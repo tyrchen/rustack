@@ -1,4 +1,6 @@
 [default.extend-words]
+# moto test function name: test_get_nonexistant_parameter
+nonexistant = "nonexistant"
 
 [files]
 extend-exclude = ["CHANGELOG.md", "notebooks/*", "vendors/*", "codegen/smithy-model/*"]
