@@ -2059,6 +2059,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
+ "aws-sdk-sqs",
  "aws-smithy-runtime-api",
  "bytes",
  "rand",

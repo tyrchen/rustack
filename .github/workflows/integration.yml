@@ -32,6 +32,8 @@ jobs:
       - name: Start server in background
         run: |
           S3_SKIP_SIGNATURE_VALIDATION=true \
+          DYNAMODB_SKIP_SIGNATURE_VALIDATION=true \
+          SQS_SKIP_SIGNATURE_VALIDATION=true \
           GATEWAY_LISTEN=127.0.0.1:4566 \
           LOG_LEVEL=info \
           cargo run --release -p ruststack-server &

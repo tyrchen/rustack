@@ -18,6 +18,7 @@
 //! | `SERVICES` | *(empty = all)* | Comma-separated list of services to enable |
 //! | `S3_SKIP_SIGNATURE_VALIDATION` | `true` | Skip S3 SigV4 verification |
 //! | `DYNAMODB_SKIP_SIGNATURE_VALIDATION` | `true` | Skip DynamoDB SigV4 verification |
+//! | `SQS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SQS SigV4 verification |
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 //! | `LOG_LEVEL` | `info` | Log level filter |
 //! | `RUST_LOG` | *(unset)* | Fine-grained tracing filter (overrides `LOG_LEVEL`) |

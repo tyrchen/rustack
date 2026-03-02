@@ -1,6 +1,6 @@
-//! Integration tests for RustStack server (S3 + DynamoDB).
+//! Integration tests for `RustStack` server (S3 + DynamoDB + SQS).
 //!
-//! These tests require a running RustStack server at `localhost:4566`.
+//! These tests require a running `RustStack` server at `localhost:4566`.
 //! They are marked `#[ignore]` so they don't run during normal `cargo test`.
 //!
 //! Run them with:
@@ -11,6 +11,7 @@
 use std::sync::Once;
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+use aws_sdk_sqs as sqs;
 
 static INIT: Once = Once::new();
 
@@ -137,6 +138,50 @@ pub async fn cleanup_bucket(client: &aws_sdk_s3::Client, bucket: &str) {
     let _ = client.delete_bucket().bucket(bucket).send().await;
 }
 
+/// Create a configured SQS client pointing at the local server.
+#[must_use]
+pub fn sqs_client() -> sqs::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = sqs::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    sqs::Client::from_conf(config)
+}
+
+/// Generate a unique queue name for an SQS test.
+#[must_use]
+pub fn test_queue_name(prefix: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string()[..8].to_owned();
+    format!("test-{prefix}-{id}")
+}
+
+/// Create a standard queue and return its URL. Caller is responsible for cleanup.
+pub async fn create_test_queue(client: &sqs::Client, prefix: &str) -> (String, String) {
+    let name = test_queue_name(prefix);
+    let url = client
+        .create_queue()
+        .queue_name(&name)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("failed to create queue {name}: {e}"))
+        .queue_url()
+        .unwrap()
+        .to_string();
+    (name, url)
+}
+
+/// Delete a queue by URL.
+pub async fn delete_test_queue(client: &sqs::Client, queue_url: &str) {
+    let _ = client.delete_queue().queue_url(queue_url).send().await;
+}
+
 mod test_bucket;
 mod test_cors;
 mod test_dynamodb;
@@ -145,4 +190,5 @@ mod test_list;
 mod test_multipart;
 mod test_object;
 mod test_precondition;
+mod test_sqs;
 mod test_versioning;

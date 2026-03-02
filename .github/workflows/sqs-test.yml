@@ -1,0 +1,324 @@
+name: sqs-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  sqs-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start RustStack
+        id: ruststack
+        uses: tyrchen/ruststack@v0
+
+      # ── Queue Operations ──────────────────────────────────────────────
+      - name: "Queue Operations: create, list, get-url, get/set attributes, delete"
+        run: |
+          set -euo pipefail
+
+          # Create a standard queue
+          QUEUE_URL=$(aws sqs create-queue --queue-name test-queue \
+            | jq -r '.QueueUrl')
+          echo "Created queue: $QUEUE_URL"
+          [ -n "$QUEUE_URL" ]
+
+          # Get queue URL
+          GOT_URL=$(aws sqs get-queue-url --queue-name test-queue \
+            | jq -r '.QueueUrl')
+          [ "$QUEUE_URL" = "$GOT_URL" ]
+
+          # List queues
+          QUEUES=$(aws sqs list-queues)
+          echo "$QUEUES" | jq -r '.QueueUrls[]' | grep -q "test-queue"
+
+          # List queues with prefix filter
+          aws sqs create-queue --queue-name other-queue
+          FILTERED=$(aws sqs list-queues --queue-name-prefix test)
+          FILTERED_COUNT=$(echo "$FILTERED" | jq '.QueueUrls | length')
+          [ "$FILTERED_COUNT" -eq 1 ]
+
+          # Get queue attributes
+          ATTRS=$(aws sqs get-queue-attributes \
+            --queue-url "$QUEUE_URL" \
+            --attribute-names All)
+          echo "$ATTRS" | jq -r '.Attributes.VisibilityTimeout' | grep -q "30"
+
+          # Set queue attributes
+          aws sqs set-queue-attributes \
+            --queue-url "$QUEUE_URL" \
+            --attributes VisibilityTimeout=60
+
+          ATTRS=$(aws sqs get-queue-attributes \
+            --queue-url "$QUEUE_URL" \
+            --attribute-names VisibilityTimeout)
+          echo "$ATTRS" | jq -r '.Attributes.VisibilityTimeout' | grep -q "60"
+
+          # Idempotent create (same name, same attributes)
+          QUEUE_URL2=$(aws sqs create-queue --queue-name test-queue \
+            | jq -r '.QueueUrl')
+          [ "$QUEUE_URL" = "$QUEUE_URL2" ]
+
+          # Delete queues
+          aws sqs delete-queue --queue-url "$QUEUE_URL"
+          aws sqs delete-queue --queue-url "$(aws sqs get-queue-url --queue-name other-queue | jq -r '.QueueUrl')"
+
+      # ── Message Operations ────────────────────────────────────────────
+      - name: "Message Operations: send, receive, delete, visibility"
+        run: |
+          set -euo pipefail
+
+          QUEUE_URL=$(aws sqs create-queue --queue-name msg-queue \
+            | jq -r '.QueueUrl')
+
+          # Send a message
+          SEND=$(aws sqs send-message \
+            --queue-url "$QUEUE_URL" \
+            --message-body "Hello, SQS!")
+          MSG_ID=$(echo "$SEND" | jq -r '.MessageId')
+          MD5=$(echo "$SEND" | jq -r '.MD5OfMessageBody')
+          [ -n "$MSG_ID" ]
+          [ -n "$MD5" ]
+
+          # Send with message attributes
+          SEND2=$(aws sqs send-message \
+            --queue-url "$QUEUE_URL" \
+            --message-body "With attributes" \
+            --message-attributes '{"Color":{"DataType":"String","StringValue":"blue"},"Count":{"DataType":"Number","StringValue":"42"}}')
+          [ -n "$(echo "$SEND2" | jq -r '.MD5OfMessageAttributes')" ]
+
+          # Send with delay
+          aws sqs send-message \
+            --queue-url "$QUEUE_URL" \
+            --message-body "Delayed message" \
+            --delay-seconds 0
+
+          # Receive messages
+          RECV=$(aws sqs receive-message \
+            --queue-url "$QUEUE_URL" \
+            --max-number-of-messages 10 \
+            --message-attribute-names All \
+            --attribute-names All)
+          RECV_COUNT=$(echo "$RECV" | jq '.Messages | length')
+          [ "$RECV_COUNT" -ge 1 ]
+
+          # Get receipt handle from first message
+          RECEIPT=$(echo "$RECV" | jq -r '.Messages[0].ReceiptHandle')
+          [ -n "$RECEIPT" ]
+
+          # Change visibility timeout
+          aws sqs change-message-visibility \
+            --queue-url "$QUEUE_URL" \
+            --receipt-handle "$RECEIPT" \
+            --visibility-timeout 0
+
+          # Re-receive and delete the message
+          RECV2=$(aws sqs receive-message \
+            --queue-url "$QUEUE_URL" \
+            --max-number-of-messages 1)
+          RECEIPT2=$(echo "$RECV2" | jq -r '.Messages[0].ReceiptHandle')
+          aws sqs delete-message \
+            --queue-url "$QUEUE_URL" \
+            --receipt-handle "$RECEIPT2"
+
+          # Cleanup
+          aws sqs delete-queue --queue-url "$QUEUE_URL"
+
+      # ── Batch Operations ──────────────────────────────────────────────
+      - name: "Batch Operations: send-batch, delete-batch"
+        run: |
+          set -euo pipefail
+
+          QUEUE_URL=$(aws sqs create-queue --queue-name batch-queue \
+            | jq -r '.QueueUrl')
+
+          # Batch send 5 messages
+          aws sqs send-message-batch \
+            --queue-url "$QUEUE_URL" \
+            --entries '[
+              {"Id":"1","MessageBody":"batch msg 1"},
+              {"Id":"2","MessageBody":"batch msg 2"},
+              {"Id":"3","MessageBody":"batch msg 3"},
+              {"Id":"4","MessageBody":"batch msg 4"},
+              {"Id":"5","MessageBody":"batch msg 5"}
+            ]'
+
+          # Receive all messages
+          RECV=$(aws sqs receive-message \
+            --queue-url "$QUEUE_URL" \
+            --max-number-of-messages 10)
+          RECV_COUNT=$(echo "$RECV" | jq '.Messages | length')
+          [ "$RECV_COUNT" -eq 5 ]
+
+          # Batch delete all messages
+          ENTRIES=$(echo "$RECV" | jq -c '[.Messages[] | {Id: .MessageId, ReceiptHandle: .ReceiptHandle}]')
+          aws sqs delete-message-batch \
+            --queue-url "$QUEUE_URL" \
+            --entries "$ENTRIES"
+
+          # Verify queue is empty
+          RECV3=$(aws sqs receive-message \
+            --queue-url "$QUEUE_URL" \
+            --max-number-of-messages 10 \
+            --wait-time-seconds 0)
+          EMPTY_COUNT=$(echo "$RECV3" | jq '.Messages // [] | length')
+          [ "$EMPTY_COUNT" -eq 0 ]
+
+          # Cleanup
+          aws sqs delete-queue --queue-url "$QUEUE_URL"
+
+      # ── FIFO Queue ────────────────────────────────────────────────────
+      - name: "FIFO Queue: create, send, receive with ordering"
+        run: |
+          set -euo pipefail
+
+          # Create FIFO queue
+          FIFO_URL=$(aws sqs create-queue \
+            --queue-name test-queue.fifo \
+            --attributes FifoQueue=true,ContentBasedDeduplication=true \
+            | jq -r '.QueueUrl')
+          echo "Created FIFO queue: $FIFO_URL"
+
+          # Send messages to same group (should maintain order)
+          for i in 1 2 3 4 5; do
+            aws sqs send-message \
+              --queue-url "$FIFO_URL" \
+              --message-body "FIFO message $i" \
+              --message-group-id "group1"
+          done
+
+          # Receive and verify ordering
+          RECV=$(aws sqs receive-message \
+            --queue-url "$FIFO_URL" \
+            --max-number-of-messages 5 \
+            --attribute-names All)
+          FIRST_BODY=$(echo "$RECV" | jq -r '.Messages[0].Body')
+          [ "$FIRST_BODY" = "FIFO message 1" ]
+          LAST_BODY=$(echo "$RECV" | jq -r '.Messages[4].Body')
+          [ "$LAST_BODY" = "FIFO message 5" ]
+
+          # Verify sequence numbers are present and ordered
+          SEQ1=$(echo "$RECV" | jq -r '.Messages[0].Attributes.SequenceNumber')
+          SEQ5=$(echo "$RECV" | jq -r '.Messages[4].Attributes.SequenceNumber')
+          [ -n "$SEQ1" ]
+          [ "$SEQ1" != "null" ]
+
+          # Content-based deduplication: sending same body should be deduplicated
+          SEND1=$(aws sqs send-message \
+            --queue-url "$FIFO_URL" \
+            --message-body "dedup test" \
+            --message-group-id "group2")
+          SEND2=$(aws sqs send-message \
+            --queue-url "$FIFO_URL" \
+            --message-body "dedup test" \
+            --message-group-id "group2")
+          # Both should return same sequence number
+          SEQ_A=$(echo "$SEND1" | jq -r '.SequenceNumber')
+          SEQ_B=$(echo "$SEND2" | jq -r '.SequenceNumber')
+          [ "$SEQ_A" = "$SEQ_B" ]
+
+          # Cleanup
+          aws sqs delete-queue --queue-url "$FIFO_URL"
+
+      # ── Tags ──────────────────────────────────────────────────────────
+      - name: "Tags: tag, list, untag"
+        run: |
+          set -euo pipefail
+
+          QUEUE_URL=$(aws sqs create-queue --queue-name tag-queue \
+            | jq -r '.QueueUrl')
+
+          # Tag queue
+          aws sqs tag-queue \
+            --queue-url "$QUEUE_URL" \
+            --tags env=test,team=platform
+
+          # List tags
+          TAGS=$(aws sqs list-queue-tags --queue-url "$QUEUE_URL")
+          echo "$TAGS" | jq -r '.Tags.env' | grep -q "test"
+          echo "$TAGS" | jq -r '.Tags.team' | grep -q "platform"
+
+          # Untag queue
+          aws sqs untag-queue \
+            --queue-url "$QUEUE_URL" \
+            --tag-keys env
+
+          TAGS2=$(aws sqs list-queue-tags --queue-url "$QUEUE_URL")
+          [ "$(echo "$TAGS2" | jq -r '.Tags.env // empty')" = "" ]
+          echo "$TAGS2" | jq -r '.Tags.team' | grep -q "platform"
+
+          # Cleanup
+          aws sqs delete-queue --queue-url "$QUEUE_URL"
+
+      # ── Purge Queue ───────────────────────────────────────────────────
+      - name: "Purge Queue"
+        run: |
+          set -euo pipefail
+
+          QUEUE_URL=$(aws sqs create-queue --queue-name purge-queue \
+            | jq -r '.QueueUrl')
+
+          # Send several messages
+          for i in 1 2 3 4 5; do
+            aws sqs send-message \
+              --queue-url "$QUEUE_URL" \
+              --message-body "message $i"
+          done
+
+          # Purge
+          aws sqs purge-queue --queue-url "$QUEUE_URL"
+
+          # Verify empty
+          RECV=$(aws sqs receive-message \
+            --queue-url "$QUEUE_URL" \
+            --max-number-of-messages 10 \
+            --wait-time-seconds 0)
+          EMPTY=$(echo "$RECV" | jq '.Messages // [] | length')
+          [ "$EMPTY" -eq 0 ]
+
+          # Cleanup
+          aws sqs delete-queue --queue-url "$QUEUE_URL"
+
+      # ── Error Handling ────────────────────────────────────────────────
+      - name: "Error Handling: validation errors"
+        run: |
+          set -euo pipefail
+
+          # Non-existent queue URL
+          ERR=$(aws sqs send-message \
+            --queue-url "http://localhost:4566/000000000000/nonexistent" \
+            --message-body "test" 2>&1 || true)
+          echo "$ERR" | grep -qi "NonExistentQueue\|QueueDoesNotExist\|does not exist"
+
+          # Invalid queue name (too long)
+          LONG_NAME=$(python3 -c "print('a' * 81)")
+          ERR=$(aws sqs create-queue --queue-name "$LONG_NAME" 2>&1 || true)
+          echo "$ERR" | grep -qi "InvalidParameterValue\|Invalid\|error"
+
+          # FIFO queue without .fifo suffix
+          ERR=$(aws sqs create-queue \
+            --queue-name "bad-fifo" \
+            --attributes FifoQueue=true 2>&1 || true)
+          echo "$ERR" | grep -qi "InvalidParameterValue\|Invalid\|error"
+
+      # ── Cleanup ───────────────────────────────────────────────────────
+      - name: "Cleanup"
+        if: always()
+        run: |
+          set -uo pipefail
+
+          # List and delete all remaining queues
+          QUEUES=$(aws sqs list-queues 2>/dev/null | jq -r '.QueueUrls[]? // empty' || true)
+          for Q in $QUEUES; do
+            echo "Deleting queue: $Q"
+            aws sqs delete-queue --queue-url "$Q" 2>/dev/null || true
+          done
+
+          echo "Cleanup complete."

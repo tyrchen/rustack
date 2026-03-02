@@ -1,5 +1,5 @@
 name: "RustStack"
-description: "Start a high-performance AWS-compatible server (S3 + DynamoDB) on localhost:4566 (drop-in replacement for LocalStack)"
+description: "Start a high-performance AWS-compatible server (S3 + DynamoDB + SQS) on localhost:4566 (drop-in replacement for LocalStack)"
 author: "Tyr Chen"
 
 branding:
@@ -43,6 +43,10 @@ inputs:
     description: "Skip DynamoDB signature validation (true/false)"
     required: false
     default: "true"
+  sqs-skip-auth:
+    description: "Skip SQS signature validation (true/false)"
+    required: false
+    default: "true"
   persistence:
     description: "Enable durable storage persistence (true/false)"
     required: false
@@ -54,7 +58,7 @@ inputs:
 
 outputs:
   endpoint:
-    description: "The service endpoint URL (used as AWS_ENDPOINT_URL for both S3 and DynamoDB)"
+    description: "The service endpoint URL (used as AWS_ENDPOINT_URL for S3, DynamoDB, and SQS)"
     value: ${{ steps.start.outputs.endpoint }}
   container-id:
     description: "The Docker container ID (for advanced usage)"
@@ -79,6 +83,7 @@ runs:
           -e "LOG_LEVEL=${{ inputs.log-level }}" \
           -e "S3_SKIP_SIGNATURE_VALIDATION=${{ inputs.s3-skip-auth }}" \
           -e "DYNAMODB_SKIP_SIGNATURE_VALIDATION=${{ inputs.dynamodb-skip-auth }}" \
+          -e "SQS_SKIP_SIGNATURE_VALIDATION=${{ inputs.sqs-skip-auth }}" \
           -e "ACCESS_KEY=${{ inputs.access-key }}" \
           -e "SECRET_KEY=${{ inputs.secret-key }}" \
           -e "PERSISTENCE=${{ inputs.persistence }}" \
@@ -107,7 +112,7 @@ runs:
           ELAPSED=$((ELAPSED + 1))
         done
 
-        echo "RustStack is ready at $ENDPOINT (S3 + DynamoDB)"
+        echo "RustStack is ready at $ENDPOINT (S3 + DynamoDB + SQS)"
 
     - name: Export environment
       shell: bash
