@@ -99,9 +99,19 @@ impl QueueAttributes {
                     result.redrive_allow_policy = Some(value.clone());
                 }
                 "ContentBasedDeduplication" => {
+                    if !is_fifo {
+                        return Err(SqsError::invalid_parameter_value(
+                            "Unknown Attribute ContentBasedDeduplication.",
+                        ));
+                    }
                     result.content_based_deduplication = value == "true" || value == "1";
                 }
                 "DeduplicationScope" => {
+                    if !is_fifo {
+                        return Err(SqsError::invalid_parameter_value(
+                            "Unknown Attribute DeduplicationScope.",
+                        ));
+                    }
                     if value != "queue" && value != "messageGroup" {
                         return Err(SqsError::invalid_parameter_value(format!(
                             "Invalid value for DeduplicationScope: {value}"
@@ -110,6 +120,11 @@ impl QueueAttributes {
                     result.deduplication_scope.clone_from(value);
                 }
                 "FifoThroughputLimit" => {
+                    if !is_fifo {
+                        return Err(SqsError::invalid_parameter_value(
+                            "Unknown Attribute FifoThroughputLimit.",
+                        ));
+                    }
                     result.fifo_throughput_limit.clone_from(value);
                 }
                 "Policy" => {
@@ -146,7 +161,11 @@ impl QueueAttributes {
     }
 
     /// Update attributes from a string key-value map.
-    pub fn update_from_map(&mut self, attrs: &HashMap<String, String>) -> Result<(), SqsError> {
+    pub fn update_from_map(
+        &mut self,
+        attrs: &HashMap<String, String>,
+        is_fifo: bool,
+    ) -> Result<(), SqsError> {
         for (key, value) in attrs {
             match key.as_str() {
                 "DelaySeconds" => {
@@ -184,12 +203,27 @@ impl QueueAttributes {
                     };
                 }
                 "ContentBasedDeduplication" => {
+                    if !is_fifo {
+                        return Err(SqsError::invalid_parameter_value(
+                            "Unknown Attribute ContentBasedDeduplication.",
+                        ));
+                    }
                     self.content_based_deduplication = value == "true" || value == "1";
                 }
                 "DeduplicationScope" => {
+                    if !is_fifo {
+                        return Err(SqsError::invalid_parameter_value(
+                            "Unknown Attribute DeduplicationScope.",
+                        ));
+                    }
                     self.deduplication_scope.clone_from(value);
                 }
                 "FifoThroughputLimit" => {
+                    if !is_fifo {
+                        return Err(SqsError::invalid_parameter_value(
+                            "Unknown Attribute FifoThroughputLimit.",
+                        ));
+                    }
                     self.fifo_throughput_limit.clone_from(value);
                 }
                 "Policy" => {

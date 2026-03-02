@@ -4,6 +4,47 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Serde helper for base64-encoded `Option<Vec<u8>>`.
+///
+/// AWS SQS JSON protocol encodes binary values as base64 strings, not JSON
+/// arrays of integers. This module handles the conversion transparently.
+mod base64_option {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize `Option<Vec<u8>>` as an optional base64 string.
+    #[allow(clippy::ref_option)] // serde(with) requires `&Option<T>` signature.
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                serializer.serialize_some(&encoded)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Deserialize an optional base64 string into `Option<Vec<u8>>`.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&s)
+                    .map_err(serde::de::Error::custom)?;
+                Ok(Some(bytes))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 /// A message attribute value (user-defined).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -14,8 +55,12 @@ pub struct MessageAttributeValue {
     /// The string value (for `String` and `Number` types).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub string_value: Option<String>,
-    /// The binary value (for `Binary` type), base64-encoded.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The binary value (for `Binary` type), transmitted as base64.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "base64_option",
+        default
+    )]
     pub binary_value: Option<Vec<u8>>,
 }
 
@@ -28,8 +73,12 @@ pub struct MessageSystemAttributeValue {
     /// The string value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub string_value: Option<String>,
-    /// The binary value.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The binary value, transmitted as base64.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "base64_option",
+        default
+    )]
     pub binary_value: Option<Vec<u8>>,
 }
 

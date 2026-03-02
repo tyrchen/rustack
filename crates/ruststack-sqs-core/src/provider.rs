@@ -82,7 +82,6 @@ impl RustStackSqs {
     // ---- Queue Management Operations ----
 
     /// Handle `CreateQueue`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
     pub async fn create_queue(
         &self,
         input: CreateQueueInput,
@@ -111,8 +110,30 @@ impl RustStackSqs {
         }
 
         // Idempotent create: if queue exists with same attributes, return existing URL.
+        // If attributes differ, return QueueAlreadyExists.
         if let Some(existing) = self.queues.get(queue_name) {
-            // For simplicity, return existing URL (AWS checks attribute equality).
+            if !input.attributes.is_empty() {
+                let existing_attrs = existing
+                    .get_attributes(vec!["All".to_owned()])
+                    .await
+                    .unwrap_or_default();
+
+                // Check each requested attribute against the existing queue's attributes.
+                for (key, value) in &input.attributes {
+                    // Skip FifoQueue since it's validated by name convention.
+                    if key == "FifoQueue" {
+                        continue;
+                    }
+                    if let Some(existing_value) = existing_attrs.get(key) {
+                        if existing_value != value {
+                            return Err(SqsError::queue_already_exists(format!(
+                                "A queue already exists with the same name and a different value \
+                                 for attribute {key}."
+                            )));
+                        }
+                    }
+                }
+            }
             return Ok(CreateQueueOutput {
                 queue_url: Some(existing.metadata.url.clone()),
             });
@@ -354,7 +375,7 @@ impl RustStackSqs {
                 Err(err) => {
                     failed.push(ruststack_sqs_model::types::BatchResultErrorEntry {
                         id: entry.id,
-                        sender_fault: true,
+                        sender_fault: err.code.is_sender_fault(),
                         code: err.code.error_type().to_owned(),
                         message: Some(err.message),
                     });
@@ -392,7 +413,7 @@ impl RustStackSqs {
                 Err(err) => {
                     failed.push(ruststack_sqs_model::types::BatchResultErrorEntry {
                         id: entry.id,
-                        sender_fault: true,
+                        sender_fault: err.code.is_sender_fault(),
                         code: err.code.error_type().to_owned(),
                         message: Some(err.message),
                     });
@@ -435,7 +456,7 @@ impl RustStackSqs {
                 Err(err) => {
                     failed.push(ruststack_sqs_model::types::BatchResultErrorEntry {
                         id: entry.id,
-                        sender_fault: true,
+                        sender_fault: err.code.is_sender_fault(),
                         code: err.code.error_type().to_owned(),
                         message: Some(err.message),
                     });

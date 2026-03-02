@@ -23,7 +23,7 @@ use crate::message::{
 };
 
 use super::attributes::QueueAttributes;
-use super::storage::{FifoQueueStorage, StandardQueueStorage};
+use super::storage::{EnqueueResult, FifoQueueStorage, StandardQueueStorage};
 
 /// Commands sent to a queue actor via its channel.
 pub enum QueueCommand {
@@ -170,6 +170,8 @@ struct PendingLongPoll {
     reply: oneshot::Sender<Result<ReceiveMessageOutput, SqsError>>,
     /// Maximum messages to return.
     max_messages: i32,
+    /// Per-request visibility timeout in seconds.
+    visibility_timeout: i32,
     /// When the poll times out.
     deadline: Instant,
     /// System attribute names requested.
@@ -291,7 +293,7 @@ impl QueueActor {
                 let _ = reply.send(attrs);
             }
             QueueCommand::SetAttributes { attributes, reply } => {
-                let result = self.attributes.update_from_map(&attributes);
+                let result = self.attributes.update_from_map(&attributes, self.is_fifo);
                 if result.is_ok() {
                     self.last_modified_at = crate::message::now_epoch_seconds();
                 }
@@ -360,6 +362,20 @@ impl QueueActor {
         &mut self,
         input: SendMessageInput,
     ) -> Result<SendMessageOutput, SqsError> {
+        // Reject FIFO-only fields on standard queues.
+        if input.message_group_id.is_some() {
+            return Err(SqsError::invalid_parameter_value(
+                "Value for parameter MessageGroupId is invalid. \
+                 Reason: The request includes a parameter that is not valid for this queue type.",
+            ));
+        }
+        if input.message_deduplication_id.is_some() {
+            return Err(SqsError::invalid_parameter_value(
+                "Value for parameter MessageDeduplicationId is invalid. \
+                 Reason: The request includes a parameter that is not valid for this queue type.",
+            ));
+        }
+
         let QueueStorage::Standard(ref mut storage) = self.storage else {
             return Err(SqsError::internal_error("Storage type mismatch"));
         };
@@ -386,8 +402,8 @@ impl QueueActor {
             approximate_receive_count: 0,
             approximate_first_receive_timestamp: None,
             sequence_number: None,
-            message_group_id: input.message_group_id,
-            message_deduplication_id: input.message_deduplication_id,
+            message_group_id: None,
+            message_deduplication_id: None,
             available_at,
             delay_seconds,
         };
@@ -445,6 +461,15 @@ impl QueueActor {
             ));
         };
 
+        // Build the effective dedup key based on DeduplicationScope.
+        // "queue" scope: global dedup across all groups (default).
+        // "messageGroup" scope: dedup only within the same group.
+        let effective_dedup_key = if self.attributes.deduplication_scope == "messageGroup" {
+            format!("{group_id}:{dedup_id}")
+        } else {
+            dedup_id
+        };
+
         let message_id = uuid::Uuid::new_v4().to_string();
         let body_md5 = md5_of_body(&input.message_body);
         let attr_md5 = md5_of_message_attributes(&input.message_attributes);
@@ -466,17 +491,26 @@ impl QueueActor {
             delay_seconds: 0,
         };
 
-        let sequence_number = storage.enqueue(msg, &dedup_id);
-        // Even if deduplicated, SQS returns success with the original message's ID.
+        let enqueue_result = storage.enqueue(msg, &effective_dedup_key);
         self.message_notify.notify_waiters();
 
-        Ok(SendMessageOutput {
-            message_id: Some(message_id),
-            md5_of_message_body: Some(body_md5),
-            md5_of_message_attributes: attr_md5,
-            md5_of_message_system_attributes: None,
-            sequence_number,
-        })
+        // On dedup, return the original message's ID and sequence number per AWS spec.
+        match enqueue_result {
+            EnqueueResult::Enqueued {
+                message_id: mid,
+                sequence_number,
+            }
+            | EnqueueResult::Deduplicated {
+                message_id: mid,
+                sequence_number,
+            } => Ok(SendMessageOutput {
+                message_id: Some(mid),
+                md5_of_message_body: Some(body_md5),
+                md5_of_message_attributes: attr_md5,
+                md5_of_message_system_attributes: None,
+                sequence_number: Some(sequence_number),
+            }),
+        }
     }
 
     /// Handle `ReceiveMessage`.
@@ -511,6 +545,7 @@ impl QueueActor {
         self.pending_long_polls.push(PendingLongPoll {
             reply,
             max_messages,
+            visibility_timeout,
             deadline: Instant::now() + Duration::from_secs(wait_time as u64),
             attribute_names: merge_attribute_names(
                 &input.attribute_names,
@@ -663,7 +698,7 @@ impl QueueActor {
 
             let messages = self.try_receive(
                 poll.max_messages,
-                self.attributes.visibility_timeout,
+                poll.visibility_timeout,
                 &poll.attribute_names,
                 &[],
                 &poll.message_attribute_names,
@@ -728,7 +763,16 @@ fn try_receive_standard(
 
                 // Check DLQ redrive threshold.
                 if let Some(ref policy) = queue_attrs.redrive_policy {
+                    #[allow(clippy::cast_sign_loss)]
                     if msg.approximate_receive_count > policy.max_receive_count as u32 {
+                        // Move to dead_letters storage instead of silently dropping.
+                        // Actual DLQ routing (cross-queue send) can be added later.
+                        tracing::debug!(
+                            message_id = %msg.message_id,
+                            receive_count = msg.approximate_receive_count,
+                            "message exceeded maxReceiveCount, moved to dead letters"
+                        );
+                        storage.dead_letters.push(msg);
                         continue;
                     }
                 }
@@ -1025,8 +1069,12 @@ fn build_message(
     }
 
     // Filter user message attributes.
+    // Per AWS spec: if no MessageAttributeNames are specified, no user attributes are returned.
+    // Only return all when explicitly requested with "All" or ".*".
     let want_all_msg = message_attr_names.iter().any(|n| n == "All" || n == ".*");
-    let filtered_attrs = if want_all_msg || message_attr_names.is_empty() {
+    let filtered_attrs = if message_attr_names.is_empty() {
+        HashMap::new()
+    } else if want_all_msg {
         msg.message_attributes.clone()
     } else {
         msg.message_attributes

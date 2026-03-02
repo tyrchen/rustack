@@ -16,6 +16,9 @@ pub struct StandardQueueStorage {
     pub delayed: Vec<QueueMessage>,
     /// Messages currently being processed by consumers.
     pub in_flight: HashMap<String, InFlightMessage>,
+    /// Messages that exceeded the DLQ `maxReceiveCount` threshold.
+    /// Stored here until actual DLQ routing is implemented.
+    pub dead_letters: Vec<QueueMessage>,
 }
 
 impl StandardQueueStorage {
@@ -72,7 +75,19 @@ impl StandardQueueStorage {
         self.available.clear();
         self.delayed.clear();
         self.in_flight.clear();
+        self.dead_letters.clear();
     }
+}
+
+/// Cached information for a deduplicated message.
+#[derive(Debug, Clone)]
+pub struct DedupCacheEntry {
+    /// When this dedup entry expires.
+    pub expiry: Instant,
+    /// The original message ID (returned on duplicate sends).
+    pub message_id: String,
+    /// The original sequence number (returned on duplicate sends).
+    pub sequence_number: String,
 }
 
 /// FIFO queue storage with strict ordering, message group blocking, and deduplication.
@@ -84,8 +99,8 @@ pub struct FifoQueueStorage {
     blocked_groups: HashSet<String>,
     /// Messages currently being processed by consumers.
     in_flight: HashMap<String, FifoInFlightMessage>,
-    /// Deduplication cache (dedup_id -> expiry timestamp).
-    dedup_cache: HashMap<String, Instant>,
+    /// Deduplication cache: effective_dedup_key -> original message info.
+    dedup_cache: HashMap<String, DedupCacheEntry>,
     /// Monotonically increasing sequence number.
     next_sequence: AtomicU64,
 }
@@ -116,15 +131,39 @@ impl Default for FifoQueueStorage {
     }
 }
 
+/// Result of an enqueue attempt on a FIFO queue.
+#[derive(Debug, Clone)]
+pub enum EnqueueResult {
+    /// Message was enqueued with a new sequence number.
+    Enqueued {
+        /// The message ID.
+        message_id: String,
+        /// The assigned sequence number.
+        sequence_number: String,
+    },
+    /// Message was a duplicate; returns the original message's info.
+    Deduplicated {
+        /// The original message ID.
+        message_id: String,
+        /// The original sequence number.
+        sequence_number: String,
+    },
+}
+
 impl FifoQueueStorage {
     /// Attempt to enqueue a message with deduplication.
     ///
-    /// Returns `Some(sequence_number)` if enqueued, `None` if deduplicated (silently accepted).
-    pub fn enqueue(&mut self, mut msg: QueueMessage, dedup_id: &str) -> Option<String> {
+    /// The `effective_dedup_key` should already incorporate the dedup scope
+    /// (e.g., prefixed with group ID when scope is `messageGroup`).
+    pub fn enqueue(&mut self, mut msg: QueueMessage, effective_dedup_key: &str) -> EnqueueResult {
         // Check dedup cache.
-        if let Some(expiry) = self.dedup_cache.get(dedup_id) {
-            if Instant::now() < *expiry {
-                return None; // Duplicate within window.
+        if let Some(entry) = self.dedup_cache.get(effective_dedup_key) {
+            if Instant::now() < entry.expiry {
+                // Duplicate within window: return original message info.
+                return EnqueueResult::Deduplicated {
+                    message_id: entry.message_id.clone(),
+                    sequence_number: entry.sequence_number.clone(),
+                };
             }
         }
 
@@ -133,15 +172,26 @@ impl FifoQueueStorage {
         let seq_str = format!("{seq:020}");
         msg.sequence_number = Some(seq_str.clone());
 
-        // Add to dedup cache.
-        self.dedup_cache
-            .insert(dedup_id.to_owned(), Instant::now() + DEDUP_WINDOW);
+        let message_id = msg.message_id.clone();
+
+        // Add to dedup cache with original message info.
+        self.dedup_cache.insert(
+            effective_dedup_key.to_owned(),
+            DedupCacheEntry {
+                expiry: Instant::now() + DEDUP_WINDOW,
+                message_id: message_id.clone(),
+                sequence_number: seq_str.clone(),
+            },
+        );
 
         // Enqueue to the appropriate group.
         let group_id = msg.message_group_id.clone().unwrap_or_default();
         self.groups.entry(group_id).or_default().push_back(msg);
 
-        Some(seq_str)
+        EnqueueResult::Enqueued {
+            message_id,
+            sequence_number: seq_str,
+        }
     }
 
     /// Try to receive up to `max` messages from unblocked groups.
@@ -266,7 +316,7 @@ impl FifoQueueStorage {
     /// Clean expired dedup cache entries.
     pub fn clean_dedup_cache(&mut self) {
         let now = Instant::now();
-        self.dedup_cache.retain(|_, expiry| *expiry > now);
+        self.dedup_cache.retain(|_, entry| entry.expiry > now);
     }
 
     /// Get approximate message counts: (available, in_flight, delayed=0).

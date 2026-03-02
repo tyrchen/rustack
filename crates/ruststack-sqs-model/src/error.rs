@@ -96,12 +96,19 @@ impl SqsErrorCode {
         }
     }
 
+    /// Whether this is a sender (client) fault vs receiver (server) fault.
+    #[must_use]
+    pub fn is_sender_fault(&self) -> bool {
+        !matches!(self, Self::InternalError)
+    }
+
     /// Fault type for the `x-amzn-query-error` header.
     #[must_use]
     pub fn fault(&self) -> &'static str {
-        match self {
-            Self::InternalError => "Receiver",
-            _ => "Sender",
+        if self.is_sender_fault() {
+            "Sender"
+        } else {
+            "Receiver"
         }
     }
 

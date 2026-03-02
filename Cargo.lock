@@ -2237,6 +2237,7 @@ dependencies = [
 name = "ruststack-sqs-model"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
  "http 1.4.0",
  "serde",
