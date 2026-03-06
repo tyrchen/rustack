@@ -227,8 +227,9 @@ jobs:
               --queue-url "$FIFO_URL" \
               --max-number-of-messages 5 \
               --attribute-names All \
-              --wait-time-seconds 1)
-            COUNT=$(echo "$RECV" | jq '.Messages // [] | length')
+              --wait-time-seconds 1 2>/dev/null || echo '{}')
+            COUNT=$(echo "$RECV" | jq '.Messages // [] | length' 2>/dev/null || echo 0)
+            [ -z "$COUNT" ] && COUNT=0
             if [ "$COUNT" -eq 0 ]; then
               break
             fi
@@ -236,18 +237,20 @@ jobs:
             for idx in $(seq 0 $((COUNT - 1))); do
               BODY=$(echo "$RECV" | jq -r ".Messages[$idx].Body")
               ALL_BODIES="${ALL_BODIES}${BODY}\n"
-              SEQ=$(echo "$RECV" | jq -r ".Messages[$idx].Attributes.SequenceNumber")
-              if [ -n "$SEQ" ] && [ "$SEQ" != "null" ]; then
+              SEQ=$(echo "$RECV" | jq -r ".Messages[$idx].Attributes.SequenceNumber // empty")
+              if [ -n "$SEQ" ]; then
                 HAS_SEQ=true
               fi
             done
-            # Delete received messages so the group unlocks
+            # Delete received messages so the group unlocks for next receive
             ENTRIES=$(echo "$RECV" | jq -c '[.Messages[] | {Id: .MessageId, ReceiptHandle: .ReceiptHandle}]')
             aws sqs delete-message-batch --queue-url "$FIFO_URL" --entries "$ENTRIES" > /dev/null
           done
 
-          # Verify ordering: first and last messages
-          FIRST_BODY=$(echo -e "$ALL_BODIES" | head -1)
+          # Verify we got all 5 messages in order
+          TOTAL=$(echo -e "$ALL_BODIES" | sed '/^$/d' | wc -l | tr -d ' ')
+          [ "$TOTAL" -eq 5 ]
+          FIRST_BODY=$(echo -e "$ALL_BODIES" | sed '/^$/d' | head -1)
           LAST_BODY=$(echo -e "$ALL_BODIES" | sed '/^$/d' | tail -1)
           [ "$FIRST_BODY" = "FIFO message 1" ]
           [ "$LAST_BODY" = "FIFO message 5" ]
