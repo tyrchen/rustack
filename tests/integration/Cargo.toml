@@ -16,6 +16,7 @@ aws-config = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-sdk-dynamodb = { workspace = true }
 aws-sdk-sqs = { workspace = true }
+aws-sdk-ssm = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 tokio = { workspace = true }

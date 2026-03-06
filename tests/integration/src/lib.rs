@@ -182,6 +182,23 @@ pub async fn delete_test_queue(client: &sqs::Client, queue_url: &str) {
     let _ = client.delete_queue().queue_url(queue_url).send().await;
 }
 
+/// Create a configured SSM client pointing at the local server.
+#[must_use]
+pub fn ssm_client() -> aws_sdk_ssm::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_ssm::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_ssm::Client::from_conf(config)
+}
+
 mod test_bucket;
 mod test_cors;
 mod test_dynamodb;
@@ -191,4 +208,5 @@ mod test_multipart;
 mod test_object;
 mod test_precondition;
 mod test_sqs;
+mod test_ssm;
 mod test_versioning;
