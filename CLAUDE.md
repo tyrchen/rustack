@@ -1,5 +1,7 @@
 # ruststack
 
+IMPORTANT: Never enter plan mode unless I explicitly requested.
+
 ## Core Principles
 
 ### Code Quality

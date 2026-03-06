@@ -116,9 +116,29 @@ alternator-stop:
 	@pkill -f "ruststack-server" 2>/dev/null || true
 	@echo "Server stopped"
 
+sqs-compat: sqs-compat-setup sqs-compat-run
+
+sqs-compat-setup:
+	@cd tests/sqs-compat && python3 -m venv .venv 2>/dev/null || true
+	@tests/sqs-compat/.venv/bin/pip install -q -r tests/sqs-compat/requirements.txt
+
+SQS_COMPAT_VENV := tests/sqs-compat/.venv
+SQS_COMPAT_URL := http://localhost:4566
+
+sqs-compat-run:
+	@echo "Running SQS compatibility tests..."
+	@cd tests/sqs-compat && $(CURDIR)/$(SQS_COMPAT_VENV)/bin/pytest -v --url $(SQS_COMPAT_URL) \
+		2>&1 | tee /tmp/sqs-compat-output.txt || true
+	@echo ""
+	@PASSED=$$(grep -oP '\d+ passed' /tmp/sqs-compat-output.txt || echo "0 passed"); \
+		FAILED=$$(grep -oP '\d+ failed' /tmp/sqs-compat-output.txt || echo "0 failed"); \
+		ERRORS=$$(grep -oP '\d+ error' /tmp/sqs-compat-output.txt || echo "0 errors"); \
+		echo "SQS compat results: $$PASSED, $$FAILED, $$ERRORS"
+
 update-submodule:
 	@git submodule update --init --recursive --remote
 
 .PHONY: build check test fmt clippy audit deny run release update-submodule codegen integration \
 	mint mint-build mint-start mint-run mint-stop \
-	alternator alternator-setup alternator-run alternator-stop
+	alternator alternator-setup alternator-run alternator-stop \
+	sqs-compat sqs-compat-setup sqs-compat-run

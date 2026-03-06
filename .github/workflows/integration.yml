@@ -196,3 +196,72 @@ jobs:
           name: alternator-logs
           path: /tmp/alternator-output.txt
           if-no-files-found: ignore
+
+  sqs-compat:
+    name: SQS boto3 compatibility tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build server
+        run: cargo build --release -p ruststack-server
+
+      - name: Start server in background
+        run: |
+          SQS_SKIP_SIGNATURE_VALIDATION=true \
+          S3_SKIP_SIGNATURE_VALIDATION=true \
+          DYNAMODB_SKIP_SIGNATURE_VALIDATION=true \
+          GATEWAY_LISTEN=0.0.0.0:4566 \
+          LOG_LEVEL=warn \
+          cargo run --release -p ruststack-server &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server did not start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Set up SQS compat tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-venv
+          cd tests/sqs-compat && python3 -m venv .venv
+          tests/sqs-compat/.venv/bin/pip install -q -r tests/sqs-compat/requirements.txt
+
+      - name: Run SQS compat tests
+        run: |
+          cd tests/sqs-compat
+          ../../tests/sqs-compat/.venv/bin/pytest -v \
+            --url http://localhost:4566 \
+            2>&1 | tee /tmp/sqs-compat-output.txt || true
+
+          # Assert minimum passing threshold.
+          # Current: 90 passed, 3 xfailed (DLQ move, Policy after AddPermission).
+          MIN_PASS=85
+          PASS_COUNT=$(grep -oP '\d+ passed' /tmp/sqs-compat-output.txt | grep -oP '\d+' || echo "0")
+          FAIL_COUNT=$(grep -oP '\d+ failed' /tmp/sqs-compat-output.txt | grep -oP '\d+' || echo "0")
+          echo "SQS compat results: $PASS_COUNT passed, $FAIL_COUNT failed (minimum required: $MIN_PASS)"
+          if [ "$PASS_COUNT" -lt "$MIN_PASS" ]; then
+            echo "::error::SQS compat regression: only $PASS_COUNT tests passed (minimum: $MIN_PASS)"
+            exit 1
+          fi
+
+      - name: Upload SQS compat logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqs-compat-logs
+          path: /tmp/sqs-compat-output.txt
+          if-no-files-found: ignore

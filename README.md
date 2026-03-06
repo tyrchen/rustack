@@ -2,13 +2,14 @@
 
 A high-performance, LocalStack-compatible AWS service emulator written in Rust.
 
-Currently implements **S3** (70 operations from the AWS Smithy model) and **DynamoDB** (12 core operations), providing a unified gateway on a single port.
+Currently implements **S3** (70 operations), **DynamoDB** (12 core operations), and **SQS** (20 operations with FIFO support), providing a unified gateway on a single port.
 
 ## Features
 
 - **Full S3 protocol** — 70 operations covering buckets, objects, multipart uploads, versioning, and bucket configuration
 - **DynamoDB support** — 12 core operations: `CreateTable`, `DeleteTable`, `DescribeTable`, `ListTables`, `UpdateTable`, `PutItem`, `GetItem`, `DeleteItem`, `UpdateItem`, `Query`, `Scan`, `BatchWriteItem`
-- **Unified gateway** — Single port (4566) routes S3 and DynamoDB via `X-Amz-Target` header; extensible `ServiceRouter` trait for adding new services
+- **SQS support** — 20 operations: standard and FIFO queues, message batching, dead-letter queues, long polling, visibility timeouts, tags, and content-based deduplication
+- **Unified gateway** — Single port (4566) routes S3, DynamoDB, and SQS via headers; extensible `ServiceRouter` trait for adding new services
 - **Selective services** — Enable only the services you need at compile time (Cargo features) or runtime (`SERVICES` env var)
 - **AWS SDK compatible** — Drop-in replacement for LocalStack; works with any AWS SDK or CLI
 - **SigV4 authentication** — Optional AWS Signature Version 4 request verification
@@ -16,29 +17,30 @@ Currently implements **S3** (70 operations from the AWS Smithy model) and **Dyna
 - **In-memory storage** with automatic disk spillover for large S3 objects (configurable threshold)
 - **DynamoDB expressions** — Condition, filter, projection, and update expressions with full parser
 - **Smithy-driven codegen** — S3 types auto-generated from the official AWS Smithy model
-- **Tiny Docker image** — Static musl binary in a scratch container (~15 MB)
+- **Tiny Docker image** — Static musl binary in a scratch container (~8 MB)
 - **Graceful shutdown** and health check endpoints for container orchestration
 
 ## Why RustStack?
 
-If you need S3 and DynamoDB for local development or CI, RustStack gives you a **faster, leaner** alternative to LocalStack:
+If you need S3, DynamoDB, and SQS for local development or CI, RustStack gives you a **faster, leaner** alternative to LocalStack:
 
 | | RustStack | LocalStack |
 |---|---|---|
 | **Language** | Rust (static binary) | Python |
-| **Docker image** | ~15 MB (scratch) | ~475 MB compressed / ~1.88 GB on disk |
+| **Docker image** | ~8 MB (scratch) | ~475 MB compressed / ~1.88 GB on disk |
 | **Startup time** | < 1 second | 10-45 seconds (S3 only); up to 2 min (all services) |
 | **Memory (idle)** | ~10 MB | ~750 MB minimum |
 | **S3 operations** | 70 | ~92 |
 | **DynamoDB operations** | 12 | ~30+ |
+| **SQS operations** | 20 | ~23 |
 | **CI cold start** | Pull + ready in ~3s | Pull + ready in 30-90s |
 | **Auth support** | SigV4 + SigV2 + presigned URLs | SigV4 (Pro for IAM enforcement) |
 | **License** | MIT, fully open source | Shifting to registration-required; free tier limited |
-| **Multi-service** | S3 + DynamoDB | 80+ AWS services |
+| **Multi-service** | S3 + DynamoDB + SQS | 80+ AWS services |
 
-**When to use RustStack:** You need fast, reliable S3 and/or DynamoDB in CI pipelines or local dev, and don't want to wait 30+ seconds for a 2 GB container to boot. Your tests start in seconds, not minutes.
+**When to use RustStack:** You need fast, reliable S3, DynamoDB, and/or SQS in CI pipelines or local dev, and don't want to wait 30+ seconds for a 2 GB container to boot. Your tests start in seconds, not minutes.
 
-**When to use LocalStack:** You need services beyond S3 and DynamoDB (Lambda, SQS, etc.) and are willing to trade startup time and resource usage for broader AWS coverage.
+**When to use LocalStack:** You need services beyond S3, DynamoDB, and SQS (Lambda, SNS, etc.) and are willing to trade startup time and resource usage for broader AWS coverage.
 
 ## Quick Start
 
@@ -64,15 +66,16 @@ aws s3 --endpoint-url http://localhost:4566 ls s3://my-bucket/
 docker build -t ruststack .
 docker run -p 4566:4566 ruststack
 
-# Run with only DynamoDB enabled
+# Run with only specific services
 docker run -p 4566:4566 -e SERVICES=dynamodb ruststack
+docker run -p 4566:4566 -e SERVICES=sqs ruststack
 ```
 
 Multi-arch images (amd64/arm64) are published to `ghcr.io/tyrchen/ruststack` on tagged releases.
 
 ## GitHub Action
 
-Use RustStack as a drop-in S3 + DynamoDB service in your CI pipelines:
+Use RustStack as a drop-in S3 + DynamoDB + SQS service in your CI pipelines:
 
 ```yaml
 steps:
@@ -111,7 +114,7 @@ jobs:
 | `default-region` | `us-east-1` | Default AWS region |
 | `log-level` | `info` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `wait-timeout` | `30` | Seconds to wait for the service to become healthy |
-| `services` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`) |
+| `services` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`, `sqs`) |
 
 ### Action Outputs
 
@@ -133,19 +136,13 @@ The action automatically exports these into `$GITHUB_ENV`, so all subsequent ste
 
 ### What You Can Test
 
-See the [s3-test workflow](.github/workflows/s3-test.yml) for a comprehensive example covering:
+See the end-to-end test workflows for comprehensive examples:
 
-- Bucket CRUD, object CRUD, copy, batch delete
-- Object metadata (content-type, cache-control, user metadata)
-- Presigned URLs (GET and PUT via curl)
-- Versioning (multiple versions, delete markers, version-specific GET)
-- Object tagging (put, get, delete)
-- Bucket configuration (CORS, lifecycle, encryption, tagging, website)
-- Object lock (retention, legal hold)
-- Multipart uploads (create, upload-part, list-parts, complete, abort)
-- List objects (prefix, delimiter, max-keys, pagination, start-after)
-- POST object (browser-based multipart/form-data upload)
-- Error handling (NoSuchBucket, NoSuchKey, BucketNotEmpty)
+**S3** ([s3-test.yml](.github/workflows/s3-test.yml)): Bucket CRUD, object CRUD, copy, batch delete, presigned URLs, versioning, tagging, CORS, lifecycle, encryption, object lock, multipart uploads, listing with pagination, POST object, error handling.
+
+**DynamoDB** ([dynamodb-test.yml](.github/workflows/dynamodb-test.yml)): Table CRUD, item CRUD with projections and return values, condition expressions, query with key conditions/filters/pagination, scan, batch operations, update expressions (SET, REMOVE, ADD, DELETE), all data types, error handling.
+
+**SQS** ([sqs-test.yml](.github/workflows/sqs-test.yml)): Queue CRUD, send/receive/delete messages, message attributes, batch operations, FIFO queues with ordering and deduplication, tags, purge, error handling.
 
 ## Configuration
 
@@ -154,9 +151,10 @@ All settings are controlled via environment variables, matching LocalStack conve
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address and port |
-| `SERVICES` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`) |
+| `SERVICES` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`, `sqs`) |
 | `S3_SKIP_SIGNATURE_VALIDATION` | `true` | Skip S3 SigV4 request verification |
 | `DYNAMODB_SKIP_SIGNATURE_VALIDATION` | `true` | Skip DynamoDB SigV4 request verification |
+| `SQS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SQS SigV4 request verification |
 | `S3_VIRTUAL_HOSTING` | `true` | Enable virtual-hosted-style addressing |
 | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 | `S3_MAX_MEMORY_OBJECT_SIZE` | `524288` | Max S3 object size (bytes) kept in memory before disk spillover |
@@ -177,7 +175,10 @@ SERVICES=dynamodb cargo run -p ruststack-server
 # Only S3
 SERVICES=s3 cargo run -p ruststack-server
 
-# Both (default when SERVICES is empty or unset)
+# S3 + SQS
+SERVICES=s3,sqs cargo run -p ruststack-server
+
+# All services (default when SERVICES is empty or unset)
 cargo run -p ruststack-server
 ```
 
@@ -189,12 +190,15 @@ cargo build -p ruststack-server --no-default-features --features s3
 
 # DynamoDB-only binary
 cargo build -p ruststack-server --no-default-features --features dynamodb
+
+# SQS-only binary
+cargo build -p ruststack-server --no-default-features --features sqs
 ```
 
 The health check endpoint dynamically reports only the services that are running:
 
 ```json
-{"services":{"dynamodb":"running"}}
+{"services":{"s3":"running","dynamodb":"running","sqs":"running"}}
 ```
 
 ## Supported Operations
@@ -262,6 +266,19 @@ ListObjects, ListObjectsV2, ListObjectVersions
 
 DynamoDB features include: condition expressions, filter expressions, projection expressions, update expressions (SET, REMOVE, ADD, DELETE), key conditions with sort key operators (=, <, <=, >, >=, BETWEEN, begins_with), and consistent/eventually-consistent reads.
 
+## Supported SQS Operations
+
+| Category | Operations |
+|----------|-----------|
+| Queue management | CreateQueue, DeleteQueue, GetQueueUrl, ListQueues, GetQueueAttributes, SetQueueAttributes |
+| Messages | SendMessage, ReceiveMessage, DeleteMessage, ChangeMessageVisibility, PurgeQueue |
+| Batch | SendMessageBatch, DeleteMessageBatch, ChangeMessageVisibilityBatch |
+| Tags | TagQueue, UntagQueue, ListQueueTags |
+| Permissions | AddPermission, RemovePermission |
+| Dead-letter queues | ListDeadLetterSourceQueues |
+
+SQS features include: standard and FIFO queues, content-based and explicit message deduplication, message groups with ordering guarantees, dead-letter queue redrive policies, long polling, per-message and per-queue visibility timeouts, message delay, message attributes, and queue tagging.
+
 ## Architecture
 
 ```
@@ -277,6 +294,10 @@ ruststack-dynamodb-model    — DynamoDB types (operations, errors, I/O structs)
 ruststack-dynamodb-http     — DynamoDB HTTP dispatch, awsJson1.0 protocol
 ruststack-dynamodb-core     — DynamoDB business logic, B-tree storage, expression engine
 
+ruststack-sqs-model         — SQS types (operations, errors, I/O structs)
+ruststack-sqs-http          — SQS HTTP dispatch, awsJson1.0 protocol
+ruststack-sqs-core          — SQS business logic, actor-per-queue model, FIFO engine
+
 ruststack-server            — Unified server binary with gateway routing
 ```
 
@@ -291,6 +312,12 @@ HTTP Request
   │   → SigV4 authentication (optional)
   │   → Operation dispatch (DynamoDBHandler trait)
   │   → Business logic (RustStackDynamoDB provider)
+  │   → JSON response serialization
+  ├─ SQSServiceRouter (X-Amz-Target: AmazonSQS.*)
+  │   → Body collection → JSON deserialization
+  │   → SigV4 authentication (optional)
+  │   → Operation dispatch (SqsHandler trait)
+  │   → Business logic (RustStackSqs provider, actor-per-queue)
   │   → JSON response serialization
   └─ S3ServiceRouter (catch-all)
       → S3Router (path-style / virtual-hosted-style)
@@ -331,15 +358,17 @@ make run
 cargo test -p ruststack-integration -- --ignored
 ```
 
-Tests cover buckets, objects, multipart uploads, versioning, CORS, error handling, and conditional requests.
+Tests cover S3 (buckets, objects, multipart uploads, versioning, CORS), DynamoDB (tables, items, queries, expressions), and SQS (queues, messages, FIFO, batching, DLQ).
 
 ### CI/CD
 
 | Workflow | Trigger | What it does |
 |----------|---------|-------------|
 | `build.yml` | Push / PR | Format, lint, test, coverage |
-| `integration.yml` | Push / PR | AWS SDK integration tests, MinIO Mint compatibility |
+| `integration.yml` | Push / PR | AWS SDK integration tests, MinIO Mint (S3), Alternator (DynamoDB), boto3 (SQS) compatibility |
 | `s3-test.yml` | Push / PR | End-to-end S3 tests via the GitHub Action + AWS CLI |
+| `dynamodb-test.yml` | Push / PR | End-to-end DynamoDB tests via the GitHub Action + AWS CLI |
+| `sqs-test.yml` | Push / PR | End-to-end SQS tests via the GitHub Action + AWS CLI |
 | `nightly.yml` | Daily 06:00 UTC | Ceph s3-tests compatibility suite |
 | `release-docker.yml` | Version tags / manual | Multi-arch Docker image to GHCR |
 
