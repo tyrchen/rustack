@@ -219,21 +219,41 @@ jobs:
               --message-group-id "group1"
           done
 
-          # Receive and verify ordering
-          RECV=$(aws sqs receive-message \
-            --queue-url "$FIFO_URL" \
-            --max-number-of-messages 5 \
-            --attribute-names All)
-          FIRST_BODY=$(echo "$RECV" | jq -r '.Messages[0].Body')
+          # Receive all messages (FIFO may return fewer per call while group is in-flight)
+          ALL_BODIES=""
+          HAS_SEQ=false
+          for attempt in $(seq 1 10); do
+            RECV=$(aws sqs receive-message \
+              --queue-url "$FIFO_URL" \
+              --max-number-of-messages 5 \
+              --attribute-names All \
+              --wait-time-seconds 1)
+            COUNT=$(echo "$RECV" | jq '.Messages // [] | length')
+            if [ "$COUNT" -eq 0 ]; then
+              break
+            fi
+            # Collect bodies in order
+            for idx in $(seq 0 $((COUNT - 1))); do
+              BODY=$(echo "$RECV" | jq -r ".Messages[$idx].Body")
+              ALL_BODIES="${ALL_BODIES}${BODY}\n"
+              SEQ=$(echo "$RECV" | jq -r ".Messages[$idx].Attributes.SequenceNumber")
+              if [ -n "$SEQ" ] && [ "$SEQ" != "null" ]; then
+                HAS_SEQ=true
+              fi
+            done
+            # Delete received messages so the group unlocks
+            ENTRIES=$(echo "$RECV" | jq -c '[.Messages[] | {Id: .MessageId, ReceiptHandle: .ReceiptHandle}]')
+            aws sqs delete-message-batch --queue-url "$FIFO_URL" --entries "$ENTRIES" > /dev/null
+          done
+
+          # Verify ordering: first and last messages
+          FIRST_BODY=$(echo -e "$ALL_BODIES" | head -1)
+          LAST_BODY=$(echo -e "$ALL_BODIES" | sed '/^$/d' | tail -1)
           [ "$FIRST_BODY" = "FIFO message 1" ]
-          LAST_BODY=$(echo "$RECV" | jq -r '.Messages[4].Body')
           [ "$LAST_BODY" = "FIFO message 5" ]
 
-          # Verify sequence numbers are present and ordered
-          SEQ1=$(echo "$RECV" | jq -r '.Messages[0].Attributes.SequenceNumber')
-          SEQ5=$(echo "$RECV" | jq -r '.Messages[4].Attributes.SequenceNumber')
-          [ -n "$SEQ1" ]
-          [ "$SEQ1" != "null" ]
+          # Verify sequence numbers were present
+          [ "$HAS_SEQ" = "true" ]
 
           # Content-based deduplication: sending same body should be deduplicated
           SEND1=$(aws sqs send-message \
