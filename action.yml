@@ -62,7 +62,7 @@ inputs:
 
 outputs:
   endpoint:
-    description: "The service endpoint URL (used as AWS_ENDPOINT_URL for S3, DynamoDB, and SQS)"
+    description: "The service endpoint URL (used as AWS_ENDPOINT_URL for S3, DynamoDB, SQS, and SSM)"
     value: ${{ steps.start.outputs.endpoint }}
   container-id:
     description: "The Docker container ID (for advanced usage)"

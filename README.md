@@ -2,14 +2,15 @@
 
 A high-performance, LocalStack-compatible AWS service emulator written in Rust.
 
-Currently implements **S3** (70 operations), **DynamoDB** (12 core operations), and **SQS** (20 operations with FIFO support), providing a unified gateway on a single port.
+Currently implements **S3** (70 operations), **DynamoDB** (12 core operations), **SQS** (20 operations with FIFO support), and **SSM Parameter Store** (13 operations with version/label management), providing a unified gateway on a single port.
 
 ## Features
 
 - **Full S3 protocol** — 70 operations covering buckets, objects, multipart uploads, versioning, and bucket configuration
 - **DynamoDB support** — 12 core operations: `CreateTable`, `DeleteTable`, `DescribeTable`, `ListTables`, `UpdateTable`, `PutItem`, `GetItem`, `DeleteItem`, `UpdateItem`, `Query`, `Scan`, `BatchWriteItem`
 - **SQS support** — 20 operations: standard and FIFO queues, message batching, dead-letter queues, long polling, visibility timeouts, tags, and content-based deduplication
-- **Unified gateway** — Single port (4566) routes S3, DynamoDB, and SQS via headers; extensible `ServiceRouter` trait for adding new services
+- **SSM Parameter Store** — 13 operations: `PutParameter`, `GetParameter`, `GetParameters`, `GetParametersByPath`, `DeleteParameter`, `DeleteParameters`, `DescribeParameters`, `GetParameterHistory`, `AddTagsToResource`, `RemoveTagsFromResource`, `ListTagsForResource`, `LabelParameterVersion`, `UnlabelParameterVersion`
+- **Unified gateway** — Single port (4566) routes S3, DynamoDB, SQS, and SSM via headers; extensible `ServiceRouter` trait for adding new services
 - **Selective services** — Enable only the services you need at compile time (Cargo features) or runtime (`SERVICES` env var)
 - **AWS SDK compatible** — Drop-in replacement for LocalStack; works with any AWS SDK or CLI
 - **SigV4 authentication** — Optional AWS Signature Version 4 request verification
@@ -22,7 +23,7 @@ Currently implements **S3** (70 operations), **DynamoDB** (12 core operations), 
 
 ## Why RustStack?
 
-If you need S3, DynamoDB, and SQS for local development or CI, RustStack gives you a **faster, leaner** alternative to LocalStack:
+If you need S3, DynamoDB, SQS, and SSM for local development or CI, RustStack gives you a **faster, leaner** alternative to LocalStack:
 
 | | RustStack | LocalStack |
 |---|---|---|
@@ -33,14 +34,15 @@ If you need S3, DynamoDB, and SQS for local development or CI, RustStack gives y
 | **S3 operations** | 70 | ~92 |
 | **DynamoDB operations** | 12 | ~30+ |
 | **SQS operations** | 20 | ~23 |
+| **SSM operations** | 13 | ~146 |
 | **CI cold start** | Pull + ready in ~3s | Pull + ready in 30-90s |
 | **Auth support** | SigV4 + SigV2 + presigned URLs | SigV4 (Pro for IAM enforcement) |
 | **License** | MIT, fully open source | Shifting to registration-required; free tier limited |
 | **Multi-service** | S3 + DynamoDB + SQS | 80+ AWS services |
 
-**When to use RustStack:** You need fast, reliable S3, DynamoDB, and/or SQS in CI pipelines or local dev, and don't want to wait 30+ seconds for a 2 GB container to boot. Your tests start in seconds, not minutes.
+**When to use RustStack:** You need fast, reliable S3, DynamoDB, SQS, and/or SSM in CI pipelines or local dev, and don't want to wait 30+ seconds for a 2 GB container to boot. Your tests start in seconds, not minutes.
 
-**When to use LocalStack:** You need services beyond S3, DynamoDB, and SQS (Lambda, SNS, etc.) and are willing to trade startup time and resource usage for broader AWS coverage.
+**When to use LocalStack:** You need services beyond S3, DynamoDB, SQS, and SSM (Lambda, SNS, etc.) and are willing to trade startup time and resource usage for broader AWS coverage.
 
 ## Quick Start
 
@@ -69,13 +71,14 @@ docker run -p 4566:4566 ruststack
 # Run with only specific services
 docker run -p 4566:4566 -e SERVICES=dynamodb ruststack
 docker run -p 4566:4566 -e SERVICES=sqs ruststack
+docker run -p 4566:4566 -e SERVICES=ssm ruststack
 ```
 
 Multi-arch images (amd64/arm64) are published to `ghcr.io/tyrchen/ruststack` on tagged releases.
 
 ## GitHub Action
 
-Use RustStack as a drop-in S3 + DynamoDB + SQS service in your CI pipelines:
+Use RustStack as a drop-in S3 + DynamoDB + SQS + SSM service in your CI pipelines:
 
 ```yaml
 steps:
@@ -114,7 +117,8 @@ jobs:
 | `default-region` | `us-east-1` | Default AWS region |
 | `log-level` | `info` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `wait-timeout` | `30` | Seconds to wait for the service to become healthy |
-| `services` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`, `sqs`) |
+| `ssm-skip-auth` | `true` | Skip SSM signature validation |
+| `services` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`, `sqs`, `ssm`) |
 
 ### Action Outputs
 
@@ -144,6 +148,8 @@ See the end-to-end test workflows for comprehensive examples:
 
 **SQS** ([sqs-test.yml](.github/workflows/sqs-test.yml)): Queue CRUD, send/receive/delete messages, message attributes, batch operations, FIFO queues with ordering and deduplication, tags, purge, error handling.
 
+**SSM** ([ssm-test.yml](.github/workflows/ssm-test.yml)): PutParameter (String, SecureString, StringList), GetParameter with version/label selectors, GetParameters batch, GetParametersByPath (recursive/non-recursive), DeleteParameter/DeleteParameters, DescribeParameters with filters, GetParameterHistory, tags, labels.
+
 ## Configuration
 
 All settings are controlled via environment variables, matching LocalStack conventions:
@@ -151,10 +157,11 @@ All settings are controlled via environment variables, matching LocalStack conve
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address and port |
-| `SERVICES` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`, `sqs`) |
+| `SERVICES` | *(empty = all)* | Comma-separated list of services to enable (`s3`, `dynamodb`, `sqs`, `ssm`) |
 | `S3_SKIP_SIGNATURE_VALIDATION` | `true` | Skip S3 SigV4 request verification |
 | `DYNAMODB_SKIP_SIGNATURE_VALIDATION` | `true` | Skip DynamoDB SigV4 request verification |
 | `SQS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SQS SigV4 request verification |
+| `SSM_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SSM SigV4 request verification |
 | `S3_VIRTUAL_HOSTING` | `true` | Enable virtual-hosted-style addressing |
 | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 | `S3_MAX_MEMORY_OBJECT_SIZE` | `524288` | Max S3 object size (bytes) kept in memory before disk spillover |
@@ -178,6 +185,9 @@ SERVICES=s3 cargo run -p ruststack-server
 # S3 + SQS
 SERVICES=s3,sqs cargo run -p ruststack-server
 
+# Only SSM
+SERVICES=ssm cargo run -p ruststack-server
+
 # All services (default when SERVICES is empty or unset)
 cargo run -p ruststack-server
 ```
@@ -193,12 +203,15 @@ cargo build -p ruststack-server --no-default-features --features dynamodb
 
 # SQS-only binary
 cargo build -p ruststack-server --no-default-features --features sqs
+
+# SSM-only binary
+cargo build -p ruststack-server --no-default-features --features ssm
 ```
 
 The health check endpoint dynamically reports only the services that are running:
 
 ```json
-{"services":{"s3":"running","dynamodb":"running","sqs":"running"}}
+{"services":{"s3":"running","dynamodb":"running","sqs":"running","ssm":"running"}}
 ```
 
 ## Supported Operations
@@ -279,6 +292,18 @@ DynamoDB features include: condition expressions, filter expressions, projection
 
 SQS features include: standard and FIFO queues, content-based and explicit message deduplication, message groups with ordering guarantees, dead-letter queue redrive policies, long polling, per-message and per-queue visibility timeouts, message delay, message attributes, and queue tagging.
 
+## Supported SSM Parameter Store Operations
+
+| Category | Operations |
+|----------|-----------|
+| CRUD | PutParameter, GetParameter, GetParameters, DeleteParameter, DeleteParameters |
+| Path queries | GetParametersByPath |
+| Metadata | DescribeParameters, GetParameterHistory |
+| Tags | AddTagsToResource, RemoveTagsFromResource, ListTagsForResource |
+| Labels | LabelParameterVersion, UnlabelParameterVersion |
+
+SSM features include: String, StringList, and SecureString parameter types, hierarchical path-based parameters, 100-version history with automatic oldest-unlabeled-version cleanup, version selectors (`name:3`) and label selectors (`name:release`), parameter filtering and pagination, tag management, and AllowedPattern regex validation.
+
 ## Architecture
 
 ```
@@ -297,6 +322,10 @@ ruststack-dynamodb-core     — DynamoDB business logic, B-tree storage, express
 ruststack-sqs-model         — SQS types (operations, errors, I/O structs)
 ruststack-sqs-http          — SQS HTTP dispatch, awsJson1.0 protocol
 ruststack-sqs-core          — SQS business logic, actor-per-queue model, FIFO engine
+
+ruststack-ssm-model         — SSM types (operations, errors, I/O structs)
+ruststack-ssm-http          — SSM HTTP dispatch, awsJson1.1 protocol
+ruststack-ssm-core          — SSM business logic, in-memory versioned parameter store
 
 ruststack-server            — Unified server binary with gateway routing
 ```
@@ -318,6 +347,12 @@ HTTP Request
   │   → SigV4 authentication (optional)
   │   → Operation dispatch (SqsHandler trait)
   │   → Business logic (RustStackSqs provider, actor-per-queue)
+  │   → JSON response serialization
+  ├─ SSMServiceRouter (X-Amz-Target: AmazonSSM.*)
+  │   → Body collection → JSON deserialization
+  │   → SigV4 authentication (optional)
+  │   → Operation dispatch (SsmHandler trait)
+  │   → Business logic (RustStackSsm provider)
   │   → JSON response serialization
   └─ S3ServiceRouter (catch-all)
       → S3Router (path-style / virtual-hosted-style)
@@ -358,7 +393,7 @@ make run
 cargo test -p ruststack-integration -- --ignored
 ```
 
-Tests cover S3 (buckets, objects, multipart uploads, versioning, CORS), DynamoDB (tables, items, queries, expressions), and SQS (queues, messages, FIFO, batching, DLQ).
+Tests cover S3 (buckets, objects, multipart uploads, versioning, CORS), DynamoDB (tables, items, queries, expressions), SQS (queues, messages, FIFO, batching, DLQ), and SSM (parameters, versions, labels, tags, paths).
 
 ### CI/CD
 
@@ -366,9 +401,10 @@ Tests cover S3 (buckets, objects, multipart uploads, versioning, CORS), DynamoDB
 |----------|---------|-------------|
 | `build.yml` | Push / PR | Format, lint, test, coverage |
 | `integration.yml` | Push / PR | AWS SDK integration tests, MinIO Mint (S3), Alternator (DynamoDB), boto3 (SQS) compatibility |
-| `s3-test.yml` | Push / PR | End-to-end S3 tests via the GitHub Action + AWS CLI |
-| `dynamodb-test.yml` | Push / PR | End-to-end DynamoDB tests via the GitHub Action + AWS CLI |
-| `sqs-test.yml` | Push / PR | End-to-end SQS tests via the GitHub Action + AWS CLI |
+| `s3-test.yml` | Push / PR | End-to-end S3 tests via AWS CLI |
+| `dynamodb-test.yml` | Push / PR | End-to-end DynamoDB tests via AWS CLI |
+| `sqs-test.yml` | Push / PR | End-to-end SQS tests via AWS CLI |
+| `ssm-test.yml` | Push / PR | End-to-end SSM Parameter Store tests via AWS CLI |
 | `nightly.yml` | Daily 06:00 UTC | Ceph s3-tests compatibility suite |
 | `release-docker.yml` | Version tags / manual | Multi-arch Docker image to GHCR |
 
