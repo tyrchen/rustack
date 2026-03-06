@@ -36,6 +36,9 @@ ruststack-dynamodb-core = { path = "crates/ruststack-dynamodb-core" }
 ruststack-sqs-model = { path = "crates/ruststack-sqs-model" }
 ruststack-sqs-http = { path = "crates/ruststack-sqs-http" }
 ruststack-sqs-core = { path = "crates/ruststack-sqs-core" }
+ruststack-ssm-model = { path = "crates/ruststack-ssm-model" }
+ruststack-ssm-http = { path = "crates/ruststack-ssm-http" }
+ruststack-ssm-core = { path = "crates/ruststack-ssm-core" }
 
 # Async runtime
 tokio = { version = "1.49", features = [

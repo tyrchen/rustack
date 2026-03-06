@@ -19,6 +19,7 @@
 //! | `S3_SKIP_SIGNATURE_VALIDATION` | `true` | Skip S3 SigV4 verification |
 //! | `DYNAMODB_SKIP_SIGNATURE_VALIDATION` | `true` | Skip DynamoDB SigV4 verification |
 //! | `SQS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SQS SigV4 verification |
+//! | `SSM_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SSM SigV4 verification |
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 //! | `LOG_LEVEL` | `info` | Log level filter |
 //! | `RUST_LOG` | *(unset)* | Fine-grained tracing filter (overrides `LOG_LEVEL`) |
@@ -55,6 +56,15 @@ use ruststack_sqs_core::handler::RustStackSqsHandler;
 use ruststack_sqs_core::provider::RustStackSqs;
 #[cfg(feature = "sqs")]
 use ruststack_sqs_http::service::{SqsHttpConfig, SqsHttpService};
+
+#[cfg(feature = "ssm")]
+use ruststack_ssm_core::config::SsmConfig;
+#[cfg(feature = "ssm")]
+use ruststack_ssm_core::handler::RustStackSsmHandler;
+#[cfg(feature = "ssm")]
+use ruststack_ssm_core::provider::RustStackSsm;
+#[cfg(feature = "ssm")]
+use ruststack_ssm_http::service::{SsmHttpConfig, SsmHttpService};
 
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
@@ -124,9 +134,21 @@ fn build_sqs_http_config(config: &SqsConfig) -> SqsHttpConfig {
     }
 }
 
+/// Build the [`SsmHttpConfig`] from the [`SsmConfig`].
+#[cfg(feature = "ssm")]
+fn build_ssm_http_config(config: &SsmConfig) -> SsmHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    SsmHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
-#[cfg(any(feature = "s3", feature = "dynamodb", feature = "sqs"))]
+#[cfg(any(feature = "s3", feature = "dynamodb", feature = "sqs", feature = "ssm"))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
 
@@ -200,6 +222,7 @@ fn is_compiled_in(name: &str) -> bool {
     (name == "s3" && cfg!(feature = "s3"))
         || (name == "dynamodb" && cfg!(feature = "dynamodb"))
         || (name == "sqs" && cfg!(feature = "sqs"))
+        || (name == "ssm" && cfg!(feature = "ssm"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -226,6 +249,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "sqs") {
             all.push("sqs".to_string());
+        }
+        if cfg!(feature = "ssm") {
+            all.push("ssm".to_string());
         }
         all
     } else {
@@ -340,6 +366,21 @@ async fn main() -> Result<()> {
         services.push(Box::new(service::SqsServiceRouter::new(sqs_service)));
     }
 
+    // ----- SSM (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "ssm")]
+    if is_enabled("ssm") {
+        let ssm_config = SsmConfig::from_env();
+        info!(
+            ssm_skip_signature_validation = ssm_config.skip_signature_validation,
+            "initializing SSM service",
+        );
+        let ssm_provider = RustStackSsm::new(ssm_config.clone());
+        let ssm_handler = RustStackSsmHandler::new(Arc::new(ssm_provider));
+        let ssm_http_config = build_ssm_http_config(&ssm_config);
+        let ssm_service = SsmHttpService::new(Arc::new(ssm_handler), ssm_http_config);
+        services.push(Box::new(service::SsmServiceRouter::new(ssm_service)));
+    }
+
     // ----- S3 (catch-all, must be last) -----
     #[cfg(feature = "s3")]
     if is_enabled("s3") {
@@ -431,6 +472,7 @@ mod tests {
         assert_eq!(is_compiled_in("s3"), cfg!(feature = "s3"));
         assert_eq!(is_compiled_in("dynamodb"), cfg!(feature = "dynamodb"));
         assert_eq!(is_compiled_in("sqs"), cfg!(feature = "sqs"));
+        assert_eq!(is_compiled_in("ssm"), cfg!(feature = "ssm"));
     }
 
     #[cfg(feature = "s3")]

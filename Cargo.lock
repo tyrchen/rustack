@@ -2179,6 +2179,8 @@ dependencies = [
  "ruststack-s3-model",
  "ruststack-sqs-core",
  "ruststack-sqs-http",
+ "ruststack-ssm-core",
+ "ruststack-ssm-http",
  "serde",
  "serde_json",
  "tokio",
@@ -2240,6 +2242,56 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "bytes",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ruststack-ssm-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "http 1.4.0",
+ "ruststack-auth",
+ "ruststack-core",
+ "ruststack-ssm-http",
+ "ruststack-ssm-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-ssm-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "ruststack-auth",
+ "ruststack-ssm-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-ssm-model"
+version = "0.1.0"
+dependencies = [
  "http 1.4.0",
  "serde",
  "serde_json",

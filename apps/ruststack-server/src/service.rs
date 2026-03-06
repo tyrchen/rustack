@@ -228,3 +228,64 @@ mod sqs_router {
 
 #[cfg(feature = "sqs")]
 pub use sqs_router::SqsServiceRouter;
+
+// ---------------------------------------------------------------------------
+// SSM
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ssm")]
+mod ssm_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_ssm_http::dispatch::SsmHandler;
+    use ruststack_ssm_http::service::SsmHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the SSM service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `AmazonSSM.`.
+    pub struct SsmServiceRouter<H: SsmHandler> {
+        inner: SsmHttpService<H>,
+    }
+
+    impl<H: SsmHandler> SsmServiceRouter<H> {
+        /// Wrap an [`SsmHttpService`] in a router.
+        pub fn new(inner: SsmHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: SsmHandler> ServiceRouter for SsmServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "ssm"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("AmazonSSM."))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "ssm")]
+pub use ssm_router::SsmServiceRouter;
