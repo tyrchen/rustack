@@ -48,6 +48,8 @@ pub enum SsmErrorCode {
     InternalServerError,
     /// Invalid security (encryption key issue).
     InvalidSecurity,
+    /// Invalid action (unrecognized operation).
+    InvalidAction,
     /// Missing action header.
     MissingAction,
     /// Validation error.
@@ -88,6 +90,7 @@ impl SsmErrorCode {
             Self::TooManyTagsError => "TooManyTagsError",
             Self::InternalServerError => "InternalServerError",
             Self::InvalidSecurity => "InvalidSecurity",
+            Self::InvalidAction => "InvalidAction",
             Self::MissingAction => "MissingAction",
             Self::ValidationException => "ValidationException",
         }
@@ -217,8 +220,11 @@ impl SsmError {
     #[must_use]
     pub fn unknown_operation(target: &str) -> Self {
         Self::with_message(
-            SsmErrorCode::ValidationException,
-            format!("Unrecognized operation: {target}"),
+            SsmErrorCode::InvalidAction,
+            format!(
+                "Operation {target} is not supported. \
+                 Only Parameter Store operations are implemented."
+            ),
         )
     }
 

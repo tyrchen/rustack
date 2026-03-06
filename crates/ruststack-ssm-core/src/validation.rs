@@ -112,7 +112,13 @@ pub fn validate_description(description: &str) -> Result<(), SsmError> {
     Ok(())
 }
 
-/// Validate tags.
+/// Maximum tag key length.
+const MAX_TAG_KEY_LENGTH: usize = 128;
+
+/// Maximum tag value length.
+const MAX_TAG_VALUE_LENGTH: usize = 256;
+
+/// Validate tags (count, key length, value length).
 pub fn validate_tags(tags: &[ruststack_ssm_model::types::Tag]) -> Result<(), SsmError> {
     if tags.len() > MAX_TAGS {
         return Err(SsmError::with_message(
@@ -120,15 +126,26 @@ pub fn validate_tags(tags: &[ruststack_ssm_model::types::Tag]) -> Result<(), Ssm
             format!("Number of tags exceeds the maximum of {MAX_TAGS}."),
         ));
     }
+    for tag in tags {
+        if tag.key.is_empty() || tag.key.len() > MAX_TAG_KEY_LENGTH {
+            return Err(SsmError::validation(format!(
+                "Tag key must be between 1 and {MAX_TAG_KEY_LENGTH} characters."
+            )));
+        }
+        if tag.value.len() > MAX_TAG_VALUE_LENGTH {
+            return Err(SsmError::validation(format!(
+                "Tag value must not exceed {MAX_TAG_VALUE_LENGTH} characters."
+            )));
+        }
+    }
     Ok(())
 }
 
 /// Validate an allowed pattern regex and check the value against it.
+///
+/// AWS SSM uses Java regex patterns. We use Rust's `regex` crate which covers
+/// most common patterns. The pattern is compiled and must match the full value.
 pub fn validate_allowed_pattern(pattern: &str, value: &str) -> Result<(), SsmError> {
-    // For simplicity in local emulation, we validate that the pattern is a valid
-    // basic regex. We do not pull in a regex crate; instead we do a simple check.
-    // In a real implementation we would use `regex` crate.
-    // For now, we just check that the value is non-empty if a pattern is set.
     if pattern.is_empty() {
         return Err(SsmError::with_message(
             SsmErrorCode::InvalidAllowedPatternException,
@@ -136,21 +153,32 @@ pub fn validate_allowed_pattern(pattern: &str, value: &str) -> Result<(), SsmErr
         ));
     }
 
-    // Simple wildcard/literal match for common patterns.
-    // AWS uses Java regex; for local testing we do basic matching.
-    if pattern == ".*" {
-        // Matches everything.
-        return Ok(());
-    }
+    // Compile the pattern as a regex.
+    let re = regex::Regex::new(pattern).map_err(|_| {
+        SsmError::with_message(
+            SsmErrorCode::InvalidAllowedPatternException,
+            format!("Invalid AllowedPattern: {pattern}"),
+        )
+    })?;
 
-    // For exact match patterns (no special regex chars), do literal comparison.
-    let is_simple = pattern
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c));
-    if is_simple && value != pattern {
+    // AWS requires a full match (anchored). Wrap in ^ and $ if not already.
+    let full_match = if pattern.starts_with('^') && pattern.ends_with('$') {
+        re.is_match(value)
+    } else {
+        let anchored = format!("^(?:{pattern})$");
+        let re_full = regex::Regex::new(&anchored).map_err(|_| {
+            SsmError::with_message(
+                SsmErrorCode::InvalidAllowedPatternException,
+                format!("Invalid AllowedPattern: {pattern}"),
+            )
+        })?;
+        re_full.is_match(value)
+    };
+
+    if !full_match {
         return Err(SsmError::with_message(
             SsmErrorCode::ParameterPatternMismatchException,
-            format!("Parameter value '{value}' does not match the allowed pattern '{pattern}'."),
+            format!("Parameter value failed to satisfy the AllowedPattern: {pattern}"),
         ));
     }
 

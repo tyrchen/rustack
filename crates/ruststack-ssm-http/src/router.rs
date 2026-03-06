@@ -115,7 +115,7 @@ mod tests {
         let err = resolve_operation(&headers).unwrap_err();
         assert_eq!(
             err.code,
-            ruststack_ssm_model::error::SsmErrorCode::ValidationException,
+            ruststack_ssm_model::error::SsmErrorCode::InvalidAction,
         );
     }
 
@@ -125,7 +125,7 @@ mod tests {
         let err = resolve_operation(&headers).unwrap_err();
         assert_eq!(
             err.code,
-            ruststack_ssm_model::error::SsmErrorCode::ValidationException,
+            ruststack_ssm_model::error::SsmErrorCode::InvalidAction,
         );
     }
 }

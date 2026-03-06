@@ -117,15 +117,27 @@ impl ParameterStore {
                 ));
             }
 
-            // Check version limit.
+            // Enforce 100-version cap: delete oldest unlabeled version.
             if record.versions.len() >= MAX_VERSIONS {
-                return Err(SsmError::with_message(
-                    ruststack_ssm_model::error::SsmErrorCode::ParameterMaxVersionLimitExceeded,
-                    format!(
-                        "Parameter {name} has reached the maximum number of \
-                         {MAX_VERSIONS} versions."
-                    ),
-                ));
+                // Find the oldest version without labels.
+                let oldest_unlabeled = record
+                    .versions
+                    .iter()
+                    .find(|(_, v)| v.labels.is_empty())
+                    .map(|(k, _)| *k);
+
+                if let Some(oldest_key) = oldest_unlabeled {
+                    record.versions.remove(&oldest_key);
+                } else {
+                    // All versions have labels — cannot make room.
+                    return Err(SsmError::with_message(
+                        ruststack_ssm_model::error::SsmErrorCode::ParameterMaxVersionLimitExceeded,
+                        format!(
+                            "Parameter {name} has reached the maximum number of \
+                             {MAX_VERSIONS} versions."
+                        ),
+                    ));
+                }
             }
 
             let new_version = record.current_version + 1;
@@ -210,6 +222,8 @@ impl ParameterStore {
     }
 
     /// Get parameters by a list of names (batch).
+    ///
+    /// Duplicate names are deduplicated (only one result per unique name).
     #[must_use]
     pub fn get_parameters(
         &self,
@@ -219,8 +233,13 @@ impl ParameterStore {
     ) -> (Vec<Parameter>, Vec<String>) {
         let mut found = Vec::new();
         let mut invalid = Vec::new();
+        let mut seen = HashSet::new();
 
         for name in names {
+            if !seen.insert(name.clone()) {
+                continue; // Skip duplicate names.
+            }
+
             let Ok(parsed) = crate::selector::parse_name_with_selector(name) else {
                 invalid.push(name.clone());
                 continue;
@@ -236,17 +255,17 @@ impl ParameterStore {
     }
 
     /// Get parameters by path prefix.
-    #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn get_parameters_by_path(
         &self,
         path: &str,
         recursive: bool,
+        filters: &[ruststack_ssm_model::types::ParameterStringFilter],
         max_results: usize,
         next_token: Option<&str>,
         region: &str,
         account_id: &str,
-    ) -> (Vec<Parameter>, Option<String>) {
+    ) -> Result<(Vec<Parameter>, Option<String>), SsmError> {
         // Normalize path to ensure trailing `/`.
         let normalized_path = if path.ends_with('/') {
             path.to_owned()
@@ -267,31 +286,26 @@ impl ParameterStore {
 
             let remainder = &param_name[normalized_path.len()..];
 
-            if recursive {
-                // Include all descendants.
-                if !remainder.is_empty() {
-                    matching_names.push(param_name.clone());
-                }
+            let path_match = if recursive {
+                !remainder.is_empty()
             } else {
-                // Only direct children (no further `/` in remainder).
-                if !remainder.is_empty() && !remainder.contains('/') {
-                    matching_names.push(param_name.clone());
-                }
+                !remainder.is_empty() && !remainder.contains('/')
+            };
+
+            if path_match && matches_filters(entry.value(), filters) {
+                matching_names.push(param_name.clone());
             }
         }
 
         // Sort for deterministic pagination.
         matching_names.sort();
 
-        // Apply next_token (skip entries up to and including the token value).
-        let start_idx = if let Some(token) = next_token {
-            matching_names
-                .iter()
-                .position(|n| n.as_str() > token)
-                .unwrap_or(matching_names.len())
-        } else {
-            0
-        };
+        // Decode offset from next_token.
+        let start_idx = decode_offset(next_token)?.unwrap_or(0);
+
+        if start_idx >= matching_names.len() {
+            return Ok((Vec::new(), None));
+        }
 
         let page = &matching_names[start_idx..];
         let take = page.len().min(max_results);
@@ -307,12 +321,12 @@ impl ParameterStore {
         }
 
         let new_next_token = if take < page.len() {
-            page_names.last().cloned()
+            Some(encode_offset(start_idx + take))
         } else {
             None
         };
 
-        (parameters, new_next_token)
+        Ok((parameters, new_next_token))
     }
 
     /// Delete a parameter by name.
@@ -343,13 +357,12 @@ impl ParameterStore {
     /// Describe parameters with optional filtering and pagination.
     ///
     /// Returns parameter metadata (without values) matching the given filters.
-    #[must_use]
     pub fn describe_parameters(
         &self,
         filters: &[ruststack_ssm_model::types::ParameterStringFilter],
         max_results: usize,
         next_token: Option<&str>,
-    ) -> (Vec<ParameterMetadata>, Option<String>) {
+    ) -> Result<(Vec<ParameterMetadata>, Option<String>), SsmError> {
         // Collect all matching parameter names.
         let mut matching_names: Vec<String> = Vec::new();
         for entry in &self.parameters {
@@ -362,10 +375,10 @@ impl ParameterStore {
         matching_names.sort();
 
         // Decode offset from next_token.
-        let start_idx = decode_offset(next_token).unwrap_or(0);
+        let start_idx = decode_offset(next_token)?.unwrap_or(0);
 
         if start_idx >= matching_names.len() {
-            return (Vec::new(), None);
+            return Ok((Vec::new(), None));
         }
 
         let page = &matching_names[start_idx..];
@@ -385,7 +398,7 @@ impl ParameterStore {
             None
         };
 
-        (result, new_next_token)
+        Ok((result, new_next_token))
     }
 
     /// Get the version history for a parameter.
@@ -406,7 +419,7 @@ impl ParameterStore {
         let all_versions: Vec<&ParameterVersion> = record.versions.values().collect();
         let total = all_versions.len();
 
-        let start_idx = decode_offset(next_token).unwrap_or(0);
+        let start_idx = decode_offset(next_token)?.unwrap_or(0);
 
         if start_idx >= total {
             return Ok((Vec::new(), None));
@@ -549,6 +562,28 @@ impl ParameterStore {
             }
         }
 
+        // Check label limit on the target version BEFORE modifying anything.
+        // Count labels that would be newly added (not already on the target).
+        {
+            let target = record
+                .versions
+                .get(&target_version)
+                .ok_or_else(|| SsmError::parameter_not_found(name))?;
+            let new_label_count = valid_labels
+                .iter()
+                .filter(|l| !target.labels.contains(l.as_str()))
+                .count();
+            if target.labels.len() + new_label_count > MAX_LABELS_PER_VERSION {
+                return Err(SsmError::with_message(
+                    SsmErrorCode::ParameterVersionLabelLimitExceeded,
+                    format!(
+                        "A parameter version can have a maximum of {MAX_LABELS_PER_VERSION} labels. \
+                         Move one or more labels to a different version and try again."
+                    ),
+                ));
+            }
+        }
+
         // Remove valid labels from any other version they might be on.
         for ver in record.versions.values_mut() {
             if ver.version != target_version {
@@ -556,25 +591,6 @@ impl ParameterStore {
                     ver.labels.remove(label);
                 }
             }
-        }
-
-        // Check label limit on the target version.
-        let target = record
-            .versions
-            .get(&target_version)
-            .ok_or_else(|| SsmError::parameter_not_found(name))?;
-        let new_label_count = valid_labels
-            .iter()
-            .filter(|l| !target.labels.contains(l.as_str()))
-            .count();
-        if target.labels.len() + new_label_count > MAX_LABELS_PER_VERSION {
-            return Err(SsmError::with_message(
-                SsmErrorCode::ParameterVersionLabelLimitExceeded,
-                format!(
-                    "A parameter version can have a maximum of {MAX_LABELS_PER_VERSION} labels. \
-                     Move one or more labels to a different version and try again."
-                ),
-            ));
         }
 
         // Attach labels to the target version.
@@ -786,14 +802,35 @@ fn encode_offset(offset: usize) -> String {
 }
 
 /// Decode a base64 next token back to an offset.
-fn decode_offset(token: Option<&str>) -> Option<usize> {
+///
+/// Returns `Ok(None)` if no token is provided, `Ok(Some(offset))` on success,
+/// or `Err` if the token is present but invalid.
+fn decode_offset(token: Option<&str>) -> Result<Option<usize>, SsmError> {
     use base64::Engine;
-    let token = token?;
+    let Some(token) = token else {
+        return Ok(None);
+    };
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(token)
-        .ok()?;
-    let s = String::from_utf8(decoded).ok()?;
-    s.parse().ok()
+        .map_err(|_| {
+            SsmError::with_message(
+                SsmErrorCode::InvalidNextToken,
+                "The specified token is invalid.",
+            )
+        })?;
+    let s = String::from_utf8(decoded).map_err(|_| {
+        SsmError::with_message(
+            SsmErrorCode::InvalidNextToken,
+            "The specified token is invalid.",
+        )
+    })?;
+    let offset = s.parse::<usize>().map_err(|_| {
+        SsmError::with_message(
+            SsmErrorCode::InvalidNextToken,
+            "The specified token is invalid.",
+        )
+    })?;
+    Ok(Some(offset))
 }
 
 #[cfg(test)]
@@ -1025,15 +1062,17 @@ mod tests {
         }
 
         // Non-recursive: only direct children of /app/db.
-        let (params, token) =
-            store.get_parameters_by_path("/app/db", false, 10, None, "us-east-1", "123456789012");
+        let (params, token) = store
+            .get_parameters_by_path("/app/db", false, &[], 10, None, "us-east-1", "123456789012")
+            .expect("should get by path");
         assert_eq!(params.len(), 2);
         assert!(token.is_none());
 
         // Recursive: all descendants of /app.
-        let (params, _) =
-            store.get_parameters_by_path("/app", true, 10, None, "us-east-1", "123456789012");
-        assert_eq!(params.len(), 3);
+        let (recursive_params, _) = store
+            .get_parameters_by_path("/app", true, &[], 10, None, "us-east-1", "123456789012")
+            .expect("should get by path");
+        assert_eq!(recursive_params.len(), 3);
     }
 
     #[test]
@@ -1058,30 +1097,37 @@ mod tests {
                 .expect("should put");
         }
 
-        let (page1, token1) =
-            store.get_parameters_by_path("/page", false, 2, None, "us-east-1", "123456789012");
+        let (page1, token1) = store
+            .get_parameters_by_path("/page", false, &[], 2, None, "us-east-1", "123456789012")
+            .expect("should get by path");
         assert_eq!(page1.len(), 2);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.get_parameters_by_path(
-            "/page",
-            false,
-            2,
-            token1.as_deref(),
-            "us-east-1",
-            "123456789012",
-        );
+        let (page2, token2) = store
+            .get_parameters_by_path(
+                "/page",
+                false,
+                &[],
+                2,
+                token1.as_deref(),
+                "us-east-1",
+                "123456789012",
+            )
+            .expect("should get by path");
         assert_eq!(page2.len(), 2);
         assert!(token2.is_some());
 
-        let (page3, token3) = store.get_parameters_by_path(
-            "/page",
-            false,
-            2,
-            token2.as_deref(),
-            "us-east-1",
-            "123456789012",
-        );
+        let (page3, token3) = store
+            .get_parameters_by_path(
+                "/page",
+                false,
+                &[],
+                2,
+                token2.as_deref(),
+                "us-east-1",
+                "123456789012",
+            )
+            .expect("should get by path");
         assert_eq!(page3.len(), 1);
         assert!(token3.is_none());
     }
@@ -1159,7 +1205,9 @@ mod tests {
         put_simple(&store, "/app/db/port", "5432");
         put_simple(&store, "/app/cache/host", "redis");
 
-        let (params, token) = store.describe_parameters(&[], 50, None);
+        let (params, token) = store
+            .describe_parameters(&[], 50, None)
+            .expect("should describe");
         assert_eq!(params.len(), 3);
         assert!(token.is_none());
 
@@ -1175,15 +1223,21 @@ mod tests {
             put_simple(&store, &format!("/desc/p{i}"), "val");
         }
 
-        let (page1, token1) = store.describe_parameters(&[], 2, None);
+        let (page1, token1) = store
+            .describe_parameters(&[], 2, None)
+            .expect("should describe");
         assert_eq!(page1.len(), 2);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.describe_parameters(&[], 2, token1.as_deref());
+        let (page2, token2) = store
+            .describe_parameters(&[], 2, token1.as_deref())
+            .expect("should describe");
         assert_eq!(page2.len(), 2);
         assert!(token2.is_some());
 
-        let (page3, token3) = store.describe_parameters(&[], 2, token2.as_deref());
+        let (page3, token3) = store
+            .describe_parameters(&[], 2, token2.as_deref())
+            .expect("should describe");
         assert_eq!(page3.len(), 1);
         assert!(token3.is_none());
     }

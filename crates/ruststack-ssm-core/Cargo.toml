@@ -25,5 +25,6 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

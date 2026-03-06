@@ -176,6 +176,9 @@ impl RustStackSsm {
         &self,
         input: &GetParametersByPathInput,
     ) -> Result<GetParametersByPathOutput, SsmError> {
+        // Validate filters.
+        validate_filters(&input.parameter_filters)?;
+
         #[allow(clippy::cast_sign_loss)]
         let max_results = input
             .max_results
@@ -187,11 +190,12 @@ impl RustStackSsm {
         let (parameters, next_token) = self.store.get_parameters_by_path(
             &input.path,
             recursive,
+            &input.parameter_filters,
             max_results,
             input.next_token.as_deref(),
             &self.config.default_region,
             &self.config.default_account_id,
-        );
+        )?;
 
         Ok(GetParametersByPathOutput {
             parameters,
@@ -247,7 +251,7 @@ impl RustStackSsm {
             &input.parameter_filters,
             max_results,
             input.next_token.as_deref(),
-        );
+        )?;
 
         Ok(DescribeParametersOutput {
             parameters,
@@ -284,6 +288,7 @@ impl RustStackSsm {
         input: &AddTagsToResourceInput,
     ) -> Result<AddTagsToResourceOutput, SsmError> {
         validate_resource_type(&input.resource_type)?;
+        validate_tags(&input.tags)?;
         self.store.add_tags(&input.resource_id, &input.tags)?;
         Ok(AddTagsToResourceOutput {})
     }
