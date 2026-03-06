@@ -323,13 +323,14 @@ jobs:
           # Purge
           aws sqs purge-queue --queue-url "$QUEUE_URL"
 
-          # Verify empty
+          # Verify empty (AWS CLI returns empty output when no messages)
           RECV=$(aws sqs receive-message \
             --queue-url "$QUEUE_URL" \
             --max-number-of-messages 10 \
-            --wait-time-seconds 0)
-          EMPTY=$(echo "$RECV" | jq '.Messages // [] | length')
-          [ "$EMPTY" -eq 0 ]
+            --wait-time-seconds 0 || true)
+          MSG_COUNT=$(echo "$RECV" | jq '.Messages // [] | length' 2>/dev/null || echo 0)
+          [ -z "$MSG_COUNT" ] && MSG_COUNT=0
+          [ "$MSG_COUNT" -eq 0 ]
 
           # Cleanup
           aws sqs delete-queue --queue-url "$QUEUE_URL"
