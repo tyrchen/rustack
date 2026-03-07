@@ -1,30 +1,36 @@
-//! Main SNS provider implementing all Phase 0 operations.
+//! Main SNS provider implementing Phase 0 and Phase 1 operations.
 //!
 //! Acts as the topic manager that owns all topic state and
 //! coordinates message fan-out to subscribers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use ruststack_sns_model::error::SnsError;
+use ruststack_sns_model::error::{SnsError, SnsErrorCode};
 use ruststack_sns_model::input::{
-    CreateTopicInput, DeleteTopicInput, GetSubscriptionAttributesInput, GetTopicAttributesInput,
-    ListSubscriptionsByTopicInput, ListSubscriptionsInput, ListTopicsInput, PublishInput,
-    SetSubscriptionAttributesInput, SetTopicAttributesInput, SubscribeInput, UnsubscribeInput,
+    ConfirmSubscriptionInput, CreateTopicInput, DeleteTopicInput, GetSubscriptionAttributesInput,
+    GetTopicAttributesInput, ListSubscriptionsByTopicInput, ListSubscriptionsInput,
+    ListTagsForResourceInput, ListTopicsInput, PublishBatchInput, PublishInput,
+    SetSubscriptionAttributesInput, SetTopicAttributesInput, SubscribeInput, TagResourceInput,
+    UnsubscribeInput, UntagResourceInput,
 };
 use ruststack_sns_model::output::{
-    CreateTopicOutput, DeleteTopicOutput, GetSubscriptionAttributesOutput,
-    GetTopicAttributesOutput, ListSubscriptionsByTopicOutput, ListSubscriptionsOutput,
-    ListTopicsOutput, PublishOutput, SetSubscriptionAttributesOutput, SetTopicAttributesOutput,
-    SubscribeOutput, UnsubscribeOutput,
+    ConfirmSubscriptionOutput, CreateTopicOutput, DeleteTopicOutput,
+    GetSubscriptionAttributesOutput, GetTopicAttributesOutput, ListSubscriptionsByTopicOutput,
+    ListSubscriptionsOutput, ListTagsForResourceOutput, ListTopicsOutput, PublishBatchOutput,
+    PublishOutput, SetSubscriptionAttributesOutput, SetTopicAttributesOutput, SubscribeOutput,
+    TagResourceOutput, UnsubscribeOutput, UntagResourceOutput,
 };
-use ruststack_sns_model::types::{Subscription, Topic};
+use ruststack_sns_model::types::{
+    BatchResultErrorEntry, PublishBatchResultEntry, Subscription, Tag, Topic,
+};
 
 use crate::config::SnsConfig;
 use crate::delivery::{EnvelopeParams, build_sns_envelope};
+use crate::filter::{evaluate_filter_policy, resolve_protocol_message};
 use crate::publisher::SqsPublisher;
 use crate::state::TopicStore;
 use crate::subscription::{
@@ -40,6 +46,12 @@ const LIST_SUBSCRIPTIONS_PAGE_SIZE: usize = 100;
 
 /// Maximum message size in bytes (256 KiB).
 const MAX_MESSAGE_SIZE: usize = 256 * 1024;
+
+/// Maximum number of tags per resource.
+const MAX_TAGS_PER_RESOURCE: usize = 50;
+
+/// Maximum number of entries in a `PublishBatch` request.
+const MAX_PUBLISH_BATCH_ENTRIES: usize = 10;
 
 /// Main SNS provider.
 pub struct RustStackSns {
@@ -333,6 +345,62 @@ impl RustStackSns {
         Ok(UnsubscribeOutput {})
     }
 
+    /// Handle `ConfirmSubscription`.
+    ///
+    /// For local development, accepts any non-empty token and marks the
+    /// subscription as confirmed.
+    pub fn confirm_subscription(
+        &self,
+        input: &ConfirmSubscriptionInput,
+    ) -> Result<ConfirmSubscriptionOutput, SnsError> {
+        let mut topic = self
+            .topics
+            .get_topic_mut(&input.topic_arn)
+            .ok_or_else(|| SnsError::not_found("Topic does not exist"))?;
+
+        if input.token.is_empty() {
+            return Err(SnsError::invalid_parameter(
+                "Invalid parameter: Token Reason: Token is required",
+            ));
+        }
+
+        // Find subscription with matching token or any unconfirmed subscription
+        // (local dev mode is lenient about tokens).
+        // First try exact token match, then fall back to any unconfirmed sub.
+        let sub_idx = topic
+            .subscriptions
+            .iter()
+            .position(|s| {
+                !s.confirmed
+                    && s.confirmation_token
+                        .as_ref()
+                        .is_some_and(|t| t == &input.token)
+            })
+            .or_else(|| {
+                // Fallback: accept any token for any unconfirmed sub (local dev).
+                topic.subscriptions.iter().position(|s| !s.confirmed)
+            })
+            .ok_or_else(|| {
+                SnsError::not_found("No pending subscription found matching the token")
+            })?;
+
+        let sub = &mut topic.subscriptions[sub_idx];
+
+        sub.confirmed = true;
+        sub.confirmation_token = None;
+        let sub_arn = sub.arn.clone();
+
+        debug!(
+            topic_arn = %input.topic_arn,
+            subscription_arn = %sub_arn,
+            "confirmed subscription"
+        );
+
+        Ok(ConfirmSubscriptionOutput {
+            subscription_arn: Some(sub_arn),
+        })
+    }
+
     /// Handle `GetSubscriptionAttributes`.
     pub fn get_subscription_attributes(
         &self,
@@ -452,6 +520,92 @@ impl RustStackSns {
         })
     }
 
+    // ---- Tagging ----
+
+    /// Handle `TagResource`.
+    pub fn tag_resource(&self, input: &TagResourceInput) -> Result<TagResourceOutput, SnsError> {
+        let mut topic = self
+            .topics
+            .get_topic_mut(&input.resource_arn)
+            .ok_or_else(|| SnsError::not_found("Resource does not exist"))?;
+
+        // Apply new tags (upsert).
+        for tag in &input.tags {
+            topic.tags.insert(tag.key.clone(), tag.value.clone());
+        }
+
+        // Validate tag count after merge.
+        if topic.tags.len() > MAX_TAGS_PER_RESOURCE {
+            // Rollback: remove the tags we just added if they were new.
+            for tag in &input.tags {
+                // Only remove if it would exceed the limit.
+                if topic.tags.len() > MAX_TAGS_PER_RESOURCE {
+                    topic.tags.remove(&tag.key);
+                }
+            }
+            return Err(SnsError::new(
+                SnsErrorCode::TagLimitExceeded,
+                format!("Tag limit exceeded: maximum {MAX_TAGS_PER_RESOURCE} tags per resource"),
+            ));
+        }
+
+        debug!(
+            resource_arn = %input.resource_arn,
+            tags_added = input.tags.len(),
+            "tagged resource"
+        );
+
+        Ok(TagResourceOutput {})
+    }
+
+    /// Handle `UntagResource`.
+    pub fn untag_resource(
+        &self,
+        input: &UntagResourceInput,
+    ) -> Result<UntagResourceOutput, SnsError> {
+        let mut topic = self
+            .topics
+            .get_topic_mut(&input.resource_arn)
+            .ok_or_else(|| SnsError::not_found("Resource does not exist"))?;
+
+        for key in &input.tag_keys {
+            topic.tags.remove(key);
+        }
+
+        debug!(
+            resource_arn = %input.resource_arn,
+            tags_removed = input.tag_keys.len(),
+            "untagged resource"
+        );
+
+        Ok(UntagResourceOutput {})
+    }
+
+    /// Handle `ListTagsForResource`.
+    pub fn list_tags_for_resource(
+        &self,
+        input: &ListTagsForResourceInput,
+    ) -> Result<ListTagsForResourceOutput, SnsError> {
+        let topic = self
+            .topics
+            .get_topic(&input.resource_arn)
+            .ok_or_else(|| SnsError::not_found("Resource does not exist"))?;
+
+        let mut tags: Vec<Tag> = topic
+            .tags
+            .iter()
+            .map(|(k, v)| Tag {
+                key: k.clone(),
+                value: v.clone(),
+            })
+            .collect();
+
+        // Sort for deterministic output.
+        tags.sort_by(|a, b| a.key.cmp(&b.key));
+
+        Ok(ListTagsForResourceOutput { tags })
+    }
+
     // ---- Publishing ----
 
     /// Handle `Publish`.
@@ -468,11 +622,12 @@ impl RustStackSns {
 
         let message_id = uuid::Uuid::new_v4().to_string();
 
-        // Collect confirmed subscriptions for fan-out.
+        // Collect confirmed subscriptions for fan-out, applying filter policies.
         let confirmed_subs: Vec<SubscriptionRecord> = topic
             .subscriptions
             .iter()
             .filter(|s| s.confirmed)
+            .filter(|s| matches_filter_policy(s, &input.message_attributes, &input.message))
             .cloned()
             .collect();
 
@@ -511,6 +666,113 @@ impl RustStackSns {
             message_id: Some(message_id),
             sequence_number,
         })
+    }
+
+    /// Handle `PublishBatch`.
+    ///
+    /// Publishes up to 10 messages to a topic in a single request.
+    /// Each entry is processed independently; failures for one entry
+    /// do not affect others.
+    pub async fn publish_batch(
+        &self,
+        input: PublishBatchInput,
+    ) -> Result<PublishBatchOutput, SnsError> {
+        // Validate batch constraints.
+        if input.publish_batch_request_entries.is_empty() {
+            return Err(SnsError::new(
+                SnsErrorCode::EmptyBatchRequest,
+                "The batch request doesn't contain any entries",
+            ));
+        }
+
+        if input.publish_batch_request_entries.len() > MAX_PUBLISH_BATCH_ENTRIES {
+            return Err(SnsError::new(
+                SnsErrorCode::TooManyEntriesInBatchRequest,
+                format!(
+                    "The batch request contains more entries than permissible (max {MAX_PUBLISH_BATCH_ENTRIES})"
+                ),
+            ));
+        }
+
+        // Check for duplicate IDs.
+        let mut seen_ids = HashSet::with_capacity(input.publish_batch_request_entries.len());
+        for entry in &input.publish_batch_request_entries {
+            if !seen_ids.insert(&entry.id) {
+                return Err(SnsError::new(
+                    SnsErrorCode::BatchEntryIdsNotDistinct,
+                    format!(
+                        "Two or more batch entries in the request have the same Id: {}",
+                        entry.id
+                    ),
+                ));
+            }
+        }
+
+        // Verify topic exists.
+        let topic = self
+            .topics
+            .get_topic(&input.topic_arn)
+            .ok_or_else(|| SnsError::not_found("Topic does not exist"))?;
+
+        let is_fifo = topic.is_fifo;
+        drop(topic);
+
+        let mut successful = Vec::with_capacity(input.publish_batch_request_entries.len());
+        let mut failed = Vec::new();
+
+        for entry in &input.publish_batch_request_entries {
+            let publish_input = PublishInput {
+                topic_arn: Some(input.topic_arn.clone()),
+                target_arn: None,
+                phone_number: None,
+                message: entry.message.clone(),
+                subject: entry.subject.clone(),
+                message_structure: entry.message_structure.clone(),
+                message_attributes: entry.message_attributes.clone(),
+                message_group_id: entry.message_group_id.clone(),
+                message_deduplication_id: entry.message_deduplication_id.clone(),
+            };
+
+            match self.publish(publish_input).await {
+                Ok(output) => {
+                    successful.push(PublishBatchResultEntry {
+                        id: entry.id.clone(),
+                        message_id: output.message_id.unwrap_or_default(),
+                        sequence_number: output.sequence_number,
+                    });
+                }
+                Err(e) => {
+                    failed.push(BatchResultErrorEntry {
+                        id: entry.id.clone(),
+                        code: e.code.code().to_owned(),
+                        message: e.message,
+                        sender_fault: e.code.fault() == "Sender",
+                    });
+                }
+            }
+        }
+
+        let sequence_number = if is_fifo {
+            Some(
+                chrono::Utc::now()
+                    .timestamp_nanos_opt()
+                    .unwrap_or(0)
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+
+        // Override sequence numbers for FIFO topics.
+        if sequence_number.is_some() {
+            for entry in &mut successful {
+                if entry.sequence_number.is_none() {
+                    entry.sequence_number.clone_from(&sequence_number);
+                }
+            }
+        }
+
+        Ok(PublishBatchOutput { successful, failed })
     }
 
     // ---- Internal Helpers ----
@@ -556,7 +818,7 @@ impl RustStackSns {
                     debug!(
                         protocol = %sub.protocol,
                         endpoint = %sub.endpoint,
-                        "skipping delivery for unsupported protocol (Phase 0)"
+                        "skipping delivery for unsupported protocol"
                     );
                 }
             }
@@ -576,14 +838,18 @@ impl RustStackSns {
         port: u16,
         is_fifo: bool,
     ) {
+        // Resolve the effective message for this subscriber's protocol.
+        let effective_message =
+            resolve_effective_message(&input.message, input.message_structure.as_deref(), sub);
+
         let body = if sub.attributes.raw_message_delivery {
-            input.message.clone()
+            effective_message
         } else {
             let params = EnvelopeParams {
                 message_id,
                 topic_arn,
                 subject: input.subject.as_deref(),
-                message: &input.message,
+                message: &effective_message,
                 message_attributes: &input.message_attributes,
                 region,
                 host,
@@ -640,6 +906,64 @@ fn sub_record_to_summary(sub: &SubscriptionRecord) -> Subscription {
         protocol: sub.protocol.as_str().to_owned(),
         endpoint: sub.endpoint.clone(),
         topic_arn: sub.topic_arn.clone(),
+    }
+}
+
+/// Check whether a subscription's filter policy matches the message.
+///
+/// Returns `true` if the subscription has no filter policy or the message matches.
+fn matches_filter_policy<S: ::std::hash::BuildHasher>(
+    sub: &SubscriptionRecord,
+    message_attributes: &HashMap<String, ruststack_sns_model::types::MessageAttributeValue, S>,
+    message_body: &str,
+) -> bool {
+    let Some(ref filter_json) = sub.attributes.filter_policy else {
+        return true;
+    };
+
+    match evaluate_filter_policy(
+        filter_json,
+        &sub.attributes.filter_policy_scope,
+        message_attributes,
+        message_body,
+    ) {
+        Ok(matches) => matches,
+        Err(e) => {
+            warn!(
+                subscription_arn = %sub.arn,
+                error = %e,
+                "failed to evaluate filter policy, skipping subscriber"
+            );
+            false
+        }
+    }
+}
+
+/// Resolve the effective message for a subscriber based on `MessageStructure`.
+///
+/// When `message_structure == "json"`, resolves the protocol-specific message.
+/// Otherwise returns the original message.
+fn resolve_effective_message(
+    message: &str,
+    message_structure: Option<&str>,
+    sub: &SubscriptionRecord,
+) -> String {
+    if message_structure == Some("json") {
+        let protocol = sub.protocol.as_str();
+        match resolve_protocol_message(message, protocol) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                warn!(
+                    subscription_arn = %sub.arn,
+                    error = %e,
+                    "failed to resolve protocol-specific message, using default"
+                );
+                // Fallback: try to get default, or use original message.
+                resolve_protocol_message(message, "default").unwrap_or_else(|_| message.to_owned())
+            }
+        }
+    } else {
+        message.to_owned()
     }
 }
 
@@ -1044,5 +1368,294 @@ mod tests {
             })
             .unwrap();
         assert_eq!(attrs.attributes.get("FifoTopic").unwrap(), "true");
+    }
+
+    // ---- Phase 1 Tests ----
+
+    #[test]
+    fn test_should_tag_and_list_tags() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "tag-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        provider
+            .tag_resource(&TagResourceInput {
+                resource_arn: topic.topic_arn.clone(),
+                tags: vec![
+                    Tag {
+                        key: "env".to_owned(),
+                        value: "prod".to_owned(),
+                    },
+                    Tag {
+                        key: "team".to_owned(),
+                        value: "platform".to_owned(),
+                    },
+                ],
+            })
+            .unwrap();
+
+        let tags = provider
+            .list_tags_for_resource(&ListTagsForResourceInput {
+                resource_arn: topic.topic_arn,
+            })
+            .unwrap();
+        assert_eq!(tags.tags.len(), 2);
+    }
+
+    #[test]
+    fn test_should_untag_resource() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "untag-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        provider
+            .tag_resource(&TagResourceInput {
+                resource_arn: topic.topic_arn.clone(),
+                tags: vec![
+                    Tag {
+                        key: "env".to_owned(),
+                        value: "prod".to_owned(),
+                    },
+                    Tag {
+                        key: "team".to_owned(),
+                        value: "platform".to_owned(),
+                    },
+                ],
+            })
+            .unwrap();
+
+        provider
+            .untag_resource(&UntagResourceInput {
+                resource_arn: topic.topic_arn.clone(),
+                tag_keys: vec!["env".to_owned()],
+            })
+            .unwrap();
+
+        let tags = provider
+            .list_tags_for_resource(&ListTagsForResourceInput {
+                resource_arn: topic.topic_arn,
+            })
+            .unwrap();
+        assert_eq!(tags.tags.len(), 1);
+        assert_eq!(tags.tags[0].key, "team");
+    }
+
+    #[test]
+    fn test_should_confirm_subscription() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "confirm-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // HTTP requires confirmation.
+        let sub = provider
+            .subscribe(SubscribeInput {
+                topic_arn: topic.topic_arn.clone(),
+                protocol: "http".to_owned(),
+                endpoint: Some("http://example.com/webhook".to_owned()),
+                return_subscription_arn: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let sub_arn = sub.subscription_arn.unwrap();
+
+        // Get subscription and verify it's pending.
+        let attrs = provider
+            .get_subscription_attributes(&GetSubscriptionAttributesInput {
+                subscription_arn: sub_arn.clone(),
+            })
+            .unwrap();
+        assert_eq!(attrs.attributes.get("PendingConfirmation").unwrap(), "true");
+
+        // Confirm with a token.
+        let confirm_output = provider
+            .confirm_subscription(&ConfirmSubscriptionInput {
+                topic_arn: topic.topic_arn.clone(),
+                token: "any-valid-token".to_owned(),
+                authenticate_on_unsubscribe: None,
+            })
+            .unwrap();
+        assert_eq!(
+            confirm_output.subscription_arn.as_deref(),
+            Some(sub_arn.as_str())
+        );
+
+        // Verify it's now confirmed.
+        let attrs = provider
+            .get_subscription_attributes(&GetSubscriptionAttributesInput {
+                subscription_arn: sub_arn,
+            })
+            .unwrap();
+        assert_eq!(
+            attrs.attributes.get("PendingConfirmation").unwrap(),
+            "false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_publish_batch() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "batch-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let output = provider
+            .publish_batch(PublishBatchInput {
+                topic_arn: topic.topic_arn,
+                publish_batch_request_entries: vec![
+                    ruststack_sns_model::types::PublishBatchRequestEntry {
+                        id: "e1".to_owned(),
+                        message: "msg1".to_owned(),
+                        ..Default::default()
+                    },
+                    ruststack_sns_model::types::PublishBatchRequestEntry {
+                        id: "e2".to_owned(),
+                        message: "msg2".to_owned(),
+                        ..Default::default()
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.successful.len(), 2);
+        assert!(output.failed.is_empty());
+        assert_eq!(output.successful[0].id, "e1");
+        assert_eq!(output.successful[1].id, "e2");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_empty_batch() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "empty-batch-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let err = provider
+            .publish_batch(PublishBatchInput {
+                topic_arn: topic.topic_arn,
+                publish_batch_request_entries: vec![],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::EmptyBatchRequest);
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_duplicate_batch_ids() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "dup-batch-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let err = provider
+            .publish_batch(PublishBatchInput {
+                topic_arn: topic.topic_arn,
+                publish_batch_request_entries: vec![
+                    ruststack_sns_model::types::PublishBatchRequestEntry {
+                        id: "same".to_owned(),
+                        message: "msg1".to_owned(),
+                        ..Default::default()
+                    },
+                    ruststack_sns_model::types::PublishBatchRequestEntry {
+                        id: "same".to_owned(),
+                        message: "msg2".to_owned(),
+                        ..Default::default()
+                    },
+                ],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::BatchEntryIdsNotDistinct);
+    }
+
+    #[tokio::test]
+    async fn test_should_filter_messages_by_attribute() {
+        let provider = make_provider();
+        let topic = provider
+            .create_topic(CreateTopicInput {
+                name: "filter-topic".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Subscribe with a filter policy.
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "FilterPolicy".to_owned(),
+            r#"{"color": ["red"]}"#.to_owned(),
+        );
+        provider
+            .subscribe(SubscribeInput {
+                topic_arn: topic.topic_arn.clone(),
+                protocol: "sqs".to_owned(),
+                endpoint: Some("arn:aws:sqs:us-east-1:000000000000:filtered-queue".to_owned()),
+                attributes: attrs,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Publish with matching attribute - should succeed (no error).
+        let mut message_attrs = HashMap::new();
+        message_attrs.insert(
+            "color".to_owned(),
+            ruststack_sns_model::types::MessageAttributeValue {
+                data_type: "String".to_owned(),
+                string_value: Some("red".to_owned()),
+                binary_value: None,
+            },
+        );
+        let output = provider
+            .publish(PublishInput {
+                topic_arn: Some(topic.topic_arn.clone()),
+                message: "Hello!".to_owned(),
+                message_attributes: message_attrs,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(output.message_id.is_some());
+
+        // Publish with non-matching attribute - should also succeed (message just gets filtered).
+        let mut non_matching_attrs = HashMap::new();
+        non_matching_attrs.insert(
+            "color".to_owned(),
+            ruststack_sns_model::types::MessageAttributeValue {
+                data_type: "String".to_owned(),
+                string_value: Some("green".to_owned()),
+                binary_value: None,
+            },
+        );
+        let output = provider
+            .publish(PublishInput {
+                topic_arn: Some(topic.topic_arn),
+                message: "Hello!".to_owned(),
+                message_attributes: non_matching_attrs,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(output.message_id.is_some());
     }
 }

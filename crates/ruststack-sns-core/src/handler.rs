@@ -14,14 +14,17 @@ use ruststack_sns_http::body::SnsResponseBody;
 use ruststack_sns_http::dispatch::SnsHandler;
 use ruststack_sns_http::request::{
     get_optional_bool, get_optional_param, get_required_param, parse_attributes_map,
-    parse_form_params, parse_message_attributes, parse_tag_list,
+    parse_form_params, parse_message_attributes, parse_publish_batch_entries, parse_string_list,
+    parse_tag_list,
 };
 use ruststack_sns_http::response::{XmlWriter, xml_response};
 use ruststack_sns_model::error::SnsError;
 use ruststack_sns_model::input::{
-    CreateTopicInput, DeleteTopicInput, GetSubscriptionAttributesInput, GetTopicAttributesInput,
-    ListSubscriptionsByTopicInput, ListSubscriptionsInput, ListTopicsInput, PublishInput,
-    SetSubscriptionAttributesInput, SetTopicAttributesInput, SubscribeInput, UnsubscribeInput,
+    ConfirmSubscriptionInput, CreateTopicInput, DeleteTopicInput, GetSubscriptionAttributesInput,
+    GetTopicAttributesInput, ListSubscriptionsByTopicInput, ListSubscriptionsInput,
+    ListTagsForResourceInput, ListTopicsInput, PublishBatchInput, PublishInput,
+    SetSubscriptionAttributesInput, SetTopicAttributesInput, SubscribeInput, TagResourceInput,
+    UnsubscribeInput, UntagResourceInput,
 };
 use ruststack_sns_model::operations::SnsOperation;
 use ruststack_sns_model::types::Subscription;
@@ -154,6 +157,19 @@ async fn dispatch(
             Ok(xml_response(w.into_string(), &request_id))
         }
 
+        SnsOperation::ConfirmSubscription => {
+            let input = deserialize_confirm_subscription(&params)?;
+            let output = provider.confirm_subscription(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ConfirmSubscription");
+            w.start_result("ConfirmSubscription");
+            w.write_optional_element("SubscriptionArn", output.subscription_arn.as_deref());
+            w.end_element("ConfirmSubscriptionResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ConfirmSubscriptionResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
         SnsOperation::GetSubscriptionAttributes => {
             let input = deserialize_get_subscription_attributes(&params)?;
             let output = provider.get_subscription_attributes(&input)?;
@@ -219,7 +235,78 @@ async fn dispatch(
             Ok(xml_response(w.into_string(), &request_id))
         }
 
-        // All other operations are not yet implemented (Phase 1+).
+        SnsOperation::PublishBatch => {
+            let input = deserialize_publish_batch(&params)?;
+            let output = provider.publish_batch(input).await?;
+            let mut w = XmlWriter::new();
+            w.start_response("PublishBatch");
+            w.start_result("PublishBatch");
+            w.raw("<Successful>");
+            for entry in &output.successful {
+                w.raw("<member>");
+                w.write_element("Id", &entry.id);
+                w.write_element("MessageId", &entry.message_id);
+                w.write_optional_element("SequenceNumber", entry.sequence_number.as_deref());
+                w.raw("</member>");
+            }
+            w.raw("</Successful>");
+            w.raw("<Failed>");
+            for entry in &output.failed {
+                w.raw("<member>");
+                w.write_element("Id", &entry.id);
+                w.write_element("Code", &entry.code);
+                w.write_element("Message", &entry.message);
+                w.write_bool_element("SenderFault", entry.sender_fault);
+                w.raw("</member>");
+            }
+            w.raw("</Failed>");
+            w.end_element("PublishBatchResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("PublishBatchResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::TagResource => {
+            let input = deserialize_tag_resource(&params)?;
+            let _output = provider.tag_resource(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("TagResource");
+            w.write_response_metadata(&request_id);
+            w.end_element("TagResourceResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::UntagResource => {
+            let input = deserialize_untag_resource(&params)?;
+            let _output = provider.untag_resource(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("UntagResource");
+            w.write_response_metadata(&request_id);
+            w.end_element("UntagResourceResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::ListTagsForResource => {
+            let input = deserialize_list_tags_for_resource(&params)?;
+            let output = provider.list_tags_for_resource(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ListTagsForResource");
+            w.start_result("ListTagsForResource");
+            w.raw("<Tags>");
+            for tag in &output.tags {
+                w.raw("<member>");
+                w.write_element("Key", &tag.key);
+                w.write_element("Value", &tag.value);
+                w.raw("</member>");
+            }
+            w.raw("</Tags>");
+            w.end_element("ListTagsForResourceResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ListTagsForResourceResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        // All other operations are not yet implemented.
         _ => Err(SnsError::invalid_parameter(format!(
             "Operation not yet supported: {op}"
         ))),
@@ -333,6 +420,20 @@ fn deserialize_unsubscribe(params: &[(String, String)]) -> Result<UnsubscribeInp
     Ok(UnsubscribeInput { subscription_arn })
 }
 
+fn deserialize_confirm_subscription(
+    params: &[(String, String)],
+) -> Result<ConfirmSubscriptionInput, SnsError> {
+    let topic_arn = get_required_param(params, "TopicArn")?.to_owned();
+    let token = get_required_param(params, "Token")?.to_owned();
+    let authenticate_on_unsubscribe =
+        get_optional_param(params, "AuthenticateOnUnsubscribe").map(str::to_owned);
+    Ok(ConfirmSubscriptionInput {
+        topic_arn,
+        token,
+        authenticate_on_unsubscribe,
+    })
+}
+
 fn deserialize_get_subscription_attributes(
     params: &[(String, String)],
 ) -> Result<GetSubscriptionAttributesInput, SnsError> {
@@ -392,4 +493,35 @@ fn deserialize_publish(params: &[(String, String)]) -> Result<PublishInput, SnsE
         message_group_id,
         message_deduplication_id,
     })
+}
+
+fn deserialize_publish_batch(params: &[(String, String)]) -> Result<PublishBatchInput, SnsError> {
+    let topic_arn = get_required_param(params, "TopicArn")?.to_owned();
+    let entries = parse_publish_batch_entries(params)?;
+    Ok(PublishBatchInput {
+        topic_arn,
+        publish_batch_request_entries: entries,
+    })
+}
+
+fn deserialize_tag_resource(params: &[(String, String)]) -> Result<TagResourceInput, SnsError> {
+    let resource_arn = get_required_param(params, "ResourceArn")?.to_owned();
+    let tags = parse_tag_list(params, "Tags")?;
+    Ok(TagResourceInput { resource_arn, tags })
+}
+
+fn deserialize_untag_resource(params: &[(String, String)]) -> Result<UntagResourceInput, SnsError> {
+    let resource_arn = get_required_param(params, "ResourceArn")?.to_owned();
+    let tag_keys = parse_string_list(params, "TagKeys");
+    Ok(UntagResourceInput {
+        resource_arn,
+        tag_keys,
+    })
+}
+
+fn deserialize_list_tags_for_resource(
+    params: &[(String, String)],
+) -> Result<ListTagsForResourceInput, SnsError> {
+    let resource_arn = get_required_param(params, "ResourceArn")?.to_owned();
+    Ok(ListTagsForResourceInput { resource_arn })
 }

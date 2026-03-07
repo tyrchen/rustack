@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod delivery;
+pub mod filter;
 pub mod handler;
 pub mod provider;
 pub mod publisher;
