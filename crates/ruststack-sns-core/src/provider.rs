@@ -1,7 +1,11 @@
-//! Main SNS provider implementing Phase 0, Phase 1, and Phase 2 operations.
+//! Main SNS provider implementing Phase 0, Phase 1, Phase 2, and Phase 3 operations.
 //!
 //! Acts as the topic manager that owns all topic state and
 //! coordinates message fan-out to subscribers.
+//!
+//! Phase 3 adds stub implementations for platform application CRUD
+//! and SMS operations. These store and retrieve data but do not
+//! perform actual push notification or SMS delivery.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -11,25 +15,45 @@ use std::sync::atomic::AtomicU64;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
+use dashmap::DashMap;
 use ruststack_sns_model::error::{SnsError, SnsErrorCode};
+
 use ruststack_sns_model::input::{
-    AddPermissionInput, ConfirmSubscriptionInput, CreateTopicInput, DeleteTopicInput,
-    GetDataProtectionPolicyInput, GetSubscriptionAttributesInput, GetTopicAttributesInput,
+    AddPermissionInput, CheckIfPhoneNumberIsOptedOutInput, ConfirmSubscriptionInput,
+    CreatePlatformApplicationInput, CreatePlatformEndpointInput, CreateSMSSandboxPhoneNumberInput,
+    CreateTopicInput, DeleteEndpointInput, DeletePlatformApplicationInput,
+    DeleteSMSSandboxPhoneNumberInput, DeleteTopicInput, GetDataProtectionPolicyInput,
+    GetEndpointAttributesInput, GetPlatformApplicationAttributesInput, GetSMSAttributesInput,
+    GetSMSSandboxAccountStatusInput, GetSubscriptionAttributesInput, GetTopicAttributesInput,
+    ListEndpointsByPlatformApplicationInput, ListOriginationNumbersInput,
+    ListPhoneNumbersOptedOutInput, ListPlatformApplicationsInput, ListSMSSandboxPhoneNumbersInput,
     ListSubscriptionsByTopicInput, ListSubscriptionsInput, ListTagsForResourceInput,
-    ListTopicsInput, PublishBatchInput, PublishInput, PutDataProtectionPolicyInput,
-    RemovePermissionInput, SetSubscriptionAttributesInput, SetTopicAttributesInput, SubscribeInput,
-    TagResourceInput, UnsubscribeInput, UntagResourceInput,
+    ListTopicsInput, OptInPhoneNumberInput, PublishBatchInput, PublishInput,
+    PutDataProtectionPolicyInput, RemovePermissionInput, SetEndpointAttributesInput,
+    SetPlatformApplicationAttributesInput, SetSMSAttributesInput, SetSubscriptionAttributesInput,
+    SetTopicAttributesInput, SubscribeInput, TagResourceInput, UnsubscribeInput,
+    UntagResourceInput, VerifySMSSandboxPhoneNumberInput,
 };
 use ruststack_sns_model::output::{
-    AddPermissionOutput, ConfirmSubscriptionOutput, CreateTopicOutput, DeleteTopicOutput,
-    GetDataProtectionPolicyOutput, GetSubscriptionAttributesOutput, GetTopicAttributesOutput,
-    ListSubscriptionsByTopicOutput, ListSubscriptionsOutput, ListTagsForResourceOutput,
-    ListTopicsOutput, PublishBatchOutput, PublishOutput, PutDataProtectionPolicyOutput,
-    RemovePermissionOutput, SetSubscriptionAttributesOutput, SetTopicAttributesOutput,
-    SubscribeOutput, TagResourceOutput, UnsubscribeOutput, UntagResourceOutput,
+    AddPermissionOutput, CheckIfPhoneNumberIsOptedOutOutput, ConfirmSubscriptionOutput,
+    CreatePlatformApplicationOutput, CreatePlatformEndpointOutput,
+    CreateSMSSandboxPhoneNumberOutput, CreateTopicOutput, DeleteEndpointOutput,
+    DeletePlatformApplicationOutput, DeleteSMSSandboxPhoneNumberOutput, DeleteTopicOutput,
+    GetDataProtectionPolicyOutput, GetEndpointAttributesOutput,
+    GetPlatformApplicationAttributesOutput, GetSMSAttributesOutput,
+    GetSMSSandboxAccountStatusOutput, GetSubscriptionAttributesOutput, GetTopicAttributesOutput,
+    ListEndpointsByPlatformApplicationOutput, ListOriginationNumbersOutput,
+    ListPhoneNumbersOptedOutOutput, ListPlatformApplicationsOutput,
+    ListSMSSandboxPhoneNumbersOutput, ListSubscriptionsByTopicOutput, ListSubscriptionsOutput,
+    ListTagsForResourceOutput, ListTopicsOutput, OptInPhoneNumberOutput, PublishBatchOutput,
+    PublishOutput, PutDataProtectionPolicyOutput, RemovePermissionOutput,
+    SetEndpointAttributesOutput, SetPlatformApplicationAttributesOutput, SetSMSAttributesOutput,
+    SetSubscriptionAttributesOutput, SetTopicAttributesOutput, SubscribeOutput, TagResourceOutput,
+    UnsubscribeOutput, UntagResourceOutput, VerifySMSSandboxPhoneNumberOutput,
 };
 use ruststack_sns_model::types::{
-    BatchResultErrorEntry, PublishBatchResultEntry, Subscription, Tag, Topic,
+    BatchResultErrorEntry, Endpoint, PlatformApplication, PublishBatchResultEntry,
+    SMSSandboxPhoneNumber, Subscription, Tag, Topic,
 };
 
 use crate::config::SnsConfig;
@@ -57,6 +81,45 @@ const MAX_TAGS_PER_RESOURCE: usize = 50;
 /// Maximum number of entries in a `PublishBatch` request.
 const MAX_PUBLISH_BATCH_ENTRIES: usize = 10;
 
+/// Maximum number of platform applications returned per list page.
+const LIST_PLATFORM_APPS_PAGE_SIZE: usize = 100;
+
+/// Maximum number of platform endpoints returned per list page.
+const LIST_ENDPOINTS_PAGE_SIZE: usize = 100;
+
+/// Internal record for a platform application.
+#[derive(Debug, Clone)]
+struct PlatformApplicationRecord {
+    /// The platform application ARN.
+    arn: String,
+    /// The application name.
+    name: String,
+    /// The platform (e.g., `APNS`, `GCM`).
+    platform: String,
+    /// Application attributes.
+    attributes: HashMap<String, String>,
+}
+
+/// Internal record for a platform endpoint.
+#[derive(Debug, Clone)]
+struct PlatformEndpointRecord {
+    /// The endpoint ARN.
+    arn: String,
+    /// The parent platform application ARN.
+    platform_application_arn: String,
+    /// Endpoint attributes (includes `Enabled`, `Token`, `CustomUserData`).
+    attributes: HashMap<String, String>,
+}
+
+/// Internal record for an SMS sandbox phone number.
+#[derive(Debug, Clone)]
+struct SandboxPhoneRecord {
+    /// The phone number.
+    phone_number: String,
+    /// Verification status: `Pending` or `Verified`.
+    status: String,
+}
+
 /// Main SNS provider.
 pub struct RustStackSns {
     /// Topic store.
@@ -65,6 +128,16 @@ pub struct RustStackSns {
     sqs_publisher: Arc<dyn SqsPublisher>,
     /// Service configuration.
     config: Arc<SnsConfig>,
+    /// Platform applications keyed by ARN.
+    platform_apps: DashMap<String, PlatformApplicationRecord>,
+    /// Platform endpoints keyed by ARN.
+    platform_endpoints: DashMap<String, PlatformEndpointRecord>,
+    /// SMS attributes (global settings).
+    sms_attributes: parking_lot::RwLock<HashMap<String, String>>,
+    /// Phone numbers that have opted out of SMS.
+    opted_out_numbers: parking_lot::RwLock<HashSet<String>>,
+    /// SMS sandbox phone numbers keyed by phone number.
+    sandbox_phones: DashMap<String, SandboxPhoneRecord>,
 }
 
 impl fmt::Debug for RustStackSns {
@@ -73,6 +146,11 @@ impl fmt::Debug for RustStackSns {
             .field("topics", &self.topics)
             .field("sqs_publisher", &"<dyn SqsPublisher>")
             .field("config", &self.config)
+            .field("platform_apps", &self.platform_apps.len())
+            .field("platform_endpoints", &self.platform_endpoints.len())
+            .field("sms_attributes", &self.sms_attributes.read().len())
+            .field("opted_out_numbers", &self.opted_out_numbers.read().len())
+            .field("sandbox_phones", &self.sandbox_phones.len())
             .finish()
     }
 }
@@ -85,6 +163,11 @@ impl RustStackSns {
             topics: TopicStore::new(),
             sqs_publisher,
             config: Arc::new(config),
+            platform_apps: DashMap::new(),
+            platform_endpoints: DashMap::new(),
+            sms_attributes: parking_lot::RwLock::new(HashMap::new()),
+            opted_out_numbers: parking_lot::RwLock::new(HashSet::new()),
+            sandbox_phones: DashMap::new(),
         }
     }
 
@@ -912,6 +995,445 @@ impl RustStackSns {
         );
 
         Ok(PutDataProtectionPolicyOutput {})
+    }
+
+    // ---- Platform Applications ----
+
+    /// Handle `CreatePlatformApplication`.
+    ///
+    /// Stores a new platform application record. Does not perform
+    /// actual platform registration.
+    pub fn create_platform_application(
+        &self,
+        input: CreatePlatformApplicationInput,
+    ) -> Result<CreatePlatformApplicationOutput, SnsError> {
+        let arn = format!(
+            "arn:aws:sns:{}:{}:app/{}/{}",
+            self.config.default_region, self.config.account_id, input.platform, input.name
+        );
+
+        let record = PlatformApplicationRecord {
+            arn: arn.clone(),
+            name: input.name,
+            platform: input.platform,
+            attributes: input.attributes,
+        };
+
+        self.platform_apps.insert(arn.clone(), record);
+        debug!(platform_application_arn = %arn, "created platform application");
+
+        Ok(CreatePlatformApplicationOutput {
+            platform_application_arn: arn,
+        })
+    }
+
+    /// Handle `DeletePlatformApplication`.
+    ///
+    /// Removes the platform application and all associated endpoints.
+    pub fn delete_platform_application(
+        &self,
+        input: &DeletePlatformApplicationInput,
+    ) -> Result<DeletePlatformApplicationOutput, SnsError> {
+        self.platform_apps.remove(&input.platform_application_arn);
+
+        // Remove all endpoints belonging to this platform application.
+        let endpoints_to_remove: Vec<String> = self
+            .platform_endpoints
+            .iter()
+            .filter(|e| e.platform_application_arn == input.platform_application_arn)
+            .map(|e| e.key().clone())
+            .collect();
+
+        for arn in &endpoints_to_remove {
+            self.platform_endpoints.remove(arn);
+        }
+
+        debug!(
+            platform_application_arn = %input.platform_application_arn,
+            endpoints_removed = endpoints_to_remove.len(),
+            "deleted platform application"
+        );
+
+        Ok(DeletePlatformApplicationOutput {})
+    }
+
+    /// Handle `GetPlatformApplicationAttributes`.
+    pub fn get_platform_application_attributes(
+        &self,
+        input: &GetPlatformApplicationAttributesInput,
+    ) -> Result<GetPlatformApplicationAttributesOutput, SnsError> {
+        let app = self
+            .platform_apps
+            .get(&input.platform_application_arn)
+            .ok_or_else(|| SnsError::not_found("PlatformApplication does not exist"))?;
+
+        Ok(GetPlatformApplicationAttributesOutput {
+            attributes: app.attributes.clone(),
+        })
+    }
+
+    /// Handle `SetPlatformApplicationAttributes`.
+    pub fn set_platform_application_attributes(
+        &self,
+        input: SetPlatformApplicationAttributesInput,
+    ) -> Result<SetPlatformApplicationAttributesOutput, SnsError> {
+        let mut app = self
+            .platform_apps
+            .get_mut(&input.platform_application_arn)
+            .ok_or_else(|| SnsError::not_found("PlatformApplication does not exist"))?;
+
+        for (k, v) in input.attributes {
+            app.attributes.insert(k, v);
+        }
+
+        debug!(
+            platform_application_arn = %input.platform_application_arn,
+            "updated platform application attributes"
+        );
+
+        Ok(SetPlatformApplicationAttributesOutput {})
+    }
+
+    /// Handle `ListPlatformApplications`.
+    pub fn list_platform_applications(
+        &self,
+        input: &ListPlatformApplicationsInput,
+    ) -> Result<ListPlatformApplicationsOutput, SnsError> {
+        let mut apps: Vec<PlatformApplication> = self
+            .platform_apps
+            .iter()
+            .map(|r| PlatformApplication {
+                platform_application_arn: r.arn.clone(),
+                attributes: r.attributes.clone(),
+            })
+            .collect();
+
+        // Sort for deterministic output.
+        apps.sort_by(|a, b| a.platform_application_arn.cmp(&b.platform_application_arn));
+
+        let start = input
+            .next_token
+            .as_ref()
+            .and_then(|t| t.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let page = &apps[start.min(apps.len())..];
+        let (page, next_token) = if page.len() > LIST_PLATFORM_APPS_PAGE_SIZE {
+            (
+                &page[..LIST_PLATFORM_APPS_PAGE_SIZE],
+                Some((start + LIST_PLATFORM_APPS_PAGE_SIZE).to_string()),
+            )
+        } else {
+            (page, None)
+        };
+
+        Ok(ListPlatformApplicationsOutput {
+            platform_applications: page.to_vec(),
+            next_token,
+        })
+    }
+
+    // ---- Platform Endpoints ----
+
+    /// Handle `CreatePlatformEndpoint`.
+    ///
+    /// Creates a new platform endpoint. Does not register with actual push services.
+    pub fn create_platform_endpoint(
+        &self,
+        input: CreatePlatformEndpointInput,
+    ) -> Result<CreatePlatformEndpointOutput, SnsError> {
+        // Verify the platform application exists.
+        let app = self
+            .platform_apps
+            .get(&input.platform_application_arn)
+            .ok_or_else(|| SnsError::not_found("PlatformApplication does not exist"))?;
+
+        let endpoint_id = uuid::Uuid::new_v4();
+        let arn = format!(
+            "arn:aws:sns:{}:{}:endpoint/{}/{}/{}",
+            self.config.default_region, self.config.account_id, app.platform, app.name, endpoint_id
+        );
+
+        let mut attributes = input.attributes;
+        attributes.insert("Token".to_owned(), input.token.clone());
+        attributes
+            .entry("Enabled".to_owned())
+            .or_insert_with(|| "true".to_owned());
+        if let Some(ref custom_data) = input.custom_user_data {
+            attributes.insert("CustomUserData".to_owned(), custom_data.clone());
+        }
+
+        let record = PlatformEndpointRecord {
+            arn: arn.clone(),
+            platform_application_arn: input.platform_application_arn,
+            attributes,
+        };
+
+        self.platform_endpoints.insert(arn.clone(), record);
+        debug!(endpoint_arn = %arn, "created platform endpoint");
+
+        Ok(CreatePlatformEndpointOutput { endpoint_arn: arn })
+    }
+
+    /// Handle `DeleteEndpoint`.
+    pub fn delete_endpoint(
+        &self,
+        input: &DeleteEndpointInput,
+    ) -> Result<DeleteEndpointOutput, SnsError> {
+        // Idempotent: no error if endpoint does not exist.
+        self.platform_endpoints.remove(&input.endpoint_arn);
+        debug!(endpoint_arn = %input.endpoint_arn, "deleted endpoint");
+        Ok(DeleteEndpointOutput {})
+    }
+
+    /// Handle `GetEndpointAttributes`.
+    pub fn get_endpoint_attributes(
+        &self,
+        input: &GetEndpointAttributesInput,
+    ) -> Result<GetEndpointAttributesOutput, SnsError> {
+        let endpoint = self
+            .platform_endpoints
+            .get(&input.endpoint_arn)
+            .ok_or_else(|| SnsError::not_found("Endpoint does not exist"))?;
+
+        Ok(GetEndpointAttributesOutput {
+            attributes: endpoint.attributes.clone(),
+        })
+    }
+
+    /// Handle `SetEndpointAttributes`.
+    pub fn set_endpoint_attributes(
+        &self,
+        input: SetEndpointAttributesInput,
+    ) -> Result<SetEndpointAttributesOutput, SnsError> {
+        let mut endpoint = self
+            .platform_endpoints
+            .get_mut(&input.endpoint_arn)
+            .ok_or_else(|| SnsError::not_found("Endpoint does not exist"))?;
+
+        for (k, v) in input.attributes {
+            endpoint.attributes.insert(k, v);
+        }
+
+        debug!(endpoint_arn = %input.endpoint_arn, "updated endpoint attributes");
+        Ok(SetEndpointAttributesOutput {})
+    }
+
+    /// Handle `ListEndpointsByPlatformApplication`.
+    pub fn list_endpoints_by_platform_application(
+        &self,
+        input: &ListEndpointsByPlatformApplicationInput,
+    ) -> Result<ListEndpointsByPlatformApplicationOutput, SnsError> {
+        // Verify the platform application exists.
+        if !self
+            .platform_apps
+            .contains_key(&input.platform_application_arn)
+        {
+            return Err(SnsError::not_found("PlatformApplication does not exist"));
+        }
+
+        let mut endpoints: Vec<Endpoint> = self
+            .platform_endpoints
+            .iter()
+            .filter(|e| e.platform_application_arn == input.platform_application_arn)
+            .map(|e| Endpoint {
+                endpoint_arn: e.arn.clone(),
+                attributes: e.attributes.clone(),
+            })
+            .collect();
+
+        // Sort for deterministic output.
+        endpoints.sort_by(|a, b| a.endpoint_arn.cmp(&b.endpoint_arn));
+
+        let start = input
+            .next_token
+            .as_ref()
+            .and_then(|t| t.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let page = &endpoints[start.min(endpoints.len())..];
+        let (page, next_token) = if page.len() > LIST_ENDPOINTS_PAGE_SIZE {
+            (
+                &page[..LIST_ENDPOINTS_PAGE_SIZE],
+                Some((start + LIST_ENDPOINTS_PAGE_SIZE).to_string()),
+            )
+        } else {
+            (page, None)
+        };
+
+        Ok(ListEndpointsByPlatformApplicationOutput {
+            endpoints: page.to_vec(),
+            next_token,
+        })
+    }
+
+    // ---- SMS Operations ----
+
+    /// Handle `CheckIfPhoneNumberIsOptedOut`.
+    pub fn check_if_phone_number_is_opted_out(
+        &self,
+        input: &CheckIfPhoneNumberIsOptedOutInput,
+    ) -> Result<CheckIfPhoneNumberIsOptedOutOutput, SnsError> {
+        let opted_out = self.opted_out_numbers.read();
+        let is_opted_out = opted_out.contains(&input.phone_number);
+        Ok(CheckIfPhoneNumberIsOptedOutOutput { is_opted_out })
+    }
+
+    /// Handle `GetSMSAttributes`.
+    pub fn get_sms_attributes(
+        &self,
+        input: &GetSMSAttributesInput,
+    ) -> Result<GetSMSAttributesOutput, SnsError> {
+        let all_attrs = self.sms_attributes.read();
+
+        let attributes = if input.attributes.is_empty() {
+            all_attrs.clone()
+        } else {
+            input
+                .attributes
+                .iter()
+                .filter_map(|k| all_attrs.get(k).map(|v| (k.clone(), v.clone())))
+                .collect()
+        };
+
+        Ok(GetSMSAttributesOutput { attributes })
+    }
+
+    /// Handle `SetSMSAttributes`.
+    pub fn set_sms_attributes(
+        &self,
+        input: SetSMSAttributesInput,
+    ) -> Result<SetSMSAttributesOutput, SnsError> {
+        let mut attrs = self.sms_attributes.write();
+        for (k, v) in input.attributes {
+            attrs.insert(k, v);
+        }
+        debug!("updated SMS attributes");
+        Ok(SetSMSAttributesOutput {})
+    }
+
+    /// Handle `ListPhoneNumbersOptedOut`.
+    pub fn list_phone_numbers_opted_out(
+        &self,
+        _input: &ListPhoneNumbersOptedOutInput,
+    ) -> Result<ListPhoneNumbersOptedOutOutput, SnsError> {
+        let opted_out = self.opted_out_numbers.read();
+        let mut phone_numbers: Vec<String> = opted_out.iter().cloned().collect();
+        phone_numbers.sort();
+
+        Ok(ListPhoneNumbersOptedOutOutput {
+            phone_numbers,
+            next_token: None,
+        })
+    }
+
+    /// Handle `OptInPhoneNumber`.
+    ///
+    /// Removes the phone number from the opted-out list.
+    pub fn opt_in_phone_number(
+        &self,
+        input: &OptInPhoneNumberInput,
+    ) -> Result<OptInPhoneNumberOutput, SnsError> {
+        let mut opted_out = self.opted_out_numbers.write();
+        opted_out.remove(&input.phone_number);
+        debug!(phone_number = %input.phone_number, "opted in phone number");
+        Ok(OptInPhoneNumberOutput {})
+    }
+
+    /// Handle `GetSMSSandboxAccountStatus`.
+    ///
+    /// Always returns `is_in_sandbox = true` for local development.
+    pub fn get_sms_sandbox_account_status(
+        &self,
+        _input: &GetSMSSandboxAccountStatusInput,
+    ) -> Result<GetSMSSandboxAccountStatusOutput, SnsError> {
+        Ok(GetSMSSandboxAccountStatusOutput {
+            is_in_sandbox: true,
+        })
+    }
+
+    /// Handle `CreateSMSSandboxPhoneNumber`.
+    pub fn create_sms_sandbox_phone_number(
+        &self,
+        input: &CreateSMSSandboxPhoneNumberInput,
+    ) -> Result<CreateSMSSandboxPhoneNumberOutput, SnsError> {
+        let record = SandboxPhoneRecord {
+            phone_number: input.phone_number.clone(),
+            status: "Pending".to_owned(),
+        };
+
+        self.sandbox_phones
+            .insert(input.phone_number.clone(), record);
+        debug!(phone_number = %input.phone_number, "created SMS sandbox phone number");
+
+        Ok(CreateSMSSandboxPhoneNumberOutput {})
+    }
+
+    /// Handle `DeleteSMSSandboxPhoneNumber`.
+    pub fn delete_sms_sandbox_phone_number(
+        &self,
+        input: &DeleteSMSSandboxPhoneNumberInput,
+    ) -> Result<DeleteSMSSandboxPhoneNumberOutput, SnsError> {
+        if self.sandbox_phones.remove(&input.phone_number).is_none() {
+            return Err(SnsError::not_found(
+                "The sandbox phone number does not exist",
+            ));
+        }
+        debug!(phone_number = %input.phone_number, "deleted SMS sandbox phone number");
+        Ok(DeleteSMSSandboxPhoneNumberOutput {})
+    }
+
+    /// Handle `VerifySMSSandboxPhoneNumber`.
+    ///
+    /// For local development, accepts any OTP and marks the phone as `Verified`.
+    pub fn verify_sms_sandbox_phone_number(
+        &self,
+        input: &VerifySMSSandboxPhoneNumberInput,
+    ) -> Result<VerifySMSSandboxPhoneNumberOutput, SnsError> {
+        let mut phone = self
+            .sandbox_phones
+            .get_mut(&input.phone_number)
+            .ok_or_else(|| SnsError::not_found("The sandbox phone number does not exist"))?;
+
+        "Verified".clone_into(&mut phone.status);
+        debug!(phone_number = %input.phone_number, "verified SMS sandbox phone number");
+
+        Ok(VerifySMSSandboxPhoneNumberOutput {})
+    }
+
+    /// Handle `ListSMSSandboxPhoneNumbers`.
+    pub fn list_sms_sandbox_phone_numbers(
+        &self,
+        _input: &ListSMSSandboxPhoneNumbersInput,
+    ) -> Result<ListSMSSandboxPhoneNumbersOutput, SnsError> {
+        let mut phone_numbers: Vec<SMSSandboxPhoneNumber> = self
+            .sandbox_phones
+            .iter()
+            .map(|r| SMSSandboxPhoneNumber {
+                phone_number: r.phone_number.clone(),
+                status: r.status.clone(),
+            })
+            .collect();
+
+        phone_numbers.sort_by(|a, b| a.phone_number.cmp(&b.phone_number));
+
+        Ok(ListSMSSandboxPhoneNumbersOutput {
+            phone_numbers,
+            next_token: None,
+        })
+    }
+
+    /// Handle `ListOriginationNumbers`.
+    ///
+    /// Returns an empty list (stub -- no origination numbers in local dev).
+    pub fn list_origination_numbers(
+        &self,
+        _input: &ListOriginationNumbersInput,
+    ) -> Result<ListOriginationNumbersOutput, SnsError> {
+        Ok(ListOriginationNumbersOutput {
+            phone_numbers: Vec::new(),
+            next_token: None,
+        })
     }
 
     // ---- Internal Helpers ----
@@ -2164,5 +2686,514 @@ mod tests {
             hash,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    // ---- Phase 3 Tests: Platform Applications ----
+
+    #[test]
+    fn test_should_create_platform_application() {
+        let provider = make_provider();
+        let mut attrs = HashMap::new();
+        attrs.insert("PlatformCredential".to_owned(), "server-api-key".to_owned());
+
+        let output = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "MyApp".to_owned(),
+                platform: "GCM".to_owned(),
+                attributes: attrs,
+            })
+            .unwrap();
+
+        assert!(output.platform_application_arn.contains("app/GCM/MyApp"));
+        assert!(output.platform_application_arn.starts_with("arn:aws:sns:"));
+    }
+
+    #[test]
+    fn test_should_delete_platform_application() {
+        let provider = make_provider();
+        let output = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "ToDelete".to_owned(),
+                platform: "APNS".to_owned(),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        provider
+            .delete_platform_application(&DeletePlatformApplicationInput {
+                platform_application_arn: output.platform_application_arn.clone(),
+            })
+            .unwrap();
+
+        // Getting attributes should fail after deletion.
+        let err = provider
+            .get_platform_application_attributes(&GetPlatformApplicationAttributesInput {
+                platform_application_arn: output.platform_application_arn,
+            })
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::NotFound);
+    }
+
+    #[test]
+    fn test_should_get_and_set_platform_application_attributes() {
+        let provider = make_provider();
+        let mut initial_attrs = HashMap::new();
+        initial_attrs.insert("Key1".to_owned(), "Value1".to_owned());
+
+        let app = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "AttrApp".to_owned(),
+                platform: "GCM".to_owned(),
+                attributes: initial_attrs,
+            })
+            .unwrap();
+
+        // Get attributes.
+        let output = provider
+            .get_platform_application_attributes(&GetPlatformApplicationAttributesInput {
+                platform_application_arn: app.platform_application_arn.clone(),
+            })
+            .unwrap();
+        assert_eq!(output.attributes.get("Key1").unwrap(), "Value1");
+
+        // Set new attribute.
+        let mut new_attrs = HashMap::new();
+        new_attrs.insert("Key2".to_owned(), "Value2".to_owned());
+        provider
+            .set_platform_application_attributes(SetPlatformApplicationAttributesInput {
+                platform_application_arn: app.platform_application_arn.clone(),
+                attributes: new_attrs,
+            })
+            .unwrap();
+
+        // Verify both attributes are present.
+        let output = provider
+            .get_platform_application_attributes(&GetPlatformApplicationAttributesInput {
+                platform_application_arn: app.platform_application_arn,
+            })
+            .unwrap();
+        assert_eq!(output.attributes.get("Key1").unwrap(), "Value1");
+        assert_eq!(output.attributes.get("Key2").unwrap(), "Value2");
+    }
+
+    #[test]
+    fn test_should_list_platform_applications() {
+        let provider = make_provider();
+
+        for name in &["App1", "App2", "App3"] {
+            provider
+                .create_platform_application(CreatePlatformApplicationInput {
+                    name: (*name).to_owned(),
+                    platform: "GCM".to_owned(),
+                    attributes: HashMap::new(),
+                })
+                .unwrap();
+        }
+
+        let output = provider
+            .list_platform_applications(&ListPlatformApplicationsInput { next_token: None })
+            .unwrap();
+        assert_eq!(output.platform_applications.len(), 3);
+        assert!(output.next_token.is_none());
+    }
+
+    // ---- Phase 3 Tests: Platform Endpoints ----
+
+    #[test]
+    fn test_should_create_platform_endpoint() {
+        let provider = make_provider();
+        let app = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "EndpointApp".to_owned(),
+                platform: "GCM".to_owned(),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        let output = provider
+            .create_platform_endpoint(CreatePlatformEndpointInput {
+                platform_application_arn: app.platform_application_arn,
+                token: "device-token-123".to_owned(),
+                custom_user_data: Some("user-data".to_owned()),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        assert!(output.endpoint_arn.contains("endpoint/GCM/EndpointApp/"));
+
+        // Verify attributes include Token and Enabled.
+        let attrs = provider
+            .get_endpoint_attributes(&GetEndpointAttributesInput {
+                endpoint_arn: output.endpoint_arn,
+            })
+            .unwrap();
+        assert_eq!(attrs.attributes.get("Token").unwrap(), "device-token-123");
+        assert_eq!(attrs.attributes.get("Enabled").unwrap(), "true");
+        assert_eq!(attrs.attributes.get("CustomUserData").unwrap(), "user-data");
+    }
+
+    #[test]
+    fn test_should_create_endpoint_fails_for_nonexistent_app() {
+        let provider = make_provider();
+        let err = provider
+            .create_platform_endpoint(CreatePlatformEndpointInput {
+                platform_application_arn: "arn:aws:sns:us-east-1:000000000000:app/GCM/NoApp"
+                    .to_owned(),
+                token: "token".to_owned(),
+                custom_user_data: None,
+                attributes: HashMap::new(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::NotFound);
+    }
+
+    #[test]
+    fn test_should_delete_endpoint() {
+        let provider = make_provider();
+        let app = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "DelApp".to_owned(),
+                platform: "APNS".to_owned(),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        let ep = provider
+            .create_platform_endpoint(CreatePlatformEndpointInput {
+                platform_application_arn: app.platform_application_arn,
+                token: "tok".to_owned(),
+                custom_user_data: None,
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        provider
+            .delete_endpoint(&DeleteEndpointInput {
+                endpoint_arn: ep.endpoint_arn.clone(),
+            })
+            .unwrap();
+
+        // Getting attributes should fail after deletion.
+        let err = provider
+            .get_endpoint_attributes(&GetEndpointAttributesInput {
+                endpoint_arn: ep.endpoint_arn,
+            })
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::NotFound);
+    }
+
+    #[test]
+    fn test_should_set_endpoint_attributes() {
+        let provider = make_provider();
+        let app = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "SetAttrApp".to_owned(),
+                platform: "GCM".to_owned(),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        let ep = provider
+            .create_platform_endpoint(CreatePlatformEndpointInput {
+                platform_application_arn: app.platform_application_arn,
+                token: "original-token".to_owned(),
+                custom_user_data: None,
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        let mut new_attrs = HashMap::new();
+        new_attrs.insert("Enabled".to_owned(), "false".to_owned());
+        provider
+            .set_endpoint_attributes(SetEndpointAttributesInput {
+                endpoint_arn: ep.endpoint_arn.clone(),
+                attributes: new_attrs,
+            })
+            .unwrap();
+
+        let output = provider
+            .get_endpoint_attributes(&GetEndpointAttributesInput {
+                endpoint_arn: ep.endpoint_arn,
+            })
+            .unwrap();
+        assert_eq!(output.attributes.get("Enabled").unwrap(), "false");
+    }
+
+    #[test]
+    fn test_should_list_endpoints_by_platform_application() {
+        let provider = make_provider();
+        let app = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "ListEpApp".to_owned(),
+                platform: "GCM".to_owned(),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        for i in 0..3 {
+            provider
+                .create_platform_endpoint(CreatePlatformEndpointInput {
+                    platform_application_arn: app.platform_application_arn.clone(),
+                    token: format!("token-{i}"),
+                    custom_user_data: None,
+                    attributes: HashMap::new(),
+                })
+                .unwrap();
+        }
+
+        let output = provider
+            .list_endpoints_by_platform_application(&ListEndpointsByPlatformApplicationInput {
+                platform_application_arn: app.platform_application_arn,
+                next_token: None,
+            })
+            .unwrap();
+        assert_eq!(output.endpoints.len(), 3);
+        assert!(output.next_token.is_none());
+    }
+
+    #[test]
+    fn test_should_delete_platform_app_removes_endpoints() {
+        let provider = make_provider();
+        let app = provider
+            .create_platform_application(CreatePlatformApplicationInput {
+                name: "CascadeApp".to_owned(),
+                platform: "GCM".to_owned(),
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        let ep = provider
+            .create_platform_endpoint(CreatePlatformEndpointInput {
+                platform_application_arn: app.platform_application_arn.clone(),
+                token: "tok".to_owned(),
+                custom_user_data: None,
+                attributes: HashMap::new(),
+            })
+            .unwrap();
+
+        provider
+            .delete_platform_application(&DeletePlatformApplicationInput {
+                platform_application_arn: app.platform_application_arn,
+            })
+            .unwrap();
+
+        // Endpoint should also be gone.
+        let err = provider
+            .get_endpoint_attributes(&GetEndpointAttributesInput {
+                endpoint_arn: ep.endpoint_arn,
+            })
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::NotFound);
+    }
+
+    // ---- Phase 3 Tests: SMS ----
+
+    #[test]
+    fn test_should_get_and_set_sms_attributes() {
+        let provider = make_provider();
+
+        // Initially empty.
+        let output = provider
+            .get_sms_attributes(&GetSMSAttributesInput {
+                attributes: Vec::new(),
+            })
+            .unwrap();
+        assert!(output.attributes.is_empty());
+
+        // Set attributes.
+        let mut attrs = HashMap::new();
+        attrs.insert("DefaultSMSType".to_owned(), "Transactional".to_owned());
+        attrs.insert("MonthlySpendLimit".to_owned(), "100".to_owned());
+        provider
+            .set_sms_attributes(SetSMSAttributesInput { attributes: attrs })
+            .unwrap();
+
+        // Get all.
+        let output = provider
+            .get_sms_attributes(&GetSMSAttributesInput {
+                attributes: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(output.attributes.len(), 2);
+        assert_eq!(
+            output.attributes.get("DefaultSMSType").unwrap(),
+            "Transactional"
+        );
+
+        // Get specific.
+        let output = provider
+            .get_sms_attributes(&GetSMSAttributesInput {
+                attributes: vec!["DefaultSMSType".to_owned()],
+            })
+            .unwrap();
+        assert_eq!(output.attributes.len(), 1);
+    }
+
+    #[test]
+    fn test_should_check_phone_number_opted_out() {
+        let provider = make_provider();
+
+        // Not opted out by default.
+        let output = provider
+            .check_if_phone_number_is_opted_out(&CheckIfPhoneNumberIsOptedOutInput {
+                phone_number: "+15551234567".to_owned(),
+            })
+            .unwrap();
+        assert!(!output.is_opted_out);
+    }
+
+    #[test]
+    fn test_should_opt_in_phone_number() {
+        let provider = make_provider();
+
+        // Manually insert an opted-out number.
+        {
+            let mut opted_out = provider.opted_out_numbers.write();
+            opted_out.insert("+15559999999".to_owned());
+        }
+
+        // Verify it's opted out.
+        let output = provider
+            .check_if_phone_number_is_opted_out(&CheckIfPhoneNumberIsOptedOutInput {
+                phone_number: "+15559999999".to_owned(),
+            })
+            .unwrap();
+        assert!(output.is_opted_out);
+
+        // Opt it back in.
+        provider
+            .opt_in_phone_number(&OptInPhoneNumberInput {
+                phone_number: "+15559999999".to_owned(),
+            })
+            .unwrap();
+
+        // Verify no longer opted out.
+        let output = provider
+            .check_if_phone_number_is_opted_out(&CheckIfPhoneNumberIsOptedOutInput {
+                phone_number: "+15559999999".to_owned(),
+            })
+            .unwrap();
+        assert!(!output.is_opted_out);
+    }
+
+    #[test]
+    fn test_should_list_phone_numbers_opted_out() {
+        let provider = make_provider();
+
+        {
+            let mut opted_out = provider.opted_out_numbers.write();
+            opted_out.insert("+15551111111".to_owned());
+            opted_out.insert("+15552222222".to_owned());
+        }
+
+        let output = provider
+            .list_phone_numbers_opted_out(&ListPhoneNumbersOptedOutInput { next_token: None })
+            .unwrap();
+        assert_eq!(output.phone_numbers.len(), 2);
+        // Should be sorted.
+        assert!(output.phone_numbers[0] < output.phone_numbers[1]);
+    }
+
+    #[test]
+    fn test_should_get_sms_sandbox_account_status() {
+        let provider = make_provider();
+        let output = provider
+            .get_sms_sandbox_account_status(&GetSMSSandboxAccountStatusInput {})
+            .unwrap();
+        assert!(output.is_in_sandbox);
+    }
+
+    #[test]
+    fn test_should_create_and_verify_sms_sandbox_phone_number() {
+        let provider = make_provider();
+
+        // Create a sandbox phone number.
+        provider
+            .create_sms_sandbox_phone_number(&CreateSMSSandboxPhoneNumberInput {
+                phone_number: "+15553334444".to_owned(),
+                language_code: None,
+            })
+            .unwrap();
+
+        // List and verify it's pending.
+        let output = provider
+            .list_sms_sandbox_phone_numbers(&ListSMSSandboxPhoneNumbersInput { next_token: None })
+            .unwrap();
+        assert_eq!(output.phone_numbers.len(), 1);
+        assert_eq!(output.phone_numbers[0].phone_number, "+15553334444");
+        assert_eq!(output.phone_numbers[0].status, "Pending");
+
+        // Verify the phone number (any OTP accepted in local dev).
+        provider
+            .verify_sms_sandbox_phone_number(&VerifySMSSandboxPhoneNumberInput {
+                phone_number: "+15553334444".to_owned(),
+                one_time_password: "123456".to_owned(),
+            })
+            .unwrap();
+
+        // List and verify it's now verified.
+        let output = provider
+            .list_sms_sandbox_phone_numbers(&ListSMSSandboxPhoneNumbersInput { next_token: None })
+            .unwrap();
+        assert_eq!(output.phone_numbers[0].status, "Verified");
+    }
+
+    #[test]
+    fn test_should_delete_sms_sandbox_phone_number() {
+        let provider = make_provider();
+
+        provider
+            .create_sms_sandbox_phone_number(&CreateSMSSandboxPhoneNumberInput {
+                phone_number: "+15555556666".to_owned(),
+                language_code: None,
+            })
+            .unwrap();
+
+        provider
+            .delete_sms_sandbox_phone_number(&DeleteSMSSandboxPhoneNumberInput {
+                phone_number: "+15555556666".to_owned(),
+            })
+            .unwrap();
+
+        let output = provider
+            .list_sms_sandbox_phone_numbers(&ListSMSSandboxPhoneNumbersInput { next_token: None })
+            .unwrap();
+        assert!(output.phone_numbers.is_empty());
+    }
+
+    #[test]
+    fn test_should_delete_nonexistent_sandbox_phone_returns_error() {
+        let provider = make_provider();
+        let err = provider
+            .delete_sms_sandbox_phone_number(&DeleteSMSSandboxPhoneNumberInput {
+                phone_number: "+15550000000".to_owned(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::NotFound);
+    }
+
+    #[test]
+    fn test_should_verify_nonexistent_sandbox_phone_returns_error() {
+        let provider = make_provider();
+        let err = provider
+            .verify_sms_sandbox_phone_number(&VerifySMSSandboxPhoneNumberInput {
+                phone_number: "+15550000000".to_owned(),
+                one_time_password: "123456".to_owned(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, SnsErrorCode::NotFound);
+    }
+
+    #[test]
+    fn test_should_list_origination_numbers_empty() {
+        let provider = make_provider();
+        let output = provider
+            .list_origination_numbers(&ListOriginationNumbersInput {
+                next_token: None,
+                max_results: None,
+            })
+            .unwrap();
+        assert!(output.phone_numbers.is_empty());
+        assert!(output.next_token.is_none());
     }
 }

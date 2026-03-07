@@ -2,6 +2,10 @@
 //!
 //! Parses form-urlencoded request bodies, dispatches to the provider,
 //! and serializes XML responses following the awsQuery protocol.
+//!
+//! Covers Phase 0-3: topic management, subscriptions, publishing,
+//! tagging, permissions, data protection, platform applications,
+//! platform endpoints, and SMS operations.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -20,12 +24,20 @@ use ruststack_sns_http::request::{
 use ruststack_sns_http::response::{XmlWriter, xml_response};
 use ruststack_sns_model::error::SnsError;
 use ruststack_sns_model::input::{
-    AddPermissionInput, ConfirmSubscriptionInput, CreateTopicInput, DeleteTopicInput,
-    GetDataProtectionPolicyInput, GetSubscriptionAttributesInput, GetTopicAttributesInput,
+    AddPermissionInput, CheckIfPhoneNumberIsOptedOutInput, ConfirmSubscriptionInput,
+    CreatePlatformApplicationInput, CreatePlatformEndpointInput, CreateSMSSandboxPhoneNumberInput,
+    CreateTopicInput, DeleteEndpointInput, DeletePlatformApplicationInput,
+    DeleteSMSSandboxPhoneNumberInput, DeleteTopicInput, GetDataProtectionPolicyInput,
+    GetEndpointAttributesInput, GetPlatformApplicationAttributesInput, GetSMSAttributesInput,
+    GetSMSSandboxAccountStatusInput, GetSubscriptionAttributesInput, GetTopicAttributesInput,
+    ListEndpointsByPlatformApplicationInput, ListOriginationNumbersInput,
+    ListPhoneNumbersOptedOutInput, ListPlatformApplicationsInput, ListSMSSandboxPhoneNumbersInput,
     ListSubscriptionsByTopicInput, ListSubscriptionsInput, ListTagsForResourceInput,
-    ListTopicsInput, PublishBatchInput, PublishInput, PutDataProtectionPolicyInput,
-    RemovePermissionInput, SetSubscriptionAttributesInput, SetTopicAttributesInput, SubscribeInput,
-    TagResourceInput, UnsubscribeInput, UntagResourceInput,
+    ListTopicsInput, OptInPhoneNumberInput, PublishBatchInput, PublishInput,
+    PutDataProtectionPolicyInput, RemovePermissionInput, SetEndpointAttributesInput,
+    SetPlatformApplicationAttributesInput, SetSMSAttributesInput, SetSubscriptionAttributesInput,
+    SetTopicAttributesInput, SubscribeInput, TagResourceInput, UnsubscribeInput,
+    UntagResourceInput, VerifySMSSandboxPhoneNumberInput,
 };
 use ruststack_sns_model::operations::SnsOperation;
 use ruststack_sns_model::types::Subscription;
@@ -353,10 +365,294 @@ async fn dispatch(
             Ok(xml_response(w.into_string(), &request_id))
         }
 
-        // All other operations are not yet implemented.
-        _ => Err(SnsError::invalid_parameter(format!(
-            "Operation not yet supported: {op}"
-        ))),
+        // ---- Platform Applications ----
+        SnsOperation::CreatePlatformApplication => {
+            let input = deserialize_create_platform_application(&params)?;
+            let output = provider.create_platform_application(input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("CreatePlatformApplication");
+            w.start_result("CreatePlatformApplication");
+            w.write_element("PlatformApplicationArn", &output.platform_application_arn);
+            w.end_element("CreatePlatformApplicationResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("CreatePlatformApplicationResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::DeletePlatformApplication => {
+            let input = deserialize_delete_platform_application(&params)?;
+            let _output = provider.delete_platform_application(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("DeletePlatformApplication");
+            w.write_response_metadata(&request_id);
+            w.end_element("DeletePlatformApplicationResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::GetPlatformApplicationAttributes => {
+            let input = deserialize_get_platform_application_attributes(&params)?;
+            let output = provider.get_platform_application_attributes(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("GetPlatformApplicationAttributes");
+            w.start_result("GetPlatformApplicationAttributes");
+            write_attributes_xml(&mut w, &output.attributes);
+            w.end_element("GetPlatformApplicationAttributesResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("GetPlatformApplicationAttributesResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::SetPlatformApplicationAttributes => {
+            let input = deserialize_set_platform_application_attributes(&params)?;
+            let _output = provider.set_platform_application_attributes(input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("SetPlatformApplicationAttributes");
+            w.write_response_metadata(&request_id);
+            w.end_element("SetPlatformApplicationAttributesResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::ListPlatformApplications => {
+            let input = deserialize_list_platform_applications(&params);
+            let output = provider.list_platform_applications(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ListPlatformApplications");
+            w.start_result("ListPlatformApplications");
+            w.raw("<PlatformApplications>");
+            for app in &output.platform_applications {
+                w.raw("<member>");
+                w.write_element("PlatformApplicationArn", &app.platform_application_arn);
+                write_attributes_xml(&mut w, &app.attributes);
+                w.raw("</member>");
+            }
+            w.raw("</PlatformApplications>");
+            w.write_optional_element("NextToken", output.next_token.as_deref());
+            w.end_element("ListPlatformApplicationsResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ListPlatformApplicationsResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        // ---- Platform Endpoints ----
+        SnsOperation::CreatePlatformEndpoint => {
+            let input = deserialize_create_platform_endpoint(&params)?;
+            let output = provider.create_platform_endpoint(input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("CreatePlatformEndpoint");
+            w.start_result("CreatePlatformEndpoint");
+            w.write_element("EndpointArn", &output.endpoint_arn);
+            w.end_element("CreatePlatformEndpointResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("CreatePlatformEndpointResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::DeleteEndpoint => {
+            let input = deserialize_delete_endpoint(&params)?;
+            let _output = provider.delete_endpoint(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("DeleteEndpoint");
+            w.write_response_metadata(&request_id);
+            w.end_element("DeleteEndpointResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::GetEndpointAttributes => {
+            let input = deserialize_get_endpoint_attributes(&params)?;
+            let output = provider.get_endpoint_attributes(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("GetEndpointAttributes");
+            w.start_result("GetEndpointAttributes");
+            write_attributes_xml(&mut w, &output.attributes);
+            w.end_element("GetEndpointAttributesResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("GetEndpointAttributesResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::SetEndpointAttributes => {
+            let input = deserialize_set_endpoint_attributes(&params)?;
+            let _output = provider.set_endpoint_attributes(input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("SetEndpointAttributes");
+            w.write_response_metadata(&request_id);
+            w.end_element("SetEndpointAttributesResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::ListEndpointsByPlatformApplication => {
+            let input = deserialize_list_endpoints_by_platform_application(&params)?;
+            let output = provider.list_endpoints_by_platform_application(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ListEndpointsByPlatformApplication");
+            w.start_result("ListEndpointsByPlatformApplication");
+            w.raw("<Endpoints>");
+            for ep in &output.endpoints {
+                w.raw("<member>");
+                w.write_element("EndpointArn", &ep.endpoint_arn);
+                write_attributes_xml(&mut w, &ep.attributes);
+                w.raw("</member>");
+            }
+            w.raw("</Endpoints>");
+            w.write_optional_element("NextToken", output.next_token.as_deref());
+            w.end_element("ListEndpointsByPlatformApplicationResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ListEndpointsByPlatformApplicationResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        // ---- SMS Operations ----
+        SnsOperation::CheckIfPhoneNumberIsOptedOut => {
+            let input = deserialize_check_if_phone_number_is_opted_out(&params)?;
+            let output = provider.check_if_phone_number_is_opted_out(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("CheckIfPhoneNumberIsOptedOut");
+            w.start_result("CheckIfPhoneNumberIsOptedOut");
+            w.write_bool_element("isOptedOut", output.is_opted_out);
+            w.end_element("CheckIfPhoneNumberIsOptedOutResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("CheckIfPhoneNumberIsOptedOutResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::GetSMSAttributes => {
+            let input = deserialize_get_sms_attributes(&params);
+            let output = provider.get_sms_attributes(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("GetSMSAttributes");
+            w.start_result("GetSMSAttributes");
+            write_attributes_xml(&mut w, &output.attributes);
+            w.end_element("GetSMSAttributesResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("GetSMSAttributesResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::SetSMSAttributes => {
+            let input = deserialize_set_sms_attributes(&params)?;
+            let _output = provider.set_sms_attributes(input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("SetSMSAttributes");
+            w.write_response_metadata(&request_id);
+            w.end_element("SetSMSAttributesResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::ListPhoneNumbersOptedOut => {
+            let input = deserialize_list_phone_numbers_opted_out(&params);
+            let output = provider.list_phone_numbers_opted_out(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ListPhoneNumbersOptedOut");
+            w.start_result("ListPhoneNumbersOptedOut");
+            w.raw("<phoneNumbers>");
+            for number in &output.phone_numbers {
+                w.raw("<member>");
+                w.raw(&ruststack_sns_http::response::xml_escape(number));
+                w.raw("</member>");
+            }
+            w.raw("</phoneNumbers>");
+            w.write_optional_element("NextToken", output.next_token.as_deref());
+            w.end_element("ListPhoneNumbersOptedOutResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ListPhoneNumbersOptedOutResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::OptInPhoneNumber => {
+            let input = deserialize_opt_in_phone_number(&params)?;
+            let _output = provider.opt_in_phone_number(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("OptInPhoneNumber");
+            w.write_response_metadata(&request_id);
+            w.end_element("OptInPhoneNumberResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::GetSMSSandboxAccountStatus => {
+            let input = GetSMSSandboxAccountStatusInput {};
+            let output = provider.get_sms_sandbox_account_status(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("GetSMSSandboxAccountStatus");
+            w.start_result("GetSMSSandboxAccountStatus");
+            w.write_bool_element("IsInSandbox", output.is_in_sandbox);
+            w.end_element("GetSMSSandboxAccountStatusResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("GetSMSSandboxAccountStatusResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::CreateSMSSandboxPhoneNumber => {
+            let input = deserialize_create_sms_sandbox_phone_number(&params)?;
+            let _output = provider.create_sms_sandbox_phone_number(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("CreateSMSSandboxPhoneNumber");
+            w.write_response_metadata(&request_id);
+            w.end_element("CreateSMSSandboxPhoneNumberResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::DeleteSMSSandboxPhoneNumber => {
+            let input = deserialize_delete_sms_sandbox_phone_number(&params)?;
+            let _output = provider.delete_sms_sandbox_phone_number(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("DeleteSMSSandboxPhoneNumber");
+            w.write_response_metadata(&request_id);
+            w.end_element("DeleteSMSSandboxPhoneNumberResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::VerifySMSSandboxPhoneNumber => {
+            let input = deserialize_verify_sms_sandbox_phone_number(&params)?;
+            let _output = provider.verify_sms_sandbox_phone_number(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("VerifySMSSandboxPhoneNumber");
+            w.write_response_metadata(&request_id);
+            w.end_element("VerifySMSSandboxPhoneNumberResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::ListSMSSandboxPhoneNumbers => {
+            let input = deserialize_list_sms_sandbox_phone_numbers(&params);
+            let output = provider.list_sms_sandbox_phone_numbers(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ListSMSSandboxPhoneNumbers");
+            w.start_result("ListSMSSandboxPhoneNumbers");
+            w.raw("<PhoneNumbers>");
+            for phone in &output.phone_numbers {
+                w.raw("<member>");
+                w.write_element("PhoneNumber", &phone.phone_number);
+                w.write_element("Status", &phone.status);
+                w.raw("</member>");
+            }
+            w.raw("</PhoneNumbers>");
+            w.write_optional_element("NextToken", output.next_token.as_deref());
+            w.end_element("ListSMSSandboxPhoneNumbersResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ListSMSSandboxPhoneNumbersResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
+
+        SnsOperation::ListOriginationNumbers => {
+            let input = deserialize_list_origination_numbers(&params);
+            let output = provider.list_origination_numbers(&input)?;
+            let mut w = XmlWriter::new();
+            w.start_response("ListOriginationNumbers");
+            w.start_result("ListOriginationNumbers");
+            w.raw("<PhoneNumbers>");
+            for phone in &output.phone_numbers {
+                w.raw("<member>");
+                w.write_element("PhoneNumber", &phone.phone_number);
+                w.write_element("Status", &phone.status);
+                w.write_optional_element("RouteType", phone.route_type.as_deref());
+                w.raw("</member>");
+            }
+            w.raw("</PhoneNumbers>");
+            w.write_optional_element("NextToken", output.next_token.as_deref());
+            w.end_element("ListOriginationNumbersResult");
+            w.write_response_metadata(&request_id);
+            w.end_element("ListOriginationNumbersResponse");
+            Ok(xml_response(w.into_string(), &request_id))
+        }
     }
 }
 
@@ -610,4 +906,196 @@ fn deserialize_put_data_protection_policy(
         resource_arn,
         data_protection_policy,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Platform Application deserializers
+// ---------------------------------------------------------------------------
+
+fn deserialize_create_platform_application(
+    params: &[(String, String)],
+) -> Result<CreatePlatformApplicationInput, SnsError> {
+    let name = get_required_param(params, "Name")?.to_owned();
+    let platform = get_required_param(params, "Platform")?.to_owned();
+    let attributes = parse_attributes_map(params, "Attributes")?;
+    Ok(CreatePlatformApplicationInput {
+        name,
+        platform,
+        attributes,
+    })
+}
+
+fn deserialize_delete_platform_application(
+    params: &[(String, String)],
+) -> Result<DeletePlatformApplicationInput, SnsError> {
+    let platform_application_arn = get_required_param(params, "PlatformApplicationArn")?.to_owned();
+    Ok(DeletePlatformApplicationInput {
+        platform_application_arn,
+    })
+}
+
+fn deserialize_get_platform_application_attributes(
+    params: &[(String, String)],
+) -> Result<GetPlatformApplicationAttributesInput, SnsError> {
+    let platform_application_arn = get_required_param(params, "PlatformApplicationArn")?.to_owned();
+    Ok(GetPlatformApplicationAttributesInput {
+        platform_application_arn,
+    })
+}
+
+fn deserialize_set_platform_application_attributes(
+    params: &[(String, String)],
+) -> Result<SetPlatformApplicationAttributesInput, SnsError> {
+    let platform_application_arn = get_required_param(params, "PlatformApplicationArn")?.to_owned();
+    let attributes = parse_attributes_map(params, "Attributes")?;
+    Ok(SetPlatformApplicationAttributesInput {
+        platform_application_arn,
+        attributes,
+    })
+}
+
+fn deserialize_list_platform_applications(
+    params: &[(String, String)],
+) -> ListPlatformApplicationsInput {
+    let next_token = get_optional_param(params, "NextToken").map(str::to_owned);
+    ListPlatformApplicationsInput { next_token }
+}
+
+// ---------------------------------------------------------------------------
+// Platform Endpoint deserializers
+// ---------------------------------------------------------------------------
+
+fn deserialize_create_platform_endpoint(
+    params: &[(String, String)],
+) -> Result<CreatePlatformEndpointInput, SnsError> {
+    let platform_application_arn = get_required_param(params, "PlatformApplicationArn")?.to_owned();
+    let token = get_required_param(params, "Token")?.to_owned();
+    let custom_user_data = get_optional_param(params, "CustomUserData").map(str::to_owned);
+    let attributes = parse_attributes_map(params, "Attributes")?;
+    Ok(CreatePlatformEndpointInput {
+        platform_application_arn,
+        token,
+        custom_user_data,
+        attributes,
+    })
+}
+
+fn deserialize_delete_endpoint(
+    params: &[(String, String)],
+) -> Result<DeleteEndpointInput, SnsError> {
+    let endpoint_arn = get_required_param(params, "EndpointArn")?.to_owned();
+    Ok(DeleteEndpointInput { endpoint_arn })
+}
+
+fn deserialize_get_endpoint_attributes(
+    params: &[(String, String)],
+) -> Result<GetEndpointAttributesInput, SnsError> {
+    let endpoint_arn = get_required_param(params, "EndpointArn")?.to_owned();
+    Ok(GetEndpointAttributesInput { endpoint_arn })
+}
+
+fn deserialize_set_endpoint_attributes(
+    params: &[(String, String)],
+) -> Result<SetEndpointAttributesInput, SnsError> {
+    let endpoint_arn = get_required_param(params, "EndpointArn")?.to_owned();
+    let attributes = parse_attributes_map(params, "Attributes")?;
+    Ok(SetEndpointAttributesInput {
+        endpoint_arn,
+        attributes,
+    })
+}
+
+fn deserialize_list_endpoints_by_platform_application(
+    params: &[(String, String)],
+) -> Result<ListEndpointsByPlatformApplicationInput, SnsError> {
+    let platform_application_arn = get_required_param(params, "PlatformApplicationArn")?.to_owned();
+    let next_token = get_optional_param(params, "NextToken").map(str::to_owned);
+    Ok(ListEndpointsByPlatformApplicationInput {
+        platform_application_arn,
+        next_token,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SMS deserializers
+// ---------------------------------------------------------------------------
+
+fn deserialize_check_if_phone_number_is_opted_out(
+    params: &[(String, String)],
+) -> Result<CheckIfPhoneNumberIsOptedOutInput, SnsError> {
+    let phone_number = get_required_param(params, "phoneNumber")?.to_owned();
+    Ok(CheckIfPhoneNumberIsOptedOutInput { phone_number })
+}
+
+fn deserialize_get_sms_attributes(params: &[(String, String)]) -> GetSMSAttributesInput {
+    let attributes = parse_string_list(params, "attributes");
+    GetSMSAttributesInput { attributes }
+}
+
+fn deserialize_set_sms_attributes(
+    params: &[(String, String)],
+) -> Result<SetSMSAttributesInput, SnsError> {
+    let attributes = parse_attributes_map(params, "attributes")?;
+    Ok(SetSMSAttributesInput { attributes })
+}
+
+fn deserialize_list_phone_numbers_opted_out(
+    params: &[(String, String)],
+) -> ListPhoneNumbersOptedOutInput {
+    let next_token = get_optional_param(params, "nextToken").map(str::to_owned);
+    ListPhoneNumbersOptedOutInput { next_token }
+}
+
+fn deserialize_opt_in_phone_number(
+    params: &[(String, String)],
+) -> Result<OptInPhoneNumberInput, SnsError> {
+    let phone_number = get_required_param(params, "phoneNumber")?.to_owned();
+    Ok(OptInPhoneNumberInput { phone_number })
+}
+
+fn deserialize_create_sms_sandbox_phone_number(
+    params: &[(String, String)],
+) -> Result<CreateSMSSandboxPhoneNumberInput, SnsError> {
+    let phone_number = get_required_param(params, "PhoneNumber")?.to_owned();
+    let language_code = get_optional_param(params, "LanguageCode").map(str::to_owned);
+    Ok(CreateSMSSandboxPhoneNumberInput {
+        phone_number,
+        language_code,
+    })
+}
+
+fn deserialize_delete_sms_sandbox_phone_number(
+    params: &[(String, String)],
+) -> Result<DeleteSMSSandboxPhoneNumberInput, SnsError> {
+    let phone_number = get_required_param(params, "PhoneNumber")?.to_owned();
+    Ok(DeleteSMSSandboxPhoneNumberInput { phone_number })
+}
+
+fn deserialize_verify_sms_sandbox_phone_number(
+    params: &[(String, String)],
+) -> Result<VerifySMSSandboxPhoneNumberInput, SnsError> {
+    let phone_number = get_required_param(params, "PhoneNumber")?.to_owned();
+    let one_time_password = get_required_param(params, "OneTimePassword")?.to_owned();
+    Ok(VerifySMSSandboxPhoneNumberInput {
+        phone_number,
+        one_time_password,
+    })
+}
+
+fn deserialize_list_sms_sandbox_phone_numbers(
+    params: &[(String, String)],
+) -> ListSMSSandboxPhoneNumbersInput {
+    let next_token = get_optional_param(params, "NextToken").map(str::to_owned);
+    ListSMSSandboxPhoneNumbersInput { next_token }
+}
+
+fn deserialize_list_origination_numbers(
+    params: &[(String, String)],
+) -> ListOriginationNumbersInput {
+    let next_token = get_optional_param(params, "NextToken").map(str::to_owned);
+    let max_results = get_optional_param(params, "MaxResults").and_then(|v| v.parse::<i32>().ok());
+    ListOriginationNumbersInput {
+        next_token,
+        max_results,
+    }
 }
