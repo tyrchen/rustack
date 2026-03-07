@@ -18,6 +18,7 @@ aws-sdk-dynamodb = { workspace = true }
 aws-sdk-sqs = { workspace = true }
 aws-sdk-ssm = { workspace = true }
 aws-sdk-sns = { workspace = true }
+aws-sdk-lambda = { workspace = true }
 serde_json = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }

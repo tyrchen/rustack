@@ -375,11 +375,45 @@ mod lambda_router {
 
     use super::{GatewayBody, ServiceRouter};
 
+    /// Lambda API uses multiple date-versioned path prefixes.
+    /// The SDK may use different dates than the spec documents.
+    fn is_lambda_path(path: &str) -> bool {
+        // Function CRUD and invoke paths.
+        if path.contains("/functions") {
+            // Match any date prefix for /YYYY-MM-DD/functions
+            if let Some(rest) = path.strip_prefix('/') {
+                let parts: Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() == 2 && parts[0].len() == 10 && parts[1].starts_with("functions") {
+                    return true;
+                }
+            }
+        }
+        // Tags paths (e.g., /2017-03-31/tags/{arn}).
+        if path.contains("/tags/") {
+            if let Some(rest) = path.strip_prefix('/') {
+                let parts: Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() == 2 && parts[0].len() == 10 && parts[1].starts_with("tags/") {
+                    return true;
+                }
+            }
+        }
+        // Account settings paths.
+        if path.contains("/account-settings") {
+            if let Some(rest) = path.strip_prefix('/') {
+                let parts: Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() == 2 && parts[0].len() == 10 && parts[1] == "account-settings" {
+                    return true;
+                }
+            }
+        }
+        // Function URL invocation paths.
+        path.starts_with("/lambda-url/")
+    }
+
     /// Routes requests to the Lambda service.
     ///
-    /// Matches requests whose URL path starts with `/2015-03-31/functions`,
-    /// `/2021-10-31/functions`, `/2015-03-31/tags`, or
-    /// `/2015-03-31/account-settings`.
+    /// Matches requests whose URL path starts with a date-versioned Lambda API
+    /// prefix (e.g., `/2015-03-31/functions`, `/2017-03-31/tags`).
     pub struct LambdaServiceRouter<H: LambdaHandler> {
         inner: LambdaHttpService<H>,
     }
@@ -398,11 +432,7 @@ mod lambda_router {
 
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             let path = req.uri().path();
-            path.starts_with("/2015-03-31/functions")
-                || path.starts_with("/2021-10-31/functions")
-                || path.starts_with("/2015-03-31/tags")
-                || path.starts_with("/2015-03-31/account-settings")
-                || path.starts_with("/lambda-url/")
+            is_lambda_path(path)
         }
 
         fn call(

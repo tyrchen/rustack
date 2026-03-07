@@ -103,6 +103,40 @@ fn percent_decode(input: &str) -> String {
     result
 }
 
+/// Normalize the date prefix in a Lambda API path.
+///
+/// The AWS SDK may use different date versions than our route table defines.
+/// For example, the SDK sends `GET /2016-08-19/account-settings` but our
+/// route table uses `/2015-03-31/account-settings`. This function detects the
+/// YYYY-MM-DD prefix and maps the resource suffix to the correct canonical date.
+fn normalize_date_prefix(path: &str) -> Option<String> {
+    let trimmed = path.strip_prefix('/')?;
+    let (date_part, rest) = trimmed.split_once('/')?;
+
+    // Validate it looks like a date: YYYY-MM-DD (10 chars).
+    if date_part.len() != 10 || date_part.as_bytes()[4] != b'-' || date_part.as_bytes()[7] != b'-' {
+        return None;
+    }
+
+    // Map resource prefix to canonical date.
+    let canonical_date = if rest.starts_with("functions") {
+        // Function URLs use 2021-10-31, function CRUD uses 2015-03-31.
+        if date_part == "2021-10-31" || date_part == "2015-03-31" {
+            return None; // Already canonical.
+        }
+        "2015-03-31"
+    } else if rest.starts_with("tags") || rest == "account-settings" {
+        if date_part == "2015-03-31" {
+            return None; // Already canonical.
+        }
+        "2015-03-31"
+    } else {
+        return None;
+    };
+
+    Some(format!("/{canonical_date}/{rest}"))
+}
+
 /// Resolve a Lambda operation from the HTTP method and request path.
 ///
 /// Iterates the [`LAMBDA_ROUTES`] table and returns the first matching
@@ -116,6 +150,13 @@ pub fn resolve_operation(
     method: &Method,
     path: &str,
 ) -> Result<(LambdaOperation, PathParams, u16), LambdaError> {
+    // Normalize the date prefix: the AWS SDK may use different date versions
+    // (e.g., 2016-08-19, 2017-03-31) than the canonical ones in our route table
+    // (2015-03-31, 2021-10-31). We normalize any YYYY-MM-DD prefix to the
+    // canonical date used by the matching route pattern.
+    let normalized = normalize_date_prefix(path);
+    let path = normalized.as_deref().unwrap_or(path);
+
     for route in LAMBDA_ROUTES {
         if route.method != *method {
             continue;

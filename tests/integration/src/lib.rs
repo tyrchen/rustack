@@ -217,10 +217,28 @@ pub fn sns_client() -> sns::Client {
     sns::Client::from_conf(config)
 }
 
+/// Create a configured Lambda client pointing at the local server.
+#[must_use]
+pub fn lambda_client() -> aws_sdk_lambda::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_lambda::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_lambda::Client::from_conf(config)
+}
+
 mod test_bucket;
 mod test_cors;
 mod test_dynamodb;
 mod test_error;
+mod test_lambda;
 mod test_list;
 mod test_multipart;
 mod test_object;
