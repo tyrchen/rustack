@@ -2145,6 +2145,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruststack-lambda-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "http 1.4.0",
+ "ruststack-auth",
+ "ruststack-core",
+ "ruststack-lambda-http",
+ "ruststack-lambda-model",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-lambda-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "ruststack-auth",
+ "ruststack-lambda-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-lambda-model"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ruststack-s3-core"
 version = "0.1.0"
 dependencies = [
@@ -2250,6 +2305,8 @@ dependencies = [
  "ruststack-core",
  "ruststack-dynamodb-core",
  "ruststack-dynamodb-http",
+ "ruststack-lambda-core",
+ "ruststack-lambda-http",
  "ruststack-s3-core",
  "ruststack-s3-http",
  "ruststack-s3-model",

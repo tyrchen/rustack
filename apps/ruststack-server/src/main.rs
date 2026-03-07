@@ -80,6 +80,15 @@ use ruststack_sns_core::provider::RustStackSns;
 #[cfg(feature = "sns")]
 use ruststack_sns_http::service::{SnsHttpConfig, SnsHttpService};
 
+#[cfg(feature = "lambda")]
+use ruststack_lambda_core::config::LambdaConfig;
+#[cfg(feature = "lambda")]
+use ruststack_lambda_core::handler::RustStackLambdaHandler;
+#[cfg(feature = "lambda")]
+use ruststack_lambda_core::provider::RustStackLambda;
+#[cfg(feature = "lambda")]
+use ruststack_lambda_http::service::{LambdaHttpConfig, LambdaHttpService};
+
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
 #[cfg(feature = "s3")]
@@ -172,6 +181,18 @@ fn build_sns_http_config(config: &SnsConfig) -> SnsHttpConfig {
     }
 }
 
+/// Build the [`LambdaHttpConfig`] from the [`LambdaConfig`].
+#[cfg(feature = "lambda")]
+fn build_lambda_http_config(config: &LambdaConfig) -> LambdaHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    LambdaHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -179,7 +200,8 @@ fn build_sns_http_config(config: &SnsConfig) -> SnsHttpConfig {
     feature = "dynamodb",
     feature = "sqs",
     feature = "ssm",
-    feature = "sns"
+    feature = "sns",
+    feature = "lambda"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -256,6 +278,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "sqs" && cfg!(feature = "sqs"))
         || (name == "ssm" && cfg!(feature = "ssm"))
         || (name == "sns" && cfg!(feature = "sns"))
+        || (name == "lambda" && cfg!(feature = "lambda"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -288,6 +311,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "sns") {
             all.push("sns".to_string());
+        }
+        if cfg!(feature = "lambda") {
+            all.push("lambda".to_string());
         }
         all
     } else {
@@ -343,6 +369,7 @@ fn log_level() -> String {
 }
 
 /// Build all enabled service routers based on environment configuration.
+#[allow(clippy::too_many_lines)]
 fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRouter>> {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
 
@@ -419,6 +446,22 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         let sns_http_config = build_sns_http_config(&sns_config);
         let sns_service = SnsHttpService::new(Arc::new(sns_handler), sns_http_config);
         services.push(Box::new(service::SnsServiceRouter::new(sns_service)));
+    }
+
+    // ----- Lambda (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "lambda")]
+    if is_enabled("lambda") {
+        let lambda_config = LambdaConfig::from_env();
+        info!(
+            lambda_skip_signature_validation = lambda_config.skip_signature_validation,
+            lambda_docker_enabled = lambda_config.docker_enabled,
+            "initializing Lambda service",
+        );
+        let lambda_provider = RustStackLambda::new(lambda_config.clone());
+        let lambda_handler = RustStackLambdaHandler::new(Arc::new(lambda_provider));
+        let lambda_http_config = build_lambda_http_config(&lambda_config);
+        let lambda_service = LambdaHttpService::new(Arc::new(lambda_handler), lambda_http_config);
+        services.push(Box::new(service::LambdaServiceRouter::new(lambda_service)));
     }
 
     // ----- S3 (catch-all, must be last) -----
@@ -542,6 +585,7 @@ mod tests {
         assert_eq!(is_compiled_in("sqs"), cfg!(feature = "sqs"));
         assert_eq!(is_compiled_in("ssm"), cfg!(feature = "ssm"));
         assert_eq!(is_compiled_in("sns"), cfg!(feature = "sns"));
+        assert_eq!(is_compiled_in("lambda"), cfg!(feature = "lambda"));
     }
 
     #[cfg(feature = "s3")]

@@ -42,6 +42,9 @@ ruststack-ssm-core = { path = "crates/ruststack-ssm-core" }
 ruststack-sns-model = { path = "crates/ruststack-sns-model" }
 ruststack-sns-http = { path = "crates/ruststack-sns-http" }
 ruststack-sns-core = { path = "crates/ruststack-sns-core" }
+ruststack-lambda-model = { path = "crates/ruststack-lambda-model" }
+ruststack-lambda-http = { path = "crates/ruststack-lambda-http" }
+ruststack-lambda-core = { path = "crates/ruststack-lambda-core" }
 
 # Async runtime
 tokio = { version = "1.49", features = [

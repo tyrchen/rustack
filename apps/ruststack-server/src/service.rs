@@ -356,3 +356,67 @@ mod sns_router {
 
 #[cfg(feature = "sns")]
 pub use sns_router::SnsServiceRouter;
+
+// ---------------------------------------------------------------------------
+// Lambda
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lambda")]
+mod lambda_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_lambda_http::dispatch::LambdaHandler;
+    use ruststack_lambda_http::service::LambdaHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the Lambda service.
+    ///
+    /// Matches requests whose URL path starts with `/2015-03-31/functions`,
+    /// `/2021-10-31/functions`, `/2015-03-31/tags`, or
+    /// `/2015-03-31/account-settings`.
+    pub struct LambdaServiceRouter<H: LambdaHandler> {
+        inner: LambdaHttpService<H>,
+    }
+
+    impl<H: LambdaHandler> LambdaServiceRouter<H> {
+        /// Wrap a [`LambdaHttpService`] in a router.
+        pub fn new(inner: LambdaHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: LambdaHandler> ServiceRouter for LambdaServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "lambda"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            let path = req.uri().path();
+            path.starts_with("/2015-03-31/functions")
+                || path.starts_with("/2021-10-31/functions")
+                || path.starts_with("/2015-03-31/tags")
+                || path.starts_with("/2015-03-31/account-settings")
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "lambda")]
+pub use lambda_router::LambdaServiceRouter;
