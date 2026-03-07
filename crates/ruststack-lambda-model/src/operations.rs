@@ -273,9 +273,13 @@ pub const LAMBDA_ROUTES: &[LambdaRoute] = &[
         operation: LambdaOperation::DeleteFunctionUrlConfig,
         success_status: 204,
     },
-    // Note: ListFunctionUrlConfigs uses same path as Get but is distinguished
-    // by the presence/absence of the Qualifier query param at the handler level.
-    // We route both GET /url to GetFunctionUrlConfig and handle list logic there.
+    // ListFunctionUrlConfigs uses the plural `/urls` path.
+    LambdaRoute {
+        method: http::Method::GET,
+        path_pattern: "/2021-10-31/functions/{FunctionName}/urls",
+        operation: LambdaOperation::ListFunctionUrlConfigs,
+        success_status: 200,
+    },
     // --- /2015-03-31/tags/{arn} ---
     LambdaRoute {
         method: http::Method::POST,

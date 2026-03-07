@@ -202,22 +202,41 @@ async fn dispatch(
                 .and_then(InvocationType::from_str_value)
                 .unwrap_or(InvocationType::RequestResponse);
 
-            let is_dry_run = invocation_type == InvocationType::DryRun;
-
-            let (status, response_body) = provider
-                .invoke(function_name, qualifier, body, is_dry_run)
-                .map_err(LambdaError::from)?;
-
-            if is_dry_run {
+            if invocation_type == InvocationType::DryRun {
+                // DryRun: validate function exists, return 204.
+                let (status, _) = provider
+                    .invoke(function_name, qualifier, body, true)
+                    .map_err(LambdaError::from)?;
                 return Ok(wrap_empty_response(status));
             }
 
-            // For Event invocation, return 202 with empty body.
+            // For Event invocation, validate and return 202 immediately.
+            // Actual async execution would be queued (not yet implemented).
             if invocation_type == InvocationType::Event {
+                // Validate the function exists and qualifier resolves.
+                provider
+                    .invoke(function_name, qualifier, body, true)
+                    .map_err(LambdaError::from)?;
                 return Ok(wrap_empty_response(202));
             }
 
-            Ok(wrap_bytes_response(status, response_body))
+            // RequestResponse: synchronous invocation.
+            let (status, response_body) = provider
+                .invoke(function_name, qualifier, body, false)
+                .map_err(LambdaError::from)?;
+
+            // Build response with proper invoke headers.
+            let mut response = http::Response::builder()
+                .status(status)
+                .body(LambdaResponseBody::from_bytes(response_body))
+                .expect("valid invoke response");
+
+            // Set X-Amz-Executed-Version header.
+            if let Ok(hv) = http::HeaderValue::from_str(qualifier.unwrap_or("$LATEST")) {
+                response.headers_mut().insert("x-amz-executed-version", hv);
+            }
+
+            Ok(response)
         }
 
         // ---- Phase 1: Versions + Aliases ----
@@ -440,15 +459,6 @@ fn wrap_empty_response(status: u16) -> http::Response<LambdaResponseBody> {
     let bytes_response = empty_response(status);
     let (parts, body) = bytes_response.into_parts();
     http::Response::from_parts(parts, LambdaResponseBody::from_bytes(body))
-}
-
-/// Wrap raw bytes into a `LambdaResponseBody` response.
-fn wrap_bytes_response(status: u16, body: Bytes) -> http::Response<LambdaResponseBody> {
-    http::Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(LambdaResponseBody::from_bytes(body))
-        .expect("valid bytes response")
 }
 
 #[cfg(test)]

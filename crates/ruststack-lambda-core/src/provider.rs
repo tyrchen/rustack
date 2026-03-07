@@ -81,6 +81,7 @@ impl RustStackLambda {
     ///
     /// Validates the input, stores the deployment package, and inserts
     /// the function record into the store.
+    #[allow(clippy::too_many_lines)]
     pub async fn create_function(
         &self,
         input: CreateFunctionInput,
@@ -102,6 +103,39 @@ impl RustStackLambda {
         let revision_id = uuid::Uuid::new_v4().to_string();
         let arn = function_arn(&self.config.default_region, &self.config.account_id, name);
 
+        // Validate code is provided.
+        let package_type = input
+            .package_type
+            .clone()
+            .unwrap_or_else(|| "Zip".to_owned());
+
+        if package_type == "Zip" && input.code.zip_file.is_none() && input.code.s3_bucket.is_none()
+        {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Code is required for Zip package type. Provide ZipFile or S3Bucket."
+                    .to_owned(),
+            });
+        }
+        if package_type == "Image" && input.code.image_uri.is_none() {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "ImageUri is required for Image package type.".to_owned(),
+            });
+        }
+
+        // Validate runtime/handler for Zip packages.
+        if package_type == "Zip" {
+            if input.runtime.is_none() {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Runtime is required for Zip package type.".to_owned(),
+                });
+            }
+            if input.handler.is_none() {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Handler is required for Zip package type.".to_owned(),
+                });
+            }
+        }
+
         // Process code.
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) = self
             .process_code(
@@ -111,11 +145,6 @@ impl RustStackLambda {
                 input.code.image_uri.as_deref(),
             )
             .await?;
-
-        let package_type = input
-            .package_type
-            .clone()
-            .unwrap_or_else(|| "Zip".to_owned());
         let timeout = input.timeout.unwrap_or(3);
         let memory_size = input.memory_size.unwrap_or(128);
         let architectures = input
@@ -163,7 +192,7 @@ impl RustStackLambda {
             arn: arn.clone(),
             latest: version_record,
             versions: std::collections::BTreeMap::new(),
-            next_version: 2,
+            next_version: 1,
             aliases: HashMap::new(),
             policy: PolicyDocument::default(),
             tags: input.tags.clone().unwrap_or_default(),
@@ -171,8 +200,17 @@ impl RustStackLambda {
             created_at: now,
         };
 
-        let config = self.build_function_configuration(&record, &record.latest);
+        let should_publish = input.publish.unwrap_or(false);
         self.store.insert(record)?;
+
+        // If publish=true, publish version 1 immediately.
+        let config = if should_publish {
+            let publish_input = crate::provider::PublishVersionInput::default();
+            self.publish_version(name, &publish_input)?
+        } else {
+            let record = self.get_record(name)?;
+            self.build_function_configuration(&record, &record.latest)
+        };
 
         info!(function_name = %name, "created Lambda function");
         Ok(config)
@@ -235,7 +273,15 @@ impl RustStackLambda {
         function_ref: &str,
         input: UpdateFunctionCodeInput,
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
+        // Validate that some code source is provided.
+        if input.zip_file.is_none() && input.image_uri.is_none() && input.s3_bucket.is_none() {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Provide at least one of ZipFile, S3Bucket, or ImageUri.".to_owned(),
+            });
+        }
+
         let (name, _) = resolve_function_ref(function_ref)?;
+        let should_publish = input.publish.unwrap_or(false);
 
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) = self
             .process_code(
@@ -246,7 +292,7 @@ impl RustStackLambda {
             )
             .await?;
 
-        let config = self.store.update(&name, |record| {
+        self.store.update(&name, |record| {
             let now = now_iso8601();
             record.latest.code_sha256 = code_sha256;
             record.latest.code_size = code_size;
@@ -259,9 +305,16 @@ impl RustStackLambda {
             if let Some(archs) = input.architectures.clone() {
                 record.latest.architectures = archs;
             }
-
-            self.build_function_configuration(record, &record.latest)
         })?;
+
+        // If publish=true, publish a new version.
+        let config = if should_publish {
+            let publish_input = PublishVersionInput::default();
+            self.publish_version(&name, &publish_input)?
+        } else {
+            let record = self.get_record(&name)?;
+            self.build_function_configuration(&record, &record.latest)
+        };
 
         info!(function_name = %name, "updated Lambda function code");
         Ok(config)
@@ -506,9 +559,10 @@ impl RustStackLambda {
             })
             .map_or(0, |pos| pos + 1);
 
+        let total = versions.len();
         let page: Vec<FunctionConfiguration> = versions.into_iter().skip(start).take(max).collect();
 
-        let next_marker = if start + max < page.len() {
+        let next_marker = if start + page.len() < total {
             page.last().and_then(|v| v.version.clone())
         } else {
             None
@@ -535,6 +589,23 @@ impl RustStackLambda {
                     return Err(LambdaServiceError::ResourceConflict {
                         message: format!("Alias already exists: {}", input.name),
                     });
+                }
+
+                // Validate target version exists.
+                let target = &input.function_version;
+                if target != "$LATEST" {
+                    let version_num: u64 =
+                        target
+                            .parse()
+                            .map_err(|_| LambdaServiceError::InvalidParameter {
+                                message: format!("Invalid version: {target}"),
+                            })?;
+                    if !record.versions.contains_key(&version_num) {
+                        return Err(LambdaServiceError::VersionNotFound {
+                            function_name: name.clone(),
+                            version: target.clone(),
+                        });
+                    }
                 }
 
                 let revision_id = uuid::Uuid::new_v4().to_string();
@@ -635,6 +706,20 @@ impl RustStackLambda {
                 )?;
 
                 if let Some(fv) = &input.function_version {
+                    // Validate target version exists.
+                    if fv != "$LATEST" {
+                        let version_num: u64 =
+                            fv.parse()
+                                .map_err(|_| LambdaServiceError::InvalidParameter {
+                                    message: format!("Invalid version: {fv}"),
+                                })?;
+                        if !record.versions.contains_key(&version_num) {
+                            return Err(LambdaServiceError::VersionNotFound {
+                                function_name: name.clone(),
+                                version: fv.clone(),
+                            });
+                        }
+                    }
                     alias.function_version.clone_from(fv);
                 }
                 if let Some(desc) = &input.description {
@@ -798,9 +883,17 @@ impl RustStackLambda {
             "Resource": resource_arn,
         });
 
-        self.store.update(&name, |record| {
-            record.policy.statements.push(statement);
-        })?;
+        self.store
+            .update(&name, |record| -> Result<(), LambdaServiceError> {
+                // Check for duplicate statement ID.
+                if record.policy.statements.iter().any(|s| s.sid == sid) {
+                    return Err(LambdaServiceError::ResourceConflict {
+                        message: format!("The statement id ({sid}) provided already exists."),
+                    });
+                }
+                record.policy.statements.push(statement);
+                Ok(())
+            })??;
 
         Ok(AddPermissionOutput {
             statement: Some(statement_json.to_string()),
@@ -955,10 +1048,10 @@ impl RustStackLambda {
         let _qualifier = qualifier.or(ref_qualifier.as_deref());
 
         let now = now_iso8601();
-        let url_id = &uuid::Uuid::new_v4().to_string()[..12];
+        // Use local URL format for development: http://{host}:{port}/lambda-url/{name}/
         let function_url = format!(
-            "https://{url_id}.lambda-url.{region}.on.aws/",
-            region = self.config.default_region,
+            "http://{}:{}/lambda-url/{name}/",
+            self.config.host, self.config.port,
         );
 
         let function_arn_str =
@@ -1509,5 +1602,164 @@ mod tests {
         let provider = test_provider();
         let err = provider.get_function("nonexistent", None).unwrap_err();
         assert!(matches!(err, LambdaServiceError::FunctionNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_create_without_code() {
+        let provider = test_provider();
+        let input = CreateFunctionInput {
+            function_name: "my-func".to_owned(),
+            runtime: Some("python3.12".to_owned()),
+            role: "arn:aws:iam::000000000000:role/test-role".to_owned(),
+            handler: Some("index.handler".to_owned()),
+            code: ruststack_lambda_model::types::FunctionCode::default(),
+            ..Default::default()
+        };
+        let err = provider.create_function(input).await.unwrap_err();
+        assert!(matches!(err, LambdaServiceError::InvalidParameter { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_create_without_runtime_for_zip() {
+        use base64::Engine;
+        let provider = test_provider();
+        let zip_data = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04fake");
+        let input = CreateFunctionInput {
+            function_name: "my-func".to_owned(),
+            runtime: None,
+            role: "arn:aws:iam::000000000000:role/test-role".to_owned(),
+            handler: Some("index.handler".to_owned()),
+            code: ruststack_lambda_model::types::FunctionCode {
+                zip_file: Some(zip_data),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = provider.create_function(input).await.unwrap_err();
+        assert!(matches!(err, LambdaServiceError::InvalidParameter { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_update_code_without_source() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("my-func"))
+            .await
+            .unwrap();
+
+        let input = UpdateFunctionCodeInput::default();
+        let err = provider
+            .update_function_code("my-func", input)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LambdaServiceError::InvalidParameter { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_publish_on_create() {
+        let provider = test_provider();
+        let mut input = sample_create_input("my-func");
+        input.publish = Some(true);
+
+        let config = provider.create_function(input).await.unwrap();
+        // When publish=true, the returned config should be version "1".
+        assert_eq!(config.version, Some("1".to_owned()));
+
+        // The function should have version 1 in versions.
+        let versions = provider
+            .list_versions_by_function("my-func", None, None)
+            .unwrap();
+        assert_eq!(versions.versions.as_ref().unwrap().len(), 2); // $LATEST + 1
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_alias_to_nonexistent_version() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("my-func"))
+            .await
+            .unwrap();
+
+        let input = CreateAliasInput {
+            name: "prod".to_owned(),
+            function_version: "99".to_owned(),
+            ..Default::default()
+        };
+        let err = provider.create_alias("my-func", input).unwrap_err();
+        assert!(matches!(err, LambdaServiceError::VersionNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_duplicate_permission_sid() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("my-func"))
+            .await
+            .unwrap();
+
+        let input = AddPermissionInput {
+            statement_id: Some("stmt-1".to_owned()),
+            action: Some("lambda:InvokeFunction".to_owned()),
+            principal: Some("s3.amazonaws.com".to_owned()),
+            ..Default::default()
+        };
+        provider.add_permission("my-func", None, &input).unwrap();
+
+        // Adding same SID again should fail.
+        let err = provider
+            .add_permission("my-func", None, &input)
+            .unwrap_err();
+        assert!(matches!(err, LambdaServiceError::ResourceConflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_should_generate_local_function_url() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("my-func"))
+            .await
+            .unwrap();
+
+        let input = CreateFunctionUrlConfigInput {
+            auth_type: "NONE".to_owned(),
+            ..Default::default()
+        };
+        let url_config = provider
+            .create_function_url_config("my-func", None, input)
+            .unwrap();
+        let url = url_config.function_url.unwrap();
+        assert!(
+            url.starts_with("http://localhost:4566/lambda-url/my-func/"),
+            "URL should use local format, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_paginate_versions() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("my-func"))
+            .await
+            .unwrap();
+
+        // Publish 3 versions.
+        for _ in 0..3 {
+            provider
+                .publish_version("my-func", &PublishVersionInput::default())
+                .unwrap();
+        }
+
+        // Get first page of 2.
+        let output = provider
+            .list_versions_by_function("my-func", None, Some(2))
+            .unwrap();
+        assert_eq!(output.versions.as_ref().unwrap().len(), 2);
+        assert!(output.next_marker.is_some());
+
+        // Get next page.
+        let output2 = provider
+            .list_versions_by_function("my-func", output.next_marker.as_deref(), Some(2))
+            .unwrap();
+        assert_eq!(output2.versions.as_ref().unwrap().len(), 2);
     }
 }

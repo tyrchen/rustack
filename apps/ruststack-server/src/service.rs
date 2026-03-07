@@ -402,6 +402,7 @@ mod lambda_router {
                 || path.starts_with("/2021-10-31/functions")
                 || path.starts_with("/2015-03-31/tags")
                 || path.starts_with("/2015-03-31/account-settings")
+                || path.starts_with("/lambda-url/")
         }
 
         fn call(

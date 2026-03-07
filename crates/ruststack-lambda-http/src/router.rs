@@ -449,6 +449,16 @@ mod tests {
     }
 
     #[test]
+    fn test_should_resolve_list_function_url_configs() {
+        let (op, params, status) =
+            resolve_operation(&Method::GET, "/2021-10-31/functions/my-func/urls")
+                .expect("should resolve");
+        assert_eq!(op, LambdaOperation::ListFunctionUrlConfigs);
+        assert_eq!(params.get("FunctionName"), Some("my-func"));
+        assert_eq!(status, 200);
+    }
+
+    #[test]
     fn test_should_error_on_unknown_route() {
         let err =
             resolve_operation(&Method::GET, "/2015-03-31/nonexistent").expect_err("should error");

@@ -177,15 +177,19 @@ fn add_common_headers(
     mut response: http::Response<LambdaResponseBody>,
     request_id: &str,
 ) -> http::Response<LambdaResponseBody> {
+    let is_no_content = response.status() == http::StatusCode::NO_CONTENT;
     let headers = response.headers_mut();
 
     if let Ok(hv) = http::HeaderValue::from_str(request_id) {
         headers.entry("x-amzn-requestid").or_insert(hv);
     }
 
-    headers
-        .entry("content-type")
-        .or_insert(http::HeaderValue::from_static(CONTENT_TYPE));
+    // Only set content-type for responses with a body (not 204 No Content).
+    if !is_no_content {
+        headers
+            .entry("content-type")
+            .or_insert(http::HeaderValue::from_static(CONTENT_TYPE));
+    }
 
     headers.insert("server", http::HeaderValue::from_static("RustStack"));
 
