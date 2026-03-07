@@ -203,8 +203,31 @@ impl RustStackSns {
             self.config.default_region, self.config.account_id
         );
 
-        // Idempotent: if topic already exists, return its ARN.
-        if self.topics.get_topic(&arn).is_some() {
+        // Idempotent: if topic already exists, return its ARN -- but only
+        // if the request attributes and tags are compatible.
+        if let Some(existing) = self.topics.get_topic(&arn) {
+            // Check FIFO attribute conflict.
+            if existing.is_fifo != is_fifo {
+                return Err(SnsError::invalid_parameter(
+                    "Invalid parameter: Attributes Reason: \
+                     Topic already exists with different FifoTopic attribute",
+                ));
+            }
+            // Check tag conflict.
+            if !input.tags.is_empty() {
+                let existing_tags: HashMap<String, String> = existing.tags.clone();
+                let input_tags: HashMap<String, String> = input
+                    .tags
+                    .iter()
+                    .map(|t| (t.key.clone(), t.value.clone()))
+                    .collect();
+                if existing_tags != input_tags {
+                    return Err(SnsError::invalid_parameter(
+                        "Invalid parameter: Tags Reason: \
+                         Topic already exists with different tags",
+                    ));
+                }
+            }
             return Ok(CreateTopicOutput { topic_arn: arn });
         }
 
@@ -226,7 +249,7 @@ impl RustStackSns {
             data_protection_policy: input.data_protection_policy,
             created_at: now,
             subscription_counter: 0,
-            fifo_sequence_counter: AtomicU64::new(0),
+            fifo_sequence_counter: AtomicU64::new(10_000_000_000_000_000_000),
             fifo_dedup_cache: HashMap::new(),
         };
 
@@ -618,24 +641,23 @@ impl RustStackSns {
             .get_topic_mut(&input.resource_arn)
             .ok_or_else(|| SnsError::not_found("Resource does not exist"))?;
 
-        // Apply new tags (upsert).
-        for tag in &input.tags {
-            topic.tags.insert(tag.key.clone(), tag.value.clone());
-        }
+        // Count how many genuinely new keys will be added (not upserts).
+        let new_key_count = input
+            .tags
+            .iter()
+            .filter(|t| !topic.tags.contains_key(&t.key))
+            .count();
 
-        // Validate tag count after merge.
-        if topic.tags.len() > MAX_TAGS_PER_RESOURCE {
-            // Rollback: remove the tags we just added if they were new.
-            for tag in &input.tags {
-                // Only remove if it would exceed the limit.
-                if topic.tags.len() > MAX_TAGS_PER_RESOURCE {
-                    topic.tags.remove(&tag.key);
-                }
-            }
+        if topic.tags.len() + new_key_count > MAX_TAGS_PER_RESOURCE {
             return Err(SnsError::new(
                 SnsErrorCode::TagLimitExceeded,
                 format!("Tag limit exceeded: maximum {MAX_TAGS_PER_RESOURCE} tags per resource"),
             ));
+        }
+
+        // Apply new tags (upsert) — count is validated above.
+        for tag in &input.tags {
+            topic.tags.insert(tag.key.clone(), tag.value.clone());
         }
 
         debug!(
@@ -699,8 +721,19 @@ impl RustStackSns {
 
     /// Handle `Publish`.
     pub async fn publish(&self, input: PublishInput) -> Result<PublishOutput, SnsError> {
-        let topic_arn = resolve_publish_target(&input)?.to_owned();
+        let target = resolve_publish_target(&input)?.to_owned();
         validate_publish_message(&input)?;
+
+        // Direct-to-phone-number publish (SMS stub): no topic lookup needed.
+        if input.phone_number.is_some() && input.topic_arn.is_none() && input.target_arn.is_none() {
+            debug!(phone_number = %target, "SMS publish (stub, not delivered)");
+            return Ok(PublishOutput {
+                message_id: Some(uuid::Uuid::new_v4().to_string()),
+                sequence_number: None,
+            });
+        }
+
+        let topic_arn = target;
 
         // Use a mutable reference so we can do FIFO dedup bookkeeping.
         let mut topic = self
@@ -1679,9 +1712,10 @@ fn resolve_publish_target(input: &PublishInput) -> Result<&str, SnsError> {
         .topic_arn
         .as_deref()
         .or(input.target_arn.as_deref())
+        .or(input.phone_number.as_deref())
         .ok_or_else(|| {
             SnsError::invalid_parameter(
-                "Invalid parameter: TopicArn or TargetArn Reason: one is required",
+                "Invalid parameter: TopicArn, TargetArn, or PhoneNumber Reason: one is required",
             )
         })
 }
