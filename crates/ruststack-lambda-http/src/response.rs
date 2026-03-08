@@ -19,14 +19,22 @@ pub const CONTENT_TYPE: &str = "application/json";
 /// - HTTP status code from the error code
 /// - `X-Amzn-Errortype` header with the error type string
 /// - JSON body with `Type` and `Message` fields
-#[must_use]
-pub fn error_to_response(error: &LambdaError, request_id: &str) -> http::Response<Bytes> {
+///
+/// # Errors
+///
+/// Returns `LambdaError` with `ServiceException` if JSON serialization or
+/// response construction fails (should not happen in practice).
+pub fn error_to_response(
+    error: &LambdaError,
+    request_id: &str,
+) -> Result<http::Response<Bytes>, LambdaError> {
     let body_obj = serde_json::json!({
         "Type": error.code.error_type(),
         "Message": error.message,
     });
-    let body_bytes =
-        serde_json::to_vec(&body_obj).expect("JSON serialization of error cannot fail");
+    let body_bytes = serde_json::to_vec(&body_obj).map_err(|e| {
+        LambdaError::service_error(format!("Failed to serialize error response: {e}"))
+    })?;
 
     http::Response::builder()
         .status(error.code.status_code())
@@ -34,7 +42,7 @@ pub fn error_to_response(error: &LambdaError, request_id: &str) -> http::Respons
         .header("x-amzn-errortype", error.code.as_str())
         .header("x-amzn-requestid", request_id)
         .body(Bytes::from(body_bytes))
-        .expect("valid error response")
+        .map_err(|e| LambdaError::service_error(format!("Failed to build error response: {e}")))
 }
 
 /// Build a JSON success response with the given status code.
@@ -42,28 +50,34 @@ pub fn error_to_response(error: &LambdaError, request_id: &str) -> http::Respons
 /// Serializes the provided value as JSON and returns a response with
 /// `application/json` content type.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the value cannot be serialized to JSON.
-#[must_use]
-pub fn json_response(status: u16, body: &impl Serialize) -> http::Response<Bytes> {
-    let body_bytes = serde_json::to_vec(body).expect("JSON serialization cannot fail");
+/// Returns `LambdaError` with `ServiceException` if serialization fails.
+pub fn json_response(
+    status: u16,
+    body: &impl Serialize,
+) -> Result<http::Response<Bytes>, LambdaError> {
+    let body_bytes = serde_json::to_vec(body)
+        .map_err(|e| LambdaError::service_error(format!("Failed to serialize response: {e}")))?;
     http::Response::builder()
         .status(status)
         .header("content-type", CONTENT_TYPE)
         .body(Bytes::from(body_bytes))
-        .expect("valid JSON response")
+        .map_err(|e| LambdaError::service_error(format!("Failed to build response: {e}")))
 }
 
 /// Build an empty response with the given status code.
 ///
 /// Used for operations that return 204 No Content (e.g., `DeleteFunction`).
-#[must_use]
-pub fn empty_response(status: u16) -> http::Response<Bytes> {
+///
+/// # Errors
+///
+/// Returns `LambdaError` with `ServiceException` if response construction fails.
+pub fn empty_response(status: u16) -> Result<http::Response<Bytes>, LambdaError> {
     http::Response::builder()
         .status(status)
         .body(Bytes::new())
-        .expect("valid empty response")
+        .map_err(|e| LambdaError::service_error(format!("Failed to build empty response: {e}")))
 }
 
 #[cfg(test)]
@@ -74,7 +88,7 @@ mod tests {
     #[test]
     fn test_should_format_error_with_x_amzn_errortype_header() {
         let err = LambdaError::resource_not_found("Function not found: my-func");
-        let resp = error_to_response(&err, "req-123");
+        let resp = error_to_response(&err, "req-123").expect("should build");
         assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
         assert_eq!(
             resp.headers()
@@ -104,7 +118,7 @@ mod tests {
     #[test]
     fn test_should_format_service_error_with_type_service() {
         let err = LambdaError::service_error("internal failure");
-        let resp = error_to_response(&err, "req-456");
+        let resp = error_to_response(&err, "req-456").expect("should build");
         assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
 
         let parsed: serde_json::Value =
@@ -115,7 +129,7 @@ mod tests {
     #[test]
     fn test_should_build_json_success_response() {
         let body = serde_json::json!({"FunctionName": "my-func", "Runtime": "python3.12"});
-        let resp = json_response(201, &body);
+        let resp = json_response(201, &body).expect("should build");
         assert_eq!(resp.status().as_u16(), 201);
         assert_eq!(
             resp.headers()
@@ -128,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_should_build_empty_response() {
-        let resp = empty_response(204);
+        let resp = empty_response(204).expect("should build");
         assert_eq!(resp.status().as_u16(), 204);
         assert!(resp.body().is_empty());
     }
@@ -150,7 +164,7 @@ mod tests {
         ];
         for (code, expected_status) in cases {
             let err = LambdaError::new(code, "test");
-            let resp = error_to_response(&err, "req");
+            let resp = error_to_response(&err, "req").expect("should build");
             assert_eq!(
                 resp.status().as_u16(),
                 expected_status,

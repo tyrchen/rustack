@@ -154,13 +154,27 @@ async fn process_request<H: LambdaHandler>(
 }
 
 /// Convert a `LambdaError` into a `LambdaResponseBody`-typed response.
+///
+/// Falls back to a plain-text 500 response if the error response itself
+/// cannot be constructed (extremely unlikely).
 fn wrap_error_response(
     error: &LambdaError,
     request_id: &str,
 ) -> http::Response<LambdaResponseBody> {
-    let bytes_response = error_to_response(error, request_id);
-    let (parts, body) = bytes_response.into_parts();
-    http::Response::from_parts(parts, LambdaResponseBody::from_bytes(body))
+    if let Ok(bytes_response) = error_to_response(error, request_id) {
+        let (parts, body) = bytes_response.into_parts();
+        http::Response::from_parts(parts, LambdaResponseBody::from_bytes(body))
+    } else {
+        // Fallback: if we cannot even serialize the error, return a minimal 500.
+        let (parts, body) = http::Response::builder()
+            .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Bytes::from(
+                r#"{"Type":"Service","Message":"Internal error"}"#,
+            ))
+            .unwrap_or_default()
+            .into_parts();
+        http::Response::from_parts(parts, LambdaResponseBody::from_bytes(body))
+    }
 }
 
 /// Collect the incoming body into a single `Bytes` buffer.

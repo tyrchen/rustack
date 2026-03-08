@@ -10,6 +10,12 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use tracing::info;
 
+/// Maximum deployment package size (50 MB zipped, per Appendix C).
+const MAX_ZIP_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Maximum synchronous invoke payload size (6 MB, per Appendix C).
+const MAX_SYNC_PAYLOAD: usize = 6 * 1024 * 1024;
+
 use ruststack_lambda_model::input::{
     AddPermissionInput, CreateAliasInput, CreateFunctionInput, CreateFunctionUrlConfigInput,
     PublishVersionInput, TagResourceInput, UpdateAliasInput, UpdateFunctionCodeInput,
@@ -93,6 +99,72 @@ impl RustStackLambda {
             });
         }
 
+        // Validate handler length (Appendix C: max 128 chars).
+        if let Some(ref handler) = input.handler {
+            if handler.len() > 128 {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Handler must be at most 128 characters".to_owned(),
+                });
+            }
+        }
+
+        // Validate description length (Appendix C: max 256 chars).
+        if let Some(ref desc) = input.description {
+            if desc.len() > 256 {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Description must be at most 256 characters".to_owned(),
+                });
+            }
+        }
+
+        // Validate timeout (Appendix C: 1-900 seconds).
+        if let Some(timeout) = input.timeout {
+            if !(1..=900).contains(&timeout) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Timeout must be between 1 and 900 seconds".to_owned(),
+                });
+            }
+        }
+
+        // Validate memory size (Appendix C: 128-10240 MB).
+        if let Some(memory) = input.memory_size {
+            if !(128..=10_240).contains(&memory) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Memory size must be between 128 and 10240 MB".to_owned(),
+                });
+            }
+        }
+
+        // Validate ephemeral storage (Appendix C: 512-10240 MB).
+        if let Some(ref ephemeral) = input.ephemeral_storage {
+            if !(512..=10_240).contains(&ephemeral.size) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Ephemeral storage must be between 512 and 10240 MB".to_owned(),
+                });
+            }
+        }
+
+        // Validate environment variables total size (Appendix C: 4 KB).
+        if let Some(ref env) = input.environment {
+            if let Some(ref vars) = env.variables {
+                let total_size: usize = vars.iter().map(|(k, v)| k.len() + v.len()).sum();
+                if total_size > 4096 {
+                    return Err(LambdaServiceError::InvalidParameter {
+                        message: "Environment variables total size exceeds 4 KB limit".to_owned(),
+                    });
+                }
+            }
+        }
+
+        // Validate tags count (Appendix C: max 50).
+        if let Some(ref tags) = input.tags {
+            if tags.len() > 50 {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Tags count exceeds the limit of 50".to_owned(),
+                });
+            }
+        }
+
         if self.store.contains(name) {
             return Err(LambdaServiceError::ResourceConflict {
                 message: format!("Function already exist: {name}"),
@@ -145,6 +217,14 @@ impl RustStackLambda {
                 input.code.image_uri.as_deref(),
             )
             .await?;
+
+        // Validate deployment package size (Appendix C: 50 MB zipped).
+        if code_size > MAX_ZIP_SIZE {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: format!("Unzipped size must be smaller than {MAX_ZIP_SIZE} bytes"),
+            });
+        }
+
         let timeout = input.timeout.unwrap_or(3);
         let memory_size = input.memory_size.unwrap_or(128);
         let architectures = input
@@ -328,6 +408,58 @@ impl RustStackLambda {
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
         let (name, _) = resolve_function_ref(function_ref)?;
 
+        // Validate handler length (Appendix C: max 128 chars).
+        if let Some(ref handler) = input.handler {
+            if handler.len() > 128 {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Handler must be at most 128 characters".to_owned(),
+                });
+            }
+        }
+        // Validate description length (Appendix C: max 256 chars).
+        if let Some(ref desc) = input.description {
+            if desc.len() > 256 {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Description must be at most 256 characters".to_owned(),
+                });
+            }
+        }
+        // Validate timeout (Appendix C: 1-900 seconds).
+        if let Some(timeout) = input.timeout {
+            if !(1..=900).contains(&timeout) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Timeout must be between 1 and 900 seconds".to_owned(),
+                });
+            }
+        }
+        // Validate memory size (Appendix C: 128-10240 MB).
+        if let Some(memory) = input.memory_size {
+            if !(128..=10_240).contains(&memory) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Memory size must be between 128 and 10240 MB".to_owned(),
+                });
+            }
+        }
+        // Validate ephemeral storage (Appendix C: 512-10240 MB).
+        if let Some(ref ephemeral) = input.ephemeral_storage {
+            if !(512..=10_240).contains(&ephemeral.size) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Ephemeral storage must be between 512 and 10240 MB".to_owned(),
+                });
+            }
+        }
+        // Validate environment variables total size (Appendix C: 4 KB).
+        if let Some(ref env) = input.environment {
+            if let Some(ref vars) = env.variables {
+                let total_size: usize = vars.iter().map(|(k, v)| k.len() + v.len()).sum();
+                if total_size > 4096 {
+                    return Err(LambdaServiceError::InvalidParameter {
+                        message: "Environment variables total size exceeds 4 KB limit".to_owned(),
+                    });
+                }
+            }
+        }
+
         let config = self.store.update(&name, |record| {
             let now = now_iso8601();
 
@@ -472,6 +604,16 @@ impl RustStackLambda {
         payload: &[u8],
         is_dry_run: bool,
     ) -> Result<(u16, Bytes), LambdaServiceError> {
+        // Validate synchronous payload size (Appendix C: 6 MB).
+        if payload.len() > MAX_SYNC_PAYLOAD {
+            let payload_len = payload.len();
+            return Err(LambdaServiceError::RequestTooLarge {
+                message: format!(
+                    "Request payload size {payload_len} exceeds the synchronous invoke limit of {MAX_SYNC_PAYLOAD} bytes",
+                ),
+            });
+        }
+
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref());
 
@@ -856,12 +998,31 @@ impl RustStackLambda {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let _qualifier = qualifier.or(ref_qualifier.as_deref());
 
-        let sid = input
-            .statement_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let action = input.action.clone().unwrap_or_default();
-        let principal = input.principal.clone().unwrap_or_default();
+        // Validate required fields per AWS API.
+        let sid = match &input.statement_id {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "StatementId is required".to_owned(),
+                });
+            }
+        };
+        let action = match &input.action {
+            Some(a) if !a.is_empty() => a.clone(),
+            _ => {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Action is required".to_owned(),
+                });
+            }
+        };
+        let principal = match &input.principal {
+            Some(p) if !p.is_empty() => p.clone(),
+            _ => {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Principal is required".to_owned(),
+                });
+            }
+        };
 
         let resource_arn =
             function_arn(&self.config.default_region, &self.config.account_id, &name);
@@ -973,6 +1134,19 @@ impl RustStackLambda {
         input: &TagResourceInput,
     ) -> Result<(), LambdaServiceError> {
         let name = Self::extract_function_name_from_arn(resource_arn)?;
+
+        // Validate tag count after merge (Appendix C: max 50).
+        let record = self.get_record(&name)?;
+        let new_count = {
+            let mut merged = record.tags.clone();
+            merged.extend(input.tags.clone());
+            merged.len()
+        };
+        if new_count > 50 {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Tags count exceeds the limit of 50".to_owned(),
+            });
+        }
 
         self.store.update(&name, |record| {
             record.tags.extend(input.tags.clone());

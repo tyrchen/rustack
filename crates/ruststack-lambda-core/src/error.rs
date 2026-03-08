@@ -79,6 +79,13 @@ pub enum LambdaServiceError {
         sid: String,
     },
 
+    /// Request payload exceeds the size limit.
+    #[error("Request too large: {message}")]
+    RequestTooLarge {
+        /// Description of the size violation.
+        message: String,
+    },
+
     /// Internal error (catch-all for unexpected failures).
     #[error("Internal error: {message}")]
     Internal {
@@ -125,6 +132,9 @@ impl From<LambdaServiceError> for LambdaError {
             LambdaServiceError::DockerNotAvailable => LambdaError::service_error(
                 "Docker execution is not available. Set LAMBDA_DOCKER_ENABLED=true to enable.",
             ),
+            LambdaServiceError::RequestTooLarge { ref message } => {
+                LambdaError::new(LambdaErrorCode::RequestTooLargeException, message.clone())
+            }
             LambdaServiceError::PolicyNotFound { ref sid } => {
                 LambdaError::resource_not_found(format!("No policy is found for: {sid}"))
             }

@@ -17,6 +17,8 @@ pub enum LambdaErrorCode {
     ResourceConflictException,
     /// Request payload too large.
     RequestTooLargeException,
+    /// Unsupported media type.
+    UnsupportedMediaTypeException,
     /// Invalid runtime.
     InvalidRuntimeException,
     /// Resource not ready.
@@ -39,6 +41,7 @@ impl LambdaErrorCode {
             Self::ResourceNotFoundException => "ResourceNotFoundException",
             Self::ResourceConflictException => "ResourceConflictException",
             Self::RequestTooLargeException => "RequestTooLargeException",
+            Self::UnsupportedMediaTypeException => "UnsupportedMediaTypeException",
             Self::InvalidRuntimeException => "InvalidRuntimeException",
             Self::ResourceNotReadyException => "ResourceNotReadyException",
             Self::TooManyRequestsException => "TooManyRequestsException",
@@ -56,6 +59,7 @@ impl LambdaErrorCode {
             Self::ResourceNotFoundException => http::StatusCode::NOT_FOUND,
             Self::ResourceConflictException => http::StatusCode::CONFLICT,
             Self::RequestTooLargeException => http::StatusCode::PAYLOAD_TOO_LARGE,
+            Self::UnsupportedMediaTypeException => http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::InvalidRuntimeException | Self::ResourceNotReadyException => {
                 http::StatusCode::BAD_GATEWAY
             }

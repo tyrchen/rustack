@@ -25,8 +25,18 @@ pub fn resolve_function_ref(
 ) -> Result<(String, Option<String>), LambdaServiceError> {
     if function_ref.starts_with("arn:") {
         parse_arn(function_ref)
-    } else if let Some((name, qualifier)) = function_ref.split_once(':') {
-        Ok((name.to_owned(), Some(qualifier.to_owned())))
+    } else if let Some((left, right)) = function_ref.split_once(':') {
+        // Handle partial ARN: `{account}:function:{name}[:{qualifier}]`
+        if let Some(rest) = right.strip_prefix("function:") {
+            if let Some((name, qualifier)) = rest.split_once(':') {
+                Ok((name.to_owned(), Some(qualifier.to_owned())))
+            } else {
+                Ok((rest.to_owned(), None))
+            }
+        } else {
+            // Simple qualified name: `my-function:qualifier`
+            Ok((left.to_owned(), Some(right.to_owned())))
+        }
     } else {
         Ok((function_ref.to_owned(), None))
     }
@@ -233,6 +243,20 @@ mod tests {
         let (name, qual) =
             resolve_function_ref("arn:aws:lambda:us-east-1:123456789012:function:my-func:prod")
                 .unwrap();
+        assert_eq!(name, "my-func");
+        assert_eq!(qual.unwrap(), "prod");
+    }
+
+    #[test]
+    fn test_should_resolve_partial_arn() {
+        let (name, qual) = resolve_function_ref("000000000000:function:my-func").unwrap();
+        assert_eq!(name, "my-func");
+        assert!(qual.is_none());
+    }
+
+    #[test]
+    fn test_should_resolve_partial_arn_with_qualifier() {
+        let (name, qual) = resolve_function_ref("000000000000:function:my-func:prod").unwrap();
         assert_eq!(name, "my-func");
         assert_eq!(qual.unwrap(), "prod");
     }

@@ -131,7 +131,7 @@ async fn dispatch(
                 .create_function(input)
                 .await
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(201, &config))
+            wrap_json_response(201, &config)
         }
 
         LambdaOperation::GetFunction => {
@@ -139,7 +139,7 @@ async fn dispatch(
             let output = provider
                 .get_function(function_name, qualifier)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         LambdaOperation::GetFunctionConfiguration => {
@@ -147,7 +147,7 @@ async fn dispatch(
             let config = provider
                 .get_function_configuration(function_name, qualifier)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &config))
+            wrap_json_response(200, &config)
         }
 
         LambdaOperation::UpdateFunctionCode => {
@@ -159,7 +159,7 @@ async fn dispatch(
                 .update_function_code(function_name, input)
                 .await
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &config))
+            wrap_json_response(200, &config)
         }
 
         LambdaOperation::UpdateFunctionConfiguration => {
@@ -171,7 +171,7 @@ async fn dispatch(
             let config = provider
                 .update_function_configuration(function_name, &input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &config))
+            wrap_json_response(200, &config)
         }
 
         LambdaOperation::DeleteFunction => {
@@ -180,7 +180,7 @@ async fn dispatch(
                 .delete_function(function_name, qualifier)
                 .await
                 .map_err(LambdaError::from)?;
-            Ok(wrap_empty_response(204))
+            wrap_empty_response(204)
         }
 
         LambdaOperation::ListFunctions => {
@@ -188,7 +188,7 @@ async fn dispatch(
             let max_items =
                 get_query_param(&query_params, "MaxItems").and_then(|v| v.parse::<usize>().ok());
             let output = provider.list_functions(marker, max_items);
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         // ---- Phase 0: Invoke ----
@@ -207,7 +207,7 @@ async fn dispatch(
                 let (status, _) = provider
                     .invoke(function_name, qualifier, body, true)
                     .map_err(LambdaError::from)?;
-                return Ok(wrap_empty_response(status));
+                return wrap_empty_response(status);
             }
 
             // For Event invocation, validate and return 202 immediately.
@@ -217,7 +217,7 @@ async fn dispatch(
                 provider
                     .invoke(function_name, qualifier, body, true)
                     .map_err(LambdaError::from)?;
-                return Ok(wrap_empty_response(202));
+                return wrap_empty_response(202);
             }
 
             // RequestResponse: synchronous invocation.
@@ -229,7 +229,9 @@ async fn dispatch(
             let mut response = http::Response::builder()
                 .status(status)
                 .body(LambdaResponseBody::from_bytes(response_body))
-                .expect("valid invoke response");
+                .map_err(|e| {
+                    LambdaError::service_error(format!("Failed to build invoke response: {e}"))
+                })?;
 
             // Set X-Amz-Executed-Version header.
             if let Ok(hv) = http::HeaderValue::from_str(qualifier.unwrap_or("$LATEST")) {
@@ -252,7 +254,7 @@ async fn dispatch(
             let config = provider
                 .publish_version(function_name, &input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(201, &config))
+            wrap_json_response(201, &config)
         }
 
         LambdaOperation::ListVersionsByFunction => {
@@ -263,7 +265,7 @@ async fn dispatch(
             let output = provider
                 .list_versions_by_function(function_name, marker, max_items)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         LambdaOperation::CreateAlias => {
@@ -274,7 +276,7 @@ async fn dispatch(
             let config = provider
                 .create_alias(function_name, input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(201, &config))
+            wrap_json_response(201, &config)
         }
 
         LambdaOperation::GetAlias => {
@@ -283,7 +285,7 @@ async fn dispatch(
             let config = provider
                 .get_alias(function_name, alias_name)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &config))
+            wrap_json_response(200, &config)
         }
 
         LambdaOperation::UpdateAlias => {
@@ -295,7 +297,7 @@ async fn dispatch(
             let config = provider
                 .update_alias(function_name, alias_name, &input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &config))
+            wrap_json_response(200, &config)
         }
 
         LambdaOperation::DeleteAlias => {
@@ -304,7 +306,7 @@ async fn dispatch(
             provider
                 .delete_alias(function_name, alias_name)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_empty_response(204))
+            wrap_empty_response(204)
         }
 
         LambdaOperation::ListAliases => {
@@ -315,7 +317,7 @@ async fn dispatch(
             let output = provider
                 .list_aliases(function_name, marker, max_items)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         // ---- Phase 2: Permissions + Tags + Account ----
@@ -327,7 +329,7 @@ async fn dispatch(
             let output = provider
                 .add_permission(function_name, qualifier, &input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(201, &output))
+            wrap_json_response(201, &output)
         }
 
         LambdaOperation::RemovePermission => {
@@ -336,7 +338,7 @@ async fn dispatch(
             provider
                 .remove_permission(function_name, statement_id, qualifier)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_empty_response(204))
+            wrap_empty_response(204)
         }
 
         LambdaOperation::GetPolicy => {
@@ -344,7 +346,7 @@ async fn dispatch(
             let output = provider
                 .get_policy(function_name, qualifier)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         LambdaOperation::TagResource => {
@@ -355,7 +357,7 @@ async fn dispatch(
             provider
                 .tag_resource(resource, &input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_empty_response(204))
+            wrap_empty_response(204)
         }
 
         LambdaOperation::UntagResource => {
@@ -368,18 +370,18 @@ async fn dispatch(
             provider
                 .untag_resource(resource, &tag_keys)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_empty_response(204))
+            wrap_empty_response(204)
         }
 
         LambdaOperation::ListTags => {
             let resource = require_path_param(path_params, "Resource")?;
             let output = provider.list_tags(resource).map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         LambdaOperation::GetAccountSettings => {
             let output = provider.get_account_settings();
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         // ---- Phase 3: Function URLs ----
@@ -392,7 +394,7 @@ async fn dispatch(
             let output = provider
                 .create_function_url_config(function_name, qualifier, input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(201, &output))
+            wrap_json_response(201, &output)
         }
 
         LambdaOperation::GetFunctionUrlConfig => {
@@ -400,7 +402,7 @@ async fn dispatch(
             let output = provider
                 .get_function_url_config(function_name, qualifier)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         LambdaOperation::UpdateFunctionUrlConfig => {
@@ -412,7 +414,7 @@ async fn dispatch(
             let output = provider
                 .update_function_url_config(function_name, qualifier, &input)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         LambdaOperation::DeleteFunctionUrlConfig => {
@@ -420,7 +422,7 @@ async fn dispatch(
             provider
                 .delete_function_url_config(function_name, qualifier)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_empty_response(204))
+            wrap_empty_response(204)
         }
 
         LambdaOperation::ListFunctionUrlConfigs => {
@@ -428,7 +430,7 @@ async fn dispatch(
             let output = provider
                 .list_function_url_configs(function_name)
                 .map_err(LambdaError::from)?;
-            Ok(wrap_json_response(200, &output))
+            wrap_json_response(200, &output)
         }
 
         _ => Err(LambdaError::service_error(format!(
@@ -448,17 +450,23 @@ fn require_path_param<'a>(params: &'a PathParams, name: &str) -> Result<&'a str,
 fn wrap_json_response(
     status: u16,
     body: &impl serde::Serialize,
-) -> http::Response<LambdaResponseBody> {
-    let bytes_response = json_response(status, body);
+) -> Result<http::Response<LambdaResponseBody>, LambdaError> {
+    let bytes_response = json_response(status, body)?;
     let (parts, body) = bytes_response.into_parts();
-    http::Response::from_parts(parts, LambdaResponseBody::from_bytes(body))
+    Ok(http::Response::from_parts(
+        parts,
+        LambdaResponseBody::from_bytes(body),
+    ))
 }
 
 /// Wrap an empty response with the given status code.
-fn wrap_empty_response(status: u16) -> http::Response<LambdaResponseBody> {
-    let bytes_response = empty_response(status);
+fn wrap_empty_response(status: u16) -> Result<http::Response<LambdaResponseBody>, LambdaError> {
+    let bytes_response = empty_response(status)?;
     let (parts, body) = bytes_response.into_parts();
-    http::Response::from_parts(parts, LambdaResponseBody::from_bytes(body))
+    Ok(http::Response::from_parts(
+        parts,
+        LambdaResponseBody::from_bytes(body),
+    ))
 }
 
 #[cfg(test)]

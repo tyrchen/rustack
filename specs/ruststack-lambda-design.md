@@ -318,7 +318,7 @@ All Lambda operations with their HTTP bindings:
 | **GetFunctionUrlConfig** | GET | `/2021-10-31/functions/{FunctionName}/url` | 200 |
 | **UpdateFunctionUrlConfig** | PUT | `/2021-10-31/functions/{FunctionName}/url` | 200 |
 | **DeleteFunctionUrlConfig** | DELETE | `/2021-10-31/functions/{FunctionName}/url` | 204 |
-| **ListFunctionUrlConfigs** | GET | `/2021-10-31/functions/{FunctionName}/url` | 200 |
+| **ListFunctionUrlConfigs** | GET | `/2021-10-31/functions/{FunctionName}/urls` | 200 |
 
 Total: **27 operations** across management, invocation, versioning, aliases, permissions, tags, and function URLs.
 
