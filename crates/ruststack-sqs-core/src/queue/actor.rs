@@ -230,6 +230,15 @@ impl QueueActor {
     pub async fn run(mut self) {
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
         loop {
+            // Compute the earliest long-poll deadline so we can expire it precisely
+            // instead of waiting for the next 1-second cleanup tick.
+            let next_poll_deadline = self
+                .pending_long_polls
+                .iter()
+                .map(|p| p.deadline)
+                .min()
+                .unwrap_or_else(|| Instant::now() + Duration::from_hours(24));
+
             tokio::select! {
                 Some(cmd) = self.commands.recv() => {
                     match cmd {
@@ -242,6 +251,9 @@ impl QueueActor {
                 }
                 () = self.message_notify.notified(), if !self.pending_long_polls.is_empty() => {
                     self.fulfill_pending_long_polls();
+                }
+                () = tokio::time::sleep_until(next_poll_deadline), if !self.pending_long_polls.is_empty() => {
+                    self.expire_long_polls();
                 }
             }
         }
@@ -595,7 +607,11 @@ impl QueueActor {
                 storage.in_flight.remove(receipt_handle);
             }
             QueueStorage::Fifo(storage) => {
-                storage.delete_message(receipt_handle);
+                if storage.delete_message(receipt_handle) {
+                    // Unblocking a FIFO group may make messages available
+                    // for pending long-poll requests.
+                    self.message_notify.notify_waiters();
+                }
             }
         }
         // AWS SQS is lenient: delete of non-existent receipt handle succeeds.
