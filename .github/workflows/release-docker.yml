@@ -15,7 +15,23 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/ruststack
 
 jobs:
+  # Wait for the build workflow to pass before pushing the Docker image.
+  wait-for-build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for build workflow
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.ref }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          check-name: build-rust
+          wait-interval: 15
+          allowed-conclusions: success
+
   build-and-push:
+    needs: [wait-for-build]
+    if: always() && (needs.wait-for-build.result == 'success' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
