@@ -25,7 +25,7 @@ jobs:
         with:
           ref: ${{ github.ref }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-          check-name: build-rust
+          check-name: build-rust (ubuntu-latest)
           wait-interval: 15
           allowed-conclusions: success
 
