@@ -326,13 +326,13 @@ fn validate_content_sha256(parts: &http::request::Parts, body: &[u8]) -> Result<
     })?;
 
     // Skip validation for streaming and unsigned payload placeholders.
-    if matches!(
-        hash_str,
-        "UNSIGNED-PAYLOAD"
-            | "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
-            | "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
-            | "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
-    ) {
+    // AWS SDKs use various STREAMING-* prefixes (SigV4, SigV4a, CRT-based,
+    // etc.) and UNSIGNED-PAYLOAD variants. Rather than maintaining an
+    // exhaustive allowlist, accept any recognised placeholder pattern.
+    if hash_str == "UNSIGNED-PAYLOAD"
+        || hash_str.starts_with("STREAMING-")
+        || hash_str.starts_with("UNSIGNED-PAYLOAD-")
+    {
         return Ok(());
     }
 
@@ -601,6 +601,30 @@ mod tests {
     #[test]
     fn test_should_accept_streaming_payload() {
         let parts = parts_with_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_streaming_payload_trailer() {
+        let parts = parts_with_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_streaming_sigv4a_payload() {
+        let parts = parts_with_sha256("STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_streaming_unsigned_payload_trailer() {
+        let parts = parts_with_sha256("STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_unsigned_payload_trailer() {
+        let parts = parts_with_sha256("UNSIGNED-PAYLOAD-TRAILER");
         assert!(validate_content_sha256(&parts, b"hello").is_ok());
     }
 

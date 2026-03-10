@@ -283,10 +283,10 @@ jobs:
 
       # ── Bucket Configuration ────────────────────────────────────────
       - name: "Bucket Config: CORS, lifecycle, encryption, tagging, website"
-        continue-on-error: true # Not all config APIs may be implemented yet
         run: |
           set -euo pipefail
 
+          aws --version
           aws s3api create-bucket --bucket test-config
 
           # CORS
@@ -500,6 +500,11 @@ jobs:
           # BucketAlreadyExists (create same bucket again)
           ERR=$(aws s3api create-bucket --bucket test-bucket-ops 2>&1 || true)
           echo "$ERR" | grep -qi "BucketAlreadyOwnedByYou\|BucketAlreadyExists\|409\|already\|200"
+
+      # ── Server Logs (on failure) ────────────────────────────────────
+      - name: "Dump server logs (last 100 lines)"
+        if: failure()
+        run: tail -100 /tmp/ruststack.log || true
 
       # ── Cleanup ─────────────────────────────────────────────────────
       - name: "Cleanup: delete all test buckets"

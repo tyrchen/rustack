@@ -19,3 +19,4 @@ All specs that for AI to generate code.
 | [ruststack-events-design](./ruststack-events-design.md) | Design | Draft | Native Rust EventBridge implementation -- 57 operations, event pattern matching engine, actor-per-bus architecture, SQS target delivery |
 | [ruststack-kms-design](./ruststack-kms-design.md) | Design | Draft | Native Rust KMS implementation -- ~35 operations, AES-256-GCM/RSA/ECC/HMAC crypto engine, envelope encryption, key state machine, alias management |
 | [ruststack-kinesis-design](./ruststack-kinesis-design.md) | Design | Draft | Native Rust Kinesis Data Streams implementation -- ~40 operations, actor-per-shard architecture, MD5 partition key routing, shard iterators, CBOR+JSON wire formats |
+| [s3-checksum-parity-design](./s3-checksum-parity-design.md) | Design | Draft | S3 checksum parity -- CRC64NVME, ChecksumMode gating, aws-chunked trailing headers, multipart checksum combination, upload validation |
