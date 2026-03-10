@@ -186,10 +186,18 @@ impl fmt::Display for Permission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecksumData {
-    /// The checksum algorithm (e.g. `CRC32`, `CRC32C`, `SHA1`, `SHA256`).
+    /// The checksum algorithm (e.g. `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1`, `SHA256`).
     pub algorithm: String,
     /// The base64-encoded checksum value.
     pub value: String,
+    /// Whether this is a `FULL_OBJECT` or `COMPOSITE` checksum.
+    #[serde(default = "default_checksum_type")]
+    pub checksum_type: String,
+}
+
+/// Default checksum type for single-object uploads.
+fn default_checksum_type() -> String {
+    "FULL_OBJECT".to_owned()
 }
 
 // ---------------------------------------------------------------------------

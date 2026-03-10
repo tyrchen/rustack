@@ -4,6 +4,7 @@
 //! `delete_objects`, and `copy_object`.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -18,11 +19,12 @@ use ruststack_s3_model::output::{
 };
 use ruststack_s3_model::request::StreamingBlob;
 use ruststack_s3_model::types::{
-    CopyObjectResult, DeletedObject, MetadataDirective, ObjectCannedACL, ObjectLockLegalHoldStatus,
-    ObjectLockMode, ServerSideEncryption, StorageClass,
+    ChecksumType, CopyObjectResult, DeletedObject, MetadataDirective, ObjectCannedACL,
+    ObjectLockLegalHoldStatus, ObjectLockMode, ServerSideEncryption, StorageClass,
 };
 use tracing::debug;
 
+use crate::checksums::{ChecksumAlgorithm, compute_checksum};
 use crate::error::S3ServiceError;
 use crate::provider::RustStackS3;
 use crate::state::keystore::ObjectStore;
@@ -138,8 +140,26 @@ impl RustStackS3 {
             .await
             .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
 
-        // Extract checksum from the request, if provided.
-        let checksum = extract_checksum_from_put(&input);
+        // Extract checksum from the request, or compute CRC32 by default.
+        let client_checksum =
+            extract_checksum_from_put(&input).map_err(S3ServiceError::into_s3_error)?;
+        let is_client_provided = client_checksum.is_some();
+
+        let checksum = client_checksum.unwrap_or_else(|| ChecksumData {
+            algorithm: "CRC32".to_owned(),
+            value: compute_checksum(ChecksumAlgorithm::Crc32, &body_data),
+            checksum_type: "FULL_OBJECT".to_owned(),
+        });
+
+        // Validate client-provided checksum against server-computed value.
+        if is_client_provided {
+            if let Ok(algo) = ChecksumAlgorithm::from_str(&checksum.algorithm) {
+                let computed = compute_checksum(algo, &body_data);
+                if checksum.value != computed {
+                    return Err(S3ServiceError::BadDigest.into_s3_error());
+                }
+            }
+        }
 
         // Build the S3Object.
         let owner = InternalOwner::default();
@@ -155,7 +175,7 @@ impl RustStackS3 {
                 .map_or_else(|| "STANDARD".to_owned(), StorageClass::as_str_owned),
             metadata,
             owner,
-            checksum,
+            checksum: Some(checksum.clone()),
             parts_count: None,
             part_etags: Vec::new(),
         };
@@ -174,9 +194,16 @@ impl RustStackS3 {
             Some(version_id)
         };
 
+        let cksum = checksum_to_fields(&checksum);
         Ok(PutObjectOutput {
             e_tag: Some(write_result.etag),
             version_id: real_version_id,
+            checksum_crc32: cksum.crc32,
+            checksum_crc32c: cksum.crc32c,
+            checksum_crc64nvme: cksum.crc64nvme,
+            checksum_sha1: cksum.sha1,
+            checksum_sha256: cksum.sha256,
+            checksum_type: cksum.checksum_type,
             ..PutObjectOutput::default()
         })
     }
@@ -193,6 +220,7 @@ impl RustStackS3 {
         let if_match_param = input.if_match;
         let if_none_match_param = input.if_none_match;
         let range_param = input.range;
+        let checksum_mode = input.checksum_mode;
 
         // S3 response header overrides (from query parameters in presigned URLs).
         let override_cache_control = input.response_cache_control;
@@ -213,6 +241,7 @@ impl RustStackS3 {
             obj_storage_class,
             obj_meta,
             obj_parts_count,
+            obj_checksum,
             version_for_storage,
         ) = {
             let bucket = self
@@ -269,6 +298,7 @@ impl RustStackS3 {
                 obj.storage_class.clone(),
                 obj.metadata.clone(),
                 obj.parts_count,
+                obj.checksum.clone(),
                 obj.version_id.clone(),
             )
         };
@@ -309,10 +339,28 @@ impl RustStackS3 {
             obj_meta.user_metadata.clone()
         };
 
+        // Only return checksums when ChecksumMode=ENABLED (matching AWS behavior)
+        // and the request is for the full object (not a range request). A range
+        // response covers a subset of the object data, so the full-object
+        // checksum would not match and SDKs would reject the response.
+        let checksum_enabled = checksum_mode
+            .as_ref()
+            .is_some_and(|m| m.as_str() == "ENABLED");
+        let cksum = if checksum_enabled && range.is_none() {
+            obj_checksum.as_ref().map(checksum_to_fields)
+        } else {
+            None
+        };
         let output = GetObjectOutput {
             accept_ranges: Some("bytes".to_owned()),
             body: Some(body),
             cache_control: override_cache_control.or(obj_meta.cache_control),
+            checksum_crc32: cksum.as_ref().and_then(|c| c.crc32.clone()),
+            checksum_crc32c: cksum.as_ref().and_then(|c| c.crc32c.clone()),
+            checksum_crc64nvme: cksum.as_ref().and_then(|c| c.crc64nvme.clone()),
+            checksum_sha1: cksum.as_ref().and_then(|c| c.sha1.clone()),
+            checksum_sha256: cksum.as_ref().and_then(|c| c.sha256.clone()),
+            checksum_type: cksum.as_ref().and_then(|c| c.checksum_type.clone()),
             content_disposition: override_content_disposition.or(obj_meta.content_disposition),
             content_encoding: override_content_encoding.or(obj_meta.content_encoding),
             content_language: override_content_language.or(obj_meta.content_language),
@@ -348,6 +396,7 @@ impl RustStackS3 {
     }
 
     /// Head object (get metadata without body).
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_head_object(
         &self,
         input: HeadObjectInput,
@@ -355,6 +404,7 @@ impl RustStackS3 {
         let bucket_name = input.bucket;
         let key = input.key;
         let version_id_param = input.version_id;
+        let checksum_mode = input.checksum_mode;
 
         // S3 response header overrides (from query parameters in presigned URLs).
         let override_cache_control = input.response_cache_control;
@@ -410,9 +460,24 @@ impl RustStackS3 {
             obj.metadata.user_metadata.clone()
         };
 
+        // Only return checksums when ChecksumMode=ENABLED (matching AWS behavior).
+        let checksum_enabled = checksum_mode
+            .as_ref()
+            .is_some_and(|m| m.as_str() == "ENABLED");
+        let cksum = if checksum_enabled {
+            obj.checksum.as_ref().map(checksum_to_fields)
+        } else {
+            None
+        };
         let output = HeadObjectOutput {
             accept_ranges: Some("bytes".to_owned()),
             cache_control: override_cache_control.or(obj.metadata.cache_control.clone()),
+            checksum_crc32: cksum.as_ref().and_then(|c| c.crc32.clone()),
+            checksum_crc32c: cksum.as_ref().and_then(|c| c.crc32c.clone()),
+            checksum_crc64nvme: cksum.as_ref().and_then(|c| c.crc64nvme.clone()),
+            checksum_sha1: cksum.as_ref().and_then(|c| c.sha1.clone()),
+            checksum_sha256: cksum.as_ref().and_then(|c| c.sha256.clone()),
+            checksum_type: cksum.as_ref().and_then(|c| c.checksum_type.clone()),
             content_disposition: override_content_disposition
                 .or(obj.metadata.content_disposition.clone()),
             content_encoding: override_content_encoding.or(obj.metadata.content_encoding.clone()),
@@ -599,7 +664,7 @@ impl RustStackS3 {
 
         // Look up source object to get its metadata.
         // Keep this entire block synchronous -- no awaits while the lock is held.
-        let (src_metadata, src_version_for_storage) = {
+        let (src_metadata, src_checksum, src_version_for_storage) = {
             let src_bucket_ref = self
                 .state
                 .get_bucket(&src_bucket)
@@ -623,7 +688,11 @@ impl RustStackS3 {
                 })?
             };
 
-            (src_obj.metadata.clone(), src_obj.version_id.clone())
+            (
+                src_obj.metadata.clone(),
+                src_obj.checksum.clone(),
+                src_obj.version_id.clone(),
+            )
         };
 
         // Determine destination versioning.
@@ -681,7 +750,7 @@ impl RustStackS3 {
             storage_class,
             metadata,
             owner: InternalOwner::default(),
-            checksum: None,
+            checksum: src_checksum,
             parts_count: None,
             part_etags: Vec::new(),
         };
@@ -855,34 +924,67 @@ pub(super) fn parse_tagging_header(tagging: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Holds the individual checksum fields for populating output structs.
+struct ChecksumFields {
+    crc32: Option<String>,
+    crc32c: Option<String>,
+    crc64nvme: Option<String>,
+    sha1: Option<String>,
+    sha256: Option<String>,
+    checksum_type: Option<ChecksumType>,
+}
+
+/// Map a [`ChecksumData`] to individual output fields.
+fn checksum_to_fields(checksum: &ChecksumData) -> ChecksumFields {
+    let mut fields = ChecksumFields {
+        crc32: None,
+        crc32c: None,
+        crc64nvme: None,
+        sha1: None,
+        sha256: None,
+        checksum_type: None,
+    };
+    match checksum.algorithm.as_str() {
+        "CRC32" => fields.crc32 = Some(checksum.value.clone()),
+        "CRC32C" => fields.crc32c = Some(checksum.value.clone()),
+        "CRC64NVME" => fields.crc64nvme = Some(checksum.value.clone()),
+        "SHA1" => fields.sha1 = Some(checksum.value.clone()),
+        "SHA256" => fields.sha256 = Some(checksum.value.clone()),
+        _ => {}
+    }
+    fields.checksum_type = Some(match checksum.checksum_type.as_str() {
+        "COMPOSITE" => ChecksumType::Composite,
+        _ => ChecksumType::FullObject,
+    });
+    fields
+}
+
 /// Extract checksum data from a [`PutObjectInput`] if any checksum fields are
 /// set.
-fn extract_checksum_from_put(input: &PutObjectInput) -> Option<ChecksumData> {
-    if let Some(v) = &input.checksum_crc32 {
-        return Some(ChecksumData {
-            algorithm: "CRC32".to_owned(),
-            value: v.clone(),
+///
+/// Returns an error if multiple checksum fields are set (only one is allowed
+/// per request, matching AWS behavior).
+fn extract_checksum_from_put(
+    input: &PutObjectInput,
+) -> Result<Option<ChecksumData>, S3ServiceError> {
+    let candidates: [(&str, &Option<String>); 5] = [
+        ("CRC32", &input.checksum_crc32),
+        ("CRC32C", &input.checksum_crc32c),
+        ("CRC64NVME", &input.checksum_crc64nvme),
+        ("SHA1", &input.checksum_sha1),
+        ("SHA256", &input.checksum_sha256),
+    ];
+    let found: Vec<_> = candidates.iter().filter(|(_, v)| v.is_some()).collect();
+    if found.len() > 1 {
+        return Err(S3ServiceError::InvalidArgument {
+            message: "Only one checksum value can be provided per request".to_owned(),
         });
     }
-    if let Some(v) = &input.checksum_crc32c {
-        return Some(ChecksumData {
-            algorithm: "CRC32C".to_owned(),
-            value: v.clone(),
-        });
-    }
-    if let Some(v) = &input.checksum_sha1 {
-        return Some(ChecksumData {
-            algorithm: "SHA1".to_owned(),
-            value: v.clone(),
-        });
-    }
-    if let Some(v) = &input.checksum_sha256 {
-        return Some(ChecksumData {
-            algorithm: "SHA256".to_owned(),
-            value: v.clone(),
-        });
-    }
-    None
+    Ok(found.into_iter().next().map(|(alg, val)| ChecksumData {
+        algorithm: (*alg).to_owned(),
+        value: val.as_ref().unwrap_or(&String::new()).clone(),
+        checksum_type: "FULL_OBJECT".to_owned(),
+    }))
 }
 
 #[cfg(test)]

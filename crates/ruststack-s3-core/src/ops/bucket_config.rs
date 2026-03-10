@@ -33,12 +33,13 @@ use ruststack_s3_model::output::{
 };
 use ruststack_s3_model::types::{
     BucketAccelerateStatus, BucketVersioningStatus, CORSRule,
-    DefaultRetention as ModelDefaultRetention, Grant, Grantee,
+    DefaultRetention as ModelDefaultRetention, ErrorDocument, Grant, Grantee, IndexDocument,
     ObjectLockConfiguration as ModelObjectLockConfiguration, ObjectLockEnabled,
     ObjectLockRetentionMode, ObjectLockRule as ModelObjectLockRule, ObjectOwnership,
-    OwnershipControls, OwnershipControlsRule, Payer, Permission, PolicyStatus,
-    PublicAccessBlockConfiguration, ServerSideEncryption, ServerSideEncryptionByDefault,
-    ServerSideEncryptionConfiguration, ServerSideEncryptionRule, Tag,
+    OwnershipControls, OwnershipControlsRule, Payer, Permission, PolicyStatus, Protocol,
+    PublicAccessBlockConfiguration, RedirectAllRequestsTo, ServerSideEncryption,
+    ServerSideEncryptionByDefault, ServerSideEncryptionConfiguration, ServerSideEncryptionRule,
+    Tag,
 };
 use tracing::debug;
 
@@ -47,7 +48,7 @@ use crate::error::S3ServiceError;
 use crate::provider::RustStackS3;
 use crate::state::bucket::{
     BucketEncryption, CorsRuleConfig, ObjectLockConfiguration, ObjectLockRule,
-    OwnershipControlsConfig, PublicAccessBlockConfig, VersioningStatus,
+    OwnershipControlsConfig, PublicAccessBlockConfig, VersioningStatus, WebsiteConfig,
 };
 use crate::state::object::{CannedAcl, Owner as InternalOwner};
 
@@ -925,15 +926,31 @@ impl RustStackS3 {
             .get_bucket(&bucket_name)
             .map_err(S3ServiceError::into_s3_error)?;
 
-        let website = bucket.website.read();
-        if website.is_none() {
-            return Err(S3ServiceError::NoSuchWebsiteConfiguration.into_s3_error());
-        }
+        let guard = bucket.website.read();
+        let config = guard
+            .as_ref()
+            .ok_or_else(|| S3ServiceError::NoSuchWebsiteConfiguration.into_s3_error())?;
 
         Ok(GetBucketWebsiteOutput {
-            error_document: None,
-            index_document: None,
-            redirect_all_requests_to: None,
+            index_document: config
+                .index_document_suffix
+                .as_ref()
+                .map(|s| IndexDocument { suffix: s.clone() }),
+            error_document: config
+                .error_document_key
+                .as_ref()
+                .map(|k| ErrorDocument { key: k.clone() }),
+            redirect_all_requests_to: config.redirect_all_requests_to_host.as_ref().map(|host| {
+                RedirectAllRequestsTo {
+                    host_name: host.clone(),
+                    protocol: config.redirect_all_requests_to_protocol.as_ref().map(|p| {
+                        match p.as_str() {
+                            "https" => Protocol::Https,
+                            _ => Protocol::Http,
+                        }
+                    }),
+                }
+            }),
             routing_rules: Vec::new(),
         })
     }
@@ -950,7 +967,19 @@ impl RustStackS3 {
             .get_bucket(&bucket_name)
             .map_err(S3ServiceError::into_s3_error)?;
 
-        *bucket.website.write() = Some(serde_json::json!({"status": "configured"}));
+        let wc = &input.website_configuration;
+        *bucket.website.write() = Some(WebsiteConfig {
+            index_document_suffix: wc.index_document.as_ref().map(|d| d.suffix.clone()),
+            error_document_key: wc.error_document.as_ref().map(|d| d.key.clone()),
+            redirect_all_requests_to_host: wc
+                .redirect_all_requests_to
+                .as_ref()
+                .map(|r| r.host_name.clone()),
+            redirect_all_requests_to_protocol: wc
+                .redirect_all_requests_to
+                .as_ref()
+                .and_then(|r| r.protocol.as_ref().map(|p| p.as_str().to_owned())),
+        });
 
         debug!(bucket = %bucket_name, "put_bucket_website completed");
         Ok(())

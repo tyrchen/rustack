@@ -219,15 +219,27 @@ async fn process_request<H: S3Handler>(
     // 4c. Decode AWS chunked transfer encoding.
     if crate::codec::is_aws_chunked(&parts) {
         match crate::codec::decode_aws_chunked(&body) {
-            Ok(decoded) => {
+            Ok(result) => {
                 debug!(
                     raw_len = body.len(),
-                    decoded_len = decoded.len(),
+                    decoded_len = result.body.len(),
+                    trailing_header_count = result.trailing_headers.len(),
                     request_id,
                     "decoded aws-chunked body"
                 );
-                body = decoded;
+                body = result.body;
                 crate::codec::strip_aws_chunked_encoding(&mut parts.headers);
+
+                // Inject trailing headers (e.g. checksum values) into request
+                // headers so downstream request parsing picks them up.
+                for (key, value) in &result.trailing_headers {
+                    if let Ok(hv) = http::header::HeaderValue::from_str(value) {
+                        if let Ok(hn) = http::header::HeaderName::from_bytes(key.as_bytes()) {
+                            // Only insert if not already present in the request headers.
+                            parts.headers.entry(hn).or_insert(hv);
+                        }
+                    }
+                }
             }
             Err(s3_err) => {
                 warn!(error = %s3_err.message, request_id, "failed to decode aws-chunked body");
@@ -314,13 +326,13 @@ fn validate_content_sha256(parts: &http::request::Parts, body: &[u8]) -> Result<
     })?;
 
     // Skip validation for streaming and unsigned payload placeholders.
-    if matches!(
-        hash_str,
-        "UNSIGNED-PAYLOAD"
-            | "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
-            | "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
-            | "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
-    ) {
+    // AWS SDKs use various STREAMING-* prefixes (SigV4, SigV4a, CRT-based,
+    // etc.) and UNSIGNED-PAYLOAD variants. Rather than maintaining an
+    // exhaustive allowlist, accept any recognised placeholder pattern.
+    if hash_str == "UNSIGNED-PAYLOAD"
+        || hash_str.starts_with("STREAMING-")
+        || hash_str.starts_with("UNSIGNED-PAYLOAD-")
+    {
         return Ok(());
     }
 
@@ -589,6 +601,30 @@ mod tests {
     #[test]
     fn test_should_accept_streaming_payload() {
         let parts = parts_with_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_streaming_payload_trailer() {
+        let parts = parts_with_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_streaming_sigv4a_payload() {
+        let parts = parts_with_sha256("STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_streaming_unsigned_payload_trailer() {
+        let parts = parts_with_sha256("STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    }
+
+    #[test]
+    fn test_should_accept_unsigned_payload_trailer() {
+        let parts = parts_with_sha256("UNSIGNED-PAYLOAD-TRAILER");
         assert!(validate_content_sha256(&parts, b"hello").is_ok());
     }
 

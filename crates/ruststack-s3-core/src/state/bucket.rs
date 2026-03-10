@@ -139,6 +139,24 @@ pub struct DefaultRetention {
     pub years: Option<i32>,
 }
 
+/// Static website hosting configuration for a bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsiteConfig {
+    /// The name of the index document (e.g. `index.html`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_document_suffix: Option<String>,
+    /// The key of the error document (e.g. `error.html`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_document_key: Option<String>,
+    /// Redirect all requests to another host/protocol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_all_requests_to_host: Option<String>,
+    /// Protocol for the redirect (`http` or `https`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_all_requests_to_protocol: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // S3Bucket
 // ---------------------------------------------------------------------------
@@ -197,8 +215,8 @@ pub struct S3Bucket {
     pub accelerate: RwLock<Option<String>>,
     /// Request payment configuration (default `"BucketOwner"`).
     pub request_payment: RwLock<String>,
-    /// Static website hosting configuration (stored as opaque JSON).
-    pub website: RwLock<Option<serde_json::Value>>,
+    /// Static website hosting configuration.
+    pub website: RwLock<Option<WebsiteConfig>>,
     /// Replication configuration (stored as opaque JSON).
     pub replication: RwLock<Option<serde_json::Value>>,
     /// Analytics configuration (stored as opaque JSON).

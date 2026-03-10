@@ -29,6 +29,8 @@ pub enum ChecksumAlgorithm {
     Crc32,
     /// CRC-32C (Castagnoli).
     Crc32c,
+    /// CRC-64/NVME (NVMe polynomial, hardware-accelerated).
+    Crc64Nvme,
     /// SHA-1.
     Sha1,
     /// SHA-256.
@@ -42,6 +44,7 @@ impl ChecksumAlgorithm {
         match self {
             Self::Crc32 => "CRC32",
             Self::Crc32c => "CRC32C",
+            Self::Crc64Nvme => "CRC64NVME",
             Self::Sha1 => "SHA1",
             Self::Sha256 => "SHA256",
         }
@@ -66,6 +69,7 @@ impl FromStr for ChecksumAlgorithm {
         match s.to_ascii_uppercase().as_str() {
             "CRC32" => Ok(Self::Crc32),
             "CRC32C" => Ok(Self::Crc32c),
+            "CRC64NVME" => Ok(Self::Crc64Nvme),
             "SHA1" => Ok(Self::Sha1),
             "SHA256" => Ok(Self::Sha256),
             _ => Err(ParseChecksumAlgorithmError(s.to_owned())),
@@ -181,6 +185,12 @@ pub fn compute_checksum(algorithm: ChecksumAlgorithm, data: &[u8]) -> String {
             let value = crc32c::crc32c(data);
             BASE64_STANDARD.encode(value.to_be_bytes())
         }
+        ChecksumAlgorithm::Crc64Nvme => {
+            let mut hasher = crc64fast_nvme::Digest::new();
+            hasher.write(data);
+            let value = hasher.sum64();
+            BASE64_STANDARD.encode(value.to_be_bytes())
+        }
         ChecksumAlgorithm::Sha1 => {
             let hash = sha1::Sha1::digest(data);
             BASE64_STANDARD.encode(hash)
@@ -254,14 +264,22 @@ pub struct HasherResult {
 /// assert!(!result.md5_hex.is_empty());
 /// assert_eq!(result.checksums.len(), 1);
 /// ```
-#[derive(Debug)]
 pub struct StreamingHasher {
     md5: md5::Md5,
     sha1: Option<sha1::Sha1>,
     sha256: Option<sha2::Sha256>,
     crc32: Option<crc32fast::Hasher>,
     crc32c: Option<u32>,
+    crc64nvme: Option<crc64fast_nvme::Digest>,
     algorithms: Vec<ChecksumAlgorithm>,
+}
+
+impl fmt::Debug for StreamingHasher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamingHasher")
+            .field("algorithms", &self.algorithms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamingHasher {
@@ -275,6 +293,7 @@ impl StreamingHasher {
         let mut sha256 = None;
         let mut crc32 = None;
         let mut crc32c = None;
+        let mut crc64nvme = None;
 
         for &algo in algorithms {
             match algo {
@@ -290,6 +309,9 @@ impl StreamingHasher {
                 ChecksumAlgorithm::Crc32c => {
                     crc32c = Some(0);
                 }
+                ChecksumAlgorithm::Crc64Nvme => {
+                    crc64nvme = Some(crc64fast_nvme::Digest::new());
+                }
             }
         }
 
@@ -299,6 +321,7 @@ impl StreamingHasher {
             sha256,
             crc32,
             crc32c,
+            crc64nvme,
             algorithms: algorithms.to_vec(),
         }
     }
@@ -318,6 +341,9 @@ impl StreamingHasher {
         }
         if let Some(ref mut val) = self.crc32c {
             *val = crc32c::crc32c_append(*val, data);
+        }
+        if let Some(ref mut h) = self.crc64nvme {
+            h.write(data);
         }
     }
 
@@ -348,6 +374,13 @@ impl StreamingHasher {
                 }
                 ChecksumAlgorithm::Crc32c => {
                     let val = self.crc32c.unwrap_or(0);
+                    BASE64_STANDARD.encode(val.to_be_bytes())
+                }
+                ChecksumAlgorithm::Crc64Nvme => {
+                    let val = self
+                        .crc64nvme
+                        .as_ref()
+                        .map_or(0, crc64fast_nvme::Digest::sum64);
                     BASE64_STANDARD.encode(val.to_be_bytes())
                 }
             };
@@ -390,6 +423,7 @@ mod tests {
     fn test_should_display_checksum_algorithm() {
         assert_eq!(ChecksumAlgorithm::Crc32.to_string(), "CRC32");
         assert_eq!(ChecksumAlgorithm::Crc32c.to_string(), "CRC32C");
+        assert_eq!(ChecksumAlgorithm::Crc64Nvme.to_string(), "CRC64NVME");
         assert_eq!(ChecksumAlgorithm::Sha1.to_string(), "SHA1");
         assert_eq!(ChecksumAlgorithm::Sha256.to_string(), "SHA256");
     }
@@ -403,6 +437,10 @@ mod tests {
         assert_eq!(
             "crc32c".parse::<ChecksumAlgorithm>().ok(),
             Some(ChecksumAlgorithm::Crc32c)
+        );
+        assert_eq!(
+            "CRC64NVME".parse::<ChecksumAlgorithm>().ok(),
+            Some(ChecksumAlgorithm::Crc64Nvme)
         );
         assert_eq!(
             "sha1".parse::<ChecksumAlgorithm>().ok(),
@@ -483,6 +521,15 @@ mod tests {
     }
 
     #[test]
+    fn test_should_compute_crc64nvme_checksum() {
+        let b64 = compute_checksum(ChecksumAlgorithm::Crc64Nvme, b"hello");
+        assert!(!b64.is_empty());
+        let decoded = BASE64_STANDARD.decode(&b64);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.expect("test decode").len(), 8);
+    }
+
+    #[test]
     fn test_should_compute_sha1_checksum() {
         let b64 = compute_checksum(ChecksumAlgorithm::Sha1, b"hello");
         let decoded = BASE64_STANDARD.decode(&b64);
@@ -547,6 +594,7 @@ mod tests {
         let algos = [
             ChecksumAlgorithm::Crc32,
             ChecksumAlgorithm::Crc32c,
+            ChecksumAlgorithm::Crc64Nvme,
             ChecksumAlgorithm::Sha1,
             ChecksumAlgorithm::Sha256,
         ];
@@ -554,7 +602,7 @@ mod tests {
         hasher.update(b"test data");
         let result = hasher.finish();
 
-        assert_eq!(result.checksums.len(), 4);
+        assert_eq!(result.checksums.len(), 5);
         for (i, algo) in algos.iter().enumerate() {
             assert_eq!(result.checksums[i].algorithm, *algo);
             assert_eq!(

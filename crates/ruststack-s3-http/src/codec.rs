@@ -7,15 +7,31 @@
 //! <hex-size>;chunk-signature=<sig>\r\n
 //! <data>\r\n
 //! 0;chunk-signature=<sig>\r\n
+//! <trailing-headers>\r\n
 //! \r\n
 //! ```
 //!
 //! This module detects and decodes that framing so the server stores the raw
-//! object data rather than the chunk envelope.
+//! object data rather than the chunk envelope. Trailing headers (e.g. checksum
+//! values sent after the body) are extracted and returned separately.
+
+use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
 use http::header::HeaderMap;
 use ruststack_s3_model::error::{S3Error, S3ErrorCode};
+
+/// Result of decoding an AWS-chunked body.
+#[derive(Debug)]
+pub struct AwsChunkedResult {
+    /// The decoded body data.
+    pub body: Bytes,
+    /// Trailing headers extracted from the chunked stream.
+    ///
+    /// Keys are lowercased header names, values are trimmed header values.
+    /// The `x-amz-trailer-signature` header is excluded.
+    pub trailing_headers: HashMap<String, String>,
+}
 
 /// Return `true` if the request uses AWS chunked transfer encoding.
 ///
@@ -42,13 +58,19 @@ pub fn is_aws_chunked(parts: &http::request::Parts) -> bool {
     false
 }
 
-/// Decode an AWS-chunked body into the raw payload bytes.
+/// Decode an AWS-chunked body, extracting both the raw payload and trailing
+/// headers.
+///
+/// After the terminal `0`-sized chunk, any trailing headers (e.g.
+/// `x-amz-checksum-crc32`) are parsed and returned in
+/// [`AwsChunkedResult::trailing_headers`]. The `x-amz-trailer-signature`
+/// header is silently skipped.
 ///
 /// # Errors
 ///
 /// Returns an error if the chunked framing is malformed (missing size line,
 /// invalid hex size, or truncated data).
-pub fn decode_aws_chunked(body: &[u8]) -> Result<Bytes, S3Error> {
+pub fn decode_aws_chunked(body: &[u8]) -> Result<AwsChunkedResult, S3Error> {
     let mut output = BytesMut::new();
     let mut pos = 0;
 
@@ -89,8 +111,12 @@ pub fn decode_aws_chunked(body: &[u8]) -> Result<Bytes, S3Error> {
         pos = line_end + 2;
 
         if chunk_size == 0 {
-            // Terminal chunk — we're done.
-            break;
+            // Terminal chunk — parse trailing headers from remainder.
+            let trailing_headers = parse_trailing_headers(&body[pos..])?;
+            return Ok(AwsChunkedResult {
+                body: output.freeze(),
+                trailing_headers,
+            });
         }
 
         // Read exactly `chunk_size` bytes of data.
@@ -113,8 +139,38 @@ pub fn decode_aws_chunked(body: &[u8]) -> Result<Bytes, S3Error> {
         }
         pos += 2;
     }
+}
 
-    Ok(output.freeze())
+/// Parse trailing headers from the remainder of an AWS-chunked stream.
+///
+/// Format: `header-name:value\r\n` repeated, terminated by an empty `\r\n`.
+/// The `x-amz-trailer-signature` header is silently skipped since we do not
+/// validate trailer signatures.
+fn parse_trailing_headers(data: &[u8]) -> Result<HashMap<String, String>, S3Error> {
+    let mut headers = HashMap::new();
+
+    let text = std::str::from_utf8(data).map_err(|_| {
+        S3Error::with_message(
+            S3ErrorCode::InvalidArgument,
+            "Malformed aws-chunked body: trailing headers are not valid UTF-8",
+        )
+    })?;
+
+    for line in text.split("\r\n") {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip trailer signature lines.
+        if line.starts_with("x-amz-trailer-signature") {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(key.trim().to_lowercase(), value.trim().to_owned());
+        }
+    }
+
+    Ok(headers)
 }
 
 /// Remove `aws-chunked` from the `Content-Encoding` header.
@@ -197,7 +253,8 @@ mod tests {
     fn test_should_decode_single_chunk() {
         let body = b"5;chunk-signature=abc123\r\nhello\r\n0;chunk-signature=def456\r\n\r\n";
         let result = decode_aws_chunked(body).expect("should decode");
-        assert_eq!(result.as_ref(), b"hello");
+        assert_eq!(result.body.as_ref(), b"hello");
+        assert!(result.trailing_headers.is_empty());
     }
 
     #[test]
@@ -205,14 +262,16 @@ mod tests {
         let body =
             b"5;chunk-signature=aaa\r\nhello\r\n6;chunk-signature=bbb\r\n world\r\n0;chunk-signature=ccc\r\n\r\n";
         let result = decode_aws_chunked(body).expect("should decode");
-        assert_eq!(result.as_ref(), b"hello world");
+        assert_eq!(result.body.as_ref(), b"hello world");
+        assert!(result.trailing_headers.is_empty());
     }
 
     #[test]
     fn test_should_decode_empty_body() {
         let body = b"0;chunk-signature=abc\r\n\r\n";
         let result = decode_aws_chunked(body).expect("should decode");
-        assert!(result.is_empty());
+        assert!(result.body.is_empty());
+        assert!(result.trailing_headers.is_empty());
     }
 
     #[test]
@@ -225,6 +284,49 @@ mod tests {
     fn test_should_reject_truncated_data() {
         let body = b"10;chunk-signature=abc\r\nshort\r\n";
         assert!(decode_aws_chunked(body).is_err());
+    }
+
+    #[test]
+    fn test_should_extract_trailing_headers() {
+        let body = b"5;chunk-signature=aaa\r\nhello\r\n0;chunk-signature=bbb\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n";
+        let result = decode_aws_chunked(body).expect("should decode");
+        assert_eq!(result.body.as_ref(), b"hello");
+        assert_eq!(
+            result.trailing_headers.get("x-amz-checksum-crc32"),
+            Some(&"AAAAAA==".to_owned()),
+        );
+    }
+
+    #[test]
+    fn test_should_skip_trailer_signature_in_trailing_headers() {
+        let body = b"3;chunk-signature=aaa\r\nabc\r\n0;chunk-signature=bbb\r\nx-amz-checksum-sha256:abc123\r\nx-amz-trailer-signature:sigvalue\r\n\r\n";
+        let result = decode_aws_chunked(body).expect("should decode");
+        assert_eq!(result.body.as_ref(), b"abc");
+        assert_eq!(
+            result.trailing_headers.get("x-amz-checksum-sha256"),
+            Some(&"abc123".to_owned()),
+        );
+        assert!(
+            !result
+                .trailing_headers
+                .contains_key("x-amz-trailer-signature")
+        );
+    }
+
+    #[test]
+    fn test_should_extract_multiple_trailing_headers() {
+        let body = b"2;chunk-signature=aaa\r\nhi\r\n0;chunk-signature=bbb\r\nx-amz-checksum-crc32:AAA=\r\nx-amz-checksum-crc32c:BBB=\r\n\r\n";
+        let result = decode_aws_chunked(body).expect("should decode");
+        assert_eq!(result.body.as_ref(), b"hi");
+        assert_eq!(result.trailing_headers.len(), 2);
+        assert_eq!(
+            result.trailing_headers.get("x-amz-checksum-crc32"),
+            Some(&"AAA=".to_owned()),
+        );
+        assert_eq!(
+            result.trailing_headers.get("x-amz-checksum-crc32c"),
+            Some(&"BBB=".to_owned()),
+        );
     }
 
     #[test]
@@ -260,6 +362,6 @@ mod tests {
     fn test_should_decode_chunk_without_signature_extension() {
         let body = b"3\r\nabc\r\n0\r\n\r\n";
         let result = decode_aws_chunked(body).expect("should decode");
-        assert_eq!(result.as_ref(), b"abc");
+        assert_eq!(result.body.as_ref(), b"abc");
     }
 }

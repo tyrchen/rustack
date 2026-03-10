@@ -32,6 +32,9 @@ pub struct MultipartUpload {
     /// The checksum algorithm requested for this upload (e.g. `CRC32`, `SHA256`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum_algorithm: Option<String>,
+    /// Whether the final checksum should be `FULL_OBJECT` or `COMPOSITE`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum_type: Option<String>,
     /// Parts uploaded so far, keyed by part number (1-based).
     pub parts: BTreeMap<u32, UploadPart>,
     /// Server-side encryption algorithm for the final object.
@@ -55,6 +58,7 @@ impl MultipartUpload {
             owner,
             metadata,
             checksum_algorithm: None,
+            checksum_type: None,
             parts: BTreeMap::new(),
             sse_algorithm: None,
             sse_kms_key_id: None,
@@ -209,6 +213,7 @@ mod tests {
             checksum: Some(ChecksumData {
                 algorithm: "CRC32".to_owned(),
                 value: "AAAAAA==".to_owned(),
+                checksum_type: "FULL_OBJECT".to_owned(),
             }),
         };
         let cs = part.checksum.as_ref();

@@ -17,8 +17,9 @@ use ruststack_s3_model::output::{
     PutObjectLegalHoldOutput, PutObjectRetentionOutput, PutObjectTaggingOutput,
 };
 use ruststack_s3_model::types::{
-    GetObjectAttributesParts, Grant, Grantee, ObjectLockLegalHold, ObjectLockLegalHoldStatus,
-    ObjectLockRetention, ObjectLockRetentionMode, Permission, StorageClass, Tag, Type,
+    Checksum, ChecksumType, GetObjectAttributesParts, Grant, Grantee, ObjectLockLegalHold,
+    ObjectLockLegalHoldStatus, ObjectLockRetention, ObjectLockRetentionMode, Permission,
+    StorageClass, Tag, Type,
 };
 use tracing::debug;
 
@@ -582,8 +583,25 @@ impl RustStackS3 {
             Some(obj.version_id.clone())
         };
 
+        let checksum = obj.checksum.as_ref().map(|c| {
+            let mut cksum = Checksum::default();
+            match c.algorithm.as_str() {
+                "CRC32" => cksum.checksum_crc32 = Some(c.value.clone()),
+                "CRC32C" => cksum.checksum_crc32c = Some(c.value.clone()),
+                "CRC64NVME" => cksum.checksum_crc64nvme = Some(c.value.clone()),
+                "SHA1" => cksum.checksum_sha1 = Some(c.value.clone()),
+                "SHA256" => cksum.checksum_sha256 = Some(c.value.clone()),
+                _ => {}
+            }
+            cksum.checksum_type = Some(match c.checksum_type.as_str() {
+                "COMPOSITE" => ChecksumType::Composite,
+                _ => ChecksumType::FullObject,
+            });
+            cksum
+        });
+
         Ok(GetObjectAttributesOutput {
-            checksum: None,
+            checksum,
             delete_marker: None,
             e_tag: Some(obj.etag.clone()),
             last_modified: Some(obj.last_modified),
