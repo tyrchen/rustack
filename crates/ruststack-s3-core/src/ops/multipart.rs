@@ -473,14 +473,11 @@ impl RustStackS3 {
                     })
                     .collect();
 
-                let value = if checksum_type_str == "COMPOSITE" || part_checksums.is_empty() {
-                    compute_composite_checksum(algo, &part_checksums)
-                } else {
-                    // FULL_OBJECT: for CRC algorithms we can use the composite
-                    // path as a fallback since true CRC combination requires
-                    // per-part sizes. Use composite with the raw checksums.
-                    compute_composite_checksum(algo, &part_checksums)
-                };
+                // Compute the composite checksum (hash of concatenated part
+                // checksums with `-N` suffix). True FULL_OBJECT CRC combination
+                // using GF(2) math is not yet implemented; composite is used as
+                // a fallback for all checksum types.
+                let value = compute_composite_checksum(algo, &part_checksums);
 
                 Some(ChecksumData {
                     algorithm: algo_str.clone(),

@@ -141,18 +141,19 @@ impl RustStackS3 {
             .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
 
         // Extract checksum from the request, or compute CRC32 by default.
-        let checksum = extract_checksum_from_put(&input).map_err(S3ServiceError::into_s3_error)?;
+        let client_checksum =
+            extract_checksum_from_put(&input).map_err(S3ServiceError::into_s3_error)?;
+        let is_client_provided = client_checksum.is_some();
 
-        let checksum = checksum.unwrap_or_else(|| ChecksumData {
+        let checksum = client_checksum.unwrap_or_else(|| ChecksumData {
             algorithm: "CRC32".to_owned(),
             value: compute_checksum(ChecksumAlgorithm::Crc32, &body_data),
             checksum_type: "FULL_OBJECT".to_owned(),
         });
 
         // Validate client-provided checksum against server-computed value.
-        if let Ok(algo) = ChecksumAlgorithm::from_str(&checksum.algorithm) {
-            // Only validate if the client explicitly provided a checksum (not our default).
-            if extract_checksum_from_put(&input).ok().flatten().is_some() {
+        if is_client_provided {
+            if let Ok(algo) = ChecksumAlgorithm::from_str(&checksum.algorithm) {
                 let computed = compute_checksum(algo, &body_data);
                 if checksum.value != computed {
                     return Err(S3ServiceError::BadDigest.into_s3_error());

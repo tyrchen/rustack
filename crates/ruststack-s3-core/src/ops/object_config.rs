@@ -593,7 +593,10 @@ impl RustStackS3 {
                 "SHA256" => cksum.checksum_sha256 = Some(c.value.clone()),
                 _ => {}
             }
-            cksum.checksum_type = Some(ChecksumType::FullObject);
+            cksum.checksum_type = Some(match c.checksum_type.as_str() {
+                "COMPOSITE" => ChecksumType::Composite,
+                _ => ChecksumType::FullObject,
+            });
             cksum
         });
 
