@@ -647,14 +647,25 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     writeln!(out, "#[non_exhaustive]")?;
     writeln!(out, "pub enum {prefix}ErrorCode {{")?;
 
-    // Find the default variant (ValidationException if present, else first)
+    // Find the default variant (ValidationException if present, else first).
+    // If no errors exist, add an InternalException fallback so the enum is not empty.
     let default_name = errors
         .iter()
         .find(|e| e.name == "ValidationException")
         .map_or_else(
-            || errors.first().map_or("Unknown", |e| e.name.as_str()),
+            || {
+                errors
+                    .first()
+                    .map_or("InternalException", |e| e.name.as_str())
+            },
             |e| e.name.as_str(),
         );
+
+    if errors.is_empty() {
+        writeln!(out, "    /// Internal error.")?;
+        writeln!(out, "    #[default]")?;
+        writeln!(out, "    InternalException,")?;
+    }
 
     for err in errors {
         writeln!(out, "    /// {} error.", err.name)?;

@@ -5,10 +5,9 @@
 //!
 //! Many fields are defined here for future phases of the universal codegen
 //! and are not yet read by the current pipeline.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
+use anyhow::{Result, bail};
 use serde::Deserialize;
 
 /// Top-level TOML configuration file structure.
@@ -153,6 +152,7 @@ fn default_file_layout() -> String {
 }
 
 /// Derived runtime configuration used by the codegen pipeline.
+#[derive(Debug)]
 pub struct ServiceConfig {
     /// Short service name.
     pub name: String,
@@ -207,14 +207,14 @@ pub enum Protocol {
 
 impl ServiceConfig {
     /// Build a `ServiceConfig` from a parsed TOML configuration file.
-    pub fn from_file(config: ServiceConfigFile) -> Self {
+    pub fn from_file(config: ServiceConfigFile) -> Result<Self> {
         let protocol = match config.service.protocol.as_str() {
             "restXml" => Protocol::RestXml,
             "awsJson1_0" => Protocol::AwsJson1_0,
             "awsJson1_1" => Protocol::AwsJson1_1,
             "awsQuery" => Protocol::AwsQuery,
             "restJson1" => Protocol::RestJson1,
-            other => panic!("Unknown protocol: {other}"),
+            other => bail!("Unknown protocol: {other}"),
         };
 
         let serde_rename = match config.protocol.serde_rename.as_str() {
@@ -263,7 +263,7 @@ impl ServiceConfig {
             Some(config.operations.categories.clone())
         };
 
-        Self {
+        Ok(Self {
             name: config.service.name,
             display_name: config.service.display_name,
             rust_prefix: config.service.rust_prefix,
@@ -281,7 +281,7 @@ impl ServiceConfig {
             overlay_preserve: config.overlay.preserve,
             overlay_extra_modules: config.overlay.extra_modules,
             always_serialize_arrays: config.output.always_serialize_arrays,
-        }
+        })
     }
 
     /// Whether this service uses serde derives.

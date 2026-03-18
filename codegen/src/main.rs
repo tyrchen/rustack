@@ -38,7 +38,8 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
     let config_file: ServiceConfigFile =
         toml::from_str(&config_toml).context("Failed to parse TOML config")?;
-    let service_config = ServiceConfig::from_file(config_file);
+    let service_config =
+        ServiceConfig::from_file(config_file).context("Failed to build service config")?;
 
     // Determine model and output paths (named args > legacy positional > defaults)
     let model_path = model_path_arg.map_or_else(
