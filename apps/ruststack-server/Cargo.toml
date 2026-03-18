@@ -15,7 +15,7 @@ name = "ruststack-server"
 path = "src/main.rs"
 
 [features]
-default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events"]
+default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs"]
 s3 = ["dep:ruststack-s3-core", "dep:ruststack-s3-http", "dep:ruststack-s3-model"]
 dynamodb = ["dep:ruststack-dynamodb-core", "dep:ruststack-dynamodb-http"]
 sqs = ["dep:ruststack-sqs-core", "dep:ruststack-sqs-http"]
@@ -23,6 +23,7 @@ ssm = ["dep:ruststack-ssm-core", "dep:ruststack-ssm-http"]
 sns = ["dep:ruststack-sns-core", "dep:ruststack-sns-http", "dep:ruststack-sqs-model", "sqs"]
 lambda = ["dep:ruststack-lambda-core", "dep:ruststack-lambda-http"]
 events = ["dep:ruststack-events-core", "dep:ruststack-events-http", "dep:ruststack-sqs-model", "sqs"]
+logs = ["dep:ruststack-logs-core", "dep:ruststack-logs-http"]
 
 [dependencies]
 # Internal crates - shared
@@ -58,6 +59,10 @@ ruststack-lambda-http = { workspace = true, optional = true }
 # Internal crates - EventBridge (optional, gated by "events" feature)
 ruststack-events-core = { workspace = true, optional = true }
 ruststack-events-http = { workspace = true, optional = true }
+
+# Internal crates - CloudWatch Logs (optional, gated by "logs" feature)
+ruststack-logs-core = { workspace = true, optional = true }
+ruststack-logs-http = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

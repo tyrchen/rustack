@@ -512,3 +512,64 @@ mod events_router {
 
 #[cfg(feature = "events")]
 pub use events_router::EventsServiceRouter;
+
+// ---------------------------------------------------------------------------
+// CloudWatch Logs
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "logs")]
+mod logs_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_logs_http::dispatch::LogsHandler;
+    use ruststack_logs_http::service::LogsHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the CloudWatch Logs service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `Logs_20140328.`.
+    pub struct LogsServiceRouter<H: LogsHandler> {
+        inner: LogsHttpService<H>,
+    }
+
+    impl<H: LogsHandler> LogsServiceRouter<H> {
+        /// Wrap a [`LogsHttpService`] in a router.
+        pub fn new(inner: LogsHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: LogsHandler> ServiceRouter for LogsServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "logs"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("Logs_20140328."))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "logs")]
+pub use logs_router::LogsServiceRouter;

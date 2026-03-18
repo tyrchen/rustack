@@ -1,0 +1,32 @@
+[package]
+name = "ruststack-logs-http"
+description = "CloudWatch Logs HTTP service layer for RustStack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ruststack-logs-model = { workspace = true }
+ruststack-auth = { workspace = true }
+
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+
+bytes = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+crc32fast = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+http-body = "1.0"

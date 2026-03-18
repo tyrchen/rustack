@@ -2314,6 +2314,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruststack-logs-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "http 1.4.0",
+ "regex",
+ "ruststack-auth",
+ "ruststack-core",
+ "ruststack-logs-http",
+ "ruststack-logs-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-logs-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "ruststack-auth",
+ "ruststack-logs-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-logs-model"
+version = "0.1.0"
+dependencies = [
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ruststack-s3-core"
 version = "0.1.0"
 dependencies = [
@@ -2424,6 +2476,8 @@ dependencies = [
  "ruststack-events-http",
  "ruststack-lambda-core",
  "ruststack-lambda-http",
+ "ruststack-logs-core",
+ "ruststack-logs-http",
  "ruststack-s3-core",
  "ruststack-s3-http",
  "ruststack-s3-model",

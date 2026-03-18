@@ -102,6 +102,15 @@ use ruststack_events_core::provider::RustStackEvents;
 #[cfg(feature = "events")]
 use ruststack_events_http::service::{EventsHttpConfig, EventsHttpService};
 
+#[cfg(feature = "logs")]
+use ruststack_logs_core::config::LogsConfig;
+#[cfg(feature = "logs")]
+use ruststack_logs_core::handler::RustStackLogsHandler;
+#[cfg(feature = "logs")]
+use ruststack_logs_core::provider::RustStackLogs;
+#[cfg(feature = "logs")]
+use ruststack_logs_http::service::{LogsHttpConfig, LogsHttpService};
+
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
 #[cfg(feature = "s3")]
@@ -218,6 +227,18 @@ fn build_events_http_config(config: &EventsConfig) -> EventsHttpConfig {
     }
 }
 
+/// Build the [`LogsHttpConfig`] from the [`LogsConfig`].
+#[cfg(feature = "logs")]
+fn build_logs_http_config(config: &LogsConfig) -> LogsHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    LogsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -227,7 +248,8 @@ fn build_events_http_config(config: &EventsConfig) -> EventsHttpConfig {
     feature = "ssm",
     feature = "sns",
     feature = "lambda",
-    feature = "events"
+    feature = "events",
+    feature = "logs"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -306,6 +328,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "sns" && cfg!(feature = "sns"))
         || (name == "lambda" && cfg!(feature = "lambda"))
         || (name == "events" && cfg!(feature = "events"))
+        || (name == "logs" && cfg!(feature = "logs"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -344,6 +367,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "events") {
             all.push("events".to_string());
+        }
+        if cfg!(feature = "logs") {
+            all.push("logs".to_string());
         }
         all
     } else {
@@ -505,6 +531,21 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         services.push(Box::new(service::EventsServiceRouter::new(events_service)));
     }
 
+    // ----- CloudWatch Logs (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "logs")]
+    if is_enabled("logs") {
+        let logs_config = LogsConfig::from_env();
+        info!(
+            logs_skip_signature_validation = logs_config.skip_signature_validation,
+            "initializing CloudWatch Logs service",
+        );
+        let logs_provider = RustStackLogs::new(logs_config.clone());
+        let logs_handler = RustStackLogsHandler::new(Arc::new(logs_provider));
+        let logs_http_config = build_logs_http_config(&logs_config);
+        let logs_service = LogsHttpService::new(Arc::new(logs_handler), logs_http_config);
+        services.push(Box::new(service::LogsServiceRouter::new(logs_service)));
+    }
+
     // ----- Lambda (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "lambda")]
     if is_enabled("lambda") {
@@ -644,6 +685,7 @@ mod tests {
         assert_eq!(is_compiled_in("sns"), cfg!(feature = "sns"));
         assert_eq!(is_compiled_in("lambda"), cfg!(feature = "lambda"));
         assert_eq!(is_compiled_in("events"), cfg!(feature = "events"));
+        assert_eq!(is_compiled_in("logs"), cfg!(feature = "logs"));
     }
 
     #[cfg(feature = "s3")]

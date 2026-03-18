@@ -46,6 +46,9 @@ ruststack-lambda-model = { path = "crates/ruststack-lambda-model" }
 ruststack-lambda-http = { path = "crates/ruststack-lambda-http" }
 ruststack-lambda-core = { path = "crates/ruststack-lambda-core" }
 ruststack-events-model = { path = "crates/ruststack-events-model" }
+ruststack-logs-model = { path = "crates/ruststack-logs-model" }
+ruststack-logs-http = { path = "crates/ruststack-logs-http" }
+ruststack-logs-core = { path = "crates/ruststack-logs-core" }
 ruststack-events-http = { path = "crates/ruststack-events-http" }
 ruststack-events-core = { path = "crates/ruststack-events-core" }
 

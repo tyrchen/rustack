@@ -1,0 +1,16 @@
+[package]
+name = "ruststack-logs-model"
+description = "CloudWatch Logs model types for RustStack (auto-generated from Smithy)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
