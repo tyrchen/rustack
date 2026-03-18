@@ -8,6 +8,8 @@ use std::fmt::Write;
 
 use anyhow::Result;
 
+use heck::{ToLowerCamelCase, ToPascalCase};
+
 use crate::config::ServiceConfig;
 use crate::shapes::{EnumVariantInfo, FieldInfo, HttpBinding, OperationCategories, ResolvedModel};
 
@@ -34,25 +36,41 @@ pub fn generate_all(
     }
     files.insert("lib.rs".to_owned(), generate_lib(resolved, config)?);
 
-    // Generate input modules
-    generate_io_modules(
-        &mut files,
-        "input",
-        &resolved.input_categories,
-        &resolved.input_structs,
-        resolved,
-        config,
-    )?;
-
-    // Generate output modules
-    generate_io_modules(
-        &mut files,
-        "output",
-        &resolved.output_categories,
-        &resolved.output_structs,
-        resolved,
-        config,
-    )?;
+    if config.file_layout == "flat" {
+        // Flat layout: single input.rs and output.rs files
+        generate_flat_io(
+            &mut files,
+            "input",
+            &resolved.input_structs,
+            resolved,
+            config,
+        )?;
+        generate_flat_io(
+            &mut files,
+            "output",
+            &resolved.output_structs,
+            resolved,
+            config,
+        )?;
+    } else {
+        // Categorized layout: input/mod.rs + input/{cat}.rs
+        generate_io_modules(
+            &mut files,
+            "input",
+            &resolved.input_categories,
+            &resolved.input_structs,
+            resolved,
+            config,
+        )?;
+        generate_io_modules(
+            &mut files,
+            "output",
+            &resolved.output_categories,
+            &resolved.output_structs,
+            resolved,
+            config,
+        )?;
+    }
 
     Ok(files)
 }
@@ -75,8 +93,13 @@ fn generate_types(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<St
         writeln!(out)?;
     }
 
-    writeln!(out, "use serde::{{Deserialize, Serialize}};")?;
-    writeln!(out)?;
+    // Serde is always needed for enums (they always derive Serialize, Deserialize).
+    // When config.uses_serde() is true, structs also need it.
+    let needs_serde = !resolved.enums.is_empty() || config.uses_serde();
+    if needs_serde {
+        writeln!(out, "use serde::{{Deserialize, Serialize}};")?;
+        writeln!(out)?;
+    }
 
     // Check if StreamingBlob is needed in shared structs
     let needs_streaming_blob = resolved
@@ -95,7 +118,7 @@ fn generate_types(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<St
 
     // Generate shared structs
     for (name, fields) in &resolved.shared_structs {
-        write_struct(&mut out, name, fields, false, display_name)?;
+        write_struct(&mut out, name, fields, false, display_name, config)?;
     }
 
     Ok(out)
@@ -181,6 +204,22 @@ fn write_enum(
     Ok(())
 }
 
+/// Check whether an explicit `#[serde(rename = "...")]` is needed for a field.
+///
+/// This compares what `rename_all` would produce from the Rust field name
+/// against the actual Smithy name.  When they differ, an explicit rename is
+/// required so the serialised form matches the wire protocol.
+fn needs_explicit_rename(rust_name: &str, smithy_name: &str, rename_strategy: &str) -> bool {
+    // Strip raw-identifier prefix before applying case conversion.
+    let clean = rust_name.strip_prefix("r#").unwrap_or(rust_name);
+    let expected = match rename_strategy {
+        "PascalCase" => clean.to_pascal_case(),
+        "camelCase" => clean.to_lower_camel_case(),
+        _ => clean.to_owned(),
+    };
+    expected != smithy_name
+}
+
 /// Generate a Rust struct with all fields.
 fn write_struct(
     out: &mut String,
@@ -188,9 +227,22 @@ fn write_struct(
     fields: &[FieldInfo],
     include_http_comments: bool,
     display_name: &str,
+    config: &ServiceConfig,
 ) -> Result<()> {
     writeln!(out, "/// {display_name} {name}.")?;
-    writeln!(out, "#[derive(Debug, Clone, Default)]")?;
+
+    if config.uses_serde() {
+        writeln!(
+            out,
+            "#[derive(Debug, Clone, Default, Serialize, Deserialize)]"
+        )?;
+        if let Some(ref rename) = config.serde_rename {
+            writeln!(out, "#[serde(rename_all = \"{rename}\")]")?;
+        }
+    } else {
+        writeln!(out, "#[derive(Debug, Clone, Default)]")?;
+    }
+
     writeln!(out, "pub struct {name} {{")?;
 
     for field in fields {
@@ -206,6 +258,37 @@ fn write_struct(
                 }
             };
             writeln!(out, "{comment}")?;
+        }
+
+        // Write serde field attributes when serde is enabled
+        if config.uses_serde() {
+            // Explicit rename if rename_all would not produce the correct Smithy name
+            if let Some(ref strategy) = config.serde_rename
+                && needs_explicit_rename(&field.rust_name, &field.smithy_name, strategy)
+            {
+                writeln!(out, "    #[serde(rename = \"{}\")]", field.smithy_name)?;
+            }
+
+            if field.rust_type.starts_with("Option<") {
+                writeln!(
+                    out,
+                    "    #[serde(skip_serializing_if = \"Option::is_none\")]"
+                )?;
+            } else if field.rust_type.starts_with("Vec<") {
+                if config.always_serialize_arrays {
+                    writeln!(out, "    #[serde(default)]")?;
+                } else {
+                    writeln!(
+                        out,
+                        "    #[serde(default, skip_serializing_if = \"Vec::is_empty\")]"
+                    )?;
+                }
+            } else if field.rust_type.starts_with("HashMap<") {
+                writeln!(
+                    out,
+                    "    #[serde(default, skip_serializing_if = \"HashMap::is_empty\")]"
+                )?;
+            }
         }
 
         writeln!(out, "    pub {}: {},", field.rust_name, field.rust_type)?;
@@ -304,6 +387,11 @@ fn generate_io_modules(
             writeln!(out)?;
         }
 
+        if config.uses_serde() {
+            writeln!(out, "use serde::{{Deserialize, Serialize}};")?;
+            writeln!(out)?;
+        }
+
         if needs_streaming_blob {
             writeln!(out, "use crate::request::StreamingBlob;")?;
             writeln!(out)?;
@@ -317,12 +405,75 @@ fn generate_io_modules(
 
         // Write structs
         for (name, fields) in &category_structs {
-            write_struct(&mut out, name, fields, true, display_name)?;
+            write_struct(&mut out, name, fields, true, display_name, config)?;
         }
 
         files.insert(format!("{kind}/{cat_name}.rs"), out);
     }
 
+    Ok(())
+}
+
+/// Generate a flat input.rs or output.rs file containing all structs.
+fn generate_flat_io(
+    files: &mut BTreeMap<String, String>,
+    kind: &str, // "input" or "output"
+    structs: &BTreeMap<String, Vec<FieldInfo>>,
+    resolved: &ResolvedModel,
+    config: &ServiceConfig,
+) -> Result<()> {
+    let header = file_header(config);
+    let display_name = &config.display_name;
+
+    let mut out = String::with_capacity(32 * 1024);
+    writeln!(out, "{header}")?;
+    writeln!(out)?;
+
+    // Determine imports needed across all structs
+    let all_struct_refs: Vec<(&String, &Vec<FieldInfo>)> = structs.iter().collect();
+
+    let needs_hashmap = all_struct_refs
+        .iter()
+        .any(|(_, fields)| fields.iter().any(|f| f.rust_type.contains("HashMap")));
+    let needs_streaming_blob = all_struct_refs
+        .iter()
+        .any(|(_, fields)| fields.iter().any(|f| f.rust_type.contains("StreamingBlob")));
+    let needs_types = category_needs_types(&all_struct_refs, resolved);
+
+    if needs_hashmap {
+        writeln!(out, "use std::collections::HashMap;")?;
+        writeln!(out)?;
+    }
+
+    if config.uses_serde() {
+        writeln!(out, "use serde::{{Deserialize, Serialize}};")?;
+        writeln!(out)?;
+    }
+
+    if needs_streaming_blob {
+        writeln!(out, "use crate::request::StreamingBlob;")?;
+        writeln!(out)?;
+    }
+
+    if !needs_types.is_empty() {
+        let types_list = needs_types.join(", ");
+        writeln!(out, "use crate::types::{{{types_list}}};")?;
+        writeln!(out)?;
+    }
+
+    // Write all structs
+    for (name, fields) in structs {
+        write_struct(
+            &mut out,
+            name,
+            fields,
+            config.emit_http_bindings,
+            display_name,
+            config,
+        )?;
+    }
+
+    files.insert(format!("{kind}.rs"), out);
     Ok(())
 }
 
