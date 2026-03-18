@@ -16,6 +16,11 @@
 //! |----------|---------|-------------|
 //! | `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address |
 //! | `SERVICES` | *(empty = all)* | Comma-separated list of services to enable |
+//! | `S3_SKIP_SIGNATURE_VALIDATION` | `true` | Skip S3 SigV4 verification |
+//! | `DYNAMODB_SKIP_SIGNATURE_VALIDATION` | `true` | Skip DynamoDB SigV4 verification |
+//! | `SQS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SQS SigV4 verification |
+//! | `SSM_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SSM SigV4 verification |
+//! | `SNS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SNS SigV4 verification |
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 //! | `LOG_LEVEL` | `info` | Log level filter |
 //! | `RUST_LOG` | *(unset)* | Fine-grained tracing filter (overrides `LOG_LEVEL`) |
@@ -144,6 +149,7 @@ fn build_s3_http_config(config: &S3Config) -> S3HttpConfig {
     S3HttpConfig {
         domain: config.s3_domain.clone(),
         virtual_hosting: config.s3_virtual_hosting,
+        skip_signature_validation: config.s3_skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider: credential_provider.clone(),
     }
@@ -155,6 +161,7 @@ fn build_dynamodb_http_config(config: &DynamoDBConfig) -> DynamoDBHttpConfig {
     let credential_provider = build_credential_provider();
 
     DynamoDBHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -166,6 +173,7 @@ fn build_sqs_http_config(config: &SqsConfig) -> SqsHttpConfig {
     let credential_provider = build_credential_provider();
 
     SqsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -177,6 +185,7 @@ fn build_ssm_http_config(config: &SsmConfig) -> SsmHttpConfig {
     let credential_provider = build_credential_provider();
 
     SsmHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -188,6 +197,7 @@ fn build_sns_http_config(config: &SnsConfig) -> SnsHttpConfig {
     let credential_provider = build_credential_provider();
 
     SnsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -199,6 +209,7 @@ fn build_lambda_http_config(config: &LambdaConfig) -> LambdaHttpConfig {
     let credential_provider = build_credential_provider();
 
     LambdaHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -210,6 +221,7 @@ fn build_events_http_config(config: &EventsConfig) -> EventsHttpConfig {
     let credential_provider = build_credential_provider();
 
     EventsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -221,6 +233,7 @@ fn build_logs_http_config(config: &LogsConfig) -> LogsHttpConfig {
     let credential_provider = build_credential_provider();
 
     LogsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
         region: config.default_region.clone(),
         credential_provider,
     }
@@ -421,7 +434,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     #[cfg(feature = "dynamodb")]
     if is_enabled("dynamodb") {
         let dynamodb_config = DynamoDBConfig::from_env();
-        info!("initializing DynamoDB service");
+        info!(
+            dynamodb_skip_signature_validation = dynamodb_config.skip_signature_validation,
+            "initializing DynamoDB service",
+        );
         let dynamodb_provider = RustStackDynamoDB::new(dynamodb_config.clone());
         let dynamodb_handler = RustStackDynamoDBHandler::new(Arc::new(dynamodb_provider));
         let dynamodb_http_config = build_dynamodb_http_config(&dynamodb_config);
@@ -436,7 +452,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     #[cfg(feature = "sqs")]
     let sqs_provider_arc: Option<Arc<RustStackSqs>> = if is_enabled("sqs") {
         let sqs_config = SqsConfig::from_env();
-        info!("initializing SQS service");
+        info!(
+            sqs_skip_signature_validation = sqs_config.skip_signature_validation,
+            "initializing SQS service",
+        );
         let sqs_provider = Arc::new(RustStackSqs::new(sqs_config.clone()));
         let sqs_handler = RustStackSqsHandler::new(Arc::clone(&sqs_provider));
         let sqs_http_config = build_sqs_http_config(&sqs_config);
@@ -451,7 +470,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     #[cfg(feature = "ssm")]
     if is_enabled("ssm") {
         let ssm_config = SsmConfig::from_env();
-        info!("initializing SSM service");
+        info!(
+            ssm_skip_signature_validation = ssm_config.skip_signature_validation,
+            "initializing SSM service",
+        );
         let ssm_provider = RustStackSsm::new(ssm_config.clone());
         let ssm_handler = RustStackSsmHandler::new(Arc::new(ssm_provider));
         let ssm_http_config = build_ssm_http_config(&ssm_config);
@@ -463,7 +485,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     #[cfg(feature = "sns")]
     if is_enabled("sns") {
         let sns_config = SnsConfig::from_env();
-        info!("initializing SNS service");
+        info!(
+            sns_skip_signature_validation = sns_config.skip_signature_validation,
+            "initializing SNS service",
+        );
         let sqs_publisher: Arc<dyn ruststack_sns_core::publisher::SqsPublisher> =
             if let Some(ref sqs) = sqs_provider_arc {
                 Arc::new(RustStackSqsPublisher::new(
@@ -484,7 +509,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     #[cfg(feature = "events")]
     if is_enabled("events") {
         let events_config = EventsConfig::from_env();
-        info!("initializing EventBridge service");
+        info!(
+            events_skip_signature_validation = events_config.skip_signature_validation,
+            "initializing EventBridge service",
+        );
         let delivery: Arc<dyn ruststack_events_core::delivery::TargetDelivery> =
             if let Some(ref sqs) = sqs_provider_arc {
                 Arc::new(LocalTargetDelivery::new(
@@ -507,7 +535,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     #[cfg(feature = "logs")]
     if is_enabled("logs") {
         let logs_config = LogsConfig::from_env();
-        info!("initializing CloudWatch Logs service");
+        info!(
+            logs_skip_signature_validation = logs_config.skip_signature_validation,
+            "initializing CloudWatch Logs service",
+        );
         let logs_provider = RustStackLogs::new(logs_config.clone());
         let logs_handler = RustStackLogsHandler::new(Arc::new(logs_provider));
         let logs_http_config = build_logs_http_config(&logs_config);
@@ -520,6 +551,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     if is_enabled("lambda") {
         let lambda_config = LambdaConfig::from_env();
         info!(
+            lambda_skip_signature_validation = lambda_config.skip_signature_validation,
             lambda_docker_enabled = lambda_config.docker_enabled,
             "initializing Lambda service",
         );
@@ -537,6 +569,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         info!(
             s3_domain = %s3_config.s3_domain,
             s3_virtual_hosting = s3_config.s3_virtual_hosting,
+            s3_skip_signature_validation = s3_config.s3_skip_signature_validation,
             "initializing S3 service",
         );
         let s3_provider = RustStackS3::new(s3_config.clone());
@@ -663,6 +696,10 @@ mod tests {
 
         assert_eq!(http_config.domain, config.s3_domain);
         assert_eq!(http_config.virtual_hosting, config.s3_virtual_hosting);
+        assert_eq!(
+            http_config.skip_signature_validation,
+            config.s3_skip_signature_validation
+        );
         assert_eq!(http_config.region, config.default_region);
     }
 
@@ -672,6 +709,10 @@ mod tests {
         let config = DynamoDBConfig::from_env();
         let http_config = build_dynamodb_http_config(&config);
 
+        assert_eq!(
+            http_config.skip_signature_validation,
+            config.skip_signature_validation
+        );
         assert_eq!(http_config.region, config.default_region);
     }
 }

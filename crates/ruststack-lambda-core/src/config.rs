@@ -5,6 +5,8 @@ use std::env;
 /// Lambda service configuration.
 #[derive(Debug, Clone)]
 pub struct LambdaConfig {
+    /// Skip signature validation (default: true for local dev).
+    pub skip_signature_validation: bool,
     /// Default AWS region.
     pub default_region: String,
     /// Default AWS account ID.
@@ -21,6 +23,7 @@ impl LambdaConfig {
     /// Create configuration from environment variables.
     ///
     /// Reads from:
+    /// - `LAMBDA_SKIP_SIGNATURE_VALIDATION` (default: `true`)
     /// - `DEFAULT_REGION` (default: `us-east-1`)
     /// - `DEFAULT_ACCOUNT_ID` (default: `000000000000`)
     /// - `GATEWAY_HOST` (default: `localhost`)
@@ -29,6 +32,7 @@ impl LambdaConfig {
     #[must_use]
     pub fn from_env() -> Self {
         Self {
+            skip_signature_validation: env_bool("LAMBDA_SKIP_SIGNATURE_VALIDATION", true),
             default_region: env::var("DEFAULT_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
             account_id: env::var("DEFAULT_ACCOUNT_ID")
                 .unwrap_or_else(|_| "000000000000".to_owned()),
@@ -45,6 +49,7 @@ impl LambdaConfig {
 impl Default for LambdaConfig {
     fn default() -> Self {
         Self {
+            skip_signature_validation: true,
             default_region: "us-east-1".to_owned(),
             account_id: "000000000000".to_owned(),
             host: "localhost".to_owned(),
@@ -67,6 +72,7 @@ mod tests {
     #[test]
     fn test_should_create_default_config() {
         let config = LambdaConfig::default();
+        assert!(config.skip_signature_validation);
         assert_eq!(config.default_region, "us-east-1");
         assert_eq!(config.account_id, "000000000000");
         assert_eq!(config.host, "localhost");
