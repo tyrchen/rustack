@@ -111,6 +111,15 @@ use ruststack_logs_core::provider::RustStackLogs;
 #[cfg(feature = "logs")]
 use ruststack_logs_http::service::{LogsHttpConfig, LogsHttpService};
 
+#[cfg(feature = "kms")]
+use ruststack_kms_core::config::KmsConfig;
+#[cfg(feature = "kms")]
+use ruststack_kms_core::handler::RustStackKmsHandler;
+#[cfg(feature = "kms")]
+use ruststack_kms_core::provider::RustStackKms;
+#[cfg(feature = "kms")]
+use ruststack_kms_http::service::{KmsHttpConfig, KmsHttpService};
+
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
 #[cfg(feature = "s3")]
@@ -239,6 +248,18 @@ fn build_logs_http_config(config: &LogsConfig) -> LogsHttpConfig {
     }
 }
 
+/// Build the [`KmsHttpConfig`] from the [`KmsConfig`].
+#[cfg(feature = "kms")]
+fn build_kms_http_config(config: &KmsConfig) -> KmsHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    KmsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -249,7 +270,8 @@ fn build_logs_http_config(config: &LogsConfig) -> LogsHttpConfig {
     feature = "sns",
     feature = "lambda",
     feature = "events",
-    feature = "logs"
+    feature = "logs",
+    feature = "kms"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -329,6 +351,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "lambda" && cfg!(feature = "lambda"))
         || (name == "events" && cfg!(feature = "events"))
         || (name == "logs" && cfg!(feature = "logs"))
+        || (name == "kms" && cfg!(feature = "kms"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -370,6 +393,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "logs") {
             all.push("logs".to_string());
+        }
+        if cfg!(feature = "kms") {
+            all.push("kms".to_string());
         }
         all
     } else {
@@ -546,6 +572,21 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         services.push(Box::new(service::LogsServiceRouter::new(logs_service)));
     }
 
+    // ----- KMS (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "kms")]
+    if is_enabled("kms") {
+        let kms_config = KmsConfig::from_env();
+        info!(
+            kms_skip_signature_validation = kms_config.skip_signature_validation,
+            "initializing KMS service",
+        );
+        let kms_provider = RustStackKms::new(kms_config.clone());
+        let kms_handler = RustStackKmsHandler::new(Arc::new(kms_provider));
+        let kms_http_config = build_kms_http_config(&kms_config);
+        let kms_service = KmsHttpService::new(Arc::new(kms_handler), kms_http_config);
+        services.push(Box::new(service::KmsServiceRouter::new(kms_service)));
+    }
+
     // ----- Lambda (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "lambda")]
     if is_enabled("lambda") {
@@ -686,6 +727,7 @@ mod tests {
         assert_eq!(is_compiled_in("lambda"), cfg!(feature = "lambda"));
         assert_eq!(is_compiled_in("events"), cfg!(feature = "events"));
         assert_eq!(is_compiled_in("logs"), cfg!(feature = "logs"));
+        assert_eq!(is_compiled_in("kms"), cfg!(feature = "kms"));
     }
 
     #[cfg(feature = "s3")]
