@@ -25,11 +25,7 @@ jobs:
         run: |
           cargo build --release -p ruststack-server
 
-          S3_SKIP_SIGNATURE_VALIDATION=true \
-          DYNAMODB_SKIP_SIGNATURE_VALIDATION=true \
-          SQS_SKIP_SIGNATURE_VALIDATION=true \
-          SSM_SKIP_SIGNATURE_VALIDATION=true \
-          SNS_SKIP_SIGNATURE_VALIDATION=true \
+          ACCESS_KEY=test SECRET_KEY=test \
           GATEWAY_LISTEN=0.0.0.0:4566 \
           LOG_LEVEL=warn \
           cargo run --release -p ruststack-server &

@@ -40,8 +40,6 @@ pub struct S3HttpConfig {
     pub domain: String,
     /// Whether to enable virtual-hosted-style bucket addressing.
     pub virtual_hosting: bool,
-    /// Whether to skip SigV4 signature validation (useful for development).
-    pub skip_signature_validation: bool,
     /// The AWS region this service operates in.
     pub region: String,
     /// Optional credential provider for SigV4 and presigned URL verification.
@@ -53,7 +51,6 @@ impl std::fmt::Debug for S3HttpConfig {
         f.debug_struct("S3HttpConfig")
             .field("domain", &self.domain)
             .field("virtual_hosting", &self.virtual_hosting)
-            .field("skip_signature_validation", &self.skip_signature_validation)
             .field("region", &self.region)
             .field(
                 "credential_provider",
@@ -68,7 +65,6 @@ impl Default for S3HttpConfig {
         Self {
             domain: "s3.localhost".to_owned(),
             virtual_hosting: true,
-            skip_signature_validation: true,
             region: "us-east-1".to_owned(),
             credential_provider: None,
         }
@@ -248,42 +244,40 @@ async fn process_request<H: S3Handler>(
         }
     }
 
-    // 5. Authentication.
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let has_presigned = parts
-                .uri
-                .query()
-                .is_some_and(|q| q.contains("X-Amz-Signature"));
+    // 5. Authentication (if credential provider is configured).
+    if let Some(ref cred_provider) = config.credential_provider {
+        let has_presigned = parts
+            .uri
+            .query()
+            .is_some_and(|q| q.contains("X-Amz-Signature"));
 
-            let auth_result = if has_presigned {
-                ruststack_auth::verify_presigned(&parts, cred_provider.as_ref())
-            } else if let Some(auth_header) = parts
-                .headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-            {
-                if ruststack_auth::is_sigv2(auth_header) {
-                    ruststack_auth::verify_sigv2(&parts, cred_provider.as_ref())
-                } else {
-                    let body_hash = ruststack_auth::hash_payload(&body);
-                    ruststack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-                }
+        let auth_result = if has_presigned {
+            ruststack_auth::verify_presigned(&parts, cred_provider.as_ref())
+        } else if let Some(auth_header) = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+        {
+            if ruststack_auth::is_sigv2(auth_header) {
+                ruststack_auth::verify_sigv2(&parts, cred_provider.as_ref())
             } else {
-                // Anonymous request — allow through.
-                Ok(ruststack_auth::AuthResult {
-                    access_key_id: String::new(),
-                    region: String::new(),
-                    service: String::new(),
-                    signed_headers: Vec::new(),
-                })
-            };
-
-            if let Err(auth_err) = auth_result {
-                warn!(error = %auth_err, request_id, "authentication failed");
-                let s3_err = S3Error::with_message(S3ErrorCode::AccessDenied, auth_err.to_string());
-                return error_to_response(&s3_err, request_id);
+                let body_hash = ruststack_auth::hash_payload(&body);
+                ruststack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
             }
+        } else {
+            // Anonymous request — allow through.
+            Ok(ruststack_auth::AuthResult {
+                access_key_id: String::new(),
+                region: String::new(),
+                service: String::new(),
+                signed_headers: Vec::new(),
+            })
+        };
+
+        if let Err(auth_err) = auth_result {
+            warn!(error = %auth_err, request_id, "authentication failed");
+            let s3_err = S3Error::with_message(S3ErrorCode::AccessDenied, auth_err.to_string());
+            return error_to_response(&s3_err, request_id);
         }
     }
 
@@ -548,7 +542,6 @@ mod tests {
         let config = S3HttpConfig::default();
         assert_eq!(config.domain, "s3.localhost");
         assert!(config.virtual_hosting);
-        assert!(config.skip_signature_validation);
         assert_eq!(config.region, "us-east-1");
         assert!(config.credential_provider.is_none());
     }

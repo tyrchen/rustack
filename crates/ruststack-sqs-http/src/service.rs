@@ -19,8 +19,6 @@ use crate::router::resolve_operation;
 /// Configuration for the SQS HTTP service.
 #[derive(Clone)]
 pub struct SqsHttpConfig {
-    /// Whether to skip AWS signature validation.
-    pub skip_signature_validation: bool,
     /// The AWS region this service is running in.
     pub region: String,
     /// Credential provider for signature validation.
@@ -30,7 +28,6 @@ pub struct SqsHttpConfig {
 impl std::fmt::Debug for SqsHttpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SqsHttpConfig")
-            .field("skip_signature_validation", &self.skip_signature_validation)
             .field("region", &self.region)
             .field(
                 "credential_provider",
@@ -43,7 +40,6 @@ impl std::fmt::Debug for SqsHttpConfig {
 impl Default for SqsHttpConfig {
     fn default() -> Self {
         Self {
-            skip_signature_validation: true,
             region: "us-east-1".to_owned(),
             credential_provider: None,
         }
@@ -127,19 +123,17 @@ async fn process_request<H: SqsHandler>(
         Err(err) => return error_to_response(&err, request_id),
     };
 
-    // 4. Authenticate (if enabled).
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let body_hash = ruststack_auth::hash_payload(&body);
-            if let Err(auth_err) =
-                ruststack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-            {
-                let err = SqsError::new(
-                    ruststack_sqs_model::error::SqsErrorCode::InvalidSecurity,
-                    auth_err.to_string(),
-                );
-                return error_to_response(&err, request_id);
-            }
+    // 4. Authenticate (if credential provider is configured).
+    if let Some(ref cred_provider) = config.credential_provider {
+        let body_hash = ruststack_auth::hash_payload(&body);
+        if let Err(auth_err) =
+            ruststack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
+        {
+            let err = SqsError::new(
+                ruststack_sqs_model::error::SqsErrorCode::InvalidSecurity,
+                auth_err.to_string(),
+            );
+            return error_to_response(&err, request_id);
         }
     }
 

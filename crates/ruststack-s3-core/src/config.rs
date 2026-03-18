@@ -36,10 +36,6 @@ pub struct S3Config {
     #[builder(default = String::from("s3.localhost.localstack.cloud"))]
     pub s3_domain: String,
 
-    /// Whether to skip signature validation on incoming requests.
-    #[builder(default = true)]
-    pub s3_skip_signature_validation: bool,
-
     /// Maximum object size (in bytes) kept entirely in memory before spilling to disk.
     #[builder(default = 524_288)]
     pub s3_max_memory_object_size: usize,
@@ -67,7 +63,6 @@ impl Default for S3Config {
             gateway_listen: String::from("0.0.0.0:4566"),
             s3_virtual_hosting: true,
             s3_domain: String::from("s3.localhost.localstack.cloud"),
-            s3_skip_signature_validation: true,
             s3_max_memory_object_size: 524_288,
             default_region: String::from("us-east-1"),
             log_level: String::from("info"),
@@ -87,7 +82,6 @@ impl S3Config {
     /// | `GATEWAY_LISTEN` | `0.0.0.0:4566` |
     /// | `S3_VIRTUAL_HOSTING` | `true` |
     /// | `S3_DOMAIN` | `s3.localhost.localstack.cloud` |
-    /// | `S3_SKIP_SIGNATURE_VALIDATION` | `true` |
     /// | `S3_MAX_MEMORY_OBJECT_SIZE` | `524288` |
     /// | `DEFAULT_REGION` | `us-east-1` |
     /// | `LOG_LEVEL` | `info` |
@@ -114,9 +108,6 @@ impl S3Config {
         }
         if let Ok(v) = std::env::var("S3_DOMAIN") {
             config.s3_domain = v;
-        }
-        if let Ok(v) = std::env::var("S3_SKIP_SIGNATURE_VALIDATION") {
-            config.s3_skip_signature_validation = parse_bool(&v);
         }
         if let Ok(v) = std::env::var("S3_MAX_MEMORY_OBJECT_SIZE") {
             if let Ok(n) = v.parse::<usize>() {
@@ -155,7 +146,6 @@ mod tests {
         assert_eq!(config.gateway_listen, "0.0.0.0:4566");
         assert!(config.s3_virtual_hosting);
         assert_eq!(config.s3_domain, "s3.localhost.localstack.cloud");
-        assert!(config.s3_skip_signature_validation);
         assert_eq!(config.s3_max_memory_object_size, 524_288);
         assert_eq!(config.default_region, "us-east-1");
         assert_eq!(config.log_level, "info");
@@ -175,7 +165,6 @@ mod tests {
             .gateway_listen("127.0.0.1:9999".into())
             .s3_virtual_hosting(false)
             .s3_domain("custom.domain".into())
-            .s3_skip_signature_validation(false)
             .s3_max_memory_object_size(1024)
             .default_region("eu-west-1".into())
             .log_level("debug".into())
@@ -186,7 +175,6 @@ mod tests {
         assert_eq!(config.gateway_listen, "127.0.0.1:9999");
         assert!(!config.s3_virtual_hosting);
         assert_eq!(config.s3_domain, "custom.domain");
-        assert!(!config.s3_skip_signature_validation);
         assert_eq!(config.s3_max_memory_object_size, 1024);
         assert_eq!(config.default_region, "eu-west-1");
         assert_eq!(config.log_level, "debug");
