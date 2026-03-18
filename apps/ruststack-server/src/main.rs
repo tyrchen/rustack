@@ -25,6 +25,8 @@
 //! | `LOG_LEVEL` | `info` | Log level filter |
 //! | `RUST_LOG` | *(unset)* | Fine-grained tracing filter (overrides `LOG_LEVEL`) |
 
+#[cfg(feature = "events")]
+mod events_bridge;
 mod gateway;
 #[cfg(feature = "s3")]
 mod handler;
@@ -88,6 +90,17 @@ use ruststack_lambda_core::handler::RustStackLambdaHandler;
 use ruststack_lambda_core::provider::RustStackLambda;
 #[cfg(feature = "lambda")]
 use ruststack_lambda_http::service::{LambdaHttpConfig, LambdaHttpService};
+
+#[cfg(feature = "events")]
+use crate::events_bridge::LocalTargetDelivery;
+#[cfg(feature = "events")]
+use ruststack_events_core::config::EventsConfig;
+#[cfg(feature = "events")]
+use ruststack_events_core::handler::RustStackEventsHandler;
+#[cfg(feature = "events")]
+use ruststack_events_core::provider::RustStackEvents;
+#[cfg(feature = "events")]
+use ruststack_events_http::service::{EventsHttpConfig, EventsHttpService};
 
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
@@ -193,6 +206,18 @@ fn build_lambda_http_config(config: &LambdaConfig) -> LambdaHttpConfig {
     }
 }
 
+/// Build the [`EventsHttpConfig`] from the [`EventsConfig`].
+#[cfg(feature = "events")]
+fn build_events_http_config(config: &EventsConfig) -> EventsHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    EventsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -201,7 +226,8 @@ fn build_lambda_http_config(config: &LambdaConfig) -> LambdaHttpConfig {
     feature = "sqs",
     feature = "ssm",
     feature = "sns",
-    feature = "lambda"
+    feature = "lambda",
+    feature = "events"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -279,6 +305,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "ssm" && cfg!(feature = "ssm"))
         || (name == "sns" && cfg!(feature = "sns"))
         || (name == "lambda" && cfg!(feature = "lambda"))
+        || (name == "events" && cfg!(feature = "events"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -314,6 +341,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "lambda") {
             all.push("lambda".to_string());
+        }
+        if cfg!(feature = "events") {
+            all.push("events".to_string());
         }
         all
     } else {
@@ -447,6 +477,32 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         let sns_http_config = build_sns_http_config(&sns_config);
         let sns_service = SnsHttpService::new(Arc::new(sns_handler), sns_http_config);
         services.push(Box::new(service::SnsServiceRouter::new(sns_service)));
+    }
+
+    // ----- EventBridge (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "events")]
+    if is_enabled("events") {
+        let events_config = EventsConfig::from_env();
+        info!(
+            events_skip_signature_validation = events_config.skip_signature_validation,
+            "initializing EventBridge service",
+        );
+        let delivery: Arc<dyn ruststack_events_core::delivery::TargetDelivery> =
+            if let Some(ref sqs) = sqs_provider_arc {
+                Arc::new(LocalTargetDelivery::new(
+                    Arc::clone(sqs),
+                    events_config.account_id.clone(),
+                    events_config.host.clone(),
+                    events_config.port,
+                ))
+            } else {
+                Arc::new(ruststack_events_core::delivery::NoopTargetDelivery)
+            };
+        let events_provider = RustStackEvents::new(events_config.clone(), delivery);
+        let events_handler = RustStackEventsHandler::new(Arc::new(events_provider));
+        let events_http_config = build_events_http_config(&events_config);
+        let events_service = EventsHttpService::new(Arc::new(events_handler), events_http_config);
+        services.push(Box::new(service::EventsServiceRouter::new(events_service)));
     }
 
     // ----- Lambda (register before S3: S3 is the catch-all) -----
@@ -587,6 +643,7 @@ mod tests {
         assert_eq!(is_compiled_in("ssm"), cfg!(feature = "ssm"));
         assert_eq!(is_compiled_in("sns"), cfg!(feature = "sns"));
         assert_eq!(is_compiled_in("lambda"), cfg!(feature = "lambda"));
+        assert_eq!(is_compiled_in("events"), cfg!(feature = "events"));
     }
 
     #[cfg(feature = "s3")]

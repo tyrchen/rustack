@@ -2157,6 +2157,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruststack-events-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "http 1.4.0",
+ "ipnet",
+ "ruststack-auth",
+ "ruststack-core",
+ "ruststack-events-http",
+ "ruststack-events-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-events-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "ruststack-auth",
+ "ruststack-events-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-events-model"
+version = "0.1.0"
+dependencies = [
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ruststack-integration"
 version = "0.1.0"
 dependencies = [
@@ -2341,6 +2395,8 @@ dependencies = [
  "ruststack-core",
  "ruststack-dynamodb-core",
  "ruststack-dynamodb-http",
+ "ruststack-events-core",
+ "ruststack-events-http",
  "ruststack-lambda-core",
  "ruststack-lambda-http",
  "ruststack-s3-core",

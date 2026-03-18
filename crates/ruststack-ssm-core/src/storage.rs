@@ -670,7 +670,7 @@ fn resolve_version<'a>(
         Some(ParameterSelector::Version(v)) => record.versions.get(v).ok_or_else(|| {
             SsmError::with_message(
                 ruststack_ssm_model::error::SsmErrorCode::ParameterVersionNotFound,
-                format!("Version {} not found for parameter {}", v, record.name,),
+                format!("Version {} not found for parameter {}", v, record.name),
             )
         }),
         Some(ParameterSelector::Label(label)) => {
@@ -682,7 +682,7 @@ fn resolve_version<'a>(
                 .ok_or_else(|| {
                     SsmError::with_message(
                         ruststack_ssm_model::error::SsmErrorCode::ParameterVersionNotFound,
-                        format!("Label '{}' not found for parameter {}", label, record.name,),
+                        format!("Label '{}' not found for parameter {}", label, record.name),
                     )
                 })
         }

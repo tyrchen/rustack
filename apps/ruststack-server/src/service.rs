@@ -451,3 +451,64 @@ mod lambda_router {
 
 #[cfg(feature = "lambda")]
 pub use lambda_router::LambdaServiceRouter;
+
+// ---------------------------------------------------------------------------
+// EventBridge
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "events")]
+mod events_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_events_http::dispatch::EventsHandler;
+    use ruststack_events_http::service::EventsHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the EventBridge service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `AWSEvents.`.
+    pub struct EventsServiceRouter<H: EventsHandler> {
+        inner: EventsHttpService<H>,
+    }
+
+    impl<H: EventsHandler> EventsServiceRouter<H> {
+        /// Wrap an [`EventsHttpService`] in a router.
+        pub fn new(inner: EventsHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: EventsHandler> ServiceRouter for EventsServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "events"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("AWSEvents."))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "events")]
+pub use events_router::EventsServiceRouter;

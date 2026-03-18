@@ -498,7 +498,7 @@ impl VersionedKeyStore {
         max_keys: usize,
     ) -> ListResult {
         // Build an iterator over the "current" (latest non-DM) object per key.
-        let current_objects = self.objects.iter().filter_map(|(_, versions)| {
+        let current_objects = self.objects.values().filter_map(|versions| {
             // Only consider keys whose latest entry is NOT a delete marker.
             let latest = versions.first()?;
             if latest.is_delete_marker() {

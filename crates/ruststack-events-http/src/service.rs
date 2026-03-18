@@ -1,4 +1,4 @@
-//! SSM HTTP service implementing the hyper `Service` trait.
+//! EventBridge HTTP service implementing the hyper `Service` trait.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -9,16 +9,16 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 
-use ruststack_ssm_model::error::SsmError;
+use ruststack_events_model::error::EventsError;
 
-use crate::body::SsmResponseBody;
-use crate::dispatch::{SsmHandler, dispatch_operation};
+use crate::body::EventsResponseBody;
+use crate::dispatch::{EventsHandler, dispatch_operation};
 use crate::response::{CONTENT_TYPE, error_to_response};
 use crate::router::resolve_operation;
 
-/// Configuration for the SSM HTTP service.
+/// Configuration for the EventBridge HTTP service.
 #[derive(Clone)]
-pub struct SsmHttpConfig {
+pub struct EventsHttpConfig {
     /// Whether to skip AWS signature validation.
     pub skip_signature_validation: bool,
     /// The AWS region this service is running in.
@@ -27,9 +27,9 @@ pub struct SsmHttpConfig {
     pub credential_provider: Option<Arc<dyn ruststack_auth::CredentialProvider>>,
 }
 
-impl std::fmt::Debug for SsmHttpConfig {
+impl std::fmt::Debug for EventsHttpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SsmHttpConfig")
+        f.debug_struct("EventsHttpConfig")
             .field("skip_signature_validation", &self.skip_signature_validation)
             .field("region", &self.region)
             .field(
@@ -40,7 +40,7 @@ impl std::fmt::Debug for SsmHttpConfig {
     }
 }
 
-impl Default for SsmHttpConfig {
+impl Default for EventsHttpConfig {
     fn default() -> Self {
         Self {
             skip_signature_validation: true,
@@ -50,19 +50,19 @@ impl Default for SsmHttpConfig {
     }
 }
 
-/// Hyper `Service` implementation for SSM.
+/// Hyper `Service` implementation for EventBridge.
 ///
-/// Wraps an [`SsmHandler`] implementation and routes incoming HTTP
-/// requests to the appropriate SSM operation handler.
+/// Wraps an [`EventsHandler`] implementation and routes incoming HTTP
+/// requests to the appropriate EventBridge operation handler.
 #[derive(Debug)]
-pub struct SsmHttpService<H: SsmHandler> {
+pub struct EventsHttpService<H: EventsHandler> {
     handler: Arc<H>,
-    config: Arc<SsmHttpConfig>,
+    config: Arc<EventsHttpConfig>,
 }
 
-impl<H: SsmHandler> SsmHttpService<H> {
-    /// Create a new `SsmHttpService`.
-    pub fn new(handler: Arc<H>, config: SsmHttpConfig) -> Self {
+impl<H: EventsHandler> EventsHttpService<H> {
+    /// Create a new `EventsHttpService`.
+    pub fn new(handler: Arc<H>, config: EventsHttpConfig) -> Self {
         Self {
             handler,
             config: Arc::new(config),
@@ -70,7 +70,7 @@ impl<H: SsmHandler> SsmHttpService<H> {
     }
 }
 
-impl<H: SsmHandler> Clone for SsmHttpService<H> {
+impl<H: EventsHandler> Clone for EventsHttpService<H> {
     fn clone(&self) -> Self {
         Self {
             handler: Arc::clone(&self.handler),
@@ -79,8 +79,8 @@ impl<H: SsmHandler> Clone for SsmHttpService<H> {
     }
 }
 
-impl<H: SsmHandler> hyper::service::Service<http::Request<Incoming>> for SsmHttpService<H> {
-    type Response = http::Response<SsmResponseBody>;
+impl<H: EventsHandler> hyper::service::Service<http::Request<Incoming>> for EventsHttpService<H> {
+    type Response = http::Response<EventsResponseBody>;
     type Error = Infallible;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -97,18 +97,21 @@ impl<H: SsmHandler> hyper::service::Service<http::Request<Incoming>> for SsmHttp
     }
 }
 
-/// Process a single SSM HTTP request through the full pipeline.
-async fn process_request<H: SsmHandler>(
+/// Process a single EventBridge HTTP request through the full pipeline.
+async fn process_request<H: EventsHandler>(
     req: http::Request<Incoming>,
     handler: &H,
-    config: &SsmHttpConfig,
+    config: &EventsHttpConfig,
     request_id: &str,
-) -> http::Response<SsmResponseBody> {
+) -> http::Response<EventsResponseBody> {
     let (parts, incoming) = req.into_parts();
 
-    // 1. Verify POST method (SSM only accepts POST).
+    // 1. Verify POST method (EventBridge only accepts POST).
     if parts.method != http::Method::POST {
-        let err = SsmError::validation(format!("SSM requires POST method, got {}", parts.method));
+        let err = EventsError::validation(format!(
+            "EventBridge requires POST method, got {}",
+            parts.method,
+        ));
         return error_to_response(&err, request_id);
     }
 
@@ -131,8 +134,8 @@ async fn process_request<H: SsmHandler>(
             if let Err(auth_err) =
                 ruststack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
             {
-                let err = SsmError::with_message(
-                    ruststack_ssm_model::error::SsmErrorCode::ValidationException,
+                let err = EventsError::with_message(
+                    ruststack_events_model::error::EventsErrorCode::ValidationException,
                     auth_err.to_string(),
                 );
                 return error_to_response(&err, request_id);
@@ -148,19 +151,19 @@ async fn process_request<H: SsmHandler>(
 }
 
 /// Collect the incoming body into a single `Bytes` buffer.
-async fn collect_body(incoming: Incoming) -> Result<Bytes, SsmError> {
+async fn collect_body(incoming: Incoming) -> Result<Bytes, EventsError> {
     incoming
         .collect()
         .await
         .map(http_body_util::Collected::to_bytes)
-        .map_err(|e| SsmError::internal_error(format!("Failed to read request body: {e}")))
+        .map_err(|e| EventsError::internal_error(format!("Failed to read request body: {e}")))
 }
 
-/// Add common response headers to every SSM response.
+/// Add common response headers to every EventBridge response.
 fn add_common_headers(
-    mut response: http::Response<SsmResponseBody>,
+    mut response: http::Response<EventsResponseBody>,
     request_id: &str,
-) -> http::Response<SsmResponseBody> {
+) -> http::Response<EventsResponseBody> {
     let headers = response.headers_mut();
 
     if let Ok(hv) = http::HeaderValue::from_str(request_id) {
