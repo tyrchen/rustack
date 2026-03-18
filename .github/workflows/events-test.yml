@@ -1,0 +1,321 @@
+name: events-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  events-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and start RustStack
+        id: ruststack
+        run: |
+          cargo build --release -p ruststack-server
+
+          S3_SKIP_SIGNATURE_VALIDATION=true \
+          DYNAMODB_SKIP_SIGNATURE_VALIDATION=true \
+          SQS_SKIP_SIGNATURE_VALIDATION=true \
+          SSM_SKIP_SIGNATURE_VALIDATION=true \
+          EVENTS_SKIP_SIGNATURE_VALIDATION=true \
+          GATEWAY_LISTEN=0.0.0.0:4566 \
+          LOG_LEVEL=warn \
+          cargo run --release -p ruststack-server &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server did not start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "endpoint=http://localhost:4566" >> "$GITHUB_OUTPUT"
+
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=us-east-1" >> "$GITHUB_ENV"
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+
+      # ── Event Bus CRUD ────────────────────────────────────────────
+      - name: "EventBus: default bus exists"
+        run: |
+          set -euo pipefail
+          BUSES=$(aws events list-event-buses --query "EventBuses[].Name" --output text)
+          echo "$BUSES" | grep -q "default"
+
+      - name: "EventBus: create, describe, delete custom bus"
+        run: |
+          set -euo pipefail
+
+          ARN=$(aws events create-event-bus --name ci-test-bus \
+            --query "EventBusArn" --output text)
+          [ -n "$ARN" ]
+
+          NAME=$(aws events describe-event-bus --name ci-test-bus \
+            --query "Name" --output text)
+          [ "$NAME" = "ci-test-bus" ]
+
+          aws events delete-event-bus --name ci-test-bus
+
+          ! aws events describe-event-bus --name ci-test-bus 2>/dev/null
+
+      - name: "EventBus: cannot delete default bus"
+        run: |
+          ! aws events delete-event-bus --name default 2>/dev/null
+
+      # ── Rule CRUD ─────────────────────────────────────────────────
+      - name: "Rule: PutRule + DescribeRule + ListRules"
+        run: |
+          set -euo pipefail
+
+          RULE_ARN=$(aws events put-rule \
+            --name ci-test-rule \
+            --event-pattern '{"source":["my.ci.app"]}' \
+            --description "CI test rule" \
+            --query "RuleArn" --output text)
+          [ -n "$RULE_ARN" ]
+
+          STATE=$(aws events describe-rule --name ci-test-rule \
+            --query "State" --output text)
+          [ "$STATE" = "ENABLED" ]
+
+          PATTERN=$(aws events describe-rule --name ci-test-rule \
+            --query "EventPattern" --output text)
+          echo "$PATTERN" | grep -q "my.ci.app"
+
+          RULES=$(aws events list-rules --query "Rules[].Name" --output text)
+          echo "$RULES" | grep -q "ci-test-rule"
+
+      - name: "Rule: DisableRule + EnableRule"
+        run: |
+          set -euo pipefail
+
+          aws events disable-rule --name ci-test-rule
+
+          STATE=$(aws events describe-rule --name ci-test-rule \
+            --query "State" --output text)
+          [ "$STATE" = "DISABLED" ]
+
+          aws events enable-rule --name ci-test-rule
+
+          STATE=$(aws events describe-rule --name ci-test-rule \
+            --query "State" --output text)
+          [ "$STATE" = "ENABLED" ]
+
+      # ── Targets ───────────────────────────────────────────────────
+      - name: "Targets: PutTargets + ListTargetsByRule + RemoveTargets"
+        run: |
+          set -euo pipefail
+
+          # Create an SQS queue for the target
+          QUEUE_URL=$(aws sqs create-queue --queue-name ci-events-target \
+            --query "QueueUrl" --output text)
+
+          aws events put-targets --rule ci-test-rule \
+            --targets "Id=sqs-1,Arn=arn:aws:sqs:us-east-1:000000000000:ci-events-target"
+
+          TARGET_COUNT=$(aws events list-targets-by-rule --rule ci-test-rule \
+            --query "Targets | length(@)" --output text)
+          [ "$TARGET_COUNT" = "1" ]
+
+          TARGET_ID=$(aws events list-targets-by-rule --rule ci-test-rule \
+            --query "Targets[0].Id" --output text)
+          [ "$TARGET_ID" = "sqs-1" ]
+
+          aws events remove-targets --rule ci-test-rule --ids sqs-1
+
+          TARGET_COUNT=$(aws events list-targets-by-rule --rule ci-test-rule \
+            --query "Targets | length(@)" --output text)
+          [ "$TARGET_COUNT" = "0" ]
+
+      # ── TestEventPattern ──────────────────────────────────────────
+      - name: "TestEventPattern: exact match"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail-type":"test","detail":{"status":"active"}}' \
+            --event-pattern '{"detail":{"status":["active"]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      - name: "TestEventPattern: no match"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail-type":"test","detail":{"status":"inactive"}}' \
+            --event-pattern '{"detail":{"status":["active"]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "False" ]
+
+      - name: "TestEventPattern: prefix operator"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail":{"region":"us-west-2"}}' \
+            --event-pattern '{"detail":{"region":[{"prefix":"us-"}]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      - name: "TestEventPattern: numeric operator"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail":{"amount":150}}' \
+            --event-pattern '{"detail":{"amount":[{"numeric":[">",100]}]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      - name: "TestEventPattern: anything-but operator"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail":{"status":"active"}}' \
+            --event-pattern '{"detail":{"status":[{"anything-but":"cancelled"}]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      - name: "TestEventPattern: exists operator"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail":{"user_id":"abc"}}' \
+            --event-pattern '{"detail":{"user_id":[{"exists":true}]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      - name: "TestEventPattern: suffix operator"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail":{"file":"image.png"}}' \
+            --event-pattern '{"detail":{"file":[{"suffix":".png"}]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      - name: "TestEventPattern: wildcard operator"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws events test-event-pattern \
+            --event '{"source":"my.app","detail":{"path":"dir/file.txt"}}' \
+            --event-pattern '{"detail":{"path":[{"wildcard":"dir/*.txt"}]}}' \
+            --query "Result" --output text)
+          [ "$RESULT" = "True" ]
+
+      # ── PutEvents + SQS delivery ─────────────────────────────────
+      - name: "PutEvents: deliver to SQS target"
+        run: |
+          set -euo pipefail
+
+          # Re-add the SQS target
+          aws events put-targets --rule ci-test-rule \
+            --targets "Id=sqs-1,Arn=arn:aws:sqs:us-east-1:000000000000:ci-events-target"
+
+          # Put an event
+          RESULT=$(aws events put-events --entries \
+            '[{"Source":"my.ci.app","DetailType":"CITest","Detail":"{\"build\":\"123\"}"}]')
+          FAILED=$(echo "$RESULT" | jq '.FailedEntryCount')
+          [ "$FAILED" = "0" ]
+
+          EVENT_ID=$(echo "$RESULT" | jq -r '.Entries[0].EventId')
+          [ -n "$EVENT_ID" ]
+
+          # Receive from SQS
+          sleep 1
+          MSG=$(aws sqs receive-message \
+            --queue-url "$(aws sqs get-queue-url --queue-name ci-events-target --query QueueUrl --output text)" \
+            --wait-time-seconds 5)
+
+          MSG_COUNT=$(echo "$MSG" | jq '.Messages | length')
+          [ "$MSG_COUNT" = "1" ]
+
+          # Verify event envelope
+          BODY=$(echo "$MSG" | jq -r '.Messages[0].Body')
+          SOURCE=$(echo "$BODY" | jq -r '.source')
+          DETAIL_TYPE=$(echo "$BODY" | jq -r '."detail-type"')
+          VERSION=$(echo "$BODY" | jq -r '.version')
+          BUILD=$(echo "$BODY" | jq -r '.detail.build')
+
+          [ "$SOURCE" = "my.ci.app" ]
+          [ "$DETAIL_TYPE" = "CITest" ]
+          [ "$VERSION" = "0" ]
+          [ "$BUILD" = "123" ]
+
+      - name: "PutEvents: non-matching event not delivered"
+        run: |
+          set -euo pipefail
+
+          # Purge existing messages
+          QUEUE_URL=$(aws sqs get-queue-url --queue-name ci-events-target --query QueueUrl --output text)
+          aws sqs purge-queue --queue-url "$QUEUE_URL" || true
+          sleep 2
+
+          # Put an event with different source (should not match)
+          aws events put-events --entries \
+            '[{"Source":"different.app","DetailType":"Test","Detail":"{}"}]'
+
+          # SQS should be empty
+          MSG=$(aws sqs receive-message --queue-url "$QUEUE_URL" --wait-time-seconds 2)
+          MSG_COUNT=$(echo "$MSG" | jq '.Messages | length // 0')
+          [ "$MSG_COUNT" = "0" ]
+
+      # ── Tags ──────────────────────────────────────────────────────
+      - name: "Tags: tag, list, untag a rule"
+        run: |
+          set -euo pipefail
+
+          RULE_ARN=$(aws events describe-rule --name ci-test-rule \
+            --query "Arn" --output text)
+
+          aws events tag-resource --resource-arn "$RULE_ARN" \
+            --tags "Key=env,Value=ci" "Key=team,Value=platform"
+
+          TAG_COUNT=$(aws events list-tags-for-resource \
+            --resource-arn "$RULE_ARN" \
+            --query "Tags | length(@)" --output text)
+          [ "$TAG_COUNT" = "2" ]
+
+          aws events untag-resource --resource-arn "$RULE_ARN" \
+            --tag-keys "team"
+
+          TAG_COUNT=$(aws events list-tags-for-resource \
+            --resource-arn "$RULE_ARN" \
+            --query "Tags | length(@)" --output text)
+          [ "$TAG_COUNT" = "1" ]
+
+      # ── Cleanup ───────────────────────────────────────────────────
+      - name: "Cleanup"
+        if: always()
+        run: |
+          set -uo pipefail
+          aws events remove-targets --rule ci-test-rule --ids sqs-1 2>/dev/null || true
+          aws events delete-rule --name ci-test-rule 2>/dev/null || true
+          QUEUE_URL=$(aws sqs get-queue-url --queue-name ci-events-target --query QueueUrl --output text 2>/dev/null) || true
+          if [ -n "$QUEUE_URL" ]; then
+            aws sqs delete-queue --queue-url "$QUEUE_URL" 2>/dev/null || true
+          fi
+          echo "Cleanup complete."
