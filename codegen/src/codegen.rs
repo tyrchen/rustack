@@ -30,7 +30,7 @@ pub fn generate_all(
 
     files.insert("types.rs".to_owned(), generate_types(resolved, config)?);
     files.insert("operations.rs".to_owned(), generate_operations(config)?);
-    files.insert("error.rs".to_owned(), generate_error(config)?);
+    files.insert("error.rs".to_owned(), generate_error(resolved, config)?);
     if config.emit_request_wrapper {
         files.insert("request.rs".to_owned(), generate_request(config)?);
     }
@@ -605,7 +605,375 @@ fn generate_operations(config: &ServiceConfig) -> Result<String> {
 }
 
 /// Generate error.rs with error code enum and error struct.
-fn generate_error(config: &ServiceConfig) -> Result<String> {
+fn generate_error(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<String> {
+    if config.emit_request_wrapper {
+        return generate_error_s3(config);
+    }
+    generate_error_json(resolved, config)
+}
+
+/// Generate error.rs for JSON protocol services (SSM, EventBridge, etc.).
+///
+/// Uses the resolved error types from the Smithy model + custom errors from config.
+fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<String> {
+    let header = file_header(config);
+    let prefix = &config.rust_prefix;
+    let name = &config.name;
+    let display_name = &config.display_name;
+
+    let mut out = String::with_capacity(16 * 1024);
+    writeln!(out, "{header}")?;
+    writeln!(out, "//!")?;
+    writeln!(
+        out,
+        "//! {display_name} errors use JSON format with a `__type` field containing the"
+    )?;
+    writeln!(
+        out,
+        "//! short error type name (e.g., `ResourceNotFoundException`)."
+    )?;
+    writeln!(out)?;
+    writeln!(out, "use std::fmt;")?;
+    writeln!(out)?;
+
+    let errors = &resolved.errors;
+
+    // Generate error code enum
+    writeln!(out, "/// Well-known {display_name} error codes.")?;
+    writeln!(
+        out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]"
+    )?;
+    writeln!(out, "#[non_exhaustive]")?;
+    writeln!(out, "pub enum {prefix}ErrorCode {{")?;
+
+    // Find the default variant (ValidationException if present, else first)
+    let default_name = errors
+        .iter()
+        .find(|e| e.name == "ValidationException")
+        .map_or_else(
+            || errors.first().map_or("Unknown", |e| e.name.as_str()),
+            |e| e.name.as_str(),
+        );
+
+    for err in errors {
+        writeln!(out, "    /// {} error.", err.name)?;
+        if err.name == default_name {
+            writeln!(out, "    #[default]")?;
+        }
+        writeln!(out, "    {},", err.name)?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // error_type() and as_str()
+    writeln!(out, "impl {prefix}ErrorCode {{")?;
+    writeln!(
+        out,
+        "    /// Returns the short error type string for the JSON `__type` field."
+    )?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn error_type(&self) -> &'static str {{")?;
+    writeln!(out, "        self.as_str()")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+
+    writeln!(out, "    /// Returns the short error code string.")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn as_str(&self) -> &'static str {{")?;
+    writeln!(out, "        match self {{")?;
+    for err in errors {
+        writeln!(
+            out,
+            "            Self::{} => \"{}\",",
+            err.name, err.wire_name
+        )?;
+    }
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+
+    // default_status_code()
+    writeln!(
+        out,
+        "    /// Returns the default HTTP status code for this error."
+    )?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(
+        out,
+        "    pub fn default_status_code(&self) -> http::StatusCode {{"
+    )?;
+    writeln!(out, "        match self {{")?;
+
+    // Group by status code to produce clean match arms
+    let mut status_groups: BTreeMap<u16, Vec<&str>> = BTreeMap::new();
+    for err in errors {
+        status_groups
+            .entry(err.status_code)
+            .or_default()
+            .push(&err.name);
+    }
+    for (status, codes) in &status_groups {
+        let status_const = status_code_const(*status);
+        let patterns: Vec<String> = codes.iter().map(|c| format!("Self::{c}")).collect();
+        let joined = patterns.join(" | ");
+        writeln!(out, "            {joined} => {status_const},")?;
+    }
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // Display impl
+    writeln!(out, "impl fmt::Display for {prefix}ErrorCode {{")?;
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
+    )?;
+    writeln!(out, "        f.write_str(self.as_str())")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // Error struct (no resource/request_id for JSON services)
+    writeln!(out, "/// An {display_name} error response.")?;
+    writeln!(out, "#[derive(Debug)]")?;
+    writeln!(out, "pub struct {prefix}Error {{")?;
+    writeln!(out, "    /// The error code.")?;
+    writeln!(out, "    pub code: {prefix}ErrorCode,")?;
+    writeln!(out, "    /// A human-readable error message.")?;
+    writeln!(out, "    pub message: String,")?;
+    writeln!(out, "    /// The HTTP status code.")?;
+    writeln!(out, "    pub status_code: http::StatusCode,")?;
+    writeln!(out, "    /// The underlying source error, if any.")?;
+    writeln!(
+        out,
+        "    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,"
+    )?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // Display impl
+    writeln!(out, "impl fmt::Display for {prefix}Error {{")?;
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
+    )?;
+    writeln!(
+        out,
+        "        write!(f, \"{prefix}Error({{}}): {{}}\", self.code, self.message)"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // std::error::Error impl
+    writeln!(out, "impl std::error::Error for {prefix}Error {{")?;
+    writeln!(
+        out,
+        "    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {{"
+    )?;
+    writeln!(
+        out,
+        "        self.source.as_ref().map(|e| e.as_ref() as &(dyn std::error::Error + 'static))"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // Constructors
+    writeln!(out, "impl {prefix}Error {{")?;
+    writeln!(
+        out,
+        "    /// Create a new `{prefix}Error` from an error code."
+    )?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn new(code: {prefix}ErrorCode) -> Self {{")?;
+    writeln!(out, "        Self {{")?;
+    writeln!(out, "            status_code: code.default_status_code(),")?;
+    writeln!(out, "            message: code.as_str().to_owned(),")?;
+    writeln!(out, "            code,")?;
+    writeln!(out, "            source: None,")?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+
+    writeln!(
+        out,
+        "    /// Create a new `{prefix}Error` with a custom message."
+    )?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(
+        out,
+        "    pub fn with_message(code: {prefix}ErrorCode, message: impl Into<String>) -> Self {{"
+    )?;
+    writeln!(out, "        Self {{")?;
+    writeln!(out, "            status_code: code.default_status_code(),")?;
+    writeln!(out, "            message: message.into(),")?;
+    writeln!(out, "            code,")?;
+    writeln!(out, "            source: None,")?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+
+    writeln!(
+        out,
+        "    /// Returns the `__type` string for the JSON error response."
+    )?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn error_type(&self) -> &'static str {{")?;
+    writeln!(out, "        self.code.error_type()")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+
+    // Convenience constructors for common errors
+    // Generate validation(), internal_error(), missing_action(), unknown_operation(), not_implemented()
+    // based on which errors are present
+
+    let has_error = |name: &str| errors.iter().any(|e| e.name == name);
+
+    // Find the "validation" error (ValidationException)
+    if has_error("ValidationException") {
+        writeln!(out, "    /// Validation error.")?;
+        writeln!(out, "    #[must_use]")?;
+        writeln!(
+            out,
+            "    pub fn validation(message: impl Into<String>) -> Self {{"
+        )?;
+        writeln!(
+            out,
+            "        Self::with_message({prefix}ErrorCode::ValidationException, message)"
+        )?;
+        writeln!(out, "    }}")?;
+        writeln!(out)?;
+    }
+
+    // Find the "internal" error
+    let internal_variant = errors
+        .iter()
+        .find(|e| e.fault == "server")
+        .map(|e| e.name.as_str());
+
+    if let Some(internal_name) = internal_variant {
+        writeln!(out, "    /// Internal error.")?;
+        writeln!(out, "    #[must_use]")?;
+        writeln!(
+            out,
+            "    pub fn internal_error(message: impl Into<String>) -> Self {{"
+        )?;
+        writeln!(
+            out,
+            "        Self::with_message({prefix}ErrorCode::{internal_name}, message)"
+        )?;
+        writeln!(out, "    }}")?;
+        writeln!(out)?;
+    }
+
+    if has_error("MissingAction") {
+        writeln!(out, "    /// Missing action header.")?;
+        writeln!(out, "    #[must_use]")?;
+        writeln!(out, "    pub fn missing_action() -> Self {{")?;
+        writeln!(out, "        Self::with_message(")?;
+        writeln!(out, "            {prefix}ErrorCode::MissingAction,")?;
+        writeln!(
+            out,
+            "            \"Missing required header: X-Amz-Target\","
+        )?;
+        writeln!(out, "        )")?;
+        writeln!(out, "    }}")?;
+        writeln!(out)?;
+    }
+
+    if has_error("InvalidAction") {
+        writeln!(out, "    /// Unknown operation.")?;
+        writeln!(out, "    #[must_use]")?;
+        writeln!(out, "    pub fn unknown_operation(target: &str) -> Self {{")?;
+        writeln!(out, "        Self::with_message(")?;
+        writeln!(out, "            {prefix}ErrorCode::InvalidAction,")?;
+        writeln!(
+            out,
+            "            format!(\"Operation {{target}} is not supported.\"),"
+        )?;
+        writeln!(out, "        )")?;
+        writeln!(out, "    }}")?;
+        writeln!(out)?;
+    }
+
+    if let Some(internal_name) = internal_variant {
+        writeln!(out, "    /// Not implemented.")?;
+        writeln!(out, "    #[must_use]")?;
+        writeln!(
+            out,
+            "    pub fn not_implemented(operation: &str) -> Self {{"
+        )?;
+        writeln!(out, "        Self::with_message(")?;
+        writeln!(out, "            {prefix}ErrorCode::{internal_name},")?;
+        writeln!(
+            out,
+            "            format!(\"Operation {{operation}} is not yet implemented\"),"
+        )?;
+        writeln!(out, "        )")?;
+        writeln!(out, "    }}")?;
+        writeln!(out)?;
+    }
+
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    // Generate {name}_error! macro
+    writeln!(out, "/// Create an `{prefix}Error` from an error code.")?;
+    writeln!(out, "///")?;
+    writeln!(out, "/// # Examples")?;
+    writeln!(out, "///")?;
+    writeln!(out, "/// ```ignore")?;
+    writeln!(out, "/// let err = {name}_error!({default_name});")?;
+    writeln!(
+        out,
+        "/// assert_eq!(err.code, {prefix}ErrorCode::{default_name});"
+    )?;
+    writeln!(out, "/// ```")?;
+    writeln!(out, "#[macro_export]")?;
+    writeln!(out, "macro_rules! {name}_error {{")?;
+    writeln!(out, "    ($code:ident) => {{")?;
+    writeln!(
+        out,
+        "        $crate::error::{prefix}Error::new($crate::error::{prefix}ErrorCode::$code)"
+    )?;
+    writeln!(out, "    }};")?;
+    writeln!(out, "    ($code:ident, $msg:expr) => {{")?;
+    writeln!(
+        out,
+        "        $crate::error::{prefix}Error::with_message($crate::error::{prefix}ErrorCode::$code, $msg)"
+    )?;
+    writeln!(out, "    }};")?;
+    writeln!(out, "}}")?;
+
+    Ok(out)
+}
+
+/// Map an HTTP status code to a Rust `http::StatusCode` constant name.
+fn status_code_const(status: u16) -> &'static str {
+    match status {
+        400 => "http::StatusCode::BAD_REQUEST",
+        401 => "http::StatusCode::UNAUTHORIZED",
+        403 => "http::StatusCode::FORBIDDEN",
+        404 => "http::StatusCode::NOT_FOUND",
+        405 => "http::StatusCode::METHOD_NOT_ALLOWED",
+        409 => "http::StatusCode::CONFLICT",
+        411 => "http::StatusCode::LENGTH_REQUIRED",
+        412 => "http::StatusCode::PRECONDITION_FAILED",
+        416 => "http::StatusCode::RANGE_NOT_SATISFIABLE",
+        500 => "http::StatusCode::INTERNAL_SERVER_ERROR",
+        501 => "http::StatusCode::NOT_IMPLEMENTED",
+        503 => "http::StatusCode::SERVICE_UNAVAILABLE",
+        _ => "http::StatusCode::INTERNAL_SERVER_ERROR",
+    }
+}
+
+/// Generate error.rs with S3-specific hardcoded error codes.
+///
+/// Preserves exact byte-identical output for S3 codegen.
+fn generate_error_s3(config: &ServiceConfig) -> Result<String> {
     let header = file_header(config);
     let prefix = &config.rust_prefix;
 

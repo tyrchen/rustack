@@ -1,0 +1,24 @@
+[service]
+name = "ssm"
+display_name = "SSM"
+rust_prefix = "Ssm"
+namespace = "com.amazonaws.ssm"
+protocol = "awsJson1_1"
+
+[protocol]
+serde_rename = "PascalCase"
+emit_serde_derives = true
+
+[operations]
+phase0 = ["PutParameter", "GetParameter", "GetParameters", "GetParametersByPath", "DeleteParameter", "DeleteParameters"]
+phase1 = ["DescribeParameters", "GetParameterHistory", "AddTagsToResource", "RemoveTagsFromResource", "ListTagsForResource"]
+phase2 = ["LabelParameterVersion", "UnlabelParameterVersion"]
+
+[errors.custom]
+MissingAction = { status = 400, message = "Missing required header: X-Amz-Target" }
+InvalidAction = { status = 400, message = "Operation is not supported" }
+ValidationException = { status = 400, message = "Validation error" }
+InvalidSecurity = { status = 400, message = "Invalid security (encryption key issue)" }
+
+[output]
+file_layout = "flat"

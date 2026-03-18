@@ -1,0 +1,42 @@
+[service]
+name = "events"
+display_name = "EventBridge"
+rust_prefix = "Events"
+namespace = "com.amazonaws.eventbridge"
+protocol = "awsJson1_1"
+
+[protocol]
+serde_rename = "PascalCase"
+emit_serde_derives = true
+
+[operations]
+phase0 = [
+    "CreateEventBus", "DeleteEventBus", "DescribeEventBus", "ListEventBuses",
+    "PutRule", "DeleteRule", "DescribeRule", "ListRules", "EnableRule", "DisableRule",
+    "PutTargets", "RemoveTargets", "ListTargetsByRule",
+    "PutEvents", "TestEventPattern",
+]
+phase1 = [
+    "TagResource", "UntagResource", "ListTagsForResource",
+    "PutPermission", "RemovePermission", "ListRuleNamesByTarget",
+]
+phase2 = ["UpdateEventBus"]
+phase3 = [
+    "CreateArchive", "DeleteArchive", "DescribeArchive", "ListArchives", "UpdateArchive",
+    "StartReplay", "CancelReplay", "DescribeReplay", "ListReplays",
+    "CreateApiDestination", "DeleteApiDestination", "DescribeApiDestination", "ListApiDestinations", "UpdateApiDestination",
+    "CreateConnection", "DeleteConnection", "DescribeConnection", "ListConnections", "UpdateConnection", "DeauthorizeConnection",
+    "CreateEndpoint", "DeleteEndpoint", "DescribeEndpoint", "ListEndpoints", "UpdateEndpoint",
+    "ActivateEventSource", "CreatePartnerEventSource", "DeactivateEventSource", "DeletePartnerEventSource",
+    "DescribeEventSource", "DescribePartnerEventSource", "ListEventSources",
+    "ListPartnerEventSourceAccounts", "ListPartnerEventSources", "PutPartnerEvents",
+]
+
+[errors.custom]
+MissingAction = { status = 400, message = "Missing required header: X-Amz-Target" }
+InvalidAction = { status = 400, message = "Operation is not supported" }
+ValidationException = { status = 400, message = "Validation error" }
+
+[output]
+file_layout = "flat"
+always_serialize_arrays = true

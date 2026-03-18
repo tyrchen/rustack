@@ -66,6 +66,21 @@ pub struct EnumVariantInfo {
     pub string_value: String,
 }
 
+/// Information about a service error type extracted from the Smithy model.
+#[derive(Debug, Clone)]
+pub struct ErrorInfo {
+    /// The Rust variant name (e.g., `ParameterNotFound`).
+    pub name: String,
+    /// The wire name for serialization (e.g., `ParameterNotFound` or `ResourceNotFoundException`).
+    pub wire_name: String,
+    /// Default HTTP status code (from `smithy.api#httpError`, or 400/500 based on fault).
+    pub status_code: u16,
+    /// Default human-readable message.
+    pub message: String,
+    /// Fault type: `"client"` or `"server"`.
+    pub fault: String,
+}
+
 /// Resolved information about all shapes needed for code generation.
 #[derive(Debug)]
 pub struct ResolvedModel {
@@ -82,6 +97,8 @@ pub struct ResolvedModel {
     pub input_structs: BTreeMap<String, Vec<FieldInfo>>,
     /// Output struct shapes (short name -> fields).
     pub output_structs: BTreeMap<String, Vec<FieldInfo>>,
+    /// Error types referenced by the generated operations.
+    pub errors: Vec<ErrorInfo>,
 }
 
 /// Build operation categories from the service config.
@@ -335,6 +352,7 @@ pub fn resolve_model(model: &SmithyModel, config: &ServiceConfig) -> Result<Reso
     let mut all_referenced = BTreeSet::new();
     let mut input_shape_ids = BTreeSet::new();
     let mut output_shape_ids = BTreeSet::new();
+    let mut error_shape_ids = BTreeSet::new();
 
     for op_name in &config.all_operations {
         let full_name = format!("{namespace_prefix}{op_name}");
@@ -343,10 +361,11 @@ pub fn resolve_model(model: &SmithyModel, config: &ServiceConfig) -> Result<Reso
             .get(&full_name)
             .with_context(|| format!("Operation {op_name} not found in model"))?;
 
-        let (input_target, output_target) = match shape {
+        let (input_target, output_target, op_errors) = match shape {
             Shape::Operation(op) => (
                 op.input.as_ref().map(|r| r.target.clone()),
                 op.output.as_ref().map(|r| r.target.clone()),
+                &op.errors,
             ),
             _ => anyhow::bail!("{op_name} is not an operation shape"),
         };
@@ -362,6 +381,10 @@ pub fn resolve_model(model: &SmithyModel, config: &ServiceConfig) -> Result<Reso
         {
             collect_referenced_shapes(model, out, &mut all_referenced, 0);
             output_shape_ids.insert(out.clone());
+        }
+
+        for err_ref in op_errors {
+            error_shape_ids.insert(err_ref.target.clone());
         }
 
         operations.push(OperationInfo {
@@ -491,6 +514,12 @@ pub fn resolve_model(model: &SmithyModel, config: &ServiceConfig) -> Result<Reso
         }
     }
 
+    // Step 5: Collect error types from Smithy model.
+    let mut errors = collect_errors(model, &error_shape_ids, config);
+
+    // Sort errors by name for stable output
+    errors.sort_by(|a, b| a.name.cmp(&b.name));
+
     Ok(ResolvedModel {
         operations,
         input_categories,
@@ -499,5 +528,72 @@ pub fn resolve_model(model: &SmithyModel, config: &ServiceConfig) -> Result<Reso
         shared_structs,
         input_structs,
         output_structs,
+        errors,
     })
+}
+
+/// Collect error types from Smithy model shapes and merge with custom errors from config.
+fn collect_errors(
+    model: &SmithyModel,
+    error_shape_ids: &BTreeSet<String>,
+    config: &ServiceConfig,
+) -> Vec<ErrorInfo> {
+    let mut seen_names = BTreeSet::new();
+    let mut errors = Vec::new();
+
+    // Collect errors from Smithy model
+    for shape_id in error_shape_ids {
+        let Some(Shape::Structure(structure)) = model.shapes.get(shape_id.as_str()) else {
+            continue;
+        };
+
+        let Some(fault_value) = structure.traits.get("smithy.api#error") else {
+            continue;
+        };
+
+        let wire_name = SmithyModel::short_name(shape_id).to_owned();
+        let fault = fault_value.as_str().unwrap_or("client").to_owned();
+
+        // Determine HTTP status code: from httpError trait, or default by fault
+        let status_code = structure
+            .traits
+            .get("smithy.api#httpError")
+            .and_then(|v| v.as_u64())
+            .map_or_else(|| if fault == "server" { 500 } else { 400 }, |v| v as u16);
+
+        // Use the wire name as the variant name (strip trailing "Exception" if present
+        // for a cleaner Rust API, but keep the wire name for serialization)
+        let name = wire_name.clone();
+
+        let message = name.clone();
+
+        seen_names.insert(name.clone());
+        errors.push(ErrorInfo {
+            name,
+            wire_name,
+            status_code,
+            message,
+            fault,
+        });
+    }
+
+    // Merge custom errors from config
+    for (name, custom) in &config.custom_errors {
+        if !seen_names.contains(name) {
+            seen_names.insert(name.clone());
+            errors.push(ErrorInfo {
+                name: name.clone(),
+                wire_name: name.clone(),
+                status_code: custom.status,
+                message: custom.message.clone(),
+                fault: if custom.status >= 500 {
+                    "server".to_owned()
+                } else {
+                    "client".to_owned()
+                },
+            });
+        }
+    }
+
+    errors
 }

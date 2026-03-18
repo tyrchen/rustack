@@ -109,6 +109,9 @@ pub struct OperationShape {
     pub input: Option<ShapeRef>,
     /// Output shape reference.
     pub output: Option<ShapeRef>,
+    /// Error shape references.
+    #[serde(default)]
+    pub errors: Vec<ShapeRef>,
     /// Traits applied to this shape.
     #[serde(default)]
     pub traits: HashMap<String, serde_json::Value>,
