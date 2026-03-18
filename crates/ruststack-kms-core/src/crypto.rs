@@ -504,20 +504,24 @@ fn hmac_algorithm(alg: &MacAlgorithmSpec) -> Result<&'static aws_lc_rs::hmac::Al
 /// Generate a data key of the specified spec.
 pub fn generate_data_key(spec: &DataKeySpec, num_bytes: Option<i32>) -> Result<Vec<u8>, KmsError> {
     let len = if let Some(n) = num_bytes {
-        n as usize
+        if !(1..=1024).contains(&n) {
+            return Err(KmsError::with_message(
+                KmsErrorCode::InvalidArnException,
+                "NumberOfBytes must be between 1 and 1024",
+            ));
+        }
+        usize::try_from(n).map_err(|_| {
+            KmsError::with_message(
+                KmsErrorCode::InvalidArnException,
+                "NumberOfBytes must be positive",
+            )
+        })?
     } else {
         match spec {
             DataKeySpec::Aes128 => 16,
             DataKeySpec::Aes256 => 32,
         }
     };
-
-    if len == 0 || len > 1024 {
-        return Err(KmsError::with_message(
-            KmsErrorCode::InvalidKeyUsageException,
-            "NumberOfBytes must be between 1 and 1024",
-        ));
-    }
 
     generate_random_bytes(len)
 }

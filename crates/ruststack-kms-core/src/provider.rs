@@ -293,6 +293,12 @@ impl RustStackKms {
         }
 
         let days = input.pending_window_in_days.unwrap_or(30);
+        if !(7..=30).contains(&days) {
+            return Err(KmsError::with_message(
+                KmsErrorCode::InvalidArnException,
+                format!("PendingWindowInDays must be between 7 and 30, got {days}"),
+            ));
+        }
         let deletion_date = Utc::now() + chrono::Duration::days(i64::from(days));
 
         key.key_state = KeyState::PendingDeletion;
@@ -349,10 +355,14 @@ impl RustStackKms {
                 format!("Key '{}' does not exist", input.key_id),
             )
         })?;
-        key_ref
-            .value_mut()
-            .description
-            .clone_from(&input.description);
+        let key = key_ref.value_mut();
+        if key.key_state == KeyState::PendingDeletion {
+            return Err(KmsError::with_message(
+                KmsErrorCode::KMSInvalidStateException,
+                format!("Key '{}' is pending deletion", input.key_id),
+            ));
+        }
+        key.description.clone_from(&input.description);
         Ok(())
     }
 
@@ -842,13 +852,19 @@ impl RustStackKms {
         &self,
         input: &GenerateRandomInput,
     ) -> Result<GenerateRandomResponse, KmsError> {
-        let num_bytes = input.number_of_bytes.unwrap_or(32) as usize;
-        if num_bytes == 0 || num_bytes > 1024 {
+        let num_bytes_raw = input.number_of_bytes.unwrap_or(32);
+        if !(1..=1024).contains(&num_bytes_raw) {
             return Err(KmsError::with_message(
-                KmsErrorCode::InvalidKeyUsageException,
+                KmsErrorCode::InvalidArnException,
                 "NumberOfBytes must be between 1 and 1024",
             ));
         }
+        let num_bytes = usize::try_from(num_bytes_raw).map_err(|_| {
+            KmsError::with_message(
+                KmsErrorCode::InvalidArnException,
+                "NumberOfBytes must be positive",
+            )
+        })?;
         let random = crypto::generate_random_bytes(num_bytes)?;
         Ok(GenerateRandomResponse {
             plaintext: Some(bytes::Bytes::from(random)),

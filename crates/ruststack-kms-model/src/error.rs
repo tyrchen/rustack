@@ -163,7 +163,7 @@ impl fmt::Display for KmsErrorCode {
     }
 }
 
-/// An KMS error response.
+/// A KMS error response.
 #[derive(Debug)]
 pub struct KmsError {
     /// The error code.
@@ -222,7 +222,13 @@ impl KmsError {
     /// Internal error.
     #[must_use]
     pub fn internal_error(message: impl Into<String>) -> Self {
-        Self::with_message(KmsErrorCode::DependencyTimeoutException, message)
+        Self::with_message(KmsErrorCode::KMSInternalException, message)
+    }
+
+    /// Validation error.
+    #[must_use]
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self::with_message(KmsErrorCode::InvalidArnException, message)
     }
 
     /// Missing action header.
@@ -247,7 +253,7 @@ impl KmsError {
     #[must_use]
     pub fn not_implemented(operation: &str) -> Self {
         Self::with_message(
-            KmsErrorCode::DependencyTimeoutException,
+            KmsErrorCode::KMSInternalException,
             format!("Operation {operation} is not yet implemented"),
         )
     }

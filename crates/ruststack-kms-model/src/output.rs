@@ -238,9 +238,17 @@ pub struct GetKeyRotationStatusResponse {
     pub key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_rotation_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub next_rotation_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub on_demand_rotation_start_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation_period_in_days: Option<i32>,
@@ -360,7 +368,11 @@ pub struct ReEncryptResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ScheduleKeyDeletionResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub deletion_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,

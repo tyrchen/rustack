@@ -10,7 +10,7 @@ use ruststack_kms_model::types::{
 };
 
 /// Internal KMS key representation with metadata and crypto material.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KmsKey {
     /// The key ID (UUID).
     pub key_id: String,
@@ -58,8 +58,28 @@ pub struct KmsKey {
     pub mac_algorithms: Vec<MacAlgorithmSpec>,
 }
 
+/// Custom `Debug` for `KmsKey` that redacts key material to prevent
+/// accidental logging of sensitive cryptographic secrets.
+#[allow(clippy::missing_fields_in_debug)]
+impl std::fmt::Debug for KmsKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KmsKey")
+            .field("key_id", &self.key_id)
+            .field("arn", &self.arn)
+            .field("key_spec", &self.key_spec)
+            .field("key_usage", &self.key_usage)
+            .field("key_state", &self.key_state)
+            .field("enabled", &self.enabled)
+            .field("key_material", &"<REDACTED>")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Cryptographic key material for a KMS key.
-#[derive(Debug, Clone)]
+///
+/// Key material is never exposed in `Debug` output to prevent accidental
+/// logging of sensitive cryptographic secrets.
+#[derive(Clone)]
 pub enum KeyMaterial {
     /// AES-256 symmetric key (32 bytes).
     Symmetric {
@@ -85,6 +105,17 @@ pub enum KeyMaterial {
         /// Raw HMAC key bytes.
         key: Vec<u8>,
     },
+}
+
+impl std::fmt::Debug for KeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Symmetric { .. } => f.write_str("Symmetric(<REDACTED>)"),
+            Self::Rsa { .. } => f.write_str("Rsa(<REDACTED>)"),
+            Self::Ec { .. } => f.write_str("Ec(<REDACTED>)"),
+            Self::Hmac { .. } => f.write_str("Hmac(<REDACTED>)"),
+        }
+    }
 }
 
 impl KmsKey {

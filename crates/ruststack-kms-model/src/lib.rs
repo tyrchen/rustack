@@ -4,6 +4,7 @@
 #![allow(missing_docs)]
 
 pub mod blob;
+pub mod epoch_seconds;
 pub mod error;
 pub mod input;
 pub mod operations;

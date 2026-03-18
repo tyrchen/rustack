@@ -4,7 +4,6 @@
     clippy::doc_markdown,
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
-    clippy::cast_sign_loss,
     clippy::needless_pass_by_value,
     clippy::unused_self,
     clippy::unnecessary_wraps,

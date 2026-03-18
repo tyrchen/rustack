@@ -955,9 +955,17 @@ pub struct AliasListEntry {
     pub alias_arn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub creation_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub last_updated_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_key_id: Option<String>,
@@ -979,7 +987,11 @@ pub struct GrantConstraints {
 pub struct GrantListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub constraints: Option<GrantConstraints>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub creation_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<String>,
@@ -1018,7 +1030,11 @@ pub struct KeyMetadata {
     pub arn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_hsm_cluster_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub creation_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_key_material_id: Option<String>,
@@ -1026,7 +1042,11 @@ pub struct KeyMetadata {
     pub custom_key_store_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub customer_master_key_spec: Option<CustomerMasterKeySpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub deletion_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1059,7 +1079,11 @@ pub struct KeyMetadata {
     pub pending_deletion_window_in_days: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signing_algorithms: Vec<SigningAlgorithmSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::epoch_seconds::option::serialize",
+        deserialize_with = "crate::epoch_seconds::option::deserialize"
+    )]
     pub valid_to: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xks_key_configuration: Option<XksKeyConfigurationType>,
