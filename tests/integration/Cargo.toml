@@ -20,6 +20,7 @@ aws-sdk-ssm = { workspace = true }
 aws-sdk-sns = { workspace = true }
 aws-sdk-lambda = { workspace = true }
 aws-sdk-eventbridge = { workspace = true }
+aws-sdk-cloudwatchlogs = { workspace = true }
 serde_json = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }

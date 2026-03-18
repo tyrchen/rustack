@@ -1,0 +1,297 @@
+name: logs-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  logs-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and start RustStack
+        id: ruststack
+        run: |
+          cargo build --release -p ruststack-server
+
+          S3_SKIP_SIGNATURE_VALIDATION=true \
+          DYNAMODB_SKIP_SIGNATURE_VALIDATION=true \
+          SQS_SKIP_SIGNATURE_VALIDATION=true \
+          SSM_SKIP_SIGNATURE_VALIDATION=true \
+          EVENTS_SKIP_SIGNATURE_VALIDATION=true \
+          GATEWAY_LISTEN=0.0.0.0:4566 \
+          LOG_LEVEL=warn \
+          cargo run --release -p ruststack-server &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server did not start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "endpoint=http://localhost:4566" >> "$GITHUB_OUTPUT"
+
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=us-east-1" >> "$GITHUB_ENV"
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+
+      # ── LogGroup CRUD ──────────────────────────────────────────────
+      - name: "LogGroup: create, describe, delete"
+        run: |
+          set -euo pipefail
+
+          aws logs create-log-group --log-group-name /ci/test-group
+
+          GROUP=$(aws logs describe-log-groups \
+            --log-group-name-prefix /ci/test-group \
+            --query "logGroups[?logGroupName=='/ci/test-group'].logGroupName" \
+            --output text)
+          [ "$GROUP" = "/ci/test-group" ]
+
+          aws logs delete-log-group --log-group-name /ci/test-group
+
+          GROUP=$(aws logs describe-log-groups \
+            --log-group-name-prefix /ci/test-group \
+            --query "logGroups[?logGroupName=='/ci/test-group'].logGroupName" \
+            --output text)
+          [ -z "$GROUP" ]
+
+      # ── LogStream CRUD ─────────────────────────────────────────────
+      - name: "LogStream: create, describe, delete"
+        run: |
+          set -euo pipefail
+
+          aws logs create-log-group --log-group-name /ci/stream-group
+
+          aws logs create-log-stream \
+            --log-group-name /ci/stream-group \
+            --log-stream-name ci-stream
+
+          STREAM=$(aws logs describe-log-streams \
+            --log-group-name /ci/stream-group \
+            --log-stream-name-prefix ci-stream \
+            --query "logStreams[?logStreamName=='ci-stream'].logStreamName" \
+            --output text)
+          [ "$STREAM" = "ci-stream" ]
+
+          aws logs delete-log-stream \
+            --log-group-name /ci/stream-group \
+            --log-stream-name ci-stream
+
+          aws logs delete-log-group --log-group-name /ci/stream-group
+
+      # ── PutLogEvents + GetLogEvents ────────────────────────────────
+      - name: "PutLogEvents + GetLogEvents"
+        run: |
+          set -euo pipefail
+
+          GROUP="/ci/put-get-group"
+          STREAM="ci-put-get-stream"
+
+          aws logs create-log-group --log-group-name "$GROUP"
+          aws logs create-log-stream \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM"
+
+          aws logs put-log-events \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM" \
+            --log-events "[{\"timestamp\":$(date +%s000),\"message\":\"test message 1\"},{\"timestamp\":$(( $(date +%s000) + 1 )),\"message\":\"test message 2\"}]"
+
+          MSG_COUNT=$(aws logs get-log-events \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM" \
+            --start-from-head \
+            --query "events | length(@)" --output text)
+          [ "$MSG_COUNT" = "2" ]
+
+          # Verify message content
+          MSG1=$(aws logs get-log-events \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM" \
+            --start-from-head \
+            --query "events[0].message" --output text)
+          [ "$MSG1" = "test message 1" ]
+
+          MSG2=$(aws logs get-log-events \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM" \
+            --start-from-head \
+            --query "events[1].message" --output text)
+          [ "$MSG2" = "test message 2" ]
+
+      # ── FilterLogEvents ────────────────────────────────────────────
+      - name: "FilterLogEvents"
+        run: |
+          set -euo pipefail
+
+          GROUP="/ci/filter-group"
+          STREAM1="ci-filter-stream-1"
+          STREAM2="ci-filter-stream-2"
+
+          aws logs create-log-group --log-group-name "$GROUP"
+          aws logs create-log-stream \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM1"
+          aws logs create-log-stream \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM2"
+
+          NOW=$(date +%s000)
+
+          aws logs put-log-events \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM1" \
+            --log-events "[{\"timestamp\":$NOW,\"message\":\"ERROR stream1 failure\"},{\"timestamp\":$(( NOW + 1 )),\"message\":\"INFO stream1 ok\"}]"
+
+          aws logs put-log-events \
+            --log-group-name "$GROUP" \
+            --log-stream-name "$STREAM2" \
+            --log-events "[{\"timestamp\":$(( NOW + 2 )),\"message\":\"ERROR stream2 failure\"}]"
+
+          FILTER_COUNT=$(aws logs filter-log-events \
+            --log-group-name "$GROUP" \
+            --filter-pattern "ERROR" \
+            --query "events | length(@)" --output text)
+          [ "$FILTER_COUNT" -ge "2" ]
+
+      # ── RetentionPolicy ────────────────────────────────────────────
+      - name: "RetentionPolicy: put and describe"
+        run: |
+          set -euo pipefail
+
+          GROUP="/ci/retention-group"
+
+          aws logs create-log-group --log-group-name "$GROUP"
+
+          aws logs put-retention-policy \
+            --log-group-name "$GROUP" \
+            --retention-in-days 7
+
+          RETENTION=$(aws logs describe-log-groups \
+            --log-group-name-prefix "$GROUP" \
+            --query "logGroups[?logGroupName=='$GROUP'].retentionInDays | [0]" \
+            --output text)
+          [ "$RETENTION" = "7" ]
+
+      # ── Tags ───────────────────────────────────────────────────────
+      - name: "Tags: tag, list, untag"
+        run: |
+          set -euo pipefail
+
+          GROUP="/ci/tags-group"
+
+          aws logs create-log-group --log-group-name "$GROUP"
+
+          aws logs tag-log-group \
+            --log-group-name "$GROUP" \
+            --tags env=ci,team=platform
+
+          ENV_TAG=$(aws logs list-tags-log-group \
+            --log-group-name "$GROUP" \
+            --query "tags.env" --output text)
+          [ "$ENV_TAG" = "ci" ]
+
+          TEAM_TAG=$(aws logs list-tags-log-group \
+            --log-group-name "$GROUP" \
+            --query "tags.team" --output text)
+          [ "$TEAM_TAG" = "platform" ]
+
+          aws logs untag-log-group \
+            --log-group-name "$GROUP" \
+            --tags "team"
+
+          TEAM_TAG=$(aws logs list-tags-log-group \
+            --log-group-name "$GROUP" \
+            --query "tags.team" --output text)
+          [ "$TEAM_TAG" = "None" ] || [ -z "$TEAM_TAG" ]
+
+      # ── ResourcePolicy ─────────────────────────────────────────────
+      - name: "ResourcePolicy: put, describe, delete"
+        run: |
+          set -euo pipefail
+
+          POLICY_NAME="ci-test-policy"
+          POLICY_DOC='{"Version":"2012-10-17","Statement":[{"Sid":"AllowLogs","Effect":"Allow","Principal":{"Service":"es.amazonaws.com"},"Action":["logs:PutLogEvents","logs:CreateLogStream"],"Resource":"*"}]}'
+
+          aws logs put-resource-policy \
+            --policy-name "$POLICY_NAME" \
+            --policy-document "$POLICY_DOC"
+
+          FOUND=$(aws logs describe-resource-policies \
+            --query "resourcePolicies[?policyName=='$POLICY_NAME'].policyName | [0]" \
+            --output text)
+          [ "$FOUND" = "$POLICY_NAME" ]
+
+          aws logs delete-resource-policy --policy-name "$POLICY_NAME"
+
+          FOUND=$(aws logs describe-resource-policies \
+            --query "resourcePolicies[?policyName=='$POLICY_NAME'].policyName | [0]" \
+            --output text)
+          [ "$FOUND" = "None" ] || [ -z "$FOUND" ]
+
+      # ── MetricFilter ───────────────────────────────────────────────
+      - name: "MetricFilter: put, describe, delete"
+        run: |
+          set -euo pipefail
+
+          GROUP="/ci/metric-filter-group"
+          FILTER_NAME="ci-error-filter"
+
+          aws logs create-log-group --log-group-name "$GROUP"
+
+          aws logs put-metric-filter \
+            --log-group-name "$GROUP" \
+            --filter-name "$FILTER_NAME" \
+            --filter-pattern "ERROR" \
+            --metric-transformations \
+              metricName=ErrorCount,metricNamespace=CITest,metricValue=1
+
+          FOUND=$(aws logs describe-metric-filters \
+            --log-group-name "$GROUP" \
+            --filter-name-prefix "$FILTER_NAME" \
+            --query "metricFilters[?filterName=='$FILTER_NAME'].filterName | [0]" \
+            --output text)
+          [ "$FOUND" = "$FILTER_NAME" ]
+
+          aws logs delete-metric-filter \
+            --log-group-name "$GROUP" \
+            --filter-name "$FILTER_NAME"
+
+          FOUND=$(aws logs describe-metric-filters \
+            --log-group-name "$GROUP" \
+            --filter-name-prefix "$FILTER_NAME" \
+            --query "metricFilters[?filterName=='$FILTER_NAME'].filterName | [0]" \
+            --output text)
+          [ "$FOUND" = "None" ] || [ -z "$FOUND" ]
+
+      # ── Cleanup ────────────────────────────────────────────────────
+      - name: "Cleanup"
+        if: always()
+        run: |
+          set -uo pipefail
+          aws logs delete-log-group --log-group-name /ci/put-get-group 2>/dev/null || true
+          aws logs delete-log-group --log-group-name /ci/filter-group 2>/dev/null || true
+          aws logs delete-log-group --log-group-name /ci/retention-group 2>/dev/null || true
+          aws logs delete-log-group --log-group-name /ci/tags-group 2>/dev/null || true
+          aws logs delete-log-group --log-group-name /ci/metric-filter-group 2>/dev/null || true
+          aws logs delete-resource-policy --policy-name ci-test-policy 2>/dev/null || true
+          echo "Cleanup complete."
