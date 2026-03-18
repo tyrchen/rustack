@@ -203,15 +203,15 @@ pub fn match_single_value(condition: &MatchCondition, value: &Value) -> bool {
         MatchCondition::Prefix(prefix) => value
             .as_str()
             .is_some_and(|s| s.starts_with(prefix.as_str())),
-        MatchCondition::PrefixIgnoreCase(prefix) => value.as_str().is_some_and(|s| {
-            s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix)
-        }),
+        MatchCondition::PrefixIgnoreCase(prefix) => value
+            .as_str()
+            .is_some_and(|s| s.to_lowercase().starts_with(&prefix.to_lowercase())),
         MatchCondition::Suffix(suffix) => {
             value.as_str().is_some_and(|s| s.ends_with(suffix.as_str()))
         }
-        MatchCondition::SuffixIgnoreCase(suffix) => value.as_str().is_some_and(|s| {
-            s.len() >= suffix.len() && s[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        }),
+        MatchCondition::SuffixIgnoreCase(suffix) => value
+            .as_str()
+            .is_some_and(|s| s.to_lowercase().ends_with(&suffix.to_lowercase())),
         MatchCondition::EqualsIgnoreCase(expected) => value
             .as_str()
             .is_some_and(|s| s.eq_ignore_ascii_case(expected)),

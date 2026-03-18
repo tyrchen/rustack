@@ -84,10 +84,19 @@ fn parse_object(obj: &Map<String, Value>) -> Result<EventPattern, PatternParseEr
                     .as_object()
                     .ok_or(PatternParseError::OrItemNotObject)?;
                 let sub_pattern = parse_object(or_obj)?;
-                // Each $or item is a set of AND conditions (fields).
-                // Nested $or within $or branches are uncommon; we use only
-                // the top-level fields from each branch.
-                or_conditions.push(sub_pattern.fields);
+                if sub_pattern.or_conditions.is_empty() {
+                    // Simple case: no nested $or, push fields directly.
+                    or_conditions.push(sub_pattern.fields);
+                } else {
+                    // Nested $or within $or: expand into multiple branches.
+                    // Each nested $or branch is combined with the fields from
+                    // this level to form a complete branch.
+                    for nested_branch in &sub_pattern.or_conditions {
+                        let mut combined = sub_pattern.fields.clone();
+                        combined.extend(nested_branch.clone());
+                        or_conditions.push(combined);
+                    }
+                }
             }
         } else {
             fields.push(parse_field(key, value)?);

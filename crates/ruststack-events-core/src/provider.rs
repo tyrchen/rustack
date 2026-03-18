@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 
 use ruststack_events_model::error::EventsError;
 use ruststack_events_model::input::{
@@ -63,8 +64,6 @@ struct EventBusState {
     policy: Option<String>,
     tags: HashMap<String, String>,
     rules: HashMap<String, RuleState>,
-    #[allow(dead_code)] // Stored for future use in time-based responses.
-    created_at: String,
 }
 
 struct RuleState {
@@ -139,7 +138,6 @@ impl RustStackEvents {
             "arn:aws:events:{}:{}:event-bus/default",
             self.config.default_region, self.config.account_id,
         );
-        let now = chrono::Utc::now().to_rfc3339();
         self.buses.insert(
             "default".to_owned(),
             EventBusState {
@@ -149,7 +147,6 @@ impl RustStackEvents {
                 policy: None,
                 tags: HashMap::new(),
                 rules: HashMap::new(),
-                created_at: now,
             },
         );
     }
@@ -245,7 +242,7 @@ impl RustStackEvents {
     /// Handle `CreateEventBus`.
     pub fn handle_create_event_bus(
         &self,
-        input: CreateEventBusInput,
+        input: &CreateEventBusInput,
     ) -> Result<CreateEventBusOutput, EventsError> {
         let bus_name = &input.name;
 
@@ -257,14 +254,7 @@ impl RustStackEvents {
             ));
         }
 
-        if self.buses.contains_key(bus_name) {
-            return Err(EventsError::resource_already_exists(format!(
-                "Event bus {bus_name} already exists.",
-            )));
-        }
-
         let arn = self.build_bus_arn(bus_name);
-        let now = chrono::Utc::now().to_rfc3339();
 
         let tags: HashMap<String, String> = input
             .tags
@@ -272,22 +262,30 @@ impl RustStackEvents {
             .map(|t| (t.key.clone(), t.value.clone()))
             .collect();
 
-        self.buses.insert(
-            bus_name.to_owned(),
-            EventBusState {
-                name: bus_name.to_owned(),
-                arn: arn.clone(),
-                description: input.description.clone(),
-                policy: None,
-                tags,
-                rules: HashMap::new(),
-                created_at: now,
-            },
-        );
+        let description = input.description.clone();
+
+        // Atomic check-and-insert to avoid TOCTOU race.
+        match self.buses.entry(bus_name.to_owned()) {
+            Entry::Occupied(_) => {
+                return Err(EventsError::resource_already_exists(format!(
+                    "Event bus {bus_name} already exists."
+                )));
+            }
+            Entry::Vacant(v) => {
+                v.insert(EventBusState {
+                    name: bus_name.to_owned(),
+                    arn: arn.clone(),
+                    description: description.clone(),
+                    policy: None,
+                    tags,
+                    rules: HashMap::new(),
+                });
+            }
+        }
 
         Ok(CreateEventBusOutput {
             event_bus_arn: Some(arn),
-            description: input.description,
+            description,
             ..Default::default()
         })
     }
@@ -429,11 +427,20 @@ impl RustStackEvents {
             },
         );
 
-        let tags: HashMap<String, String> = input
-            .tags
-            .iter()
-            .map(|t| (t.key.clone(), t.value.clone()))
-            .collect();
+        // Preserve existing tags on update; only set tags on initial creation.
+        let is_update = bus.rules.contains_key(&input.name);
+        let tags: HashMap<String, String> = if is_update {
+            bus.rules
+                .get(&input.name)
+                .map(|r| r.tags.clone())
+                .unwrap_or_default()
+        } else {
+            input
+                .tags
+                .iter()
+                .map(|t| (t.key.clone(), t.value.clone()))
+                .collect()
+        };
 
         let rule = RuleState {
             name: input.name.clone(),
@@ -707,24 +714,14 @@ impl RustStackEvents {
             ))
         })?;
 
-        let mut failed_entries = Vec::new();
-
+        // AWS silently ignores removal of non-existent targets.
         for id in &input.ids {
-            if rule.targets.remove(id).is_none() {
-                failed_entries.push(ruststack_events_model::types::RemoveTargetsResultEntry {
-                    target_id: Some(id.clone()),
-                    error_code: Some("ResourceNotFoundException".to_owned()),
-                    error_message: Some(format!("Target {id} not found.")),
-                });
-            }
+            rule.targets.remove(id);
         }
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let failed_entry_count = failed_entries.len() as i32;
-
         Ok(RemoveTargetsOutput {
-            failed_entry_count,
-            failed_entries,
+            failed_entry_count: 0,
+            failed_entries: Vec::new(),
         })
     }
 

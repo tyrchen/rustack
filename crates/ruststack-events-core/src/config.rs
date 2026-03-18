@@ -49,6 +49,6 @@ impl Default for EventsConfig {
 
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key).map_or(default, |v| {
-        matches!(v.as_str(), "1" | "true" | "yes" | "TRUE" | "YES")
+        matches!(v.to_lowercase().as_str(), "1" | "true" | "yes")
     })
 }

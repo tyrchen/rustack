@@ -57,7 +57,7 @@ fn dispatch(
         // Phase 0: Event Bus Management
         EventsOperation::CreateEventBus => {
             let input = deserialize(body)?;
-            let output = provider.handle_create_event_bus(input)?;
+            let output = provider.handle_create_event_bus(&input)?;
             serialize(&output, &request_id)
         }
         EventsOperation::DeleteEventBus => {
