@@ -573,3 +573,64 @@ mod logs_router {
 
 #[cfg(feature = "logs")]
 pub use logs_router::LogsServiceRouter;
+
+// ---------------------------------------------------------------------------
+// KMS
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "kms")]
+mod kms_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_kms_http::dispatch::KmsHandler;
+    use ruststack_kms_http::service::KmsHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the KMS service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `TrentService.`.
+    pub struct KmsServiceRouter<H: KmsHandler> {
+        inner: KmsHttpService<H>,
+    }
+
+    impl<H: KmsHandler> KmsServiceRouter<H> {
+        /// Wrap a [`KmsHttpService`] in a router.
+        pub fn new(inner: KmsHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: KmsHandler> ServiceRouter for KmsServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "kms"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("TrentService."))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "kms")]
+pub use kms_router::KmsServiceRouter;
