@@ -1,0 +1,334 @@
+name: ses-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  ses-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and start RustStack
+        id: ruststack
+        run: |
+          cargo build --release -p ruststack-server
+
+          S3_SKIP_SIGNATURE_VALIDATION=true \
+          SES_SKIP_SIGNATURE_VALIDATION=true \
+          SNS_SKIP_SIGNATURE_VALIDATION=true \
+          GATEWAY_LISTEN=0.0.0.0:4566 \
+          LOG_LEVEL=warn \
+          cargo run --release -p ruststack-server &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server did not start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "endpoint=http://localhost:4566" >> "$GITHUB_OUTPUT"
+
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=us-east-1" >> "$GITHUB_ENV"
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+
+      # ── VerifyEmailIdentity + ListIdentities ──────────────────────
+      - name: "Identity: verify email and domain, list, delete"
+        run: |
+          set -euo pipefail
+
+          aws ses verify-email-identity --email-address sender@example.com
+          aws ses verify-domain-identity --domain example.com
+
+          IDENTITIES=$(aws ses list-identities --query "Identities" --output text)
+          echo "$IDENTITIES" | grep -q "sender@example.com"
+          echo "$IDENTITIES" | grep -q "example.com"
+
+          # GetIdentityVerificationAttributes
+          STATUS=$(aws ses get-identity-verification-attributes \
+            --identities sender@example.com \
+            --query "VerificationAttributes.\"sender@example.com\".VerificationStatus" \
+            --output text)
+          [ "$STATUS" = "Success" ]
+
+          aws ses delete-identity --identity sender@example.com
+          aws ses delete-identity --identity example.com
+
+      # ── SendEmail ─────────────────────────────────────────────────
+      - name: "SendEmail: send and verify via retrospection"
+        run: |
+          set -euo pipefail
+
+          aws ses verify-email-identity --email-address sender@example.com
+
+          MSG_ID=$(aws ses send-email \
+            --from sender@example.com \
+            --destination "ToAddresses=recipient@example.com" \
+            --message "Subject={Data=CI Test Email},Body={Text={Data=Hello from CI}}" \
+            --query "MessageId" --output text)
+          echo "Sent email: $MSG_ID"
+          [ -n "$MSG_ID" ]
+
+          # Check retrospection endpoint
+          MESSAGES=$(curl -sf http://localhost:4566/_aws/ses)
+          echo "$MESSAGES" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          msgs = data['messages']
+          assert len(msgs) >= 1, f'Expected at least 1 message, got {len(msgs)}'
+          found = [m for m in msgs if m['subject'] == 'CI Test Email']
+          assert len(found) == 1, f'Expected 1 CI Test Email, found {len(found)}'
+          assert found[0]['source'] == 'sender@example.com'
+          assert 'recipient@example.com' in found[0]['destination']['toAddresses']
+          print('SendEmail retrospection check passed')
+          "
+
+      # ── SendRawEmail ──────────────────────────────────────────────
+      - name: "SendRawEmail: send raw MIME email"
+        run: |
+          set -euo pipefail
+
+          RAW_DATA=$(echo -e "From: sender@example.com\nTo: raw-recipient@example.com\nSubject: Raw CI Test\n\nRaw body content" | base64 -w0)
+
+          MSG_ID=$(aws ses send-raw-email \
+            --raw-message "Data=$RAW_DATA" \
+            --query "MessageId" --output text)
+          echo "Sent raw email: $MSG_ID"
+          [ -n "$MSG_ID" ]
+
+      # ── GetSendQuota + GetSendStatistics ──────────────────────────
+      - name: "Stats: GetSendQuota and GetSendStatistics"
+        run: |
+          set -euo pipefail
+
+          MAX_SEND=$(aws ses get-send-quota \
+            --query "Max24HourSend" --output text)
+          echo "Max 24hr send: $MAX_SEND"
+          [ -n "$MAX_SEND" ]
+
+          aws ses get-send-statistics --query "SendDataPoints" --output text
+
+      # ── Template CRUD ─────────────────────────────────────────────
+      - name: "Templates: create, get, update, delete, list"
+        run: |
+          set -euo pipefail
+
+          aws ses create-template --template '{
+            "TemplateName": "ci-template",
+            "SubjectPart": "Hello {{name}}",
+            "TextPart": "Dear {{name}}, welcome!",
+            "HtmlPart": "<p>Dear {{name}}, welcome!</p>"
+          }'
+
+          TNAME=$(aws ses get-template \
+            --template-name ci-template \
+            --query "Template.TemplateName" --output text)
+          [ "$TNAME" = "ci-template" ]
+
+          SUBJECT=$(aws ses get-template \
+            --template-name ci-template \
+            --query "Template.SubjectPart" --output text)
+          [ "$SUBJECT" = "Hello {{name}}" ]
+
+          aws ses update-template --template '{
+            "TemplateName": "ci-template",
+            "SubjectPart": "Updated {{name}}",
+            "TextPart": "Updated body",
+            "HtmlPart": "<p>Updated</p>"
+          }'
+
+          SUBJECT2=$(aws ses get-template \
+            --template-name ci-template \
+            --query "Template.SubjectPart" --output text)
+          [ "$SUBJECT2" = "Updated {{name}}" ]
+
+          TCOUNT=$(aws ses list-templates \
+            --query "TemplatesMetadata | length(@)" --output text)
+          [ "$TCOUNT" -ge 1 ]
+
+          aws ses delete-template --template-name ci-template
+
+      # ── SendTemplatedEmail ────────────────────────────────────────
+      - name: "SendTemplatedEmail: template rendering"
+        run: |
+          set -euo pipefail
+
+          aws ses create-template --template '{
+            "TemplateName": "ci-tpl-send",
+            "SubjectPart": "Hi {{name}}",
+            "TextPart": "Hello {{name}} from {{org}}"
+          }'
+
+          MSG_ID=$(aws ses send-templated-email \
+            --from sender@example.com \
+            --destination "ToAddresses=tpl-recipient@example.com" \
+            --template ci-tpl-send \
+            --template-data '{"name":"Alice","org":"RustStack"}' \
+            --query "MessageId" --output text)
+          echo "Sent templated email: $MSG_ID"
+          [ -n "$MSG_ID" ]
+
+          aws ses delete-template --template-name ci-tpl-send
+
+      # ── Configuration Sets ────────────────────────────────────────
+      - name: "ConfigSets: create, describe, list, delete"
+        run: |
+          set -euo pipefail
+
+          aws ses create-configuration-set --configuration-set Name=ci-config-set
+
+          CS_NAME=$(aws ses describe-configuration-set \
+            --configuration-set-name ci-config-set \
+            --query "ConfigurationSet.Name" --output text)
+          [ "$CS_NAME" = "ci-config-set" ]
+
+          CS_COUNT=$(aws ses list-configuration-sets \
+            --query "ConfigurationSets | length(@)" --output text)
+          [ "$CS_COUNT" -ge 1 ]
+
+          aws ses delete-configuration-set --configuration-set-name ci-config-set
+
+      # ── Receipt Rule Sets ─────────────────────────────────────────
+      - name: "ReceiptRuleSets: create, describe, clone, delete"
+        run: |
+          set -euo pipefail
+
+          aws ses create-receipt-rule-set --rule-set-name ci-ruleset
+
+          RS_NAME=$(aws ses describe-receipt-rule-set \
+            --rule-set-name ci-ruleset \
+            --query "Metadata.Name" --output text)
+          [ "$RS_NAME" = "ci-ruleset" ]
+
+          aws ses clone-receipt-rule-set \
+            --rule-set-name ci-ruleset-clone \
+            --original-rule-set-name ci-ruleset
+
+          CLONE_NAME=$(aws ses describe-receipt-rule-set \
+            --rule-set-name ci-ruleset-clone \
+            --query "Metadata.Name" --output text)
+          [ "$CLONE_NAME" = "ci-ruleset-clone" ]
+
+          aws ses delete-receipt-rule-set --rule-set-name ci-ruleset
+          aws ses delete-receipt-rule-set --rule-set-name ci-ruleset-clone
+
+      # ── Retrospection endpoint ────────────────────────────────────
+      - name: "Retrospection: filter and clear"
+        run: |
+          set -euo pipefail
+
+          # Filter by email
+          FILTERED=$(curl -sf "http://localhost:4566/_aws/ses?email=sender@example.com")
+          echo "$FILTERED" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          msgs = data['messages']
+          for m in msgs:
+            assert m['source'] == 'sender@example.com', f'Unexpected source: {m[\"source\"]}'
+          print(f'Filter by email: {len(msgs)} messages')
+          "
+
+          # Delete all
+          curl -sf -X DELETE http://localhost:4566/_aws/ses
+
+          # Verify empty
+          EMPTY=$(curl -sf http://localhost:4566/_aws/ses)
+          echo "$EMPTY" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert len(data['messages']) == 0, 'Expected 0 messages after DELETE'
+          print('Retrospection clear check passed')
+          "
+
+      # ── Identity Notifications (Phase 3) ──────────────────────────
+      - name: "Phase 3: identity notifications and DKIM"
+        run: |
+          set -euo pipefail
+
+          aws ses verify-email-identity --email-address phase3@example.com
+
+          aws ses set-identity-notification-topic \
+            --identity phase3@example.com \
+            --notification-type Bounce \
+            --sns-topic "arn:aws:sns:us-east-1:000000000000:bounce-topic"
+
+          BOUNCE_TOPIC=$(aws ses get-identity-notification-attributes \
+            --identities phase3@example.com \
+            --query "NotificationAttributes.\"phase3@example.com\".BounceTopic" \
+            --output text)
+          echo "Bounce topic: $BOUNCE_TOPIC"
+          [ "$BOUNCE_TOPIC" = "arn:aws:sns:us-east-1:000000000000:bounce-topic" ]
+
+          aws ses verify-domain-dkim --domain example.com
+
+          aws ses delete-identity --identity phase3@example.com
+
+      # ── Identity Policies (Phase 3) ───────────────────────────────
+      - name: "Phase 3: identity sending authorization policies"
+        run: |
+          set -euo pipefail
+
+          aws ses verify-email-identity --email-address policy@example.com
+
+          aws ses put-identity-policy \
+            --identity policy@example.com \
+            --policy-name ci-policy \
+            --policy '{"Version":"2012-10-17","Statement":[]}'
+
+          POLICIES=$(aws ses list-identity-policies \
+            --identity policy@example.com \
+            --query "PolicyNames" --output text)
+          echo "$POLICIES" | grep -q "ci-policy"
+
+          POLICY=$(aws ses get-identity-policies \
+            --identity policy@example.com \
+            --policy-names ci-policy \
+            --query "Policies.\"ci-policy\"" --output text)
+          echo "$POLICY" | grep -q "2012-10-17"
+
+          aws ses delete-identity-policy \
+            --identity policy@example.com \
+            --policy-name ci-policy
+
+          aws ses delete-identity --identity policy@example.com
+
+      # ── Rust Integration Tests ────────────────────────────────────
+      - name: "Rust integration tests"
+        run: |
+          cargo test -p ruststack-integration test_ses -- --ignored
+
+      # ── Cleanup ───────────────────────────────────────────────────
+      - name: "Cleanup"
+        if: always()
+        run: |
+          set -uo pipefail
+          aws ses delete-identity --identity sender@example.com 2>/dev/null || true
+          aws ses delete-identity --identity example.com 2>/dev/null || true
+          aws ses delete-identity --identity phase3@example.com 2>/dev/null || true
+          aws ses delete-identity --identity policy@example.com 2>/dev/null || true
+          aws ses delete-template --template-name ci-template 2>/dev/null || true
+          aws ses delete-template --template-name ci-tpl-send 2>/dev/null || true
+          aws ses delete-configuration-set --configuration-set-name ci-config-set 2>/dev/null || true
+          aws ses delete-receipt-rule-set --rule-set-name ci-ruleset 2>/dev/null || true
+          aws ses delete-receipt-rule-set --rule-set-name ci-ruleset-clone 2>/dev/null || true
+          curl -sf -X DELETE http://localhost:4566/_aws/ses || true
+          echo "Cleanup complete."
