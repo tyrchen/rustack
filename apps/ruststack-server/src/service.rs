@@ -695,3 +695,64 @@ mod kinesis_router {
 
 #[cfg(feature = "kinesis")]
 pub use kinesis_router::KinesisServiceRouter;
+
+// ---------------------------------------------------------------------------
+// Secrets Manager
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "secretsmanager")]
+mod secretsmanager_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_secretsmanager_http::dispatch::SecretsManagerHandler;
+    use ruststack_secretsmanager_http::service::SecretsManagerHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the Secrets Manager service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `secretsmanager.`.
+    pub struct SecretsManagerServiceRouter<H: SecretsManagerHandler> {
+        inner: SecretsManagerHttpService<H>,
+    }
+
+    impl<H: SecretsManagerHandler> SecretsManagerServiceRouter<H> {
+        /// Wrap a [`SecretsManagerHttpService`] in a router.
+        pub fn new(inner: SecretsManagerHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: SecretsManagerHandler> ServiceRouter for SecretsManagerServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "secretsmanager"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("secretsmanager."))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "secretsmanager")]
+pub use secretsmanager_router::SecretsManagerServiceRouter;

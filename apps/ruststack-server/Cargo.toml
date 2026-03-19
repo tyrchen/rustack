@@ -15,7 +15,7 @@ name = "ruststack-server"
 path = "src/main.rs"
 
 [features]
-default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis"]
+default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager"]
 s3 = ["dep:ruststack-s3-core", "dep:ruststack-s3-http", "dep:ruststack-s3-model"]
 dynamodb = ["dep:ruststack-dynamodb-core", "dep:ruststack-dynamodb-http"]
 sqs = ["dep:ruststack-sqs-core", "dep:ruststack-sqs-http"]
@@ -26,6 +26,7 @@ events = ["dep:ruststack-events-core", "dep:ruststack-events-http", "dep:ruststa
 logs = ["dep:ruststack-logs-core", "dep:ruststack-logs-http"]
 kms = ["dep:ruststack-kms-core", "dep:ruststack-kms-http"]
 kinesis = ["dep:ruststack-kinesis-core", "dep:ruststack-kinesis-http"]
+secretsmanager = ["dep:ruststack-secretsmanager-core", "dep:ruststack-secretsmanager-http"]
 
 [dependencies]
 # Internal crates - shared
@@ -73,6 +74,10 @@ ruststack-kms-http = { workspace = true, optional = true }
 # Internal crates - Kinesis (optional, gated by "kinesis" feature)
 ruststack-kinesis-core = { workspace = true, optional = true }
 ruststack-kinesis-http = { workspace = true, optional = true }
+
+# Internal crates - Secrets Manager (optional, gated by "secretsmanager" feature)
+ruststack-secretsmanager-core = { workspace = true, optional = true }
+ruststack-secretsmanager-http = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

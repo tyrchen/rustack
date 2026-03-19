@@ -21,6 +21,7 @@
 //! | `SQS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SQS SigV4 verification |
 //! | `SSM_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SSM SigV4 verification |
 //! | `SNS_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SNS SigV4 verification |
+//! | `SECRETSMANAGER_SKIP_SIGNATURE_VALIDATION` | `true` | Skip Secrets Manager SigV4 verification |
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 //! | `LOG_LEVEL` | `info` | Log level filter |
 //! | `RUST_LOG` | *(unset)* | Fine-grained tracing filter (overrides `LOG_LEVEL`) |
@@ -128,6 +129,15 @@ use ruststack_kinesis_core::handler::RustStackKinesisHandler;
 use ruststack_kinesis_core::provider::RustStackKinesis;
 #[cfg(feature = "kinesis")]
 use ruststack_kinesis_http::service::{KinesisHttpConfig, KinesisHttpService};
+
+#[cfg(feature = "secretsmanager")]
+use ruststack_secretsmanager_core::config::SecretsManagerConfig;
+#[cfg(feature = "secretsmanager")]
+use ruststack_secretsmanager_core::handler::RustStackSecretsManagerHandler;
+#[cfg(feature = "secretsmanager")]
+use ruststack_secretsmanager_core::provider::RustStackSecretsManager;
+#[cfg(feature = "secretsmanager")]
+use ruststack_secretsmanager_http::service::{SecretsManagerHttpConfig, SecretsManagerHttpService};
 
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
@@ -281,6 +291,18 @@ fn build_kinesis_http_config(config: &KinesisConfig) -> KinesisHttpConfig {
     }
 }
 
+/// Build the [`SecretsManagerHttpConfig`] from the [`SecretsManagerConfig`].
+#[cfg(feature = "secretsmanager")]
+fn build_secretsmanager_http_config(config: &SecretsManagerConfig) -> SecretsManagerHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    SecretsManagerHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -293,7 +315,8 @@ fn build_kinesis_http_config(config: &KinesisConfig) -> KinesisHttpConfig {
     feature = "events",
     feature = "logs",
     feature = "kms",
-    feature = "kinesis"
+    feature = "kinesis",
+    feature = "secretsmanager"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -375,6 +398,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "logs" && cfg!(feature = "logs"))
         || (name == "kms" && cfg!(feature = "kms"))
         || (name == "kinesis" && cfg!(feature = "kinesis"))
+        || (name == "secretsmanager" && cfg!(feature = "secretsmanager"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -422,6 +446,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "kinesis") {
             all.push("kinesis".to_string());
+        }
+        if cfg!(feature = "secretsmanager") {
+            all.push("secretsmanager".to_string());
         }
         all
     } else {
@@ -631,6 +658,23 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         )));
     }
 
+    // ----- Secrets Manager (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "secretsmanager")]
+    if is_enabled("secretsmanager") {
+        let sm_config = SecretsManagerConfig::from_env();
+        info!(
+            secretsmanager_skip_signature_validation = sm_config.skip_signature_validation,
+            "initializing Secrets Manager service",
+        );
+        let sm_provider = RustStackSecretsManager::new(sm_config.clone());
+        let sm_handler = RustStackSecretsManagerHandler::new(Arc::new(sm_provider));
+        let sm_http_config = build_secretsmanager_http_config(&sm_config);
+        let sm_service = SecretsManagerHttpService::new(Arc::new(sm_handler), sm_http_config);
+        services.push(Box::new(service::SecretsManagerServiceRouter::new(
+            sm_service,
+        )));
+    }
+
     // ----- Lambda (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "lambda")]
     if is_enabled("lambda") {
@@ -773,6 +817,10 @@ mod tests {
         assert_eq!(is_compiled_in("logs"), cfg!(feature = "logs"));
         assert_eq!(is_compiled_in("kms"), cfg!(feature = "kms"));
         assert_eq!(is_compiled_in("kinesis"), cfg!(feature = "kinesis"));
+        assert_eq!(
+            is_compiled_in("secretsmanager"),
+            cfg!(feature = "secretsmanager")
+        );
     }
 
     #[cfg(feature = "s3")]

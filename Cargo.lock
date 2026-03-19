@@ -331,6 +331,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-secretsmanager"
+version = "1.102.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9e9668477f18fd7ef9c606a3be827051f0c14030ccb5e6d3958f66c7956cd20"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sns"
 version = "1.96.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -772,6 +796,9 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bytes-utils"
@@ -2323,6 +2350,7 @@ dependencies = [
  "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-s3",
+ "aws-sdk-secretsmanager",
  "aws-sdk-sns",
  "aws-sdk-sqs",
  "aws-sdk-ssm",
@@ -2644,6 +2672,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruststack-secretsmanager-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "http 1.4.0",
+ "rand",
+ "ruststack-auth",
+ "ruststack-core",
+ "ruststack-secretsmanager-http",
+ "ruststack-secretsmanager-model",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-secretsmanager-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "ruststack-auth",
+ "ruststack-secretsmanager-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ruststack-secretsmanager-model"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ruststack-server"
 version = "0.1.0"
 dependencies = [
@@ -2677,6 +2757,8 @@ dependencies = [
  "ruststack-s3-core",
  "ruststack-s3-http",
  "ruststack-s3-model",
+ "ruststack-secretsmanager-core",
+ "ruststack-secretsmanager-http",
  "ruststack-sns-core",
  "ruststack-sns-http",
  "ruststack-sqs-core",

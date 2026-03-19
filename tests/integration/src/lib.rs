@@ -309,6 +309,30 @@ pub fn test_stream_name(prefix: &str) -> String {
     format!("test-{prefix}-{id}")
 }
 
+/// Create a configured Secrets Manager client pointing at the local server.
+#[must_use]
+pub fn secretsmanager_client() -> aws_sdk_secretsmanager::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_secretsmanager::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_secretsmanager::Client::from_conf(config)
+}
+
+/// Generate a unique secret name for a Secrets Manager test.
+#[must_use]
+pub fn test_secret_name(prefix: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string()[..8].to_owned();
+    format!("test/{prefix}/{id}")
+}
+
 mod test_bucket;
 mod test_cors;
 mod test_dynamodb;
@@ -323,6 +347,7 @@ mod test_logs;
 mod test_multipart;
 mod test_object;
 mod test_precondition;
+mod test_secretsmanager;
 mod test_sns;
 mod test_sqs;
 mod test_ssm;
