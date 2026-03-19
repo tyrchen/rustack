@@ -15,7 +15,7 @@ name = "ruststack-server"
 path = "src/main.rs"
 
 [features]
-default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms"]
+default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis"]
 s3 = ["dep:ruststack-s3-core", "dep:ruststack-s3-http", "dep:ruststack-s3-model"]
 dynamodb = ["dep:ruststack-dynamodb-core", "dep:ruststack-dynamodb-http"]
 sqs = ["dep:ruststack-sqs-core", "dep:ruststack-sqs-http"]
@@ -25,6 +25,7 @@ lambda = ["dep:ruststack-lambda-core", "dep:ruststack-lambda-http"]
 events = ["dep:ruststack-events-core", "dep:ruststack-events-http", "dep:ruststack-sqs-model", "sqs"]
 logs = ["dep:ruststack-logs-core", "dep:ruststack-logs-http"]
 kms = ["dep:ruststack-kms-core", "dep:ruststack-kms-http"]
+kinesis = ["dep:ruststack-kinesis-core", "dep:ruststack-kinesis-http"]
 
 [dependencies]
 # Internal crates - shared
@@ -68,6 +69,10 @@ ruststack-logs-http = { workspace = true, optional = true }
 # Internal crates - KMS (optional, gated by "kms" feature)
 ruststack-kms-core = { workspace = true, optional = true }
 ruststack-kms-http = { workspace = true, optional = true }
+
+# Internal crates - Kinesis (optional, gated by "kinesis" feature)
+ruststack-kinesis-core = { workspace = true, optional = true }
+ruststack-kinesis-http = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

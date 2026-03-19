@@ -54,6 +54,9 @@ ruststack-events-core = { path = "crates/ruststack-events-core" }
 ruststack-kms-model = { path = "crates/ruststack-kms-model" }
 ruststack-kms-http = { path = "crates/ruststack-kms-http" }
 ruststack-kms-core = { path = "crates/ruststack-kms-core" }
+ruststack-kinesis-model = { path = "crates/ruststack-kinesis-model" }
+ruststack-kinesis-http = { path = "crates/ruststack-kinesis-http" }
+ruststack-kinesis-core = { path = "crates/ruststack-kinesis-core" }
 
 # Async runtime
 tokio = { version = "1.49", features = [
@@ -141,5 +144,6 @@ aws-sdk-lambda = "1.104"
 aws-sdk-cloudwatchlogs = "1.105"
 aws-sdk-eventbridge = "1.96"
 aws-sdk-kms = "1"
+aws-sdk-kinesis = "1"
 aws-credential-types = "1.2"
 aws-smithy-runtime-api = "1.11"
