@@ -187,7 +187,11 @@ pub struct GetSecretValueResponse {
     pub created_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "crate::blob::option"
+    )]
     pub secret_binary: Option<bytes::Bytes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_string: Option<String>,

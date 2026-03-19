@@ -2716,6 +2716,7 @@ dependencies = [
 name = "ruststack-secretsmanager-model"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
  "chrono",
  "http 1.4.0",

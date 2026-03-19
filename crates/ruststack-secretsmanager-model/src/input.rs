@@ -43,7 +43,11 @@ pub struct CreateSecretInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kms_key_id: Option<String>,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "crate::blob::option"
+    )]
     pub secret_binary: Option<bytes::Bytes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_string: Option<String>,
@@ -167,7 +171,11 @@ pub struct PutSecretValueInput {
     pub client_request_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "crate::blob::option"
+    )]
     pub secret_binary: Option<bytes::Bytes>,
     pub secret_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,7 +266,11 @@ pub struct UpdateSecretInput {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kms_key_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "crate::blob::option"
+    )]
     pub secret_binary: Option<bytes::Bytes>,
     pub secret_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

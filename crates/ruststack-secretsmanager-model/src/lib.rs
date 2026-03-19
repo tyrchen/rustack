@@ -3,6 +3,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(missing_docs)]
 
+pub mod blob;
 pub mod epoch_seconds;
 pub mod error;
 pub mod input;
