@@ -179,7 +179,7 @@ jobs:
           }'
 
           MSG_ID=$(aws ses send-templated-email \
-            --from sender@example.com \
+            --source sender@example.com \
             --destination "ToAddresses=tpl-recipient@example.com" \
             --template ci-tpl-send \
             --template-data '{"name":"Alice","org":"RustStack"}' \
