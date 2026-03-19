@@ -634,3 +634,64 @@ mod kms_router {
 
 #[cfg(feature = "kms")]
 pub use kms_router::KmsServiceRouter;
+
+// ---------------------------------------------------------------------------
+// Kinesis
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "kinesis")]
+mod kinesis_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_kinesis_http::dispatch::KinesisHandler;
+    use ruststack_kinesis_http::service::KinesisHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the Kinesis service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `Kinesis_20131202.`.
+    pub struct KinesisServiceRouter<H: KinesisHandler> {
+        inner: KinesisHttpService<H>,
+    }
+
+    impl<H: KinesisHandler> KinesisServiceRouter<H> {
+        /// Wrap a [`KinesisHttpService`] in a router.
+        pub fn new(inner: KinesisHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: KinesisHandler> ServiceRouter for KinesisServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "kinesis"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("Kinesis_20131202."))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "kinesis")]
+pub use kinesis_router::KinesisServiceRouter;

@@ -285,12 +285,37 @@ pub fn kms_client() -> aws_sdk_kms::Client {
     aws_sdk_kms::Client::from_conf(config)
 }
 
+/// Create a configured Kinesis client pointing at the local server.
+#[must_use]
+pub fn kinesis_client() -> aws_sdk_kinesis::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_kinesis::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_kinesis::Client::from_conf(config)
+}
+
+/// Generate a unique stream name for a Kinesis test.
+#[must_use]
+pub fn test_stream_name(prefix: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string()[..8].to_owned();
+    format!("test-{prefix}-{id}")
+}
+
 mod test_bucket;
 mod test_cors;
 mod test_dynamodb;
 mod test_error;
 mod test_events;
 mod test_health;
+mod test_kinesis;
 mod test_kms;
 mod test_lambda;
 mod test_list;

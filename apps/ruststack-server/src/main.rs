@@ -120,6 +120,15 @@ use ruststack_kms_core::provider::RustStackKms;
 #[cfg(feature = "kms")]
 use ruststack_kms_http::service::{KmsHttpConfig, KmsHttpService};
 
+#[cfg(feature = "kinesis")]
+use ruststack_kinesis_core::config::KinesisConfig;
+#[cfg(feature = "kinesis")]
+use ruststack_kinesis_core::handler::RustStackKinesisHandler;
+#[cfg(feature = "kinesis")]
+use ruststack_kinesis_core::provider::RustStackKinesis;
+#[cfg(feature = "kinesis")]
+use ruststack_kinesis_http::service::{KinesisHttpConfig, KinesisHttpService};
+
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
 #[cfg(feature = "s3")]
@@ -260,6 +269,18 @@ fn build_kms_http_config(config: &KmsConfig) -> KmsHttpConfig {
     }
 }
 
+/// Build the [`KinesisHttpConfig`] from the [`KinesisConfig`].
+#[cfg(feature = "kinesis")]
+fn build_kinesis_http_config(config: &KinesisConfig) -> KinesisHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    KinesisHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -271,7 +292,8 @@ fn build_kms_http_config(config: &KmsConfig) -> KmsHttpConfig {
     feature = "lambda",
     feature = "events",
     feature = "logs",
-    feature = "kms"
+    feature = "kms",
+    feature = "kinesis"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -352,6 +374,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "events" && cfg!(feature = "events"))
         || (name == "logs" && cfg!(feature = "logs"))
         || (name == "kms" && cfg!(feature = "kms"))
+        || (name == "kinesis" && cfg!(feature = "kinesis"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -396,6 +419,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "kms") {
             all.push("kms".to_string());
+        }
+        if cfg!(feature = "kinesis") {
+            all.push("kinesis".to_string());
         }
         all
     } else {
@@ -587,6 +613,24 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         services.push(Box::new(service::KmsServiceRouter::new(kms_service)));
     }
 
+    // ----- Kinesis (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "kinesis")]
+    if is_enabled("kinesis") {
+        let kinesis_config = KinesisConfig::from_env();
+        info!(
+            kinesis_skip_signature_validation = kinesis_config.skip_signature_validation,
+            "initializing Kinesis service",
+        );
+        let kinesis_provider = RustStackKinesis::new(kinesis_config.clone());
+        let kinesis_handler = RustStackKinesisHandler::new(Arc::new(kinesis_provider));
+        let kinesis_http_config = build_kinesis_http_config(&kinesis_config);
+        let kinesis_service =
+            KinesisHttpService::new(Arc::new(kinesis_handler), kinesis_http_config);
+        services.push(Box::new(service::KinesisServiceRouter::new(
+            kinesis_service,
+        )));
+    }
+
     // ----- Lambda (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "lambda")]
     if is_enabled("lambda") {
@@ -728,6 +772,7 @@ mod tests {
         assert_eq!(is_compiled_in("events"), cfg!(feature = "events"));
         assert_eq!(is_compiled_in("logs"), cfg!(feature = "logs"));
         assert_eq!(is_compiled_in("kms"), cfg!(feature = "kms"));
+        assert_eq!(is_compiled_in("kinesis"), cfg!(feature = "kinesis"));
     }
 
     #[cfg(feature = "s3")]
