@@ -3,7 +3,6 @@
 //! Manages per-table change logs and serves the 4 Streams API operations.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -64,7 +63,7 @@ pub struct ShardRecord {
     /// Change records in chronological order.
     pub records: VecDeque<StreamChangeRecord>,
     /// Next sequence number to assign.
-    next_sequence_number: AtomicU64,
+    next_sequence_number: u64,
 }
 
 impl ShardRecord {
@@ -77,7 +76,7 @@ impl ShardRecord {
             starting_sequence_number: None,
             ending_sequence_number: None,
             records: VecDeque::new(),
-            next_sequence_number: AtomicU64::new(1),
+            next_sequence_number: 1,
         }
     }
 
@@ -85,9 +84,8 @@ impl ShardRecord {
     ///
     /// Assigns a monotonically increasing sequence number and returns it.
     pub fn append(&mut self, mut record: StreamChangeRecord) -> String {
-        let seq = self
-            .next_sequence_number
-            .fetch_add(1, AtomicOrdering::SeqCst);
+        let seq = self.next_sequence_number;
+        self.next_sequence_number += 1;
         let seq_str = format!("{seq:021}");
 
         record.dynamodb.sequence_number = Some(seq_str.clone());

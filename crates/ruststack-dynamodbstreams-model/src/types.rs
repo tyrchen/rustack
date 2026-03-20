@@ -381,7 +381,7 @@ pub struct Stream {
 #[serde(rename_all = "PascalCase")]
 pub struct StreamDescription {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub creation_request_date_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub creation_request_date_time: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_schema: Vec<KeySchemaElement>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -405,7 +405,7 @@ pub struct StreamDescription {
 #[serde(rename_all = "PascalCase")]
 pub struct StreamRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approximate_creation_date_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub approximate_creation_date_time: Option<f64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub keys: HashMap<String, AttributeValue>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

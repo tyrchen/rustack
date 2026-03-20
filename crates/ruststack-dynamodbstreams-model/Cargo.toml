@@ -17,5 +17,4 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 http = { workspace = true }
-chrono = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }

@@ -68,6 +68,17 @@ impl RustStackDynamoDBStreams {
             }),
         };
 
+        // If ExclusiveStartShardId matches the only shard, return empty list.
+        let shards = if input
+            .exclusive_start_shard_id
+            .as_ref()
+            .is_some_and(|id| *id == shard.shard_id)
+        {
+            vec![]
+        } else {
+            vec![shard_desc]
+        };
+
         let description = StreamDescription {
             stream_arn: Some(stream.stream_arn.clone()),
             stream_label: Some(stream.stream_label.clone()),
@@ -75,7 +86,7 @@ impl RustStackDynamoDBStreams {
             stream_view_type: Some(stream.stream_view_type.clone()),
             table_name: Some(stream.table_name.clone()),
             key_schema: stream.key_schema.clone(),
-            shards: vec![shard_desc],
+            shards,
             creation_request_date_time: None,
             last_evaluated_shard_id: None,
         };
@@ -215,7 +226,7 @@ impl RustStackDynamoDBStreams {
         }
 
         #[allow(clippy::cast_sign_loss)]
-        let limit = input.limit.map_or(1000, |l| (l as usize).clamp(1, 10000));
+        let limit = input.limit.map_or(1000, |l| (l as usize).clamp(1, 1000));
         #[allow(clippy::cast_possible_truncation)]
         let start = position as usize;
         let end = (start + limit).min(shard.records.len());
@@ -295,15 +306,8 @@ fn record_to_output(record: &StreamChangeRecord) -> Record {
             old_image: old_image.unwrap_or_default(),
             sequence_number: record.dynamodb.sequence_number.clone(),
             size_bytes: Some(record.dynamodb.size_bytes.cast_signed()),
-            stream_view_type: Some(convert_view_type(&record.dynamodb.stream_view_type)),
-            #[allow(clippy::cast_possible_truncation)]
-            approximate_creation_date_time: Some(
-                chrono::DateTime::from_timestamp(
-                    record.dynamodb.approximate_creation_date_time as i64,
-                    0,
-                )
-                .unwrap_or_default(),
-            ),
+            stream_view_type: Some(record.dynamodb.stream_view_type.clone()),
+            approximate_creation_date_time: Some(record.dynamodb.approximate_creation_date_time),
         }),
         user_identity: None,
     }
@@ -362,9 +366,4 @@ fn convert_attribute_value(val: &AttributeValue) -> streams_types::AttributeValu
             ..Default::default()
         },
     }
-}
-
-/// Convert Streams storage `StreamViewType` to Streams model `StreamViewType`.
-fn convert_view_type(svt: &streams_types::StreamViewType) -> streams_types::StreamViewType {
-    svt.clone()
 }

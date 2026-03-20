@@ -2856,7 +2856,6 @@ name = "ruststack-dynamodbstreams-model"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "chrono",
  "http 1.4.0",
  "ruststack-dynamodb-model",
  "serde",
