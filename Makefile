@@ -85,6 +85,10 @@ codegen-cloudwatch:
 	@cd codegen && cargo run -- --config services/cloudwatch.toml --model smithy-model/cloudwatch.json --output ../crates/ruststack-cloudwatch-model/src
 	@cargo +nightly fmt -p ruststack-cloudwatch-model
 
+codegen-dynamodbstreams:
+	@cd codegen && cargo run -- --config services/dynamodbstreams.toml --model smithy-model/dynamodbstreams.json --output ../crates/ruststack-dynamodbstreams-model/src
+	@cargo +nightly fmt -p ruststack-dynamodbstreams-model
+
 codegen: codegen-s3
 
 SMITHY_MODELS_REPO = https://raw.githubusercontent.com/aws/api-models-aws/main
@@ -103,6 +107,7 @@ codegen-download:
 	@curl -sL $(SMITHY_MODELS_REPO)/models/ses/service/2010-12-01/ses-2010-12-01.json -o codegen/smithy-model/ses.json
 	@curl -sL $(SMITHY_MODELS_REPO)/models/apigatewayv2/service/2018-11-29/apigatewayv2-2018-11-29.json -o codegen/smithy-model/apigatewayv2.json
 	@curl -sL $(SMITHY_MODELS_REPO)/models/cloudwatch/service/2010-08-01/cloudwatch-2010-08-01.json -o codegen/smithy-model/cloudwatch.json
+	@curl -sL $(SMITHY_MODELS_REPO)/models/dynamodb-streams/service/2012-08-10/dynamodb-streams-2012-08-10.json -o codegen/smithy-model/dynamodbstreams.json
 	@echo "Done."
 
 integration:
@@ -232,7 +237,7 @@ test-cloudwatch-integration:
 	@cargo test -p ruststack-integration -- cloudwatch --ignored
 
 .PHONY: build check test fmt clippy audit deny run release update-submodule integration \
-	codegen codegen-s3 codegen-ssm codegen-events codegen-dynamodb codegen-sqs codegen-sns codegen-lambda \
+	codegen codegen-s3 codegen-ssm codegen-events codegen-dynamodb codegen-dynamodbstreams codegen-sqs codegen-sns codegen-lambda \
 	codegen-kms codegen-kinesis codegen-logs codegen-secretsmanager codegen-ses codegen-apigatewayv2 codegen-cloudwatch codegen-download \
 	mint mint-build mint-start mint-run mint-stop \
 	alternator alternator-setup alternator-run alternator-stop \

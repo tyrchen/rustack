@@ -440,12 +440,24 @@ fn validate_parallel_scan(
 }
 
 /// Main DynamoDB provider implementing all operations.
-#[derive(Debug)]
 pub struct RustStackDynamoDB {
     /// Service state owning all tables.
     pub state: Arc<DynamoDBServiceState>,
     /// Configuration.
     pub config: Arc<DynamoDBConfig>,
+    /// Stream emitter for change data capture.
+    emitter: Arc<dyn crate::stream::StreamEmitter>,
+    /// Stream lifecycle manager.
+    lifecycle: Arc<dyn crate::stream::StreamLifecycle>,
+}
+
+impl std::fmt::Debug for RustStackDynamoDB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RustStackDynamoDB")
+            .field("state", &self.state)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RustStackDynamoDB {
@@ -455,7 +467,24 @@ impl RustStackDynamoDB {
         Self {
             state: Arc::new(DynamoDBServiceState::new()),
             config: Arc::new(config),
+            emitter: Arc::new(crate::stream::NoopStreamEmitter),
+            lifecycle: Arc::new(crate::stream::NoopStreamLifecycle),
         }
+    }
+
+    /// Set the stream emitter for change data capture.
+    ///
+    /// Called by the server binary to wire in the DynamoDB Streams
+    /// implementation.
+    pub fn set_emitter(&mut self, emitter: Arc<dyn crate::stream::StreamEmitter>) {
+        self.emitter = emitter;
+    }
+
+    /// Set the stream lifecycle manager.
+    ///
+    /// Called by the server binary to wire in stream creation/deletion.
+    pub fn set_lifecycle(&mut self, lifecycle: Arc<dyn crate::stream::StreamLifecycle>) {
+        self.lifecycle = lifecycle;
     }
 
     /// Reset all state (for testing).
@@ -541,8 +570,31 @@ impl RustStackDynamoDB {
         };
 
         let table = self.state.create_table(table)?;
+
+        // Create stream if StreamSpecification is enabled.
+        let mut desc = table.to_description();
+        if let Some(ref spec) = table.stream_specification {
+            if spec.stream_enabled {
+                let svt = spec
+                    .stream_view_type
+                    .clone()
+                    .unwrap_or(ruststack_dynamodb_model::types::StreamViewType::NewAndOldImages);
+                let stream_arn = self.lifecycle.on_stream_enabled(
+                    &table.name,
+                    &table.arn,
+                    table.key_schema_elements.clone(),
+                    svt,
+                );
+                if !stream_arn.is_empty() {
+                    let stream_label = self.lifecycle.get_stream_label(&table.name);
+                    desc.latest_stream_arn = Some(stream_arn);
+                    desc.latest_stream_label = stream_label;
+                }
+            }
+        }
+
         Ok(CreateTableOutput {
-            table_description: Some(table.to_description()),
+            table_description: Some(desc),
         })
     }
 
@@ -553,6 +605,7 @@ impl RustStackDynamoDB {
         input: DeleteTableInput,
     ) -> Result<DeleteTableOutput, DynamoDBError> {
         let table = self.state.delete_table(&input.table_name)?;
+        self.lifecycle.on_table_deleted(&table.name);
         Ok(DeleteTableOutput {
             table_description: Some(table.to_delete_description()),
         })
@@ -565,9 +618,17 @@ impl RustStackDynamoDB {
         input: DescribeTableInput,
     ) -> Result<DescribeTableOutput, DynamoDBError> {
         let table = self.state.require_table(&input.table_name)?;
-        Ok(DescribeTableOutput {
-            table: Some(table.to_description()),
-        })
+        let mut desc = table.to_description();
+
+        // Add stream ARN/label if stream is enabled.
+        if let Some(ref spec) = table.stream_specification {
+            if spec.stream_enabled {
+                desc.latest_stream_arn = self.lifecycle.get_stream_arn(&table.name);
+                desc.latest_stream_label = self.lifecycle.get_stream_label(&table.name);
+            }
+        }
+
+        Ok(DescribeTableOutput { table: Some(desc) })
     }
 
     /// Handle `ListTables`.
@@ -643,6 +704,7 @@ impl RustStackDynamoDB {
 
 impl RustStackDynamoDB {
     /// Handle `PutItem`.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_put_item(&self, mut input: PutItemInput) -> Result<PutItemOutput, DynamoDBError> {
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
@@ -740,10 +802,34 @@ impl RustStackDynamoDB {
             }
         }
 
+        let new_item = input.item.clone();
         let old = table
             .storage
             .put_item(input.item)
             .map_err(storage_error_to_dynamodb)?;
+
+        // Emit stream event if stream is enabled for this table.
+        if table
+            .stream_specification
+            .as_ref()
+            .is_some_and(|s| s.stream_enabled)
+        {
+            let event_name = if old.is_some() {
+                crate::stream::ChangeEventName::Modify
+            } else {
+                crate::stream::ChangeEventName::Insert
+            };
+            let keys = extract_key_attributes(&new_item, &table.key_schema_elements);
+            let size = calculate_item_size(&new_item);
+            self.emitter.emit(crate::stream::ChangeEvent {
+                table_name: table.name.clone(),
+                event_name,
+                keys,
+                old_image: old.clone(),
+                new_image: Some(new_item),
+                size_bytes: size,
+            });
+        }
 
         // ALL_OLD: return the old item if it existed, otherwise omit Attributes.
         let attributes = match input.return_values {
@@ -920,6 +1006,26 @@ impl RustStackDynamoDB {
         }
 
         let old = table.storage.delete_item(&pk);
+
+        // Emit stream event if an item was actually deleted and stream is enabled.
+        if let Some(ref old_item) = old {
+            if table
+                .stream_specification
+                .as_ref()
+                .is_some_and(|s| s.stream_enabled)
+            {
+                let keys = extract_key_attributes(old_item, &table.key_schema_elements);
+                let size = calculate_item_size(old_item);
+                self.emitter.emit(crate::stream::ChangeEvent {
+                    table_name: table.name.clone(),
+                    event_name: crate::stream::ChangeEventName::Remove,
+                    keys,
+                    old_image: Some(old_item.clone()),
+                    new_image: None,
+                    size_bytes: size,
+                });
+            }
+        }
 
         // ALL_OLD: return the old item if it existed, otherwise omit Attributes.
         let attributes = match input.return_values {
@@ -1182,6 +1288,28 @@ impl RustStackDynamoDB {
             .storage
             .put_item(item.clone())
             .map_err(storage_error_to_dynamodb)?;
+
+        // Emit stream event if stream is enabled for this table.
+        if table
+            .stream_specification
+            .as_ref()
+            .is_some_and(|s| s.stream_enabled)
+        {
+            let event_name = if existing.is_some() || old_item.is_some() {
+                crate::stream::ChangeEventName::Modify
+            } else {
+                crate::stream::ChangeEventName::Insert
+            };
+            let keys = extract_key_attributes(&item, &table.key_schema_elements);
+            self.emitter.emit(crate::stream::ChangeEvent {
+                table_name: table.name.clone(),
+                event_name,
+                keys,
+                old_image: old_item.clone().or_else(|| existing.clone()),
+                new_image: Some(item.clone()),
+                size_bytes: size,
+            });
+        }
 
         let old_for_return = old_item.or(existing);
 
@@ -1807,17 +1935,54 @@ impl RustStackDynamoDB {
         // Execution pass: all validations passed, now execute writes.
         for (table_name, write_requests) in &input.request_items {
             let table = self.state.require_table(table_name)?;
+            let stream_enabled = table
+                .stream_specification
+                .as_ref()
+                .is_some_and(|s| s.stream_enabled);
 
             for wr in write_requests {
                 if let Some(ref put) = wr.put_request {
-                    table
+                    let old = table
                         .storage
                         .put_item(put.item.clone())
                         .map_err(storage_error_to_dynamodb)?;
+
+                    if stream_enabled {
+                        let event_name = if old.is_some() {
+                            crate::stream::ChangeEventName::Modify
+                        } else {
+                            crate::stream::ChangeEventName::Insert
+                        };
+                        let keys = extract_key_attributes(&put.item, &table.key_schema_elements);
+                        let size = calculate_item_size(&put.item);
+                        self.emitter.emit(crate::stream::ChangeEvent {
+                            table_name: table.name.clone(),
+                            event_name,
+                            keys,
+                            old_image: old,
+                            new_image: Some(put.item.clone()),
+                            size_bytes: size,
+                        });
+                    }
                 } else if let Some(ref del) = wr.delete_request {
                     let pk = extract_primary_key(&table.key_schema, &del.key)
                         .map_err(storage_error_to_dynamodb)?;
-                    table.storage.delete_item(&pk);
+                    let old = table.storage.delete_item(&pk);
+
+                    if stream_enabled {
+                        if let Some(ref old_item) = old {
+                            let keys = extract_key_attributes(old_item, &table.key_schema_elements);
+                            let size = calculate_item_size(old_item);
+                            self.emitter.emit(crate::stream::ChangeEvent {
+                                table_name: table.name.clone(),
+                                event_name: crate::stream::ChangeEventName::Remove,
+                                keys,
+                                old_image: Some(old_item.clone()),
+                                new_image: None,
+                                size_bytes: size,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -2709,6 +2874,22 @@ fn item_has_only_key_attrs(item: &HashMap<String, AttributeValue>, key_schema: &
         k == &key_schema.partition_key.name
             || key_schema.sort_key.as_ref().is_some_and(|sk| k == &sk.name)
     })
+}
+
+/// Extract only the key attributes from an item.
+///
+/// Used to build the `Keys` field in DynamoDB Streams change records.
+fn extract_key_attributes(
+    item: &HashMap<String, AttributeValue>,
+    key_schema_elements: &[ruststack_dynamodb_model::types::KeySchemaElement],
+) -> HashMap<String, AttributeValue> {
+    key_schema_elements
+        .iter()
+        .filter_map(|ks| {
+            item.get(&ks.attribute_name)
+                .map(|v| (ks.attribute_name.clone(), v.clone()))
+        })
+        .collect()
 }
 
 /// Collect all target paths from an update expression (SET targets, REMOVE

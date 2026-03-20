@@ -159,6 +159,23 @@ use ruststack_apigatewayv2_core::provider::RustStackApiGatewayV2;
 #[cfg(feature = "apigatewayv2")]
 use ruststack_apigatewayv2_http::service::{ApiGatewayV2HttpConfig, ApiGatewayV2HttpService};
 
+#[cfg(feature = "dynamodbstreams")]
+use ruststack_dynamodbstreams_core::config::DynamoDBStreamsConfig;
+#[cfg(feature = "dynamodbstreams")]
+use ruststack_dynamodbstreams_core::emitter::{
+    DynamoDBStreamEmitter, DynamoDBStreamLifecycleManager,
+};
+#[cfg(feature = "dynamodbstreams")]
+use ruststack_dynamodbstreams_core::handler::RustStackDynamoDBStreamsHandler;
+#[cfg(feature = "dynamodbstreams")]
+use ruststack_dynamodbstreams_core::provider::RustStackDynamoDBStreams;
+#[cfg(feature = "dynamodbstreams")]
+use ruststack_dynamodbstreams_core::storage::StreamStore;
+#[cfg(feature = "dynamodbstreams")]
+use ruststack_dynamodbstreams_http::service::{
+    DynamoDBStreamsHttpConfig, DynamoDBStreamsHttpService,
+};
+
 #[cfg(feature = "cloudwatch")]
 use ruststack_cloudwatch_core::config::CloudWatchConfig;
 #[cfg(feature = "cloudwatch")]
@@ -356,6 +373,18 @@ fn build_apigatewayv2_http_config(config: &ApiGatewayV2Config) -> ApiGatewayV2Ht
     }
 }
 
+/// Build the [`DynamoDBStreamsHttpConfig`] from the [`DynamoDBStreamsConfig`].
+#[cfg(feature = "dynamodbstreams")]
+fn build_dynamodbstreams_http_config(config: &DynamoDBStreamsConfig) -> DynamoDBStreamsHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    DynamoDBStreamsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build the [`CloudWatchHttpConfig`] from the [`CloudWatchConfig`].
 #[cfg(feature = "cloudwatch")]
 fn build_cloudwatch_http_config(config: &CloudWatchConfig) -> CloudWatchHttpConfig {
@@ -384,7 +413,8 @@ fn build_cloudwatch_http_config(config: &CloudWatchConfig) -> CloudWatchHttpConf
     feature = "secretsmanager",
     feature = "ses",
     feature = "apigatewayv2",
-    feature = "cloudwatch"
+    feature = "cloudwatch",
+    feature = "dynamodbstreams"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -470,6 +500,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "ses" && cfg!(feature = "ses"))
         || (name == "apigatewayv2" && cfg!(feature = "apigatewayv2"))
         || (name == "cloudwatch" && cfg!(feature = "cloudwatch"))
+        || (name == "dynamodbstreams" && cfg!(feature = "dynamodbstreams"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -530,6 +561,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         if cfg!(feature = "cloudwatch") {
             all.push("cloudwatch".to_string());
         }
+        if cfg!(feature = "dynamodbstreams") {
+            all.push("dynamodbstreams".to_string());
+        }
         all
     } else {
         trimmed
@@ -589,7 +623,7 @@ fn log_level() -> String {
 fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRouter>> {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
 
-    // ----- DynamoDB (register before S3: S3 is the catch-all) -----
+    // ----- DynamoDB + DynamoDB Streams (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "dynamodb")]
     if is_enabled("dynamodb") {
         let dynamodb_config = DynamoDBConfig::from_env();
@@ -597,7 +631,29 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             dynamodb_skip_signature_validation = dynamodb_config.skip_signature_validation,
             "initializing DynamoDB service",
         );
-        let dynamodb_provider = RustStackDynamoDB::new(dynamodb_config.clone());
+        let mut dynamodb_provider = RustStackDynamoDB::new(dynamodb_config.clone());
+
+        // Wire in DynamoDB Streams emitter and lifecycle manager if enabled.
+        #[cfg(feature = "dynamodbstreams")]
+        let stream_store = if is_enabled("dynamodbstreams") {
+            let streams_config = DynamoDBStreamsConfig::from_env();
+            let store = Arc::new(StreamStore::new());
+            let emitter = Arc::new(DynamoDBStreamEmitter::new(
+                Arc::clone(&store),
+                dynamodb_config.default_region.clone(),
+            ));
+            let lifecycle = Arc::new(DynamoDBStreamLifecycleManager::new(
+                Arc::clone(&store),
+                streams_config.default_region.clone(),
+                streams_config.default_account_id.clone(),
+            ));
+            dynamodb_provider.set_emitter(emitter);
+            dynamodb_provider.set_lifecycle(lifecycle);
+            Some((store, streams_config))
+        } else {
+            None
+        };
+
         let dynamodb_handler = RustStackDynamoDBHandler::new(Arc::new(dynamodb_provider));
         let dynamodb_http_config = build_dynamodb_http_config(&dynamodb_config);
         let dynamodb_service =
@@ -605,6 +661,20 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         services.push(Box::new(service::DynamoDBServiceRouter::new(
             dynamodb_service,
         )));
+
+        // Register DynamoDB Streams router.
+        #[cfg(feature = "dynamodbstreams")]
+        if let Some((store, streams_config)) = stream_store {
+            info!("initializing DynamoDB Streams service");
+            let streams_provider = RustStackDynamoDBStreams::new(store, streams_config.clone());
+            let streams_handler = RustStackDynamoDBStreamsHandler::new(Arc::new(streams_provider));
+            let streams_http_config = build_dynamodbstreams_http_config(&streams_config);
+            let streams_service =
+                DynamoDBStreamsHttpService::new(Arc::new(streams_handler), streams_http_config);
+            services.push(Box::new(service::DynamoDBStreamsServiceRouter::new(
+                streams_service,
+            )));
+        }
     }
 
     // ----- SQS (register before S3: S3 is the catch-all) -----

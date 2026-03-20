@@ -15,9 +15,10 @@ name = "ruststack-server"
 path = "src/main.rs"
 
 [features]
-default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses", "apigatewayv2", "cloudwatch"]
+default = ["s3", "dynamodb", "dynamodbstreams", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses", "apigatewayv2", "cloudwatch"]
 s3 = ["dep:ruststack-s3-core", "dep:ruststack-s3-http", "dep:ruststack-s3-model"]
 dynamodb = ["dep:ruststack-dynamodb-core", "dep:ruststack-dynamodb-http"]
+dynamodbstreams = ["dynamodb", "dep:ruststack-dynamodbstreams-core", "dep:ruststack-dynamodbstreams-http"]
 sqs = ["dep:ruststack-sqs-core", "dep:ruststack-sqs-http"]
 ssm = ["dep:ruststack-ssm-core", "dep:ruststack-ssm-http"]
 sns = ["dep:ruststack-sns-core", "dep:ruststack-sns-http", "dep:ruststack-sqs-model", "sqs"]
@@ -89,6 +90,10 @@ ruststack-ses-http = { workspace = true, optional = true }
 # Internal crates - API Gateway v2 (optional, gated by "apigatewayv2" feature)
 ruststack-apigatewayv2-core = { workspace = true, optional = true }
 ruststack-apigatewayv2-http = { workspace = true, optional = true }
+
+# Internal crates - DynamoDB Streams (optional, gated by "dynamodbstreams" feature)
+ruststack-dynamodbstreams-core = { workspace = true, optional = true }
+ruststack-dynamodbstreams-http = { workspace = true, optional = true }
 
 # Internal crates - CloudWatch Metrics (optional, gated by "cloudwatch" feature)
 ruststack-cloudwatch-core = { workspace = true, optional = true }
