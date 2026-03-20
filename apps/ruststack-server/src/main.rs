@@ -469,6 +469,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "secretsmanager" && cfg!(feature = "secretsmanager"))
         || (name == "ses" && cfg!(feature = "ses"))
         || (name == "apigatewayv2" && cfg!(feature = "apigatewayv2"))
+        || (name == "cloudwatch" && cfg!(feature = "cloudwatch"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -525,6 +526,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "apigatewayv2") {
             all.push("apigatewayv2".to_string());
+        }
+        if cfg!(feature = "cloudwatch") {
+            all.push("cloudwatch".to_string());
         }
         all
     } else {

@@ -982,10 +982,23 @@ impl RustStackCloudWatch {
         let mut detectors = self.anomaly_store.list();
 
         if let Some(ref ns) = input.namespace {
-            detectors.retain(|d| d.namespace.as_deref() == Some(ns.as_str()));
+            detectors.retain(|d| {
+                // Check both top-level and single_metric_anomaly_detector namespace.
+                d.namespace.as_deref() == Some(ns.as_str())
+                    || d.single_metric_anomaly_detector
+                        .as_ref()
+                        .and_then(|s| s.namespace.as_deref())
+                        == Some(ns.as_str())
+            });
         }
         if let Some(ref mn) = input.metric_name {
-            detectors.retain(|d| d.metric_name.as_deref() == Some(mn.as_str()));
+            detectors.retain(|d| {
+                d.metric_name.as_deref() == Some(mn.as_str())
+                    || d.single_metric_anomaly_detector
+                        .as_ref()
+                        .and_then(|s| s.metric_name.as_deref())
+                        == Some(mn.as_str())
+            });
         }
 
         if let Some(max) = input.max_results {
