@@ -810,7 +810,7 @@ fn cbor_to_json(value: ciborium::Value) -> serde_json::Value {
                     _ => continue,
                 };
                 let json_val = if is_timestamp_field(&key) {
-                    epoch_to_iso_string(&v)
+                    convert_timestamp_value_to_json(v)
                 } else {
                     cbor_to_json(v)
                 };
@@ -840,13 +840,35 @@ fn cbor_to_json(value: ciborium::Value) -> serde_json::Value {
 
 /// Check if a `PascalCase` field name is a timestamp field.
 fn is_timestamp_field(name: &str) -> bool {
-    // AWS CloudWatch timestamp field patterns
+    // AWS CloudWatch timestamp field patterns (singular and plural)
     name.ends_with("Time")
+        || name.ends_with("Times")
         || name.ends_with("Timestamp")
+        || name.ends_with("Timestamps")
         || name.ends_with("Date")
         || name == "LastModified"
         || name == "CreationDate"
         || name == "LastUpdateDate"
+}
+
+/// Convert a CBOR timestamp value (single or array) to JSON.
+fn convert_timestamp_value_to_json(value: ciborium::Value) -> serde_json::Value {
+    match value {
+        ciborium::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(|v| epoch_to_iso_string(&v)).collect())
+        }
+        other => epoch_to_iso_string(&other),
+    }
+}
+
+/// Convert a JSON timestamp value (single or array) to CBOR with tag 1.
+fn convert_timestamp_value_to_cbor(value: serde_json::Value) -> ciborium::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            ciborium::Value::Array(items.into_iter().map(|v| iso_string_to_epoch(&v)).collect())
+        }
+        other => iso_string_to_epoch(&other),
+    }
 }
 
 /// Convert an epoch-seconds CBOR value to an ISO 8601 string.
@@ -886,7 +908,7 @@ fn json_to_cbor(value: serde_json::Value) -> ciborium::Value {
                 .into_iter()
                 .map(|(k, v)| {
                     let cbor_val = if is_timestamp_field(&k) {
-                        iso_string_to_epoch(&v)
+                        convert_timestamp_value_to_cbor(v)
                     } else {
                         json_to_cbor(v)
                     };
