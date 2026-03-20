@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use dashmap::mapref::entry::Entry;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tracing::debug;
 
@@ -227,24 +228,31 @@ fn write_policy_xml(w: &mut XmlWriter, policy: &ManagedPolicyRecord) {
     }
 }
 
-fn write_instance_profile_xml(w: &mut XmlWriter, ip: &InstanceProfileRecord, store: &IamStore) {
+/// Write instance profile XML with pre-fetched role records to avoid nested locks.
+fn write_instance_profile_xml(w: &mut XmlWriter, ip: &InstanceProfileRecord, roles: &[RoleRecord]) {
     w.write_element("InstanceProfileName", &ip.instance_profile_name);
     w.write_element("InstanceProfileId", &ip.instance_profile_id);
     w.write_element("Arn", &ip.arn);
     w.write_element("Path", &ip.path);
     w.start_element("Roles");
-    for role_name in &ip.roles {
-        if let Some(role) = store.roles.get(role_name) {
-            w.start_element("member");
-            write_role_xml(w, &role);
-            w.end_element("member");
-        }
+    for role in roles {
+        w.start_element("member");
+        write_role_xml(w, role);
+        w.end_element("member");
     }
     w.end_element("Roles");
     w.write_element("CreateDate", &ip.create_date);
     if !ip.tags.is_empty() {
         write_tags_xml(w, &ip.tags);
     }
+}
+
+/// Fetch role records for an instance profile's role names from the store.
+fn fetch_roles_for_instance_profile(store: &IamStore, role_names: &[String]) -> Vec<RoleRecord> {
+    role_names
+        .iter()
+        .filter_map(|name| store.roles.get(name).map(|r| r.value().clone()))
+        .collect()
 }
 
 fn write_policy_version_xml(w: &mut XmlWriter, v: &PolicyVersionRecord) {
@@ -289,12 +297,6 @@ impl RustStackIam {
             )));
         }
 
-        if self.store.users.contains_key(user_name) {
-            return Err(IamError::entity_already_exists(format!(
-                "User with name {user_name} already exists."
-            )));
-        }
-
         let user = UserRecord {
             user_name: user_name.to_owned(),
             user_id: generate_iam_id("AIDA"),
@@ -321,7 +323,16 @@ impl RustStackIam {
         w.write_response_metadata(&request_id);
         w.end_element("CreateUserResponse");
 
-        self.store.users.insert(user_name.to_owned(), user);
+        match self.store.users.entry(user_name.to_owned()) {
+            Entry::Occupied(_) => {
+                return Err(IamError::entity_already_exists(format!(
+                    "User with name {user_name} already exists."
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(user);
+            }
+        }
 
         Ok((w.into_string(), request_id))
     }
@@ -366,27 +377,35 @@ impl RustStackIam {
         let user_name = get_required_param(params, "UserName")?;
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let user = self.store.users.get(user_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
-        })?;
+        // Clone validation data out, then drop the guard before checking other maps.
+        let (has_attached, has_inline, has_groups) = {
+            let user = self.store.users.get(user_name).ok_or_else(|| {
+                IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
+            })?;
+            (
+                !user.attached_policies.is_empty(),
+                !user.inline_policies.is_empty(),
+                !user.groups.is_empty(),
+            )
+        };
 
-        // Check for delete conflicts.
-        if !user.attached_policies.is_empty() {
+        // Check for delete conflicts (guard already dropped).
+        if has_attached {
             return Err(IamError::delete_conflict(
                 "Cannot delete entity, must detach all policies first.",
             ));
         }
-        if !user.inline_policies.is_empty() {
+        if has_inline {
             return Err(IamError::delete_conflict(
                 "Cannot delete entity, must delete all inline policies first.",
             ));
         }
-        if !user.groups.is_empty() {
+        if has_groups {
             return Err(IamError::delete_conflict(
                 "Cannot delete entity, must remove from all groups first.",
             ));
         }
-        // Check for access keys.
+        // Check for access keys (no guard held).
         let has_keys = self
             .store
             .access_keys
@@ -397,8 +416,6 @@ impl RustStackIam {
                 "Cannot delete entity, must delete all access keys first.",
             ));
         }
-
-        drop(user);
 
         debug!(user_name, "deleting IAM user");
         self.store.users.remove(user_name);
@@ -530,12 +547,6 @@ impl RustStackIam {
             )));
         }
 
-        if self.store.roles.contains_key(role_name) {
-            return Err(IamError::entity_already_exists(format!(
-                "Role with name {role_name} already exists."
-            )));
-        }
-
         let role = RoleRecord {
             role_name: role_name.to_owned(),
             role_id: generate_iam_id("AROA"),
@@ -565,7 +576,16 @@ impl RustStackIam {
         w.write_response_metadata(&request_id);
         w.end_element("CreateRoleResponse");
 
-        self.store.roles.insert(role_name.to_owned(), role);
+        match self.store.roles.entry(role_name.to_owned()) {
+            Entry::Occupied(_) => {
+                return Err(IamError::entity_already_exists(format!(
+                    "Role with name {role_name} already exists."
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(role);
+            }
+        }
 
         Ok((w.into_string(), request_id))
     }
@@ -597,21 +617,29 @@ impl RustStackIam {
         let role_name = get_required_param(params, "RoleName")?;
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let role = self.store.roles.get(role_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The role with name {role_name} cannot be found."))
-        })?;
+        // Clone validation data out, then drop the guard before checking other maps.
+        let (has_attached, has_inline) = {
+            let role = self.store.roles.get(role_name).ok_or_else(|| {
+                IamError::no_such_entity(format!("The role with name {role_name} cannot be found."))
+            })?;
+            (
+                !role.attached_policies.is_empty(),
+                !role.inline_policies.is_empty(),
+            )
+        };
 
-        if !role.attached_policies.is_empty() {
+        // Check for delete conflicts (guard already dropped).
+        if has_attached {
             return Err(IamError::delete_conflict(
                 "Cannot delete entity, must detach all policies first.",
             ));
         }
-        if !role.inline_policies.is_empty() {
+        if has_inline {
             return Err(IamError::delete_conflict(
                 "Cannot delete entity, must delete all inline policies first.",
             ));
         }
-        // Check instance profiles.
+        // Check instance profiles (no guard held).
         let in_ip = self
             .store
             .instance_profiles
@@ -622,8 +650,6 @@ impl RustStackIam {
                 "Cannot delete entity, must remove role from all instance profiles first.",
             ));
         }
-
-        drop(role);
 
         debug!(role_name, "deleting IAM role");
         self.store.roles.remove(role_name);
@@ -716,12 +742,6 @@ impl RustStackIam {
 
         let arn = iam_arn(&self.config.account_id, "policy", path, policy_name);
 
-        if self.store.policies.contains_key(&arn) {
-            return Err(IamError::entity_already_exists(format!(
-                "A policy called {policy_name} already exists."
-            )));
-        }
-
         let now = now_iso8601();
         let version = PolicyVersionRecord {
             version_id: "v1".to_owned(),
@@ -759,7 +779,16 @@ impl RustStackIam {
         w.write_response_metadata(&request_id);
         w.end_element("CreatePolicyResponse");
 
-        self.store.policies.insert(arn, policy);
+        match self.store.policies.entry(arn) {
+            Entry::Occupied(_) => {
+                return Err(IamError::entity_already_exists(format!(
+                    "A policy called {policy_name} already exists."
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(policy);
+            }
+        }
 
         Ok((w.into_string(), request_id))
     }
@@ -880,13 +909,19 @@ impl RustStackIam {
         let policy_arn = get_required_param(params, "PolicyArn")?;
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        // Verify policy exists.
+        // Verify both exist with read-only guards (dropped immediately).
+        if !self.store.users.contains_key(user_name) {
+            return Err(IamError::no_such_entity(format!(
+                "The user with name {user_name} cannot be found."
+            )));
+        }
         if !self.store.policies.contains_key(policy_arn) {
             return Err(IamError::no_such_entity(format!(
                 "Policy {policy_arn} does not exist."
             )));
         }
 
+        // Acquire write lock on user only.
         let mut user = self.store.users.get_mut(user_name).ok_or_else(|| {
             IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
         })?;
@@ -899,7 +934,10 @@ impl RustStackIam {
             )));
         }
 
-        if user.attached_policies.insert(policy_arn.to_owned()) {
+        let inserted = user.attached_policies.insert(policy_arn.to_owned());
+        drop(user); // Drop user lock before acquiring policy lock.
+
+        if inserted {
             if let Some(mut pol) = self.store.policies.get_mut(policy_arn) {
                 pol.attachment_count += 1;
             }
@@ -928,6 +966,8 @@ impl RustStackIam {
             )));
         }
 
+        drop(user); // Drop user lock before acquiring policy lock.
+
         if let Some(mut pol) = self.store.policies.get_mut(policy_arn) {
             pol.attachment_count = (pol.attachment_count - 1).max(0);
         }
@@ -946,12 +986,16 @@ impl RustStackIam {
         let (marker, max_items) = parse_pagination(params);
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let user = self.store.users.get(user_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
-        })?;
+        // Clone attached policy ARNs, then drop the user guard.
+        let attached_policy_arns: Vec<String> = {
+            let user = self.store.users.get(user_name).ok_or_else(|| {
+                IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
+            })?;
+            user.attached_policies.iter().cloned().collect()
+        };
 
-        let mut policies: Vec<(String, String)> = user
-            .attached_policies
+        // Guard dropped, now safe to query the policies map.
+        let mut policies: Vec<(String, String)> = attached_policy_arns
             .iter()
             .filter_map(|arn| {
                 let pol = self.store.policies.get(arn)?;
@@ -999,12 +1043,19 @@ impl RustStackIam {
         let policy_arn = get_required_param(params, "PolicyArn")?;
         let request_id = uuid::Uuid::new_v4().to_string();
 
+        // Verify both exist with read-only guards (dropped immediately).
+        if !self.store.roles.contains_key(role_name) {
+            return Err(IamError::no_such_entity(format!(
+                "The role with name {role_name} cannot be found."
+            )));
+        }
         if !self.store.policies.contains_key(policy_arn) {
             return Err(IamError::no_such_entity(format!(
                 "Policy {policy_arn} does not exist."
             )));
         }
 
+        // Acquire write lock on role only.
         let mut role = self.store.roles.get_mut(role_name).ok_or_else(|| {
             IamError::no_such_entity(format!("The role with name {role_name} cannot be found."))
         })?;
@@ -1017,7 +1068,10 @@ impl RustStackIam {
             )));
         }
 
-        if role.attached_policies.insert(policy_arn.to_owned()) {
+        let inserted = role.attached_policies.insert(policy_arn.to_owned());
+        drop(role); // Drop role lock before acquiring policy lock.
+
+        if inserted {
             if let Some(mut pol) = self.store.policies.get_mut(policy_arn) {
                 pol.attachment_count += 1;
             }
@@ -1046,6 +1100,8 @@ impl RustStackIam {
             )));
         }
 
+        drop(role); // Drop role lock before acquiring policy lock.
+
         if let Some(mut pol) = self.store.policies.get_mut(policy_arn) {
             pol.attachment_count = (pol.attachment_count - 1).max(0);
         }
@@ -1064,12 +1120,16 @@ impl RustStackIam {
         let (marker, max_items) = parse_pagination(params);
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let role = self.store.roles.get(role_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The role with name {role_name} cannot be found."))
-        })?;
+        // Clone attached policy ARNs, then drop the role guard.
+        let attached_policy_arns: Vec<String> = {
+            let role = self.store.roles.get(role_name).ok_or_else(|| {
+                IamError::no_such_entity(format!("The role with name {role_name} cannot be found."))
+            })?;
+            role.attached_policies.iter().cloned().collect()
+        };
 
-        let mut policies: Vec<(String, String)> = role
-            .attached_policies
+        // Guard dropped, now safe to query the policies map.
+        let mut policies: Vec<(String, String)> = attached_policy_arns
             .iter()
             .filter_map(|arn| {
                 let pol = self.store.policies.get(arn)?;
@@ -1307,12 +1367,6 @@ impl RustStackIam {
         validate_entity_name(group_name, 128)?;
         validate_path(path)?;
 
-        if self.store.groups.contains_key(group_name) {
-            return Err(IamError::entity_already_exists(format!(
-                "Group with name {group_name} already exists."
-            )));
-        }
-
         let group = GroupRecord {
             group_name: group_name.to_owned(),
             group_id: generate_iam_id("AGPA"),
@@ -1337,7 +1391,16 @@ impl RustStackIam {
         w.write_response_metadata(&request_id);
         w.end_element("CreateGroupResponse");
 
-        self.store.groups.insert(group_name.to_owned(), group);
+        match self.store.groups.entry(group_name.to_owned()) {
+            Entry::Occupied(_) => {
+                return Err(IamError::entity_already_exists(format!(
+                    "Group with name {group_name} already exists."
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(group);
+            }
+        }
 
         Ok((w.into_string(), request_id))
     }
@@ -1348,13 +1411,18 @@ impl RustStackIam {
         let (marker, max_items) = parse_pagination(params);
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let group = self.store.groups.get(group_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The group with name {group_name} cannot be found."))
-        })?;
+        // Clone the group data and member names, then drop the guard.
+        let (group_clone, member_names): (GroupRecord, Vec<String>) = {
+            let group = self.store.groups.get(group_name).ok_or_else(|| {
+                IamError::no_such_entity(format!(
+                    "The group with name {group_name} cannot be found."
+                ))
+            })?;
+            (group.clone(), group.members.iter().cloned().collect())
+        };
 
-        // Collect member user records.
-        let mut member_users: Vec<UserRecord> = group
-            .members
+        // Guard dropped, now safe to query the users map.
+        let mut member_users: Vec<UserRecord> = member_names
             .iter()
             .filter_map(|name| self.store.users.get(name).map(|u| u.value().clone()))
             .collect();
@@ -1366,7 +1434,7 @@ impl RustStackIam {
         w.start_response("GetGroup");
         w.start_result("GetGroup");
         w.start_element("Group");
-        write_group_xml(&mut w, &group);
+        write_group_xml(&mut w, &group_clone);
         w.end_element("Group");
         w.start_element("Users");
         for user in page {
@@ -1585,12 +1653,16 @@ impl RustStackIam {
         let (marker, max_items) = parse_pagination(params);
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let user = self.store.users.get(user_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
-        })?;
+        // Clone group names, then drop the user guard.
+        let group_names: Vec<String> = {
+            let user = self.store.users.get(user_name).ok_or_else(|| {
+                IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
+            })?;
+            user.groups.iter().cloned().collect()
+        };
 
-        let mut groups: Vec<GroupRecord> = user
-            .groups
+        // Guard dropped, now safe to query the groups map.
+        let mut groups: Vec<GroupRecord> = group_names
             .iter()
             .filter_map(|name| self.store.groups.get(name).map(|g| g.value().clone()))
             .collect();
@@ -1630,12 +1702,19 @@ impl RustStackIam {
         let policy_arn = get_required_param(params, "PolicyArn")?;
         let request_id = uuid::Uuid::new_v4().to_string();
 
+        // Verify both exist with read-only guards (dropped immediately).
+        if !self.store.groups.contains_key(group_name) {
+            return Err(IamError::no_such_entity(format!(
+                "The group with name {group_name} cannot be found."
+            )));
+        }
         if !self.store.policies.contains_key(policy_arn) {
             return Err(IamError::no_such_entity(format!(
                 "Policy {policy_arn} does not exist."
             )));
         }
 
+        // Acquire write lock on group only.
         let mut group = self.store.groups.get_mut(group_name).ok_or_else(|| {
             IamError::no_such_entity(format!("The group with name {group_name} cannot be found."))
         })?;
@@ -1648,7 +1727,10 @@ impl RustStackIam {
             )));
         }
 
-        if group.attached_policies.insert(policy_arn.to_owned()) {
+        let inserted = group.attached_policies.insert(policy_arn.to_owned());
+        drop(group); // Drop group lock before acquiring policy lock.
+
+        if inserted {
             if let Some(mut pol) = self.store.policies.get_mut(policy_arn) {
                 pol.attachment_count += 1;
             }
@@ -1677,6 +1759,8 @@ impl RustStackIam {
             )));
         }
 
+        drop(group); // Drop group lock before acquiring policy lock.
+
         if let Some(mut pol) = self.store.policies.get_mut(policy_arn) {
             pol.attachment_count = (pol.attachment_count - 1).max(0);
         }
@@ -1695,12 +1779,18 @@ impl RustStackIam {
         let (marker, max_items) = parse_pagination(params);
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let group = self.store.groups.get(group_name).ok_or_else(|| {
-            IamError::no_such_entity(format!("The group with name {group_name} cannot be found."))
-        })?;
+        // Clone attached policy ARNs, then drop the group guard.
+        let attached_policy_arns: Vec<String> = {
+            let group = self.store.groups.get(group_name).ok_or_else(|| {
+                IamError::no_such_entity(format!(
+                    "The group with name {group_name} cannot be found."
+                ))
+            })?;
+            group.attached_policies.iter().cloned().collect()
+        };
 
-        let mut policies: Vec<(String, String)> = group
-            .attached_policies
+        // Guard dropped, now safe to query the policies map.
+        let mut policies: Vec<(String, String)> = attached_policy_arns
             .iter()
             .filter_map(|arn| {
                 let pol = self.store.policies.get(arn)?;
@@ -1756,12 +1846,6 @@ impl RustStackIam {
             )));
         }
 
-        if self.store.instance_profiles.contains_key(name) {
-            return Err(IamError::entity_already_exists(format!(
-                "Instance Profile {name} already exists."
-            )));
-        }
-
         let ip = InstanceProfileRecord {
             instance_profile_name: name.to_owned(),
             instance_profile_id: generate_iam_id("AIPA"),
@@ -1779,13 +1863,23 @@ impl RustStackIam {
         w.start_response("CreateInstanceProfile");
         w.start_result("CreateInstanceProfile");
         w.start_element("InstanceProfile");
-        write_instance_profile_xml(&mut w, &ip, &self.store);
+        // No roles yet, so no nested lock issue with empty roles list.
+        write_instance_profile_xml(&mut w, &ip, &[]);
         w.end_element("InstanceProfile");
         w.end_element("CreateInstanceProfileResult");
         w.write_response_metadata(&request_id);
         w.end_element("CreateInstanceProfileResponse");
 
-        self.store.instance_profiles.insert(name.to_owned(), ip);
+        match self.store.instance_profiles.entry(name.to_owned()) {
+            Entry::Occupied(_) => {
+                return Err(IamError::entity_already_exists(format!(
+                    "Instance Profile {name} already exists."
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(ip);
+            }
+        }
 
         Ok((w.into_string(), request_id))
     }
@@ -1798,15 +1892,21 @@ impl RustStackIam {
         let name = get_required_param(params, "InstanceProfileName")?;
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let ip = self.store.instance_profiles.get(name).ok_or_else(|| {
-            IamError::no_such_entity(format!("Instance Profile {name} cannot be found."))
-        })?;
+        // Clone IP data and drop guard before fetching roles from another map.
+        let ip = {
+            let ip_ref = self.store.instance_profiles.get(name).ok_or_else(|| {
+                IamError::no_such_entity(format!("Instance Profile {name} cannot be found."))
+            })?;
+            ip_ref.clone()
+        };
+
+        let roles = fetch_roles_for_instance_profile(&self.store, &ip.roles);
 
         let mut w = XmlWriter::new();
         w.start_response("GetInstanceProfile");
         w.start_result("GetInstanceProfile");
         w.start_element("InstanceProfile");
-        write_instance_profile_xml(&mut w, &ip, &self.store);
+        write_instance_profile_xml(&mut w, &ip, &roles);
         w.end_element("InstanceProfile");
         w.end_element("GetInstanceProfileResult");
         w.write_response_metadata(&request_id);
@@ -1870,8 +1970,9 @@ impl RustStackIam {
         w.write_bool_element("IsTruncated", is_truncated);
         w.start_element("InstanceProfiles");
         for ip in page {
+            let roles = fetch_roles_for_instance_profile(&self.store, &ip.roles);
             w.start_element("member");
-            write_instance_profile_xml(&mut w, ip, &self.store);
+            write_instance_profile_xml(&mut w, ip, &roles);
             w.end_element("member");
         }
         w.end_element("InstanceProfiles");
@@ -1917,8 +2018,9 @@ impl RustStackIam {
         w.write_bool_element("IsTruncated", is_truncated);
         w.start_element("InstanceProfiles");
         for ip in page {
+            let roles = fetch_roles_for_instance_profile(&self.store, &ip.roles);
             w.start_element("member");
-            write_instance_profile_xml(&mut w, ip, &self.store);
+            write_instance_profile_xml(&mut w, ip, &roles);
             w.end_element("member");
         }
         w.end_element("InstanceProfiles");
@@ -2585,20 +2687,24 @@ impl RustStackIam {
             IamError::no_such_entity(format!("The user with name {user_name} cannot be found."))
         })?;
 
-        // Merge tags: new tags override existing ones with the same key.
+        // Calculate resulting tags BEFORE mutating.
+        let mut merged_tags = user.tags.clone();
         for (key, value) in &new_tags {
-            if let Some(existing) = user.tags.iter_mut().find(|(k, _)| k == key) {
+            if let Some(existing) = merged_tags.iter_mut().find(|(k, _)| k == key) {
                 existing.1.clone_from(value);
             } else {
-                user.tags.push((key.clone(), value.clone()));
+                merged_tags.push((key.clone(), value.clone()));
             }
         }
 
-        if user.tags.len() > MAX_TAGS_PER_ENTITY {
+        if merged_tags.len() > MAX_TAGS_PER_ENTITY {
             return Err(IamError::limit_exceeded(format!(
                 "Cannot exceed {MAX_TAGS_PER_ENTITY} tags per entity"
             )));
         }
+
+        // Now actually apply the merged tags.
+        user.tags = merged_tags;
 
         debug!(user_name, count = new_tags.len(), "tagged user");
         Ok((empty_response("TagUser", &request_id), request_id))
@@ -2662,19 +2768,24 @@ impl RustStackIam {
             IamError::no_such_entity(format!("The role with name {role_name} cannot be found."))
         })?;
 
+        // Calculate resulting tags BEFORE mutating.
+        let mut merged_tags = role.tags.clone();
         for (key, value) in &new_tags {
-            if let Some(existing) = role.tags.iter_mut().find(|(k, _)| k == key) {
+            if let Some(existing) = merged_tags.iter_mut().find(|(k, _)| k == key) {
                 existing.1.clone_from(value);
             } else {
-                role.tags.push((key.clone(), value.clone()));
+                merged_tags.push((key.clone(), value.clone()));
             }
         }
 
-        if role.tags.len() > MAX_TAGS_PER_ENTITY {
+        if merged_tags.len() > MAX_TAGS_PER_ENTITY {
             return Err(IamError::limit_exceeded(format!(
                 "Cannot exceed {MAX_TAGS_PER_ENTITY} tags per entity"
             )));
         }
+
+        // Now actually apply the merged tags.
+        role.tags = merged_tags;
 
         debug!(role_name, count = new_tags.len(), "tagged role");
         Ok((empty_response("TagRole", &request_id), request_id))
@@ -2744,12 +2855,6 @@ impl RustStackIam {
         let capitalized = capitalize_service_name(service_prefix);
         let role_name = format!("AWSServiceRoleFor{capitalized}");
 
-        if self.store.roles.contains_key(&role_name) {
-            return Err(IamError::entity_already_exists(format!(
-                "Service role {role_name} already exists."
-            )));
-        }
-
         let trust_policy = format!(
             r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"Service":"{service_name}"}},"Action":"sts:AssumeRole"}}]}}"#
         );
@@ -2787,7 +2892,16 @@ impl RustStackIam {
         w.write_response_metadata(&request_id);
         w.end_element("CreateServiceLinkedRoleResponse");
 
-        self.store.roles.insert(role_name, role);
+        match self.store.roles.entry(role_name.clone()) {
+            Entry::Occupied(_) => {
+                return Err(IamError::entity_already_exists(format!(
+                    "Service role {role_name} already exists."
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(role);
+            }
+        }
 
         Ok((w.into_string(), request_id))
     }
@@ -2987,17 +3101,39 @@ impl RustStackIam {
         }
         policy_roles.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Combine all entities for simple pagination.
-        let total_count = policy_users.len() + policy_groups.len() + policy_roles.len();
+        // Combine all entities into a single list for pagination.
+        // Each entry: (entity_type, name, id)
+        let mut all_entities: Vec<(&str, &str, &str)> = Vec::new();
+        for (name, id) in &policy_groups {
+            all_entities.push(("group", name, id));
+        }
+        for (name, id) in &policy_users {
+            all_entities.push(("user", name, id));
+        }
+        for (name, id) in &policy_roles {
+            all_entities.push(("role", name, id));
+        }
+
         let start = marker.unwrap_or(0);
-        let is_truncated = start + max_items < total_count;
+        let end = (start + max_items).min(all_entities.len());
+        let page = if start < all_entities.len() {
+            &all_entities[start..end]
+        } else {
+            &[]
+        };
+        let is_truncated = end < all_entities.len();
+
+        // Partition the page back into entity types.
+        let page_groups: Vec<_> = page.iter().filter(|(t, _, _)| *t == "group").collect();
+        let page_users: Vec<_> = page.iter().filter(|(t, _, _)| *t == "user").collect();
+        let page_roles: Vec<_> = page.iter().filter(|(t, _, _)| *t == "role").collect();
 
         let mut w = XmlWriter::new();
         w.start_response("ListEntitiesForPolicy");
         w.start_result("ListEntitiesForPolicy");
 
         w.start_element("PolicyGroups");
-        for (name, id) in &policy_groups {
+        for (_, name, id) in &page_groups {
             w.start_element("member");
             w.write_element("GroupName", name);
             w.write_element("GroupId", id);
@@ -3006,7 +3142,7 @@ impl RustStackIam {
         w.end_element("PolicyGroups");
 
         w.start_element("PolicyUsers");
-        for (name, id) in &policy_users {
+        for (_, name, id) in &page_users {
             w.start_element("member");
             w.write_element("UserName", name);
             w.write_element("UserId", id);
@@ -3015,7 +3151,7 @@ impl RustStackIam {
         w.end_element("PolicyUsers");
 
         w.start_element("PolicyRoles");
-        for (name, id) in &policy_roles {
+        for (_, name, id) in &page_roles {
             w.start_element("member");
             w.write_element("RoleName", name);
             w.write_element("RoleId", id);
@@ -3025,7 +3161,7 @@ impl RustStackIam {
 
         w.write_bool_element("IsTruncated", is_truncated);
         if is_truncated {
-            w.write_element("Marker", &(start + max_items).to_string());
+            w.write_element("Marker", &end.to_string());
         }
         w.end_element("ListEntitiesForPolicyResult");
         w.write_response_metadata(&request_id);
@@ -3055,6 +3191,21 @@ impl RustStackIam {
             filter_list.is_empty() || filter_list.iter().any(|f| f == "AWSManagedPolicy");
 
         let _ = (marker, max_items); // Full dump for simplicity.
+
+        // Pre-fetch all data to avoid nested DashMap locks during XML generation.
+        let policy_name_by_arn: HashMap<String, String> = self
+            .store
+            .policies
+            .iter()
+            .map(|e| (e.key().clone(), e.value().policy_name.clone()))
+            .collect();
+
+        let instance_profiles: Vec<InstanceProfileRecord> = self
+            .store
+            .instance_profiles
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
 
         let mut w = XmlWriter::new();
         w.start_response("GetAccountAuthorizationDetails");
@@ -3103,8 +3254,8 @@ impl RustStackIam {
                 attached.sort();
                 for arn in attached {
                     w.start_element("member");
-                    if let Some(pol) = self.store.policies.get(arn) {
-                        w.write_element("PolicyName", &pol.policy_name);
+                    if let Some(policy_name) = policy_name_by_arn.get(arn.as_str()) {
+                        w.write_element("PolicyName", policy_name);
                     }
                     w.write_element("PolicyArn", arn);
                     w.end_element("member");
@@ -3155,8 +3306,8 @@ impl RustStackIam {
                 attached.sort();
                 for arn in attached {
                     w.start_element("member");
-                    if let Some(pol) = self.store.policies.get(arn) {
-                        w.write_element("PolicyName", &pol.policy_name);
+                    if let Some(policy_name) = policy_name_by_arn.get(arn.as_str()) {
+                        w.write_element("PolicyName", policy_name);
                     }
                     w.write_element("PolicyArn", arn);
                     w.end_element("member");
@@ -3185,12 +3336,19 @@ impl RustStackIam {
                     &url_encode_policy(&role.assume_role_policy_document),
                 );
 
-                // Instance profiles for this role
+                // Instance profiles for this role (using pre-fetched data).
                 w.start_element("InstanceProfileList");
-                for entry in &self.store.instance_profiles {
-                    if entry.value().roles.contains(&role.role_name) {
+                for ip in &instance_profiles {
+                    if ip.roles.contains(&role.role_name) {
+                        // Roles are already cloned above, find matching ones.
+                        let ip_roles: Vec<&RoleRecord> = roles
+                            .iter()
+                            .filter(|r| ip.roles.contains(&r.role_name))
+                            .collect();
+                        let ip_roles_owned: Vec<RoleRecord> =
+                            ip_roles.into_iter().cloned().collect();
                         w.start_element("member");
-                        write_instance_profile_xml(&mut w, entry.value(), &self.store);
+                        write_instance_profile_xml(&mut w, ip, &ip_roles_owned);
                         w.end_element("member");
                     }
                 }
@@ -3214,8 +3372,8 @@ impl RustStackIam {
                 attached.sort();
                 for arn in attached {
                     w.start_element("member");
-                    if let Some(pol) = self.store.policies.get(arn) {
-                        w.write_element("PolicyName", &pol.policy_name);
+                    if let Some(policy_name) = policy_name_by_arn.get(arn.as_str()) {
+                        w.write_element("PolicyName", policy_name);
                     }
                     w.write_element("PolicyArn", arn);
                     w.end_element("member");

@@ -28,12 +28,18 @@ pub const XML_NS: &str = "https://iam.amazonaws.com/doc/2010-05-08/";
 #[must_use]
 pub fn xml_response(xml: String, request_id: &str) -> http::Response<IamResponseBody> {
     let body = IamResponseBody::from_xml(xml.into_bytes());
+    // Status and headers are compile-time constants, so builder cannot fail.
     http::Response::builder()
         .status(http::StatusCode::OK)
         .header("content-type", CONTENT_TYPE)
         .header("x-amzn-requestid", request_id)
         .body(body)
-        .expect("valid XML response")
+        .unwrap_or_else(|_| {
+            http::Response::new(IamResponseBody::from_xml(
+                b"<ErrorResponse><Error><Code>InternalError</Code></Error></ErrorResponse>"
+                    .to_vec(),
+            ))
+        })
 }
 
 /// Serialize an IAM error into an XML error response body string.
@@ -73,12 +79,18 @@ pub fn error_to_xml(error: &IamError, request_id: &str) -> String {
 pub fn error_to_response(error: &IamError, request_id: &str) -> http::Response<IamResponseBody> {
     let xml = error_to_xml(error, request_id);
     let body = IamResponseBody::from_xml(xml.into_bytes());
+    // Status comes from a valid error code and headers are constants, so builder cannot fail.
     http::Response::builder()
         .status(error.code.status_code())
         .header("content-type", CONTENT_TYPE)
         .header("x-amzn-requestid", request_id)
         .body(body)
-        .expect("valid error response")
+        .unwrap_or_else(|_| {
+            http::Response::new(IamResponseBody::from_xml(
+                b"<ErrorResponse><Error><Code>InternalError</Code></Error></ErrorResponse>"
+                    .to_vec(),
+            ))
+        })
 }
 
 /// XML-escape a string value.
