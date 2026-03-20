@@ -1,6 +1,6 @@
 [package]
-name = "ruststack-events-core"
-description = "EventBridge business logic for RustStack"
+name = "ruststack-sts-core"
+description = "STS business logic for RustStack"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,21 +12,16 @@ workspace = true
 
 [dependencies]
 ruststack-core = { workspace = true }
-ruststack-events-model = { workspace = true }
-ruststack-events-http = { workspace = true }
-ruststack-auth = { workspace = true }
+ruststack-sts-model = { workspace = true }
+ruststack-sts-http = { workspace = true }
 http = { workspace = true }
 
-async-trait = { workspace = true }
 dashmap = { workspace = true }
-futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-tokio = { workspace = true }
-ipnet = "2.12"
+rand = { workspace = true }
+base64 = { workspace = true }

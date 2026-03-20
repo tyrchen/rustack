@@ -1,0 +1,37 @@
+[service]
+name = "sts"
+display_name = "STS"
+rust_prefix = "Sts"
+namespace = "com.amazonaws.sts"
+protocol = "awsQuery"
+
+[protocol]
+serde_rename = "PascalCase"
+emit_serde_derives = true
+
+[operations]
+phase0 = [
+    "GetCallerIdentity", "AssumeRole",
+    "GetSessionToken", "GetAccessKeyInfo",
+]
+phase1 = [
+    "AssumeRoleWithSAML", "AssumeRoleWithWebIdentity",
+    "DecodeAuthorizationMessage", "GetFederationToken",
+]
+
+[errors.custom]
+MissingAction = { status = 400, message = "Missing action parameter" }
+InvalidAction = { status = 400, message = "Operation is not supported" }
+ExpiredTokenException = { status = 403, message = "The security token included in the request is expired" }
+MalformedPolicyDocumentException = { status = 400, message = "The policy document is malformed" }
+PackedPolicyTooLargeException = { status = 400, message = "The packed policy is too large" }
+RegionDisabledException = { status = 403, message = "STS is not activated in the requested region" }
+InvalidIdentityTokenException = { status = 400, message = "The identity token is invalid" }
+IDPRejectedClaimException = { status = 400, message = "The identity provider rejected the claim" }
+IDPCommunicationErrorException = { status = 500, message = "Error communicating with the identity provider" }
+InvalidClientTokenIdException = { status = 403, message = "The client token ID is not valid" }
+InvalidParameterValue = { status = 400, message = "An invalid or out-of-range value was supplied for the input parameter" }
+InternalError = { status = 500, message = "Internal server error" }
+
+[output]
+file_layout = "flat"

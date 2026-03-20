@@ -29,6 +29,8 @@ aws-sdk-ses = { workspace = true }
 aws-sdk-apigatewayv2 = { workspace = true }
 aws-sdk-cloudwatch = { workspace = true }
 aws-sdk-iam = { workspace = true }
+aws-sdk-sts = { workspace = true }
+base64 = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 aws-credential-types = { workspace = true }

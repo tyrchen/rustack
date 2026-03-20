@@ -197,6 +197,15 @@ use ruststack_iam_core::store::IamStore;
 #[cfg(feature = "iam")]
 use ruststack_iam_http::service::{IamHttpConfig, IamHttpService};
 
+#[cfg(feature = "sts")]
+use ruststack_sts_core::config::StsConfig;
+#[cfg(feature = "sts")]
+use ruststack_sts_core::handler::RustStackStsHandler;
+#[cfg(feature = "sts")]
+use ruststack_sts_core::provider::RustStackSts;
+#[cfg(feature = "sts")]
+use ruststack_sts_http::service::{StsHttpConfig, StsHttpService};
+
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
 #[cfg(feature = "s3")]
@@ -423,6 +432,18 @@ fn build_iam_http_config(config: &IamConfig) -> IamHttpConfig {
     }
 }
 
+/// Build the [`StsHttpConfig`] from the [`StsConfig`].
+#[cfg(feature = "sts")]
+fn build_sts_http_config(config: &StsConfig) -> StsHttpConfig {
+    let credential_provider = build_credential_provider();
+
+    StsHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -441,7 +462,8 @@ fn build_iam_http_config(config: &IamConfig) -> IamHttpConfig {
     feature = "apigatewayv2",
     feature = "cloudwatch",
     feature = "dynamodbstreams",
-    feature = "iam"
+    feature = "iam",
+    feature = "sts"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -529,6 +551,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "cloudwatch" && cfg!(feature = "cloudwatch"))
         || (name == "dynamodbstreams" && cfg!(feature = "dynamodbstreams"))
         || (name == "iam" && cfg!(feature = "iam"))
+        || (name == "sts" && cfg!(feature = "sts"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -594,6 +617,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "iam") {
             all.push("iam".to_string());
+        }
+        if cfg!(feature = "sts") {
+            all.push("sts".to_string());
         }
         all
     } else {
@@ -792,6 +818,22 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             ses_v1_service,
             ses_v2_service,
         )));
+    }
+
+    // ----- STS (register BEFORE SNS: both use form-urlencoded POST) -----
+    // STS matches on SigV4 service=sts.
+    #[cfg(feature = "sts")]
+    if is_enabled("sts") {
+        let sts_config = StsConfig::from_env();
+        info!(
+            sts_skip_signature_validation = sts_config.skip_signature_validation,
+            "initializing STS service",
+        );
+        let sts_provider = RustStackSts::new(sts_config.clone());
+        let sts_handler = RustStackStsHandler::new(Arc::new(sts_provider));
+        let sts_http_config = build_sts_http_config(&sts_config);
+        let sts_service = StsHttpService::new(Arc::new(sts_handler), sts_http_config);
+        services.push(Box::new(service::StsServiceRouter::new(sts_service)));
     }
 
     // ----- SNS (register before S3: S3 is the catch-all) -----
