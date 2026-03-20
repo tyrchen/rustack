@@ -1,0 +1,18 @@
+[package]
+name = "ruststack-cloudwatch-model"
+description = "CloudWatch Metrics model types for RustStack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+http = { workspace = true }
+chrono = { workspace = true }

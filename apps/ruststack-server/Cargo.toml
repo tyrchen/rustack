@@ -15,7 +15,7 @@ name = "ruststack-server"
 path = "src/main.rs"
 
 [features]
-default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses", "apigatewayv2"]
+default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses", "apigatewayv2", "cloudwatch"]
 s3 = ["dep:ruststack-s3-core", "dep:ruststack-s3-http", "dep:ruststack-s3-model"]
 dynamodb = ["dep:ruststack-dynamodb-core", "dep:ruststack-dynamodb-http"]
 sqs = ["dep:ruststack-sqs-core", "dep:ruststack-sqs-http"]
@@ -29,6 +29,7 @@ kinesis = ["dep:ruststack-kinesis-core", "dep:ruststack-kinesis-http"]
 secretsmanager = ["dep:ruststack-secretsmanager-core", "dep:ruststack-secretsmanager-http"]
 ses = ["dep:ruststack-ses-core", "dep:ruststack-ses-http"]
 apigatewayv2 = ["dep:ruststack-apigatewayv2-core", "dep:ruststack-apigatewayv2-http"]
+cloudwatch = ["dep:ruststack-cloudwatch-core", "dep:ruststack-cloudwatch-http"]
 
 [dependencies]
 # Internal crates - shared
@@ -88,6 +89,10 @@ ruststack-ses-http = { workspace = true, optional = true }
 # Internal crates - API Gateway v2 (optional, gated by "apigatewayv2" feature)
 ruststack-apigatewayv2-core = { workspace = true, optional = true }
 ruststack-apigatewayv2-http = { workspace = true, optional = true }
+
+# Internal crates - CloudWatch Metrics (optional, gated by "cloudwatch" feature)
+ruststack-cloudwatch-core = { workspace = true, optional = true }
+ruststack-cloudwatch-http = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

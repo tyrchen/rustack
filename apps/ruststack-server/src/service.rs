@@ -1131,3 +1131,93 @@ mod apigatewayv2_router {
 
 #[cfg(feature = "apigatewayv2")]
 pub use apigatewayv2_router::{ApiGatewayV2ExecutionRouter, ApiGatewayV2ManagementRouter};
+
+// ---------------------------------------------------------------------------
+// CloudWatch Metrics
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cloudwatch")]
+mod cloudwatch_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_cloudwatch_http::dispatch::CloudWatchHandler;
+    use ruststack_cloudwatch_http::service::CloudWatchHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Extract the SigV4 service name from the Authorization header.
+    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
+        let auth = headers.get("authorization")?.to_str().ok()?;
+        let credential_start = auth.find("Credential=")? + "Credential=".len();
+        let credential_end = auth[credential_start..]
+            .find(',')
+            .map_or(auth.len(), |i| credential_start + i);
+        let credential = &auth[credential_start..credential_end];
+        // Format: AKID/date/region/service/aws4_request
+        let parts: Vec<&str> = credential.split('/').collect();
+        if parts.len() >= 4 {
+            Some(parts[3])
+        } else {
+            None
+        }
+    }
+
+    /// Routes requests to the CloudWatch Metrics service.
+    ///
+    /// Matches `POST /` requests with `Content-Type: application/x-www-form-urlencoded`
+    /// where the SigV4 signing service is `monitoring`.
+    pub struct CloudWatchServiceRouter<H: CloudWatchHandler> {
+        inner: CloudWatchHttpService<H>,
+    }
+
+    impl<H: CloudWatchHandler> CloudWatchServiceRouter<H> {
+        /// Wrap a [`CloudWatchHttpService`] in a router.
+        pub fn new(inner: CloudWatchHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: CloudWatchHandler> ServiceRouter for CloudWatchServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "cloudwatch"
+        }
+
+        /// CloudWatch Metrics matches form-urlencoded POST requests signed
+        /// with the `monitoring` SigV4 service name.
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            if *req.method() != http::Method::POST {
+                return false;
+            }
+            let is_form_encoded = req
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.contains("x-www-form-urlencoded"));
+            if !is_form_encoded {
+                return false;
+            }
+            // Check SigV4 signing service name.
+            extract_sigv4_service(req.headers()).is_some_and(|svc| svc == "monitoring")
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "cloudwatch")]
+pub use cloudwatch_router::CloudWatchServiceRouter;

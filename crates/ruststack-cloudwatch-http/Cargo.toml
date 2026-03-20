@@ -1,0 +1,33 @@
+[package]
+name = "ruststack-cloudwatch-http"
+description = "CloudWatch Metrics HTTP service layer for RustStack (awsQuery protocol)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ruststack-cloudwatch-model = { workspace = true }
+ruststack-auth = { workspace = true }
+
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+
+bytes = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# http_body::Body trait
+http-body = "1.0"
+
+# awsQuery form-urlencoded parsing
+form_urlencoded = { workspace = true }

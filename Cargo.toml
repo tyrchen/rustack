@@ -66,6 +66,9 @@ ruststack-ses-core = { path = "crates/ruststack-ses-core" }
 ruststack-apigatewayv2-model = { path = "crates/ruststack-apigatewayv2-model" }
 ruststack-apigatewayv2-http = { path = "crates/ruststack-apigatewayv2-http" }
 ruststack-apigatewayv2-core = { path = "crates/ruststack-apigatewayv2-core" }
+ruststack-cloudwatch-model = { path = "crates/ruststack-cloudwatch-model" }
+ruststack-cloudwatch-http = { path = "crates/ruststack-cloudwatch-http" }
+ruststack-cloudwatch-core = { path = "crates/ruststack-cloudwatch-core" }
 
 # Async runtime
 tokio = { version = "1.49", features = [
@@ -150,6 +153,7 @@ aws-sdk-sqs = "1.60"
 aws-sdk-ssm = "1.107"
 aws-sdk-sns = "1.65"
 aws-sdk-lambda = "1.104"
+aws-sdk-cloudwatch = "~1.60"
 aws-sdk-cloudwatchlogs = "1.105"
 aws-sdk-eventbridge = "1.96"
 aws-sdk-kms = "1"

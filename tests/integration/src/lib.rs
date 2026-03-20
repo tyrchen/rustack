@@ -10,6 +10,7 @@
 
 use std::sync::Once;
 
+use aws_sdk_cloudwatch as cloudwatch;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_sns as sns;
 use aws_sdk_sqs as sqs;
@@ -350,6 +351,23 @@ pub fn ses_client() -> aws_sdk_ses::Client {
     aws_sdk_ses::Client::from_conf(config)
 }
 
+/// Create a configured CloudWatch client pointing at the local server.
+#[must_use]
+pub fn cloudwatch_client() -> cloudwatch::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = cloudwatch::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    cloudwatch::Client::from_conf(config)
+}
+
 /// Create a configured API Gateway v2 client pointing at the local server.
 #[must_use]
 pub fn apigatewayv2_client() -> aws_sdk_apigatewayv2::Client {
@@ -369,6 +387,7 @@ pub fn apigatewayv2_client() -> aws_sdk_apigatewayv2::Client {
 
 mod test_apigatewayv2;
 mod test_bucket;
+mod test_cloudwatch;
 mod test_cors;
 mod test_dynamodb;
 mod test_error;

@@ -1,0 +1,48 @@
+[service]
+name = "cloudwatch"
+display_name = "CloudWatch"
+rust_prefix = "CloudWatch"
+namespace = "com.amazonaws.cloudwatch"
+protocol = "awsQuery"
+
+[protocol]
+serde_rename = "PascalCase"
+emit_serde_derives = true
+
+[operations]
+phase0 = [
+    # Metric operations
+    "PutMetricData", "GetMetricData", "GetMetricStatistics", "ListMetrics",
+    # Alarm operations
+    "PutMetricAlarm", "DescribeAlarms", "DescribeAlarmsForMetric",
+    "DeleteAlarms", "SetAlarmState",
+    "EnableAlarmActions", "DisableAlarmActions",
+    "DescribeAlarmHistory",
+    # Tagging
+    "TagResource", "UntagResource", "ListTagsForResource",
+]
+phase1 = [
+    # Composite alarms
+    "PutCompositeAlarm",
+    # Dashboards
+    "PutDashboard", "GetDashboard", "DeleteDashboards", "ListDashboards",
+    # Insight rules
+    "PutInsightRule", "DeleteInsightRules", "DescribeInsightRules",
+]
+phase2 = [
+    # Anomaly detection
+    "PutAnomalyDetector", "DescribeAnomalyDetectors",
+    "DeleteAnomalyDetector",
+    # Managed insight rules
+    "PutManagedInsightRules",
+    # Metric streams
+    "PutMetricStream", "DeleteMetricStream",
+    "ListMetricStreams", "GetMetricStream",
+]
+
+[errors.custom]
+MissingAction = { status = 400, message = "Missing required parameter: Action" }
+InvalidAction = { status = 400, message = "Operation is not supported" }
+
+[output]
+file_layout = "flat"
