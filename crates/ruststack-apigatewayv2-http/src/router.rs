@@ -25,6 +25,23 @@ impl PathParams {
     pub fn insert(&mut self, name: String, value: String) {
         self.params.insert(name, value);
     }
+
+    /// Returns the number of extracted parameters.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.params.len()
+    }
+
+    /// Returns `true` if no parameters were extracted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    /// Iterate over all extracted parameters.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.params.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
 }
 
 /// Match an HTTP request path against a route pattern, extracting parameters.

@@ -138,6 +138,53 @@ fn wrap_empty_response(
     ))
 }
 
+/// Merge path parameters and query parameters into the JSON body so that
+/// required fields like `apiId` are present when deserializing the input struct.
+fn merge_params(body: &[u8], path_params: &PathParams, query: &str) -> Vec<u8> {
+    let mut obj: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else if let Ok(map) = serde_json::from_slice(body) {
+        map
+    } else {
+        return body.to_vec();
+    };
+
+    // Insert each path param into the JSON body if not already present.
+    // Handle special case: route pattern uses `resource-arn` but serde expects `resourceArn`.
+    for (key, value) in path_params.iter() {
+        let json_key = if key == "resource-arn" {
+            "resourceArn".to_owned()
+        } else {
+            key.to_owned()
+        };
+        obj.entry(json_key)
+            .or_insert(serde_json::Value::String(value.to_owned()));
+    }
+
+    // Merge query parameters. `tagKeys` can appear multiple times and must be an array.
+    for (key, value) in parse_query_params(query) {
+        let entry = obj.entry(key);
+        match entry {
+            serde_json::map::Entry::Vacant(v) => {
+                if v.key() == "tagKeys" {
+                    v.insert(serde_json::Value::Array(vec![serde_json::Value::String(
+                        value,
+                    )]));
+                } else {
+                    v.insert(serde_json::Value::String(value));
+                }
+            }
+            serde_json::map::Entry::Occupied(mut o) => {
+                if let serde_json::Value::Array(arr) = o.get_mut() {
+                    arr.push(serde_json::Value::String(value));
+                }
+            }
+        }
+    }
+
+    serde_json::to_vec(&obj).unwrap_or_else(|_| body.to_vec())
+}
+
 /// Dispatch an API Gateway v2 operation to the appropriate provider method.
 #[allow(clippy::too_many_lines, clippy::assigning_clones, clippy::unused_async)]
 async fn dispatch(
@@ -147,6 +194,9 @@ async fn dispatch(
     query: &str,
     body: &[u8],
 ) -> Result<http::Response<ApiGatewayV2ResponseBody>, ApiGatewayV2Error> {
+    // Merge path params and query params into body for deserialization.
+    let merged = merge_params(body, path_params, query);
+    let body = &merged;
     let query_params = parse_query_params(query);
 
     match op {
