@@ -1,0 +1,458 @@
+name: apigatewayv2-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  apigatewayv2-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and start RustStack
+        id: ruststack
+        run: |
+          cargo build --release -p ruststack-server
+
+          S3_SKIP_SIGNATURE_VALIDATION=true \
+          APIGATEWAYV2_SKIP_SIGNATURE_VALIDATION=true \
+          GATEWAY_LISTEN=0.0.0.0:4566 \
+          LOG_LEVEL=warn \
+          cargo run --release -p ruststack-server &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server did not start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "endpoint=http://localhost:4566" >> "$GITHUB_OUTPUT"
+
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=us-east-1" >> "$GITHUB_ENV"
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+
+      # -- API CRUD -----------------------------------------------------------
+      - name: "API: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-test-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+          echo "Created API: $API_ID"
+          [ -n "$API_ID" ]
+
+          NAME=$(aws apigatewayv2 get-api \
+            --api-id "$API_ID" \
+            --query "Name" --output text)
+          [ "$NAME" = "ci-test-api" ]
+
+          aws apigatewayv2 update-api \
+            --api-id "$API_ID" \
+            --name ci-test-api-updated
+
+          NAME2=$(aws apigatewayv2 get-api \
+            --api-id "$API_ID" \
+            --query "Name" --output text)
+          [ "$NAME2" = "ci-test-api-updated" ]
+
+          COUNT=$(aws apigatewayv2 get-apis \
+            --query "Items | length(@)" --output text)
+          [ "$COUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Route CRUD ---------------------------------------------------------
+      - name: "Route: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-route-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          ROUTE_ID=$(aws apigatewayv2 create-route \
+            --api-id "$API_ID" \
+            --route-key "GET /items" \
+            --query "RouteId" --output text)
+          echo "Created Route: $ROUTE_ID"
+          [ -n "$ROUTE_ID" ]
+
+          KEY=$(aws apigatewayv2 get-route \
+            --api-id "$API_ID" \
+            --route-id "$ROUTE_ID" \
+            --query "RouteKey" --output text)
+          [ "$KEY" = "GET /items" ]
+
+          aws apigatewayv2 update-route \
+            --api-id "$API_ID" \
+            --route-id "$ROUTE_ID" \
+            --route-key "POST /items"
+
+          KEY2=$(aws apigatewayv2 get-route \
+            --api-id "$API_ID" \
+            --route-id "$ROUTE_ID" \
+            --query "RouteKey" --output text)
+          [ "$KEY2" = "POST /items" ]
+
+          RCOUNT=$(aws apigatewayv2 get-routes \
+            --api-id "$API_ID" \
+            --query "Items | length(@)" --output text)
+          [ "$RCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-route --api-id "$API_ID" --route-id "$ROUTE_ID"
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Integration CRUD ---------------------------------------------------
+      - name: "Integration: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-int-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          INT_ID=$(aws apigatewayv2 create-integration \
+            --api-id "$API_ID" \
+            --integration-type MOCK \
+            --connection-type INTERNET \
+            --query "IntegrationId" --output text)
+          echo "Created Integration: $INT_ID"
+          [ -n "$INT_ID" ]
+
+          TYPE=$(aws apigatewayv2 get-integration \
+            --api-id "$API_ID" \
+            --integration-id "$INT_ID" \
+            --query "IntegrationType" --output text)
+          [ "$TYPE" = "MOCK" ]
+
+          aws apigatewayv2 update-integration \
+            --api-id "$API_ID" \
+            --integration-id "$INT_ID" \
+            --description "Updated mock"
+
+          ICOUNT=$(aws apigatewayv2 get-integrations \
+            --api-id "$API_ID" \
+            --query "Items | length(@)" --output text)
+          [ "$ICOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-integration --api-id "$API_ID" --integration-id "$INT_ID"
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Stage CRUD ---------------------------------------------------------
+      - name: "Stage: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-stage-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          aws apigatewayv2 create-stage \
+            --api-id "$API_ID" \
+            --stage-name dev
+
+          SNAME=$(aws apigatewayv2 get-stage \
+            --api-id "$API_ID" \
+            --stage-name dev \
+            --query "StageName" --output text)
+          [ "$SNAME" = "dev" ]
+
+          aws apigatewayv2 update-stage \
+            --api-id "$API_ID" \
+            --stage-name dev \
+            --description "Development stage"
+
+          SCOUNT=$(aws apigatewayv2 get-stages \
+            --api-id "$API_ID" \
+            --query "Items | length(@)" --output text)
+          [ "$SCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-stage --api-id "$API_ID" --stage-name dev
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Deployment CRUD ----------------------------------------------------
+      - name: "Deployment: create, get, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-deploy-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          DEP_ID=$(aws apigatewayv2 create-deployment \
+            --api-id "$API_ID" \
+            --query "DeploymentId" --output text)
+          echo "Created Deployment: $DEP_ID"
+          [ -n "$DEP_ID" ]
+
+          aws apigatewayv2 get-deployment \
+            --api-id "$API_ID" \
+            --deployment-id "$DEP_ID"
+
+          DCOUNT=$(aws apigatewayv2 get-deployments \
+            --api-id "$API_ID" \
+            --query "Items | length(@)" --output text)
+          [ "$DCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-deployment --api-id "$API_ID" --deployment-id "$DEP_ID"
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Authorizer CRUD ----------------------------------------------------
+      - name: "Authorizer: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-auth-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          AUTH_ID=$(aws apigatewayv2 create-authorizer \
+            --api-id "$API_ID" \
+            --authorizer-type JWT \
+            --identity-source '$request.header.Authorization' \
+            --name ci-authorizer \
+            --query "AuthorizerId" --output text)
+          echo "Created Authorizer: $AUTH_ID"
+          [ -n "$AUTH_ID" ]
+
+          ANAME=$(aws apigatewayv2 get-authorizer \
+            --api-id "$API_ID" \
+            --authorizer-id "$AUTH_ID" \
+            --query "Name" --output text)
+          [ "$ANAME" = "ci-authorizer" ]
+
+          aws apigatewayv2 update-authorizer \
+            --api-id "$API_ID" \
+            --authorizer-id "$AUTH_ID" \
+            --name ci-authorizer-updated
+
+          ACOUNT=$(aws apigatewayv2 get-authorizers \
+            --api-id "$API_ID" \
+            --query "Items | length(@)" --output text)
+          [ "$ACOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-authorizer --api-id "$API_ID" --authorizer-id "$AUTH_ID"
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Model CRUD ---------------------------------------------------------
+      - name: "Model: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-model-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          MODEL_ID=$(aws apigatewayv2 create-model \
+            --api-id "$API_ID" \
+            --name CIModel \
+            --content-type "application/json" \
+            --schema '{"type":"object"}' \
+            --query "ModelId" --output text)
+          echo "Created Model: $MODEL_ID"
+          [ -n "$MODEL_ID" ]
+
+          MNAME=$(aws apigatewayv2 get-model \
+            --api-id "$API_ID" \
+            --model-id "$MODEL_ID" \
+            --query "Name" --output text)
+          [ "$MNAME" = "CIModel" ]
+
+          aws apigatewayv2 update-model \
+            --api-id "$API_ID" \
+            --model-id "$MODEL_ID" \
+            --name CIModelUpdated
+
+          MCOUNT=$(aws apigatewayv2 get-models \
+            --api-id "$API_ID" \
+            --query "Items | length(@)" --output text)
+          [ "$MCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-model --api-id "$API_ID" --model-id "$MODEL_ID"
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Domain Name CRUD ---------------------------------------------------
+      - name: "Domain Name: create, get, list, delete"
+        run: |
+          set -euo pipefail
+
+          DOMAIN="ci-test.example.com"
+
+          aws apigatewayv2 create-domain-name --domain-name "$DOMAIN"
+
+          DNAME=$(aws apigatewayv2 get-domain-name \
+            --domain-name "$DOMAIN" \
+            --query "DomainName" --output text)
+          [ "$DNAME" = "$DOMAIN" ]
+
+          DNCOUNT=$(aws apigatewayv2 get-domain-names \
+            --query "Items | length(@)" --output text)
+          [ "$DNCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-domain-name --domain-name "$DOMAIN"
+
+      # -- VPC Link CRUD ------------------------------------------------------
+      - name: "VPC Link: create, get, update, list, delete"
+        run: |
+          set -euo pipefail
+
+          VPC_ID=$(aws apigatewayv2 create-vpc-link \
+            --name ci-vpc-link \
+            --subnet-ids subnet-12345 \
+            --query "VpcLinkId" --output text)
+          echo "Created VPC Link: $VPC_ID"
+          [ -n "$VPC_ID" ]
+
+          VNAME=$(aws apigatewayv2 get-vpc-link \
+            --vpc-link-id "$VPC_ID" \
+            --query "Name" --output text)
+          [ "$VNAME" = "ci-vpc-link" ]
+
+          aws apigatewayv2 update-vpc-link \
+            --vpc-link-id "$VPC_ID" \
+            --name ci-vpc-link-updated
+
+          VCOUNT=$(aws apigatewayv2 get-vpc-links \
+            --query "Items | length(@)" --output text)
+          [ "$VCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-vpc-link --vpc-link-id "$VPC_ID"
+
+      # -- Tags ---------------------------------------------------------------
+      - name: "Tags: tag, get, untag"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-tag-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          ARN="arn:aws:apigateway:us-east-1::/apis/$API_ID"
+
+          aws apigatewayv2 tag-resource \
+            --resource-arn "$ARN" \
+            --tags env=ci,team=ruststack
+
+          ENV_TAG=$(aws apigatewayv2 get-tags \
+            --resource-arn "$ARN" \
+            --query "Tags.env" --output text)
+          [ "$ENV_TAG" = "ci" ]
+
+          aws apigatewayv2 untag-resource \
+            --resource-arn "$ARN" \
+            --tag-keys team
+
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- API Mapping ---------------------------------------------------------
+      - name: "API Mapping: create, get, list, delete"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-mapping-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          aws apigatewayv2 create-stage \
+            --api-id "$API_ID" \
+            --stage-name prod
+
+          DOMAIN="ci-mapping.example.com"
+          aws apigatewayv2 create-domain-name --domain-name "$DOMAIN"
+
+          MAP_ID=$(aws apigatewayv2 create-api-mapping \
+            --domain-name "$DOMAIN" \
+            --api-id "$API_ID" \
+            --stage prod \
+            --query "ApiMappingId" --output text)
+          echo "Created API Mapping: $MAP_ID"
+          [ -n "$MAP_ID" ]
+
+          aws apigatewayv2 get-api-mapping \
+            --domain-name "$DOMAIN" \
+            --api-mapping-id "$MAP_ID"
+
+          MCOUNT=$(aws apigatewayv2 get-api-mappings \
+            --domain-name "$DOMAIN" \
+            --query "Items | length(@)" --output text)
+          [ "$MCOUNT" -ge 1 ]
+
+          aws apigatewayv2 delete-api-mapping \
+            --domain-name "$DOMAIN" \
+            --api-mapping-id "$MAP_ID"
+
+          aws apigatewayv2 delete-stage --api-id "$API_ID" --stage-name prod
+          aws apigatewayv2 delete-domain-name --domain-name "$DOMAIN"
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Mock Execution -----------------------------------------------------
+      - name: "Execution: mock integration"
+        run: |
+          set -euo pipefail
+
+          API_ID=$(aws apigatewayv2 create-api \
+            --name ci-exec-api \
+            --protocol-type HTTP \
+            --query "ApiId" --output text)
+
+          INT_ID=$(aws apigatewayv2 create-integration \
+            --api-id "$API_ID" \
+            --integration-type MOCK \
+            --connection-type INTERNET \
+            --query "IntegrationId" --output text)
+
+          aws apigatewayv2 create-route \
+            --api-id "$API_ID" \
+            --route-key "GET /mock" \
+            --target "integrations/$INT_ID"
+
+          aws apigatewayv2 create-stage \
+            --api-id "$API_ID" \
+            --stage-name test
+
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+            "http://localhost:4566/_aws/execute-api/$API_ID/test/mock")
+          [ "$STATUS" = "200" ]
+
+          aws apigatewayv2 delete-api --api-id "$API_ID"
+
+      # -- Rust Integration Tests ----------------------------------------------
+      - name: "Rust integration tests"
+        run: |
+          cargo test -p ruststack-integration test_apigatewayv2 -- --ignored
+
+      # -- Cleanup -------------------------------------------------------------
+      - name: "Cleanup"
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "Cleanup complete."

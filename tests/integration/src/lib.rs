@@ -350,6 +350,24 @@ pub fn ses_client() -> aws_sdk_ses::Client {
     aws_sdk_ses::Client::from_conf(config)
 }
 
+/// Create a configured API Gateway v2 client pointing at the local server.
+#[must_use]
+pub fn apigatewayv2_client() -> aws_sdk_apigatewayv2::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_apigatewayv2::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_apigatewayv2::Client::from_conf(config)
+}
+
+mod test_apigatewayv2;
 mod test_bucket;
 mod test_cors;
 mod test_dynamodb;

@@ -25,6 +25,8 @@ aws-sdk-kms = { workspace = true }
 aws-sdk-kinesis = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
 aws-sdk-ses = { workspace = true }
+aws-sdk-apigatewayv2 = { workspace = true }
+reqwest = { workspace = true }
 serde_json = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }

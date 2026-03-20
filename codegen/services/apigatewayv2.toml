@@ -1,0 +1,52 @@
+[service]
+name = "apigatewayv2"
+display_name = "ApiGatewayV2"
+rust_prefix = "ApiGatewayV2"
+namespace = "com.amazonaws.apigatewayv2"
+protocol = "restJson1"
+
+[protocol]
+serde_rename = "camelCase"
+emit_serde_derives = true
+emit_http_bindings = true
+
+[operations]
+phase0 = [
+    # API CRUD
+    "CreateApi", "GetApi", "UpdateApi", "DeleteApi", "GetApis",
+    # Route CRUD
+    "CreateRoute", "GetRoute", "UpdateRoute", "DeleteRoute", "GetRoutes",
+    # Integration CRUD
+    "CreateIntegration", "GetIntegration", "UpdateIntegration",
+    "DeleteIntegration", "GetIntegrations",
+]
+phase1 = [
+    # Stages + Deployments + Route Responses
+    "CreateStage", "GetStage", "UpdateStage", "DeleteStage", "GetStages",
+    "CreateDeployment", "GetDeployment", "DeleteDeployment", "GetDeployments",
+    "CreateRouteResponse", "GetRouteResponse", "DeleteRouteResponse",
+    "GetRouteResponses",
+]
+phase2 = [
+    # Authorizers + Models
+    "CreateAuthorizer", "GetAuthorizer", "UpdateAuthorizer",
+    "DeleteAuthorizer", "GetAuthorizers",
+    "CreateModel", "GetModel", "UpdateModel", "DeleteModel",
+    "GetModels", "GetModelTemplate",
+]
+phase3 = [
+    # Domain Names + VPC Links + Tags + API Mappings
+    "CreateDomainName", "GetDomainName", "UpdateDomainName",
+    "DeleteDomainName", "GetDomainNames",
+    "CreateVpcLink", "GetVpcLink", "UpdateVpcLink",
+    "DeleteVpcLink", "GetVpcLinks",
+    "TagResource", "UntagResource", "GetTags",
+    "CreateApiMapping", "GetApiMapping", "UpdateApiMapping",
+    "DeleteApiMapping", "GetApiMappings",
+]
+
+[errors.custom]
+UnknownOperation = { status = 500, message = "Unknown operation" }
+
+[output]
+file_layout = "flat"

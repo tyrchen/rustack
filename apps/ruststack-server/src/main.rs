@@ -150,6 +150,15 @@ use ruststack_ses_http::service::{SesHttpConfig, SesHttpService};
 #[cfg(feature = "ses")]
 use ruststack_ses_http::v2::SesV2HttpService;
 
+#[cfg(feature = "apigatewayv2")]
+use ruststack_apigatewayv2_core::config::ApiGatewayV2Config;
+#[cfg(feature = "apigatewayv2")]
+use ruststack_apigatewayv2_core::handler::RustStackApiGatewayV2Handler;
+#[cfg(feature = "apigatewayv2")]
+use ruststack_apigatewayv2_core::provider::RustStackApiGatewayV2;
+#[cfg(feature = "apigatewayv2")]
+use ruststack_apigatewayv2_http::service::{ApiGatewayV2HttpConfig, ApiGatewayV2HttpService};
+
 #[cfg(feature = "s3")]
 use ruststack_s3_core::{RustStackS3, S3Config};
 #[cfg(feature = "s3")]
@@ -326,6 +335,18 @@ fn build_ses_http_config(config: &SesConfig) -> SesHttpConfig {
     }
 }
 
+/// Build the [`ApiGatewayV2HttpConfig`] from the [`ApiGatewayV2Config`].
+#[cfg(feature = "apigatewayv2")]
+fn build_apigatewayv2_http_config(config: &ApiGatewayV2Config) -> ApiGatewayV2HttpConfig {
+    let credential_provider = build_credential_provider();
+
+    ApiGatewayV2HttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
 /// variables (used by MinIO Mint and other test harnesses).
 #[cfg(any(
@@ -340,7 +361,8 @@ fn build_ses_http_config(config: &SesConfig) -> SesHttpConfig {
     feature = "kms",
     feature = "kinesis",
     feature = "secretsmanager",
-    feature = "ses"
+    feature = "ses",
+    feature = "apigatewayv2"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn ruststack_auth::CredentialProvider>> {
     use ruststack_auth::StaticCredentialProvider;
@@ -424,6 +446,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "kinesis" && cfg!(feature = "kinesis"))
         || (name == "secretsmanager" && cfg!(feature = "secretsmanager"))
         || (name == "ses" && cfg!(feature = "ses"))
+        || (name == "apigatewayv2" && cfg!(feature = "apigatewayv2"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -477,6 +500,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "ses") {
             all.push("ses".to_string());
+        }
+        if cfg!(feature = "apigatewayv2") {
+            all.push("apigatewayv2".to_string());
         }
         all
     } else {
@@ -723,6 +749,27 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         )));
     }
 
+    // ----- API Gateway v2 (register before Lambda and S3: S3 is the catch-all) -----
+    #[cfg(feature = "apigatewayv2")]
+    if is_enabled("apigatewayv2") {
+        let apigw_config = ApiGatewayV2Config::from_env();
+        info!(
+            apigatewayv2_skip_signature_validation = apigw_config.skip_signature_validation,
+            "initializing API Gateway v2 service",
+        );
+        let apigw_provider = Arc::new(RustStackApiGatewayV2::new(apigw_config.clone()));
+        let apigw_handler = RustStackApiGatewayV2Handler::new(Arc::clone(&apigw_provider));
+        let apigw_http_config = build_apigatewayv2_http_config(&apigw_config);
+        let apigw_service =
+            ApiGatewayV2HttpService::new(Arc::new(apigw_handler), apigw_http_config);
+        services.push(Box::new(service::ApiGatewayV2ManagementRouter::new(
+            apigw_service,
+        )));
+        services.push(Box::new(service::ApiGatewayV2ExecutionRouter::new(
+            Arc::clone(&apigw_provider),
+        )));
+    }
+
     // ----- Lambda (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "lambda")]
     if is_enabled("lambda") {
@@ -870,6 +917,10 @@ mod tests {
             cfg!(feature = "secretsmanager")
         );
         assert_eq!(is_compiled_in("ses"), cfg!(feature = "ses"));
+        assert_eq!(
+            is_compiled_in("apigatewayv2"),
+            cfg!(feature = "apigatewayv2")
+        );
     }
 
     #[cfg(feature = "s3")]

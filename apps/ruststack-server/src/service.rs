@@ -943,3 +943,191 @@ mod ses_router {
 
 #[cfg(feature = "ses")]
 pub use ses_router::SesServiceRouter;
+
+// ---------------------------------------------------------------------------
+// API Gateway v2
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "apigatewayv2")]
+mod apigatewayv2_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_apigatewayv2_core::execution::{handle_execution, parse_execution_path};
+    use ruststack_apigatewayv2_core::provider::RustStackApiGatewayV2;
+    use ruststack_apigatewayv2_http::dispatch::ApiGatewayV2Handler;
+    use ruststack_apigatewayv2_http::service::ApiGatewayV2HttpService;
+
+    use super::{GatewayBody, ServiceRouter, gateway_body_from_string};
+
+    /// Routes management API requests to the API Gateway v2 service.
+    ///
+    /// Matches requests whose URL path starts with `/v2/apis`, `/v2/domainnames`,
+    /// `/v2/vpclinks`, or `/v2/tags`.
+    pub struct ApiGatewayV2ManagementRouter<H: ApiGatewayV2Handler> {
+        inner: ApiGatewayV2HttpService<H>,
+    }
+
+    impl<H: ApiGatewayV2Handler> ApiGatewayV2ManagementRouter<H> {
+        /// Wrap an [`ApiGatewayV2HttpService`] in a management router.
+        pub fn new(inner: ApiGatewayV2HttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: ApiGatewayV2Handler> ServiceRouter for ApiGatewayV2ManagementRouter<H> {
+        fn name(&self) -> &'static str {
+            "apigatewayv2"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            let path = req.uri().path();
+            path.starts_with("/v2/apis")
+                || path.starts_with("/v2/domainnames")
+                || path.starts_with("/v2/vpclinks")
+                || path.starts_with("/v2/tags")
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+
+    /// Routes execution requests to the API Gateway v2 execution engine.
+    ///
+    /// Matches requests whose URL path starts with `/_aws/execute-api/`.
+    pub struct ApiGatewayV2ExecutionRouter {
+        provider: Arc<RustStackApiGatewayV2>,
+    }
+
+    impl ApiGatewayV2ExecutionRouter {
+        /// Create a new execution router.
+        pub fn new(provider: Arc<RustStackApiGatewayV2>) -> Self {
+            Self { provider }
+        }
+    }
+
+    impl ServiceRouter for ApiGatewayV2ExecutionRouter {
+        fn name(&self) -> &'static str {
+            "apigatewayv2-execution"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.uri().path().starts_with("/_aws/execute-api/")
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let provider = Arc::clone(&self.provider);
+            Box::pin(async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_owned();
+                let headers = req.headers().clone();
+
+                // Strip the /_aws/execute-api prefix.
+                let exec_path = path.strip_prefix("/_aws/execute-api").unwrap_or(&path);
+
+                let target = match parse_execution_path(exec_path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let body = serde_json::json!({"message": e.to_string()});
+                        let resp = http::Response::builder()
+                            .status(http::StatusCode::BAD_REQUEST)
+                            .header("content-type", "application/json")
+                            .body(gateway_body_from_string(body.to_string()))
+                            .unwrap_or_else(|_| {
+                                http::Response::new(gateway_body_from_string(
+                                    "Bad Request".to_owned(),
+                                ))
+                            });
+                        return Ok(resp);
+                    }
+                };
+
+                // Collect request body.
+                let body_bytes: Bytes = match http_body_util::BodyExt::collect(req.into_body())
+                    .await
+                    .map(http_body_util::Collected::to_bytes)
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let body =
+                            serde_json::json!({"message": format!("Failed to read body: {e}")});
+                        let resp = http::Response::builder()
+                            .status(http::StatusCode::BAD_REQUEST)
+                            .header("content-type", "application/json")
+                            .body(gateway_body_from_string(body.to_string()))
+                            .unwrap_or_else(|_| {
+                                http::Response::new(gateway_body_from_string(
+                                    "Bad Request".to_owned(),
+                                ))
+                            });
+                        return Ok(resp);
+                    }
+                };
+
+                match handle_execution(
+                    &provider,
+                    &target.api_id,
+                    &target.stage_name,
+                    &method,
+                    &target.path,
+                    &headers,
+                    &body_bytes,
+                )
+                .await
+                {
+                    Ok(resp) => {
+                        let (parts, body) = resp.into_parts();
+                        Ok(http::Response::from_parts(
+                            parts,
+                            gateway_body_from_string(String::from_utf8_lossy(&body).into_owned()),
+                        ))
+                    }
+                    Err(e) => {
+                        let status = match &e {
+                            ruststack_apigatewayv2_core::error::ApiGatewayV2ServiceError::NotFound(_) => {
+                                http::StatusCode::NOT_FOUND
+                            }
+                            ruststack_apigatewayv2_core::error::ApiGatewayV2ServiceError::BadRequest(_) => {
+                                http::StatusCode::BAD_REQUEST
+                            }
+                            _ => http::StatusCode::INTERNAL_SERVER_ERROR,
+                        };
+                        let body = serde_json::json!({"message": e.to_string()});
+                        let resp = http::Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(gateway_body_from_string(body.to_string()))
+                            .unwrap_or_else(|_| {
+                                http::Response::new(gateway_body_from_string(
+                                    "Internal error".to_owned(),
+                                ))
+                            });
+                        Ok(resp)
+                    }
+                }
+            })
+        }
+    }
+}
+
+#[cfg(feature = "apigatewayv2")]
+pub use apigatewayv2_router::{ApiGatewayV2ExecutionRouter, ApiGatewayV2ManagementRouter};

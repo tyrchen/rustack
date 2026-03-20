@@ -77,6 +77,10 @@ codegen-ses:
 	@cd codegen && cargo run -- --config services/ses.toml --model smithy-model/ses.json --output ../crates/ruststack-ses-model/src
 	@cargo +nightly fmt -p ruststack-ses-model
 
+codegen-apigatewayv2:
+	@cd codegen && cargo run -- --config services/apigatewayv2.toml --model smithy-model/apigatewayv2.json --output ../crates/ruststack-apigatewayv2-model/src
+	@cargo +nightly fmt -p ruststack-apigatewayv2-model
+
 codegen: codegen-s3
 
 SMITHY_MODELS_REPO = https://raw.githubusercontent.com/aws/api-models-aws/main
@@ -93,6 +97,7 @@ codegen-download:
 	@curl -sL $(SMITHY_MODELS_REPO)/models/cloudwatch-logs/service/2014-03-28/cloudwatch-logs-2014-03-28.json -o codegen/smithy-model/logs.json
 	@curl -sL $(SMITHY_MODELS_REPO)/models/secrets-manager/service/2017-10-17/secrets-manager-2017-10-17.json -o codegen/smithy-model/secretsmanager.json
 	@curl -sL $(SMITHY_MODELS_REPO)/models/ses/service/2010-12-01/ses-2010-12-01.json -o codegen/smithy-model/ses.json
+	@curl -sL $(SMITHY_MODELS_REPO)/models/apigatewayv2/service/2018-11-29/apigatewayv2-2018-11-29.json -o codegen/smithy-model/apigatewayv2.json
 	@echo "Done."
 
 integration:
@@ -206,13 +211,20 @@ test-events-patterns:
 test-events-integration:
 	@cargo test -p ruststack-integration -- events --ignored
 
+test-apigatewayv2-unit:
+	@cargo test -p ruststack-apigatewayv2-model -p ruststack-apigatewayv2-core -p ruststack-apigatewayv2-http
+
+test-apigatewayv2-integration:
+	@cargo test -p ruststack-integration -- apigatewayv2 --ignored
+
 update-submodule:
 	@git submodule update --init --recursive --remote
 
 .PHONY: build check test fmt clippy audit deny run release update-submodule integration \
 	codegen codegen-s3 codegen-ssm codegen-events codegen-dynamodb codegen-sqs codegen-sns codegen-lambda \
-	codegen-kms codegen-kinesis codegen-logs codegen-secretsmanager codegen-ses codegen-download \
+	codegen-kms codegen-kinesis codegen-logs codegen-secretsmanager codegen-ses codegen-apigatewayv2 codegen-download \
 	mint mint-build mint-start mint-run mint-stop \
 	alternator alternator-setup alternator-run alternator-stop \
 	sqs-compat sqs-compat-setup sqs-compat-run \
-	test-events-unit test-events-patterns test-events-integration
+	test-events-unit test-events-patterns test-events-integration \
+	test-apigatewayv2-unit test-apigatewayv2-integration
