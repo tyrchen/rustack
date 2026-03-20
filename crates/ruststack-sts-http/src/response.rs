@@ -61,7 +61,7 @@ pub fn error_to_response(error: &StsError, request_id: &str) -> http::Response<S
     let xml = error_to_xml(error, request_id);
     let body = StsResponseBody::from_xml(xml.into_bytes());
     http::Response::builder()
-        .status(error.code.status_code())
+        .status(error.status_code)
         .header("content-type", CONTENT_TYPE)
         .header("x-amzn-requestid", request_id)
         .body(body)

@@ -163,7 +163,7 @@ async fn process_request<H: StsHandler>(
     }
 
     // 7. Dispatch to handler.
-    match dispatch_operation(handler, op, body, caller_access_key).await {
+    match dispatch_operation(handler, op, body, caller_access_key, request_id).await {
         Ok(response) => response,
         Err(err) => error_to_response(&err, request_id),
     }

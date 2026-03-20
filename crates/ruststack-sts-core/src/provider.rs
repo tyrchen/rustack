@@ -78,9 +78,7 @@ impl RustStackSts {
 
         let (account_id, role_name) = parse_role_arn(role_arn)?;
 
-        let duration_seconds: i32 = get_optional_param(params, "DurationSeconds")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3600);
+        let duration_seconds = parse_duration_seconds(params, 900, 43200, 3600)?;
         let external_id = get_optional_param(params, "ExternalId").map(str::to_owned);
         let policy = get_optional_param(params, "Policy").map(str::to_owned);
         let source_identity = get_optional_param(params, "SourceIdentity").map(str::to_owned);
@@ -168,9 +166,7 @@ impl RustStackSts {
             },
         };
 
-        let duration_seconds: i32 = get_optional_param(params, "DurationSeconds")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(43200);
+        let duration_seconds = parse_duration_seconds(params, 900, 129_600, 43200)?;
 
         let cred_gen = CredentialGenerator::new(identity.account_id().to_owned());
         let creds = cred_gen.generate_temporary();
@@ -228,20 +224,11 @@ impl RustStackSts {
         validate_role_arn(role_arn)?;
 
         let _principal_arn = get_required_param(params, "PrincipalArn")?;
-        let saml_assertion = get_required_param(params, "SAMLAssertion")?;
+        let _saml_assertion = get_required_param(params, "SAMLAssertion")?;
 
         let (account_id, role_name) = parse_role_arn(role_arn)?;
 
-        let duration_seconds: i32 = get_optional_param(params, "DurationSeconds")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3600);
-
-        // Decode SAML assertion (base64) but don't validate signature.
-        let _decoded = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            saml_assertion.as_bytes(),
-        )
-        .unwrap_or_default();
+        let duration_seconds = parse_duration_seconds(params, 900, 43200, 3600)?;
 
         let session_name = format!("saml-session-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
@@ -323,9 +310,7 @@ impl RustStackSts {
 
         let (account_id, role_name) = parse_role_arn(role_arn)?;
 
-        let duration_seconds: i32 = get_optional_param(params, "DurationSeconds")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3600);
+        let duration_seconds = parse_duration_seconds(params, 900, 43200, 3600)?;
 
         // Decode JWT payload (without validation).
         let (subject, audience, issuer) = decode_jwt_claims(web_identity_token);
@@ -428,9 +413,7 @@ impl RustStackSts {
         let name = get_required_param(params, "Name")?;
         validate_federated_name(name)?;
 
-        let duration_seconds: i32 = get_optional_param(params, "DurationSeconds")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(43200);
+        let duration_seconds = parse_duration_seconds(params, 900, 129_600, 43200)?;
 
         let caller_identity = match caller_access_key {
             Some(key) => self.state.resolve_identity(key),
@@ -513,6 +496,29 @@ fn decode_jwt_claims(token: &str) -> (Option<String>, Option<String>, Option<Str
         .map(str::to_owned);
 
     (subject, audience, issuer)
+}
+
+/// Parse and validate the DurationSeconds parameter.
+fn parse_duration_seconds(
+    params: &[(String, String)],
+    min: i32,
+    max: i32,
+    default: i32,
+) -> Result<i32, StsError> {
+    match get_optional_param(params, "DurationSeconds") {
+        Some(s) => {
+            let value: i32 = s.parse().map_err(|_| {
+                StsError::invalid_parameter_value(format!("Invalid value for DurationSeconds: {s}"))
+            })?;
+            if value < min || value > max {
+                return Err(StsError::invalid_parameter_value(format!(
+                    "DurationSeconds must be between {min} and {max}, got {value}"
+                )));
+            }
+            Ok(value)
+        }
+        None => Ok(default),
+    }
 }
 
 #[cfg(test)]

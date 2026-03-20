@@ -36,12 +36,20 @@ impl StsHandler for RustStackStsHandler {
         op: StsOperation,
         body: Bytes,
         caller_access_key: Option<String>,
+        request_id: &str,
     ) -> Pin<Box<dyn Future<Output = Result<http::Response<StsResponseBody>, StsError>> + Send>>
     {
         let provider = Arc::clone(&self.provider);
-        Box::pin(
-            async move { dispatch(provider.as_ref(), op, &body, caller_access_key.as_deref()) },
-        )
+        let request_id = request_id.to_owned();
+        Box::pin(async move {
+            dispatch(
+                provider.as_ref(),
+                op,
+                &body,
+                caller_access_key.as_deref(),
+                &request_id,
+            )
+        })
     }
 }
 
@@ -52,9 +60,9 @@ fn dispatch(
     op: StsOperation,
     body: &[u8],
     caller_access_key: Option<&str>,
+    request_id: &str,
 ) -> Result<http::Response<StsResponseBody>, StsError> {
     let params = parse_form_params(body);
-    let request_id = uuid::Uuid::new_v4().to_string();
 
     match op {
         StsOperation::GetCallerIdentity => {
@@ -66,9 +74,9 @@ fn dispatch(
             w.write_optional_element("UserId", output.user_id.as_deref());
             w.write_optional_element("Account", output.account.as_deref());
             w.end_element("GetCallerIdentityResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("GetCallerIdentityResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::AssumeRole => {
@@ -90,9 +98,9 @@ fn dispatch(
             }
             w.write_optional_element("SourceIdentity", output.source_identity.as_deref());
             w.end_element("AssumeRoleResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("AssumeRoleResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::GetSessionToken => {
@@ -104,9 +112,9 @@ fn dispatch(
                 write_credentials_xml(&mut w, creds);
             }
             w.end_element("GetSessionTokenResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("GetSessionTokenResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::GetAccessKeyInfo => {
@@ -116,9 +124,9 @@ fn dispatch(
             w.start_result("GetAccessKeyInfo");
             w.write_optional_element("Account", output.account.as_deref());
             w.end_element("GetAccessKeyInfoResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("GetAccessKeyInfoResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::AssumeRoleWithSAML => {
@@ -143,9 +151,9 @@ fn dispatch(
                 w.write_int_element("PackedPolicySize", size);
             }
             w.end_element("AssumeRoleWithSAMLResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("AssumeRoleWithSAMLResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::AssumeRoleWithWebIdentity => {
@@ -172,9 +180,9 @@ fn dispatch(
                 w.write_int_element("PackedPolicySize", size);
             }
             w.end_element("AssumeRoleWithWebIdentityResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("AssumeRoleWithWebIdentityResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::DecodeAuthorizationMessage => {
@@ -184,9 +192,9 @@ fn dispatch(
             w.start_result("DecodeAuthorizationMessage");
             w.write_optional_element("DecodedMessage", output.decoded_message.as_deref());
             w.end_element("DecodeAuthorizationMessageResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("DecodeAuthorizationMessageResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
 
         StsOperation::GetFederationToken => {
@@ -207,9 +215,9 @@ fn dispatch(
                 w.write_int_element("PackedPolicySize", size);
             }
             w.end_element("GetFederationTokenResult");
-            w.write_response_metadata(&request_id);
+            w.write_response_metadata(request_id);
             w.end_element("GetFederationTokenResponse");
-            Ok(xml_response(w.into_string(), &request_id))
+            Ok(xml_response(w.into_string(), request_id))
         }
     }
 }

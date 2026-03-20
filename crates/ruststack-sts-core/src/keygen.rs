@@ -119,12 +119,16 @@ fn generate_session_token() -> String {
 /// Encode a number in base-36 with fixed width (uppercase).
 fn encode_base36(mut num: u64, width: usize) -> String {
     let chars = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let mut result = vec![b'0'; width];
+    let mut result = String::with_capacity(width);
+    let mut digits = vec![0u8; width];
     for i in (0..width).rev() {
-        result[i] = chars[(num % 36) as usize];
+        digits[i] = chars[(num % 36) as usize];
         num /= 36;
     }
-    String::from_utf8(result).expect("base36 chars are valid UTF-8")
+    for &b in &digits {
+        result.push(b as char);
+    }
+    result
 }
 
 /// Extract the account ID from an access key.

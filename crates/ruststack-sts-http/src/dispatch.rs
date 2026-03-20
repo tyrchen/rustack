@@ -21,6 +21,7 @@ pub trait StsHandler: Send + Sync + 'static {
         op: StsOperation,
         body: Bytes,
         caller_access_key: Option<String>,
+        request_id: &str,
     ) -> Pin<Box<dyn Future<Output = Result<http::Response<StsResponseBody>, StsError>> + Send>>;
 }
 
@@ -30,7 +31,10 @@ pub async fn dispatch_operation<H: StsHandler>(
     op: StsOperation,
     body: Bytes,
     caller_access_key: Option<String>,
+    request_id: &str,
 ) -> Result<http::Response<StsResponseBody>, StsError> {
     tracing::debug!(operation = %op, "dispatching STS operation");
-    handler.handle_operation(op, body, caller_access_key).await
+    handler
+        .handle_operation(op, body, caller_access_key, request_id)
+        .await
 }

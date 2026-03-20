@@ -1,7 +1,7 @@
 //! Auto-generated from AWS STS Smithy model. DO NOT EDIT.
 //!
-//! STS errors use JSON format with a `__type` field containing the
-//! short error type name (e.g., `ResourceNotFoundException`).
+//! STS errors use XML format following the awsQuery protocol with
+//! `<ErrorResponse>` containing `<Code>`, `<Message>`, and `<Type>` fields.
 
 use std::fmt;
 
@@ -39,12 +39,6 @@ pub enum StsErrorCode {
 }
 
 impl StsErrorCode {
-    /// Returns the short error type string for the JSON `__type` field.
-    #[must_use]
-    pub fn error_type(&self) -> &'static str {
-        self.as_str()
-    }
-
     /// Returns the short error code string.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
@@ -164,12 +158,6 @@ impl StsError {
             code,
             source: None,
         }
-    }
-
-    /// Returns the `__type` string for the JSON error response.
-    #[must_use]
-    pub fn error_type(&self) -> &'static str {
-        self.code.error_type()
     }
 
     /// Internal error.
