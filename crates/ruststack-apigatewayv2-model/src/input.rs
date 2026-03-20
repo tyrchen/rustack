@@ -15,44 +15,30 @@ use crate::types::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApiInput {
-    #[serde(rename = "ApiKeySelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_selection_expression: Option<String>,
-    #[serde(rename = "CorsConfiguration")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cors_configuration: Option<Cors>,
-    #[serde(rename = "CredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_arn: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "DisableExecuteApiEndpoint")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_execute_api_endpoint: Option<bool>,
-    #[serde(rename = "DisableSchemaValidation")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_schema_validation: Option<bool>,
-    #[serde(rename = "IpAddressType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ip_address_type: Option<IpAddressType>,
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "ProtocolType")]
     pub protocol_type: ProtocolType,
-    #[serde(rename = "RouteKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_key: Option<String>,
-    #[serde(rename = "RouteSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_selection_expression: Option<String>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
-    #[serde(rename = "Target")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(rename = "Version")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -61,15 +47,11 @@ pub struct CreateApiInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApiMappingInput {
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ApiMappingKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_mapping_key: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
-    #[serde(rename = "Stage")]
     pub stage: String,
 }
 
@@ -78,35 +60,24 @@ pub struct CreateApiMappingInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateAuthorizerInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "AuthorizerCredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_credentials_arn: Option<String>,
-    #[serde(rename = "AuthorizerPayloadFormatVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_payload_format_version: Option<String>,
-    #[serde(rename = "AuthorizerResultTtlInSeconds")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_result_ttl_in_seconds: Option<i32>,
-    #[serde(rename = "AuthorizerType")]
     pub authorizer_type: AuthorizerType,
-    #[serde(rename = "AuthorizerUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_uri: Option<String>,
-    #[serde(rename = "EnableSimpleResponses")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_simple_responses: Option<bool>,
-    #[serde(rename = "IdentitySource")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_source: Vec<String>,
-    #[serde(rename = "IdentityValidationExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_validation_expression: Option<String>,
-    #[serde(rename = "JwtConfiguration")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwt_configuration: Option<JWTConfiguration>,
-    #[serde(rename = "Name")]
     pub name: String,
 }
 
@@ -115,12 +86,9 @@ pub struct CreateAuthorizerInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateDeploymentInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "StageName")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage_name: Option<String>,
 }
@@ -129,18 +97,13 @@ pub struct CreateDeploymentInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDomainNameInput {
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
-    #[serde(rename = "DomainNameConfigurations")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domain_name_configurations: Vec<DomainNameConfiguration>,
-    #[serde(rename = "MutualTlsAuthentication")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutual_tls_authentication: Option<MutualTlsAuthenticationInput>,
-    #[serde(rename = "RoutingMode")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_mode: Option<RoutingMode>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
 }
@@ -150,56 +113,38 @@ pub struct CreateDomainNameInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateIntegrationInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ConnectionId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
-    #[serde(rename = "ConnectionType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_type: Option<ConnectionType>,
-    #[serde(rename = "ContentHandlingStrategy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_handling_strategy: Option<ContentHandlingStrategy>,
-    #[serde(rename = "CredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_arn: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "IntegrationMethod")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_method: Option<String>,
-    #[serde(rename = "IntegrationSubtype")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_subtype: Option<String>,
-    #[serde(rename = "IntegrationType")]
     pub integration_type: IntegrationType,
-    #[serde(rename = "IntegrationUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_uri: Option<String>,
-    #[serde(rename = "PassthroughBehavior")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passthrough_behavior: Option<PassthroughBehavior>,
-    #[serde(rename = "PayloadFormatVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_format_version: Option<String>,
-    #[serde(rename = "RequestParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_parameters: HashMap<String, String>,
-    #[serde(rename = "RequestTemplates")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_templates: HashMap<String, String>,
-    #[serde(rename = "ResponseParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_parameters: HashMap<String, HashMap<String, String>>,
-    #[serde(rename = "TemplateSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_selection_expression: Option<String>,
-    #[serde(rename = "TimeoutInMillis")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_in_millis: Option<i32>,
-    #[serde(rename = "TlsConfig")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_config: Option<TlsConfigInput>,
 }
@@ -209,17 +154,12 @@ pub struct CreateIntegrationInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateModelInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ContentType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "Schema")]
     pub schema: String,
 }
 
@@ -228,38 +168,26 @@ pub struct CreateModelInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateRouteInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ApiKeyRequired")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_required: Option<bool>,
-    #[serde(rename = "AuthorizationScopes")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorization_scopes: Vec<String>,
-    #[serde(rename = "AuthorizationType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_type: Option<AuthorizationType>,
-    #[serde(rename = "AuthorizerId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_id: Option<String>,
-    #[serde(rename = "ModelSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_expression: Option<String>,
-    #[serde(rename = "OperationName")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_name: Option<String>,
-    #[serde(rename = "RequestModels")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_models: HashMap<String, String>,
-    #[serde(rename = "RequestParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_parameters: HashMap<String, ParameterConstraints>,
-    #[serde(rename = "RouteKey")]
     pub route_key: String,
-    #[serde(rename = "RouteResponseSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_response_selection_expression: Option<String>,
-    #[serde(rename = "Target")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -269,21 +197,15 @@ pub struct CreateRouteInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateRouteResponseInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ModelSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_expression: Option<String>,
-    #[serde(rename = "ResponseModels")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_models: HashMap<String, String>,
-    #[serde(rename = "ResponseParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_parameters: HashMap<String, ParameterConstraints>,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
-    #[serde(rename = "RouteResponseKey")]
     pub route_response_key: String,
 }
 
@@ -291,36 +213,25 @@ pub struct CreateRouteResponseInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateStageInput {
-    #[serde(rename = "AccessLogSettings")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_log_settings: Option<AccessLogSettings>,
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "AutoDeploy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_deploy: Option<bool>,
-    #[serde(rename = "ClientCertificateId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_certificate_id: Option<String>,
-    #[serde(rename = "DefaultRouteSettings")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_route_settings: Option<RouteSettings>,
-    #[serde(rename = "DeploymentId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "RouteSettings")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub route_settings: HashMap<String, RouteSettings>,
-    #[serde(rename = "StageName")]
     pub stage_name: String,
-    #[serde(rename = "StageVariables")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stage_variables: HashMap<String, String>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
 }
@@ -329,15 +240,11 @@ pub struct CreateStageInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateVpcLinkInput {
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "SecurityGroupIds")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub security_group_ids: Vec<String>,
-    #[serde(rename = "SubnetIds")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subnet_ids: Vec<String>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
 }
@@ -347,7 +254,6 @@ pub struct CreateVpcLinkInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteApiInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
 }
 
@@ -356,10 +262,8 @@ pub struct DeleteApiInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteApiMappingInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiMappingId")]
     pub api_mapping_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
 }
 
@@ -368,10 +272,8 @@ pub struct DeleteApiMappingInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteAuthorizerInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "AuthorizerId")]
     pub authorizer_id: String,
 }
 
@@ -380,10 +282,8 @@ pub struct DeleteAuthorizerInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteDeploymentInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "DeploymentId")]
     pub deployment_id: String,
 }
 
@@ -392,7 +292,6 @@ pub struct DeleteDeploymentInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteDomainNameInput {
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
 }
 
@@ -401,10 +300,8 @@ pub struct DeleteDomainNameInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteIntegrationInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "IntegrationId")]
     pub integration_id: String,
 }
 
@@ -413,10 +310,8 @@ pub struct DeleteIntegrationInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteModelInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "ModelId")]
     pub model_id: String,
 }
 
@@ -425,10 +320,8 @@ pub struct DeleteModelInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteRouteInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
 }
 
@@ -437,13 +330,10 @@ pub struct DeleteRouteInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteRouteResponseInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteResponseId")]
     pub route_response_id: String,
 }
 
@@ -452,10 +342,8 @@ pub struct DeleteRouteResponseInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteStageInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "StageName")]
     pub stage_name: String,
 }
 
@@ -464,7 +352,6 @@ pub struct DeleteStageInput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteVpcLinkInput {
     /// HTTP label (URI path).
-    #[serde(rename = "VpcLinkId")]
     pub vpc_link_id: String,
 }
 
@@ -473,7 +360,6 @@ pub struct DeleteVpcLinkInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetApiInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
 }
 
@@ -482,10 +368,8 @@ pub struct GetApiInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetApiMappingInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiMappingId")]
     pub api_mapping_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
 }
 
@@ -494,14 +378,11 @@ pub struct GetApiMappingInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetApiMappingsInput {
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -511,11 +392,9 @@ pub struct GetApiMappingsInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetApisInput {
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -525,10 +404,8 @@ pub struct GetApisInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetAuthorizerInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "AuthorizerId")]
     pub authorizer_id: String,
 }
 
@@ -537,14 +414,11 @@ pub struct GetAuthorizerInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetAuthorizersInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -554,10 +428,8 @@ pub struct GetAuthorizersInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetDeploymentInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "DeploymentId")]
     pub deployment_id: String,
 }
 
@@ -566,14 +438,11 @@ pub struct GetDeploymentInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetDeploymentsInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -583,7 +452,6 @@ pub struct GetDeploymentsInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetDomainNameInput {
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
 }
 
@@ -592,11 +460,9 @@ pub struct GetDomainNameInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetDomainNamesInput {
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -606,10 +472,8 @@ pub struct GetDomainNamesInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetIntegrationInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "IntegrationId")]
     pub integration_id: String,
 }
 
@@ -618,14 +482,11 @@ pub struct GetIntegrationInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetIntegrationsInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -635,10 +496,8 @@ pub struct GetIntegrationsInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetModelInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "ModelId")]
     pub model_id: String,
 }
 
@@ -647,10 +506,8 @@ pub struct GetModelInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetModelTemplateInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "ModelId")]
     pub model_id: String,
 }
 
@@ -659,14 +516,11 @@ pub struct GetModelTemplateInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetModelsInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -676,10 +530,8 @@ pub struct GetModelsInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetRouteInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
 }
 
@@ -688,13 +540,10 @@ pub struct GetRouteInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetRouteResponseInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteResponseId")]
     pub route_response_id: String,
 }
 
@@ -703,18 +552,14 @@ pub struct GetRouteResponseInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetRouteResponsesInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
 }
 
@@ -723,14 +568,11 @@ pub struct GetRouteResponsesInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetRoutesInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -740,10 +582,8 @@ pub struct GetRoutesInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetStageInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "StageName")]
     pub stage_name: String,
 }
 
@@ -752,14 +592,11 @@ pub struct GetStageInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetStagesInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -769,7 +606,6 @@ pub struct GetStagesInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetTagsInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ResourceArn")]
     pub resource_arn: String,
 }
 
@@ -778,7 +614,6 @@ pub struct GetTagsInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetVpcLinkInput {
     /// HTTP label (URI path).
-    #[serde(rename = "VpcLinkId")]
     pub vpc_link_id: String,
 }
 
@@ -787,11 +622,9 @@ pub struct GetVpcLinkInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetVpcLinksInput {
     /// HTTP query: `maxResults`.
-    #[serde(rename = "MaxResults")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<String>,
     /// HTTP query: `nextToken`.
-    #[serde(rename = "NextToken")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_token: Option<String>,
 }
@@ -801,9 +634,7 @@ pub struct GetVpcLinksInput {
 #[serde(rename_all = "camelCase")]
 pub struct TagResourceInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ResourceArn")]
     pub resource_arn: String,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
 }
@@ -813,10 +644,8 @@ pub struct TagResourceInput {
 #[serde(rename_all = "camelCase")]
 pub struct UntagResourceInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ResourceArn")]
     pub resource_arn: String,
     /// HTTP query: `tagKeys`.
-    #[serde(rename = "TagKeys")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tag_keys: Vec<String>,
 }
@@ -826,42 +655,29 @@ pub struct UntagResourceInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateApiInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ApiKeySelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_selection_expression: Option<String>,
-    #[serde(rename = "CorsConfiguration")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cors_configuration: Option<Cors>,
-    #[serde(rename = "CredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_arn: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "DisableExecuteApiEndpoint")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_execute_api_endpoint: Option<bool>,
-    #[serde(rename = "DisableSchemaValidation")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_schema_validation: Option<bool>,
-    #[serde(rename = "IpAddressType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ip_address_type: Option<IpAddressType>,
-    #[serde(rename = "Name")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(rename = "RouteKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_key: Option<String>,
-    #[serde(rename = "RouteSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_selection_expression: Option<String>,
-    #[serde(rename = "Target")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(rename = "Version")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -870,18 +686,13 @@ pub struct UpdateApiInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateApiMappingInput {
-    #[serde(rename = "ApiId")]
     pub api_id: String,
     /// HTTP label (URI path).
-    #[serde(rename = "ApiMappingId")]
     pub api_mapping_id: String,
-    #[serde(rename = "ApiMappingKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_mapping_key: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
-    #[serde(rename = "Stage")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
 }
@@ -891,39 +702,27 @@ pub struct UpdateApiMappingInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAuthorizerInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "AuthorizerCredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_credentials_arn: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "AuthorizerId")]
     pub authorizer_id: String,
-    #[serde(rename = "AuthorizerPayloadFormatVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_payload_format_version: Option<String>,
-    #[serde(rename = "AuthorizerResultTtlInSeconds")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_result_ttl_in_seconds: Option<i32>,
-    #[serde(rename = "AuthorizerType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_type: Option<AuthorizerType>,
-    #[serde(rename = "AuthorizerUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_uri: Option<String>,
-    #[serde(rename = "EnableSimpleResponses")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_simple_responses: Option<bool>,
-    #[serde(rename = "IdentitySource")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_source: Vec<String>,
-    #[serde(rename = "IdentityValidationExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_validation_expression: Option<String>,
-    #[serde(rename = "JwtConfiguration")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwt_configuration: Option<JWTConfiguration>,
-    #[serde(rename = "Name")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -933,15 +732,11 @@ pub struct UpdateAuthorizerInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateDomainNameInput {
     /// HTTP label (URI path).
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
-    #[serde(rename = "DomainNameConfigurations")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domain_name_configurations: Vec<DomainNameConfiguration>,
-    #[serde(rename = "MutualTlsAuthentication")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutual_tls_authentication: Option<MutualTlsAuthenticationInput>,
-    #[serde(rename = "RoutingMode")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_mode: Option<RoutingMode>,
 }
@@ -951,60 +746,41 @@ pub struct UpdateDomainNameInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateIntegrationInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ConnectionId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
-    #[serde(rename = "ConnectionType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_type: Option<ConnectionType>,
-    #[serde(rename = "ContentHandlingStrategy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_handling_strategy: Option<ContentHandlingStrategy>,
-    #[serde(rename = "CredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_arn: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "IntegrationId")]
     pub integration_id: String,
-    #[serde(rename = "IntegrationMethod")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_method: Option<String>,
-    #[serde(rename = "IntegrationSubtype")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_subtype: Option<String>,
-    #[serde(rename = "IntegrationType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_type: Option<IntegrationType>,
-    #[serde(rename = "IntegrationUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_uri: Option<String>,
-    #[serde(rename = "PassthroughBehavior")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passthrough_behavior: Option<PassthroughBehavior>,
-    #[serde(rename = "PayloadFormatVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_format_version: Option<String>,
-    #[serde(rename = "RequestParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_parameters: HashMap<String, String>,
-    #[serde(rename = "RequestTemplates")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_templates: HashMap<String, String>,
-    #[serde(rename = "ResponseParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_parameters: HashMap<String, HashMap<String, String>>,
-    #[serde(rename = "TemplateSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_selection_expression: Option<String>,
-    #[serde(rename = "TimeoutInMillis")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_in_millis: Option<i32>,
-    #[serde(rename = "TlsConfig")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_config: Option<TlsConfigInput>,
 }
@@ -1014,21 +790,15 @@ pub struct UpdateIntegrationInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateModelInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ContentType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "ModelId")]
     pub model_id: String,
-    #[serde(rename = "Name")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(rename = "Schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 }
@@ -1038,42 +808,29 @@ pub struct UpdateModelInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRouteInput {
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ApiKeyRequired")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_required: Option<bool>,
-    #[serde(rename = "AuthorizationScopes")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorization_scopes: Vec<String>,
-    #[serde(rename = "AuthorizationType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_type: Option<AuthorizationType>,
-    #[serde(rename = "AuthorizerId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_id: Option<String>,
-    #[serde(rename = "ModelSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_expression: Option<String>,
-    #[serde(rename = "OperationName")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_name: Option<String>,
-    #[serde(rename = "RequestModels")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_models: HashMap<String, String>,
-    #[serde(rename = "RequestParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_parameters: HashMap<String, ParameterConstraints>,
     /// HTTP label (URI path).
-    #[serde(rename = "RouteId")]
     pub route_id: String,
-    #[serde(rename = "RouteKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_key: Option<String>,
-    #[serde(rename = "RouteResponseSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_response_selection_expression: Option<String>,
-    #[serde(rename = "Target")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -1082,34 +839,24 @@ pub struct UpdateRouteInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStageInput {
-    #[serde(rename = "AccessLogSettings")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_log_settings: Option<AccessLogSettings>,
     /// HTTP label (URI path).
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "AutoDeploy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_deploy: Option<bool>,
-    #[serde(rename = "ClientCertificateId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_certificate_id: Option<String>,
-    #[serde(rename = "DefaultRouteSettings")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_route_settings: Option<RouteSettings>,
-    #[serde(rename = "DeploymentId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "RouteSettings")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub route_settings: HashMap<String, RouteSettings>,
     /// HTTP label (URI path).
-    #[serde(rename = "StageName")]
     pub stage_name: String,
-    #[serde(rename = "StageVariables")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stage_variables: HashMap<String, String>,
 }
@@ -1118,10 +865,8 @@ pub struct UpdateStageInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateVpcLinkInput {
-    #[serde(rename = "Name")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// HTTP label (URI path).
-    #[serde(rename = "VpcLinkId")]
     pub vpc_link_id: String,
 }

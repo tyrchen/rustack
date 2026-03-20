@@ -667,10 +667,8 @@ impl From<&str> for VpcLinkVersion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessLogSettings {
-    #[serde(rename = "DestinationArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_arn: Option<String>,
-    #[serde(rename = "Format")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }
@@ -679,52 +677,35 @@ pub struct AccessLogSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Api {
-    #[serde(rename = "ApiEndpoint")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_endpoint: Option<String>,
-    #[serde(rename = "ApiGatewayManaged")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_gateway_managed: Option<bool>,
-    #[serde(rename = "ApiId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_id: Option<String>,
-    #[serde(rename = "ApiKeySelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_selection_expression: Option<String>,
-    #[serde(rename = "CorsConfiguration")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cors_configuration: Option<Cors>,
-    #[serde(rename = "CreatedDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "DisableExecuteApiEndpoint")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_execute_api_endpoint: Option<bool>,
-    #[serde(rename = "DisableSchemaValidation")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_schema_validation: Option<bool>,
-    #[serde(rename = "ImportInfo")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub import_info: Vec<String>,
-    #[serde(rename = "IpAddressType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ip_address_type: Option<IpAddressType>,
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "ProtocolType")]
     pub protocol_type: ProtocolType,
-    #[serde(rename = "RouteSelectionExpression")]
     pub route_selection_expression: String,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
-    #[serde(rename = "Version")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(rename = "Warnings")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -733,15 +714,11 @@ pub struct Api {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiMapping {
-    #[serde(rename = "ApiId")]
     pub api_id: String,
-    #[serde(rename = "ApiMappingId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_mapping_id: Option<String>,
-    #[serde(rename = "ApiMappingKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_mapping_key: Option<String>,
-    #[serde(rename = "Stage")]
     pub stage: String,
 }
 
@@ -749,37 +726,26 @@ pub struct ApiMapping {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Authorizer {
-    #[serde(rename = "AuthorizerCredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_credentials_arn: Option<String>,
-    #[serde(rename = "AuthorizerId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_id: Option<String>,
-    #[serde(rename = "AuthorizerPayloadFormatVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_payload_format_version: Option<String>,
-    #[serde(rename = "AuthorizerResultTtlInSeconds")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_result_ttl_in_seconds: Option<i32>,
-    #[serde(rename = "AuthorizerType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_type: Option<AuthorizerType>,
-    #[serde(rename = "AuthorizerUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_uri: Option<String>,
-    #[serde(rename = "EnableSimpleResponses")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_simple_responses: Option<bool>,
-    #[serde(rename = "IdentitySource")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_source: Vec<String>,
-    #[serde(rename = "IdentityValidationExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_validation_expression: Option<String>,
-    #[serde(rename = "JwtConfiguration")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwt_configuration: Option<JWTConfiguration>,
-    #[serde(rename = "Name")]
     pub name: String,
 }
 
@@ -787,22 +753,16 @@ pub struct Authorizer {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cors {
-    #[serde(rename = "AllowCredentials")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_credentials: Option<bool>,
-    #[serde(rename = "AllowHeaders")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_headers: Vec<String>,
-    #[serde(rename = "AllowMethods")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_methods: Vec<String>,
-    #[serde(rename = "AllowOrigins")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_origins: Vec<String>,
-    #[serde(rename = "ExposeHeaders")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expose_headers: Vec<String>,
-    #[serde(rename = "MaxAge")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_age: Option<i32>,
 }
@@ -811,22 +771,16 @@ pub struct Cors {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deployment {
-    #[serde(rename = "AutoDeployed")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_deployed: Option<bool>,
-    #[serde(rename = "CreatedDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(rename = "DeploymentId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
-    #[serde(rename = "DeploymentStatus")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_status: Option<DeploymentStatus>,
-    #[serde(rename = "DeploymentStatusMessage")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_status_message: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -835,24 +789,17 @@ pub struct Deployment {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainName {
-    #[serde(rename = "ApiMappingSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_mapping_selection_expression: Option<String>,
-    #[serde(rename = "DomainName")]
     pub domain_name: String,
-    #[serde(rename = "DomainNameArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_name_arn: Option<String>,
-    #[serde(rename = "DomainNameConfigurations")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domain_name_configurations: Vec<DomainNameConfiguration>,
-    #[serde(rename = "MutualTlsAuthentication")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutual_tls_authentication: Option<MutualTlsAuthentication>,
-    #[serde(rename = "RoutingMode")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_mode: Option<RoutingMode>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
 }
@@ -861,37 +808,26 @@ pub struct DomainName {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainNameConfiguration {
-    #[serde(rename = "ApiGatewayDomainName")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_gateway_domain_name: Option<String>,
-    #[serde(rename = "CertificateArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate_arn: Option<String>,
-    #[serde(rename = "CertificateName")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate_name: Option<String>,
-    #[serde(rename = "CertificateUploadDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate_upload_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(rename = "DomainNameStatus")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_name_status: Option<DomainNameStatus>,
-    #[serde(rename = "DomainNameStatusMessage")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_name_status_message: Option<String>,
-    #[serde(rename = "EndpointType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_type: Option<EndpointType>,
-    #[serde(rename = "HostedZoneId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hosted_zone_id: Option<String>,
-    #[serde(rename = "IpAddressType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ip_address_type: Option<IpAddressType>,
-    #[serde(rename = "OwnershipVerificationCertificateArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ownership_verification_certificate_arn: Option<String>,
-    #[serde(rename = "SecurityPolicy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_policy: Option<SecurityPolicy>,
 }
@@ -900,64 +836,44 @@ pub struct DomainNameConfiguration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Integration {
-    #[serde(rename = "ApiGatewayManaged")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_gateway_managed: Option<bool>,
-    #[serde(rename = "ConnectionId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
-    #[serde(rename = "ConnectionType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_type: Option<ConnectionType>,
-    #[serde(rename = "ContentHandlingStrategy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_handling_strategy: Option<ContentHandlingStrategy>,
-    #[serde(rename = "CredentialsArn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_arn: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "IntegrationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_id: Option<String>,
-    #[serde(rename = "IntegrationMethod")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_method: Option<String>,
-    #[serde(rename = "IntegrationResponseSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_response_selection_expression: Option<String>,
-    #[serde(rename = "IntegrationSubtype")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_subtype: Option<String>,
-    #[serde(rename = "IntegrationType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_type: Option<IntegrationType>,
-    #[serde(rename = "IntegrationUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_uri: Option<String>,
-    #[serde(rename = "PassthroughBehavior")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passthrough_behavior: Option<PassthroughBehavior>,
-    #[serde(rename = "PayloadFormatVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_format_version: Option<String>,
-    #[serde(rename = "RequestParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_parameters: HashMap<String, String>,
-    #[serde(rename = "RequestTemplates")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_templates: HashMap<String, String>,
-    #[serde(rename = "ResponseParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_parameters: HashMap<String, HashMap<String, String>>,
-    #[serde(rename = "TemplateSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_selection_expression: Option<String>,
-    #[serde(rename = "TimeoutInMillis")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_in_millis: Option<i32>,
-    #[serde(rename = "TlsConfig")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_config: Option<TlsConfig>,
 }
@@ -966,10 +882,8 @@ pub struct Integration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JWTConfiguration {
-    #[serde(rename = "Audience")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audience: Vec<String>,
-    #[serde(rename = "Issuer")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
 }
@@ -978,18 +892,13 @@ pub struct JWTConfiguration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
-    #[serde(rename = "ContentType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "ModelId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "Schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 }
@@ -998,13 +907,10 @@ pub struct Model {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutualTlsAuthentication {
-    #[serde(rename = "TruststoreUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truststore_uri: Option<String>,
-    #[serde(rename = "TruststoreVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truststore_version: Option<String>,
-    #[serde(rename = "TruststoreWarnings")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub truststore_warnings: Vec<String>,
 }
@@ -1013,10 +919,8 @@ pub struct MutualTlsAuthentication {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutualTlsAuthenticationInput {
-    #[serde(rename = "TruststoreUri")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truststore_uri: Option<String>,
-    #[serde(rename = "TruststoreVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truststore_version: Option<String>,
 }
@@ -1025,7 +929,6 @@ pub struct MutualTlsAuthenticationInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParameterConstraints {
-    #[serde(rename = "Required")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
 }
@@ -1034,42 +937,29 @@ pub struct ParameterConstraints {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Route {
-    #[serde(rename = "ApiGatewayManaged")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_gateway_managed: Option<bool>,
-    #[serde(rename = "ApiKeyRequired")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_required: Option<bool>,
-    #[serde(rename = "AuthorizationScopes")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorization_scopes: Vec<String>,
-    #[serde(rename = "AuthorizationType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_type: Option<AuthorizationType>,
-    #[serde(rename = "AuthorizerId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_id: Option<String>,
-    #[serde(rename = "ModelSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_expression: Option<String>,
-    #[serde(rename = "OperationName")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_name: Option<String>,
-    #[serde(rename = "RequestModels")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_models: HashMap<String, String>,
-    #[serde(rename = "RequestParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_parameters: HashMap<String, ParameterConstraints>,
-    #[serde(rename = "RouteId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_id: Option<String>,
-    #[serde(rename = "RouteKey")]
     pub route_key: String,
-    #[serde(rename = "RouteResponseSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_response_selection_expression: Option<String>,
-    #[serde(rename = "Target")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -1078,19 +968,14 @@ pub struct Route {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteResponse {
-    #[serde(rename = "ModelSelectionExpression")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_expression: Option<String>,
-    #[serde(rename = "ResponseModels")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_models: HashMap<String, String>,
-    #[serde(rename = "ResponseParameters")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub response_parameters: HashMap<String, ParameterConstraints>,
-    #[serde(rename = "RouteResponseId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_response_id: Option<String>,
-    #[serde(rename = "RouteResponseKey")]
     pub route_response_key: String,
 }
 
@@ -1098,19 +983,14 @@ pub struct RouteResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteSettings {
-    #[serde(rename = "DataTraceEnabled")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_trace_enabled: Option<bool>,
-    #[serde(rename = "DetailedMetricsEnabled")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detailed_metrics_enabled: Option<bool>,
-    #[serde(rename = "LoggingLevel")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging_level: Option<LoggingLevel>,
-    #[serde(rename = "ThrottlingBurstLimit")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throttling_burst_limit: Option<i32>,
-    #[serde(rename = "ThrottlingRateLimit")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throttling_rate_limit: Option<f64>,
 }
@@ -1119,45 +999,31 @@ pub struct RouteSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stage {
-    #[serde(rename = "AccessLogSettings")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_log_settings: Option<AccessLogSettings>,
-    #[serde(rename = "ApiGatewayManaged")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_gateway_managed: Option<bool>,
-    #[serde(rename = "AutoDeploy")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_deploy: Option<bool>,
-    #[serde(rename = "ClientCertificateId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_certificate_id: Option<String>,
-    #[serde(rename = "CreatedDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(rename = "DefaultRouteSettings")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_route_settings: Option<RouteSettings>,
-    #[serde(rename = "DeploymentId")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
-    #[serde(rename = "Description")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "LastDeploymentStatusMessage")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_deployment_status_message: Option<String>,
-    #[serde(rename = "LastUpdatedDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(rename = "RouteSettings")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub route_settings: HashMap<String, RouteSettings>,
-    #[serde(rename = "StageName")]
     pub stage_name: String,
-    #[serde(rename = "StageVariables")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stage_variables: HashMap<String, String>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
 }
@@ -1166,7 +1032,6 @@ pub struct Stage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TlsConfig {
-    #[serde(rename = "ServerNameToVerify")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name_to_verify: Option<String>,
 }
@@ -1175,7 +1040,6 @@ pub struct TlsConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TlsConfigInput {
-    #[serde(rename = "ServerNameToVerify")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name_to_verify: Option<String>,
 }
@@ -1184,29 +1048,20 @@ pub struct TlsConfigInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VpcLink {
-    #[serde(rename = "CreatedDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "SecurityGroupIds")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub security_group_ids: Vec<String>,
-    #[serde(rename = "SubnetIds")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subnet_ids: Vec<String>,
-    #[serde(rename = "Tags")]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
-    #[serde(rename = "VpcLinkId")]
     pub vpc_link_id: String,
-    #[serde(rename = "VpcLinkStatus")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vpc_link_status: Option<VpcLinkStatus>,
-    #[serde(rename = "VpcLinkStatusMessage")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vpc_link_status_message: Option<String>,
-    #[serde(rename = "VpcLinkVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vpc_link_version: Option<VpcLinkVersion>,
 }
