@@ -1,0 +1,31 @@
+[package]
+name = "ruststack-dynamodbstreams-core"
+description = "DynamoDB Streams business logic and storage engine for RustStack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ruststack-core = { workspace = true }
+ruststack-dynamodbstreams-model = { workspace = true }
+ruststack-dynamodbstreams-http = { workspace = true }
+ruststack-dynamodb-model = { workspace = true }
+ruststack-dynamodb-core = { workspace = true }
+ruststack-auth = { workspace = true }
+http = { workspace = true }
+
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

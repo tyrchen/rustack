@@ -1,0 +1,25 @@
+[service]
+name = "dynamodbstreams"
+display_name = "DynamoDB Streams"
+rust_prefix = "DynamoDBStreams"
+namespace = "com.amazonaws.dynamodbstreams"
+protocol = "awsJson1_0"
+
+[protocol]
+serde_rename = "PascalCase"
+emit_serde_derives = true
+
+[operations]
+phase0 = [
+    "DescribeStream",
+    "GetShardIterator",
+    "GetRecords",
+    "ListStreams",
+]
+
+[errors.custom]
+MissingAction = { status = 400, message = "Missing required header: X-Amz-Target" }
+InvalidAction = { status = 400, message = "Operation is not supported" }
+
+[output]
+file_layout = "flat"

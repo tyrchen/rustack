@@ -69,6 +69,9 @@ ruststack-apigatewayv2-core = { path = "crates/ruststack-apigatewayv2-core" }
 ruststack-cloudwatch-model = { path = "crates/ruststack-cloudwatch-model" }
 ruststack-cloudwatch-http = { path = "crates/ruststack-cloudwatch-http" }
 ruststack-cloudwatch-core = { path = "crates/ruststack-cloudwatch-core" }
+ruststack-dynamodbstreams-model = { path = "crates/ruststack-dynamodbstreams-model" }
+ruststack-dynamodbstreams-http = { path = "crates/ruststack-dynamodbstreams-http" }
+ruststack-dynamodbstreams-core = { path = "crates/ruststack-dynamodbstreams-core" }
 
 # Async runtime
 tokio = { version = "1.49", features = [
@@ -149,6 +152,7 @@ tokio-test = "0.4"
 aws-config = "1.8"
 aws-sdk-s3 = "1.124"
 aws-sdk-dynamodb = "1.72"
+aws-sdk-dynamodbstreams = "1"
 aws-sdk-sqs = "1.60"
 aws-sdk-ssm = "1.107"
 aws-sdk-sns = "1.65"

@@ -1,11 +1,9 @@
-//! DynamoDB core business logic for RustStack.
+//! DynamoDB Streams core business logic for RustStack.
 #![allow(missing_docs, clippy::doc_markdown, clippy::module_name_repetitions)]
 
 pub mod config;
-pub mod error;
-pub mod expression;
+pub mod emitter;
 pub mod handler;
+pub mod iterator;
 pub mod provider;
-pub mod state;
 pub mod storage;
-pub mod stream;

@@ -70,6 +70,23 @@ pub fn dynamodb_client() -> aws_sdk_dynamodb::Client {
     aws_sdk_dynamodb::Client::from_conf(config)
 }
 
+/// Create a configured DynamoDB Streams client pointing at the local server.
+#[must_use]
+pub fn dynamodbstreams_client() -> aws_sdk_dynamodbstreams::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_dynamodbstreams::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_dynamodbstreams::Client::from_conf(config)
+}
+
 /// Generate a unique bucket name for a test.
 #[must_use]
 pub fn test_bucket_name(prefix: &str) -> String {
@@ -390,6 +407,7 @@ mod test_bucket;
 mod test_cloudwatch;
 mod test_cors;
 mod test_dynamodb;
+mod test_dynamodbstreams;
 mod test_error;
 mod test_events;
 mod test_health;

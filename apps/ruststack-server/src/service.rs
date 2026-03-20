@@ -169,6 +169,67 @@ mod dynamodb_router {
 pub use dynamodb_router::DynamoDBServiceRouter;
 
 // ---------------------------------------------------------------------------
+// DynamoDB Streams
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "dynamodbstreams")]
+mod dynamodbstreams_router {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use hyper::service::Service;
+    use ruststack_dynamodbstreams_http::dispatch::DynamoDBStreamsHandler;
+    use ruststack_dynamodbstreams_http::service::DynamoDBStreamsHttpService;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the DynamoDB Streams service.
+    ///
+    /// Matches requests whose `X-Amz-Target` header starts with `DynamoDBStreams_`.
+    pub struct DynamoDBStreamsServiceRouter<H: DynamoDBStreamsHandler> {
+        inner: DynamoDBStreamsHttpService<H>,
+    }
+
+    impl<H: DynamoDBStreamsHandler> DynamoDBStreamsServiceRouter<H> {
+        /// Wrap a [`DynamoDBStreamsHttpService`] in a router.
+        pub fn new(inner: DynamoDBStreamsHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: DynamoDBStreamsHandler> ServiceRouter for DynamoDBStreamsServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "dynamodbstreams"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            req.headers()
+                .get("x-amz-target")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("DynamoDBStreams_"))
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp.unwrap_or_else(|e| match e {}).map(BodyExt::boxed))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "dynamodbstreams")]
+pub use dynamodbstreams_router::DynamoDBStreamsServiceRouter;
+
+// ---------------------------------------------------------------------------
 // SQS
 // ---------------------------------------------------------------------------
 
