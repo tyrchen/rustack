@@ -211,9 +211,10 @@ jobs:
           aws cloudwatch delete-alarms \
             --alarm-names "ci-high-latency"
 
+          # Verify alarm no longer exists (MetricAlarms may be null or empty).
           COUNT=$(aws cloudwatch describe-alarms \
             --alarm-names "ci-high-latency" \
-            --query "MetricAlarms | length(@)" --output text)
+            --query "length(MetricAlarms || \`[]\`)" --output text)
           [ "$COUNT" = "0" ]
 
       # ── Cleanup ─────────────────────────────────────────────────
