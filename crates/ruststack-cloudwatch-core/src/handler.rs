@@ -746,6 +746,9 @@ fn dispatch(
 // ---------------------------------------------------------------------------
 
 /// Deserialize a JSON body into an input type.
+///
+/// Transforms epoch-second timestamps in known fields to ISO 8601 strings
+/// so they deserialize into `chrono::DateTime` correctly.
 fn json_decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, CloudWatchError> {
     if body.is_empty() {
         return serde_json::from_value(serde_json::Value::Object(serde_json::Map::default()))
@@ -756,12 +759,70 @@ fn json_decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, CloudWa
                 )
             });
     }
-    serde_json::from_slice(body).map_err(|e| {
+    let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        CloudWatchError::with_message(
+            CloudWatchErrorCode::InvalidParameterValueException,
+            format!("JSON parse: {e}"),
+        )
+    })?;
+    let transformed = json_transform_timestamps(raw);
+    serde_json::from_value(transformed).map_err(|e| {
         CloudWatchError::with_message(
             CloudWatchErrorCode::InvalidParameterValueException,
             format!("JSON decode: {e}"),
         )
     })
+}
+
+/// Recursively transform epoch-second numbers in timestamp fields to ISO strings.
+fn json_transform_timestamps(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let transformed = map
+                .into_iter()
+                .map(|(k, v)| {
+                    let new_v = if is_timestamp_field(&k) {
+                        json_epoch_to_iso(v)
+                    } else {
+                        json_transform_timestamps(v)
+                    };
+                    (k, new_v)
+                })
+                .collect();
+            serde_json::Value::Object(transformed)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(json_transform_timestamps).collect())
+        }
+        other => other,
+    }
+}
+
+/// Convert a JSON number (epoch seconds) to an ISO 8601 string.
+fn json_epoch_to_iso(value: serde_json::Value) -> serde_json::Value {
+    match &value {
+        serde_json::Value::Number(n) => {
+            if let Some(epoch) = n.as_f64() {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let dt = chrono::DateTime::from_timestamp(
+                    epoch as i64,
+                    (epoch.fract() * 1_000_000_000.0) as u32,
+                );
+                match dt {
+                    Some(dt) => {
+                        serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    }
+                    None => value,
+                }
+            } else {
+                value
+            }
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().cloned().map(json_epoch_to_iso).collect())
+        }
+        _ => value,
+    }
 }
 
 /// Build a JSON response for an awsJson_1.0 operation.
