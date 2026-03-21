@@ -91,14 +91,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          SHARD_ID=$(aws kinesis describe-stream \
-            --stream-name ci-test-stream \
-            --query "StreamDescription.Shards[0].ShardId" --output text)
-
-          aws kinesis put-record \
+          # Put a record and capture the shard it was assigned to.
+          SHARD_ID=$(aws kinesis put-record \
             --stream-name ci-test-stream \
             --partition-key "key1" \
-            --data "dGVzdCBtZXNzYWdl"
+            --data "dGVzdCBtZXNzYWdl" \
+            --query "ShardId" --output text)
 
           ITERATOR=$(aws kinesis get-shard-iterator \
             --stream-name ci-test-stream \

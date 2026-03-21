@@ -1273,9 +1273,11 @@ mod cloudwatch_router {
             "cloudwatch"
         }
 
-        /// CloudWatch Metrics matches in two ways:
+        /// CloudWatch Metrics matches in three ways:
         /// 1. awsQuery: form-urlencoded POST signed with `monitoring` SigV4 service.
-        /// 2. rpcv2Cbor: POST to `/service/GraniteServiceVersion20100801/...`.
+        /// 2. rpcv2Cbor path: POST to `/service/GraniteServiceVersion20100801/...`.
+        /// 3. rpcv2Cbor header: POST with `smithy-protocol: rpc-v2-cbor` signed
+        ///    with `monitoring` SigV4 service (AWS SDK v1.108+).
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             if *req.method() != http::Method::POST {
                 return false;
@@ -1290,9 +1292,19 @@ mod cloudwatch_router {
                 return true;
             }
 
+            let headers = req.headers();
+
+            // rpcv2Cbor header-based routing (AWS SDK v1.108+).
+            let is_rpcv2_cbor = headers
+                .get("smithy-protocol")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == "rpc-v2-cbor");
+            if is_rpcv2_cbor {
+                return extract_sigv4_service(headers).is_some_and(|svc| svc == "monitoring");
+            }
+
             // awsQuery form-urlencoded routing.
-            let is_form_encoded = req
-                .headers()
+            let is_form_encoded = headers
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|ct| ct.contains("x-www-form-urlencoded"));
@@ -1300,7 +1312,7 @@ mod cloudwatch_router {
                 return false;
             }
             // Check SigV4 signing service name.
-            extract_sigv4_service(req.headers()).is_some_and(|svc| svc == "monitoring")
+            extract_sigv4_service(headers).is_some_and(|svc| svc == "monitoring")
         }
 
         fn call(
