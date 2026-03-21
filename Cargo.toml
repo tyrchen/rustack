@@ -75,9 +75,12 @@ ruststack-dynamodbstreams-core = { path = "crates/ruststack-dynamodbstreams-core
 ruststack-iam-model = { path = "crates/ruststack-iam-model" }
 ruststack-iam-http = { path = "crates/ruststack-iam-http" }
 ruststack-iam-core = { path = "crates/ruststack-iam-core" }
+ruststack-sts-model = { path = "crates/ruststack-sts-model" }
+ruststack-sts-http = { path = "crates/ruststack-sts-http" }
+ruststack-sts-core = { path = "crates/ruststack-sts-core" }
 
 # Async runtime
-tokio = { version = "1.49", features = [
+tokio = { version = "1.50", features = [
   "rt-multi-thread",
   "macros",
   "signal",
@@ -96,11 +99,13 @@ hyper-util = { version = "0.1", features = [
   "server-graceful",
 ] }
 http = "1.4"
+http-body = "1.0"
 http-body-util = "0.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+ciborium = "0.2"
 quick-xml = "0.39"
 
 # Error handling
@@ -127,7 +132,7 @@ subtle = "2.6"
 # Time / IDs
 chrono = { version = "0.4", features = ["serde"] }
 time = "0.3.47"
-uuid = { version = "1.21", features = ["v4"] }
+uuid = { version = "1.22", features = ["v4"] }
 
 # Logging / tracing
 tracing = "0.1"
@@ -137,12 +142,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 async-trait = "0.1"
 
 # Regex
-regex = "1.11"
+regex = "1.12"
 
 # Utilities
 bytes = "1.11"
 rand = "0.9"
-tempfile = "3.26"
+tempfile = "3.27"
 percent-encoding = "2.3"
 mime = "0.3"
 futures = "0.3"
@@ -153,22 +158,23 @@ form_urlencoded = "1.2"
 # Testing
 tokio-test = "0.4"
 aws-config = "1.8"
-aws-sdk-s3 = "1.124"
-aws-sdk-dynamodb = "1.72"
+aws-sdk-s3 = "1.127"
+aws-sdk-dynamodb = "1.109"
 aws-sdk-dynamodbstreams = "1"
-aws-sdk-sqs = "1.60"
-aws-sdk-ssm = "1.107"
-aws-sdk-sns = "1.65"
-aws-sdk-lambda = "1.104"
-aws-sdk-cloudwatch = "~1.60"
-aws-sdk-cloudwatchlogs = "1.105"
-aws-sdk-eventbridge = "1.96"
+aws-sdk-sqs = "1.97"
+aws-sdk-ssm = "1.108"
+aws-sdk-sns = "1.98"
+aws-sdk-lambda = "1.119"
+aws-sdk-cloudwatch = "1"
+aws-sdk-cloudwatchlogs = "1.121"
+aws-sdk-eventbridge = "1.104"
 aws-sdk-kms = "1"
 aws-sdk-kinesis = "1"
 aws-sdk-secretsmanager = "1"
 aws-sdk-ses = "1"
 aws-sdk-apigatewayv2 = "1"
 aws-sdk-iam = "1"
-reqwest = { version = "0.12", features = ["json"] }
+aws-sdk-sts = "1"
+reqwest = { version = "0.13", features = ["json"] }
 aws-credential-types = "1.2"
 aws-smithy-runtime-api = "1.11"

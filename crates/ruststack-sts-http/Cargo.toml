@@ -1,6 +1,6 @@
 [package]
-name = "ruststack-cloudwatch-http"
-description = "CloudWatch Metrics HTTP service layer for RustStack (awsQuery + rpcv2Cbor protocols)"
+name = "ruststack-sts-http"
+description = "STS HTTP service layer for RustStack (awsQuery protocol)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-ruststack-cloudwatch-model = { workspace = true }
+ruststack-sts-model = { workspace = true }
 ruststack-auth = { workspace = true }
 
 hyper = { workspace = true }
@@ -28,10 +28,6 @@ uuid = { workspace = true }
 
 # http_body::Body trait
 http-body = { workspace = true }
-
-# Serialization
-ciborium = { workspace = true }
-serde_json = { workspace = true }
 
 # awsQuery form-urlencoded parsing
 form_urlencoded = { workspace = true }

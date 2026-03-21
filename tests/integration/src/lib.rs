@@ -419,6 +419,50 @@ pub fn iam_client() -> aws_sdk_iam::Client {
     aws_sdk_iam::Client::from_conf(config)
 }
 
+/// Create a configured STS client pointing at the local server.
+#[must_use]
+pub fn sts_client() -> aws_sdk_sts::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_sts::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_sts::Client::from_conf(config)
+}
+
+/// Create a configured STS client with specific credentials.
+#[must_use]
+pub fn sts_client_with_credentials(
+    access_key: &str,
+    secret_key: &str,
+    session_token: &str,
+) -> aws_sdk_sts::Client {
+    init_tracing();
+
+    let creds = Credentials::new(
+        access_key,
+        secret_key,
+        Some(session_token.to_owned()),
+        None,
+        "integration-test",
+    );
+
+    let config = aws_sdk_sts::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_sts::Client::from_conf(config)
+}
+
 mod test_apigatewayv2;
 mod test_bucket;
 mod test_cloudwatch;
@@ -442,4 +486,5 @@ mod test_ses;
 mod test_sns;
 mod test_sqs;
 mod test_ssm;
+mod test_sts;
 mod test_versioning;

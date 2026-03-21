@@ -1,10 +1,10 @@
-//! CloudWatch XML response formatting and error serialization.
+//! STS XML response formatting and error serialization.
 //!
-//! CloudWatch Metrics responses use `text/xml` content type following the awsQuery protocol.
-//! All responses follow the pattern:
+//! STS responses use `text/xml` content type following the awsQuery protocol.
+//! All STS responses follow the pattern:
 //!
 //! ```xml
-//! <{Operation}Response xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
+//! <{Operation}Response xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
 //!   <{Operation}Result>
 //!     ...fields...
 //!   </{Operation}Result>
@@ -14,25 +14,20 @@
 //! </{Operation}Response>
 //! ```
 
-use std::collections::BTreeMap;
+use ruststack_sts_model::error::StsError;
 
-use ruststack_cloudwatch_model::error::CloudWatchError;
+use crate::body::StsResponseBody;
 
-use crate::body::CloudWatchResponseBody;
-
-/// Content type for CloudWatch XML responses.
+/// Content type for STS XML responses.
 pub const CONTENT_TYPE: &str = "text/xml";
 
-/// Content type for CBOR responses.
-pub const CBOR_CONTENT_TYPE: &str = "application/cbor";
-
-/// The CloudWatch Metrics XML namespace.
-const XML_NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
+/// The STS XML namespace.
+const XML_NS: &str = "https://sts.amazonaws.com/doc/2011-06-15/";
 
 /// Build a success XML response with the given body and request ID.
 #[must_use]
-pub fn xml_response(xml: String, request_id: &str) -> http::Response<CloudWatchResponseBody> {
-    let body = CloudWatchResponseBody::from_xml(xml.into_bytes());
+pub fn xml_response(xml: String, request_id: &str) -> http::Response<StsResponseBody> {
+    let body = StsResponseBody::from_xml(xml.into_bytes());
     http::Response::builder()
         .status(http::StatusCode::OK)
         .header("content-type", CONTENT_TYPE)
@@ -41,37 +36,30 @@ pub fn xml_response(xml: String, request_id: &str) -> http::Response<CloudWatchR
         .expect("valid XML response")
 }
 
-/// Serialize a CloudWatch error into an XML error response body string.
+/// Serialize an STS error into an XML error response body string.
 #[must_use]
-pub fn error_to_xml(error: &CloudWatchError, request_id: &str) -> String {
-    let fault = if error.status_code.is_server_error() {
-        "Receiver"
-    } else {
-        "Sender"
-    };
+pub fn error_to_xml(error: &StsError, request_id: &str) -> String {
     format!(
         "<ErrorResponse xmlns=\"{XML_NS}\">\
          <Error>\
-         <Type>{fault}</Type>\
+         <Type>{}</Type>\
          <Code>{}</Code>\
          <Message>{}</Message>\
          </Error>\
          <RequestId>{}</RequestId>\
          </ErrorResponse>",
-        xml_escape(&error.code.to_string()),
+        error.code.fault(),
+        error.code.code(),
         xml_escape(&error.message),
         xml_escape(request_id),
     )
 }
 
-/// Convert a `CloudWatchError` into a complete HTTP error response.
+/// Convert an `StsError` into a complete HTTP error response.
 #[must_use]
-pub fn error_to_response(
-    error: &CloudWatchError,
-    request_id: &str,
-) -> http::Response<CloudWatchResponseBody> {
+pub fn error_to_response(error: &StsError, request_id: &str) -> http::Response<StsResponseBody> {
     let xml = error_to_xml(error, request_id);
-    let body = CloudWatchResponseBody::from_xml(xml.into_bytes());
+    let body = StsResponseBody::from_xml(xml.into_bytes());
     http::Response::builder()
         .status(error.status_code)
         .header("content-type", CONTENT_TYPE)
@@ -81,6 +69,8 @@ pub fn error_to_response(
 }
 
 /// XML-escape a string value.
+///
+/// Replaces the five XML special characters with their entity references.
 #[must_use]
 pub fn xml_escape(s: &str) -> String {
     if !s.contains(['&', '<', '>', '"', '\'']) {
@@ -101,39 +91,7 @@ pub fn xml_escape(s: &str) -> String {
     result
 }
 
-/// Build a CBOR success response.
-#[must_use]
-pub fn cbor_response(body: Vec<u8>, request_id: &str) -> http::Response<CloudWatchResponseBody> {
-    http::Response::builder()
-        .status(http::StatusCode::OK)
-        .header("content-type", CBOR_CONTENT_TYPE)
-        .header("smithy-protocol", "rpc-v2-cbor")
-        .header("x-amzn-requestid", request_id)
-        .body(CloudWatchResponseBody::from_bytes(body))
-        .expect("valid CBOR response")
-}
-
-/// Build a CBOR error response.
-#[must_use]
-pub fn cbor_error_response(
-    error: &CloudWatchError,
-    request_id: &str,
-) -> http::Response<CloudWatchResponseBody> {
-    let mut error_map: BTreeMap<&str, &str> = BTreeMap::new();
-    error_map.insert("__type", error.code.as_str());
-    error_map.insert("message", &error.message);
-    let mut buf = Vec::new();
-    ciborium::into_writer(&error_map, &mut buf).unwrap_or_default();
-    http::Response::builder()
-        .status(error.status_code)
-        .header("content-type", CBOR_CONTENT_TYPE)
-        .header("smithy-protocol", "rpc-v2-cbor")
-        .header("x-amzn-requestid", request_id)
-        .body(CloudWatchResponseBody::from_bytes(buf))
-        .expect("valid CBOR error response")
-}
-
-/// Simple XML writer for building CloudWatch response XML.
+/// Simple XML writer for building STS response XML.
 #[derive(Debug)]
 pub struct XmlWriter {
     buf: String,
@@ -170,13 +128,6 @@ impl XmlWriter {
         self.buf.push_str("Result>");
     }
 
-    /// Start an element: `<{name}>`.
-    pub fn start_element(&mut self, name: &str) {
-        self.buf.push('<');
-        self.buf.push_str(name);
-        self.buf.push('>');
-    }
-
     /// End an element: `</{name}>`.
     pub fn end_element(&mut self, name: &str) {
         self.buf.push_str("</");
@@ -202,26 +153,14 @@ impl XmlWriter {
         }
     }
 
-    /// Write a boolean element.
-    pub fn write_bool_element(&mut self, name: &str, value: bool) {
-        self.write_element(name, if value { "true" } else { "false" });
-    }
-
-    /// Write an f64 element.
-    pub fn write_f64_element(&mut self, name: &str, value: f64) {
+    /// Write an integer element.
+    pub fn write_int_element(&mut self, name: &str, value: i32) {
         self.write_element(name, &value.to_string());
     }
 
-    /// Write an optional f64 element.
-    pub fn write_optional_f64_element(&mut self, name: &str, value: Option<f64>) {
-        if let Some(v) = value {
-            self.write_f64_element(name, v);
-        }
-    }
-
-    /// Write an i32 element.
-    pub fn write_i32_element(&mut self, name: &str, value: i32) {
-        self.write_element(name, &value.to_string());
+    /// Write raw XML content without escaping.
+    pub fn raw(&mut self, s: &str) {
+        self.buf.push_str(s);
     }
 
     /// Write the `<ResponseMetadata>` block with a `<RequestId>`.
@@ -229,11 +168,6 @@ impl XmlWriter {
         self.buf.push_str("<ResponseMetadata>");
         self.write_element("RequestId", request_id);
         self.buf.push_str("</ResponseMetadata>");
-    }
-
-    /// Write raw XML content without escaping.
-    pub fn raw(&mut self, s: &str) {
-        self.buf.push_str(s);
     }
 
     /// Consume the writer and return the final XML string.
@@ -256,34 +190,44 @@ mod tests {
 
     #[test]
     fn test_should_format_error_xml() {
-        let err = CloudWatchError::with_message(
-            ruststack_cloudwatch_model::error::CloudWatchErrorCode::ResourceNotFound,
-            "Alarm not found",
-        );
+        let err = StsError::invalid_parameter_value("Bad value");
         let xml = error_to_xml(&err, "req-123");
-        assert!(xml.contains("<Code>ResourceNotFound</Code>"));
-        assert!(xml.contains("<Message>Alarm not found</Message>"));
+        assert!(xml.contains("<Code>InvalidParameterValue</Code>"));
+        assert!(xml.contains("<Message>Bad value</Message>"));
         assert!(xml.contains("<Type>Sender</Type>"));
         assert!(xml.contains("<RequestId>req-123</RequestId>"));
+        assert!(xml.contains("sts.amazonaws.com"));
     }
 
     #[test]
-    fn test_should_format_server_error_as_receiver() {
-        let err = CloudWatchError::internal_error("something broke");
-        let xml = error_to_xml(&err, "req-456");
-        assert!(xml.contains("<Type>Receiver</Type>"));
+    fn test_should_build_error_response_with_correct_status() {
+        let err = StsError::invalid_parameter_value("bad");
+        let resp = error_to_response(&err, "test-req-123");
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        assert_eq!(resp.headers().get("content-type").unwrap(), CONTENT_TYPE);
     }
 
     #[test]
     fn test_should_build_xml_with_writer() {
         let mut w = XmlWriter::new();
-        w.start_response("PutMetricData");
-        w.start_result("PutMetricData");
-        w.end_element("PutMetricDataResult");
+        w.start_response("GetCallerIdentity");
+        w.start_result("GetCallerIdentity");
+        w.write_element("Account", "000000000000");
+        w.write_element("Arn", "arn:aws:iam::000000000000:root");
+        w.write_element("UserId", "000000000000");
+        w.end_element("GetCallerIdentityResult");
         w.write_response_metadata("req-789");
-        w.end_element("PutMetricDataResponse");
+        w.end_element("GetCallerIdentityResponse");
         let xml = w.into_string();
-        assert!(xml.contains("<PutMetricDataResponse xmlns="));
+        assert!(xml.contains("<Account>000000000000</Account>"));
         assert!(xml.contains("<RequestId>req-789</RequestId>"));
+        assert!(xml.contains("GetCallerIdentityResponse xmlns="));
+    }
+
+    #[test]
+    fn test_should_build_success_xml_response() {
+        let resp = xml_response("<TestResponse/>".to_owned(), "req-success");
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), CONTENT_TYPE);
     }
 }

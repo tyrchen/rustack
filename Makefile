@@ -93,6 +93,10 @@ codegen-iam:
 	@cd codegen && cargo run -- --config services/iam.toml --model smithy-model/iam.json --output ../crates/ruststack-iam-model/src
 	@cargo +nightly fmt -p ruststack-iam-model
 
+codegen-sts:
+	@cd codegen && cargo run -- --config services/sts.toml --model smithy-model/sts.json --output ../crates/ruststack-sts-model/src
+	@cargo +nightly fmt -p ruststack-sts-model
+
 codegen: codegen-s3
 
 SMITHY_MODELS_REPO = https://raw.githubusercontent.com/aws/api-models-aws/main
@@ -113,6 +117,7 @@ codegen-download:
 	@curl -sL $(SMITHY_MODELS_REPO)/models/cloudwatch/service/2010-08-01/cloudwatch-2010-08-01.json -o codegen/smithy-model/cloudwatch.json
 	@curl -sL $(SMITHY_MODELS_REPO)/models/dynamodb-streams/service/2012-08-10/dynamodb-streams-2012-08-10.json -o codegen/smithy-model/dynamodbstreams.json
 	@curl -sL $(SMITHY_MODELS_REPO)/models/iam/service/2010-05-08/iam-2010-05-08.json -o codegen/smithy-model/iam.json
+	@curl -sL $(SMITHY_MODELS_REPO)/models/sts/service/2011-06-15/sts-2011-06-15.json -o codegen/smithy-model/sts.json
 	@echo "Done."
 
 integration:

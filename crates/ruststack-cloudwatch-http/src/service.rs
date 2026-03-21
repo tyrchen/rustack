@@ -1,8 +1,10 @@
 //! CloudWatch HTTP service implementing the hyper `Service` trait.
 //!
-//! CloudWatch Metrics uses the `awsQuery` protocol where the request body is
-//! `application/x-www-form-urlencoded` and the response is `text/xml`.
-//! The `Action=` form parameter determines the operation.
+//! CloudWatch Metrics supports two wire protocols:
+//! - **awsQuery**: form-urlencoded requests, XML responses (legacy SDKs).
+//! - **rpcv2Cbor**: CBOR requests/responses (AWS SDK v1.108+).
+//!
+//! The protocol is detected automatically from request headers and URL path.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -14,11 +16,12 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 
 use ruststack_cloudwatch_model::error::CloudWatchError;
+use ruststack_cloudwatch_model::operations::CloudWatchOperation;
 
 use crate::body::CloudWatchResponseBody;
-use crate::dispatch::{CloudWatchHandler, dispatch_operation};
+use crate::dispatch::{CloudWatchHandler, Protocol, dispatch_operation};
 use crate::request::parse_form_params;
-use crate::response::{CONTENT_TYPE, error_to_response};
+use crate::response::{CONTENT_TYPE, cbor_error_response, error_to_response};
 use crate::router::resolve_operation;
 
 /// Configuration for the CloudWatch HTTP service.
@@ -98,9 +101,44 @@ impl<H: CloudWatchHandler> hyper::service::Service<http::Request<Incoming>>
 
         Box::pin(async move {
             let response = process_request(req, handler.as_ref(), &config, &request_id).await;
-            let response = add_common_headers(response, &request_id);
+            let response = add_common_headers(response);
             Ok(response)
         })
+    }
+}
+
+/// Detect the wire protocol from request headers and path.
+fn detect_protocol(parts: &http::request::Parts) -> Protocol {
+    // Check for rpcv2Cbor indicators.
+    if parts
+        .headers
+        .get("smithy-protocol")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "rpc-v2-cbor")
+    {
+        return Protocol::RpcV2Cbor;
+    }
+    if parts
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/cbor"))
+    {
+        return Protocol::RpcV2Cbor;
+    }
+    Protocol::AwsQuery
+}
+
+/// Extract the operation name from an rpcv2Cbor URL path.
+///
+/// Path format: `/service/GraniteServiceVersion20100801/operation/{OperationName}`
+fn extract_cbor_operation(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.split('/').collect();
+    // ["", "service", "GraniteServiceVersion20100801", "operation", "OpName"]
+    if segments.len() >= 5 && segments[1] == "service" && segments[3] == "operation" {
+        Some(segments[4])
+    } else {
+        None
     }
 }
 
@@ -113,28 +151,55 @@ async fn process_request<H: CloudWatchHandler>(
 ) -> http::Response<CloudWatchResponseBody> {
     let (parts, incoming) = req.into_parts();
 
+    // Detect protocol.
+    let protocol = detect_protocol(&parts);
+
     // Verify POST method.
     if parts.method != http::Method::POST {
         let err = CloudWatchError::with_message(
             ruststack_cloudwatch_model::error::CloudWatchErrorCode::InvalidParameterValueException,
             format!("CloudWatch requires POST method, got {}", parts.method),
         );
-        return error_to_response(&err, request_id);
+        return make_error_response(&err, request_id, protocol);
     }
 
     // Collect body.
     let body = match collect_body(incoming).await {
         Ok(body) => body,
-        Err(err) => return error_to_response(&err, request_id),
+        Err(err) => return make_error_response(&err, request_id, protocol),
     };
 
-    // Parse form params to extract Action for routing.
-    let params = parse_form_params(&body);
-
-    // Resolve operation from Action= param.
-    let op = match resolve_operation(&params) {
-        Ok(op) => op,
-        Err(err) => return error_to_response(&err, request_id),
+    // Resolve operation based on protocol.
+    let op = match protocol {
+        Protocol::AwsQuery => {
+            let params = parse_form_params(&body);
+            match resolve_operation(&params) {
+                Ok(op) => op,
+                Err(err) => return make_error_response(&err, request_id, protocol),
+            }
+        }
+        Protocol::RpcV2Cbor => {
+            let path = parts.uri.path();
+            match extract_cbor_operation(path) {
+                Some(name) => match CloudWatchOperation::from_name(name) {
+                    Some(op) => op,
+                    None => {
+                        return make_error_response(
+                            &CloudWatchError::unknown_operation(name),
+                            request_id,
+                            protocol,
+                        );
+                    }
+                },
+                None => {
+                    return make_error_response(
+                        &CloudWatchError::missing_action(),
+                        request_id,
+                        protocol,
+                    );
+                }
+            }
+        }
     };
 
     // Authenticate (if enabled).
@@ -148,15 +213,27 @@ async fn process_request<H: CloudWatchHandler>(
                     ruststack_cloudwatch_model::error::CloudWatchErrorCode::InternalServiceFault,
                     auth_err.to_string(),
                 );
-                return error_to_response(&err, request_id);
+                return make_error_response(&err, request_id, protocol);
             }
         }
     }
 
     // Dispatch to handler.
-    match dispatch_operation(handler, op, body).await {
+    match dispatch_operation(handler, op, body, protocol).await {
         Ok(response) => response,
-        Err(err) => error_to_response(&err, request_id),
+        Err(err) => make_error_response(&err, request_id, protocol),
+    }
+}
+
+/// Return the appropriate error response for the given protocol.
+fn make_error_response(
+    err: &CloudWatchError,
+    request_id: &str,
+    protocol: Protocol,
+) -> http::Response<CloudWatchResponseBody> {
+    match protocol {
+        Protocol::AwsQuery => error_to_response(err, request_id),
+        Protocol::RpcV2Cbor => cbor_error_response(err, request_id),
     }
 }
 
@@ -170,16 +247,16 @@ async fn collect_body(incoming: Incoming) -> Result<Bytes, CloudWatchError> {
 }
 
 /// Add common response headers to every CloudWatch response.
+///
+/// Protocol-specific headers (content-type, smithy-protocol, x-amzn-requestid)
+/// are already set by the individual response builders; this only adds
+/// server-level headers that apply to every response.
 fn add_common_headers(
     mut response: http::Response<CloudWatchResponseBody>,
-    request_id: &str,
 ) -> http::Response<CloudWatchResponseBody> {
     let headers = response.headers_mut();
 
-    if let Ok(hv) = http::HeaderValue::from_str(request_id) {
-        headers.entry("x-amzn-requestid").or_insert(hv);
-    }
-
+    // Fallback content-type for awsQuery when not already set.
     headers
         .entry("content-type")
         .or_insert(http::HeaderValue::from_static(CONTENT_TYPE));

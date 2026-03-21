@@ -1,0 +1,253 @@
+name: sts-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  sts-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and start RustStack
+        id: ruststack
+        run: |
+          cargo build --release -p ruststack-server
+
+          STS_SKIP_SIGNATURE_VALIDATION=true \
+          SNS_SKIP_SIGNATURE_VALIDATION=true \
+          SQS_SKIP_SIGNATURE_VALIDATION=true \
+          IAM_SKIP_SIGNATURE_VALIDATION=true \
+          GATEWAY_LISTEN=0.0.0.0:4566 \
+          LOG_LEVEL=warn \
+          cargo run --release -p ruststack-server &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server did not start within 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "endpoint=http://localhost:4566" >> "$GITHUB_OUTPUT"
+
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=us-east-1" >> "$GITHUB_ENV"
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+
+      # ── Phase 0: Core Operations ──────────────────────────────────────
+      - name: "GetCallerIdentity (root)"
+        run: |
+          set -euo pipefail
+
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query "Account" --output text)
+          echo "Account: $ACCOUNT"
+          [ "$ACCOUNT" = "000000000000" ]
+
+          ARN=$(aws sts get-caller-identity \
+            --query "Arn" --output text)
+          echo "ARN: $ARN"
+          [ "$ARN" = "arn:aws:iam::000000000000:root" ]
+
+      - name: "AssumeRole + GetCallerIdentity (assumed role)"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws sts assume-role \
+            --role-arn arn:aws:iam::123456789012:role/TestRole \
+            --role-session-name ci-test)
+
+          AK=$(echo "$RESULT" | jq -r '.Credentials.AccessKeyId')
+          SK=$(echo "$RESULT" | jq -r '.Credentials.SecretAccessKey')
+          ST=$(echo "$RESULT" | jq -r '.Credentials.SessionToken')
+
+          echo "AccessKeyId starts with ASIA: $(echo "$AK" | head -c4)"
+          [ "$(echo "$AK" | head -c4)" = "ASIA" ]
+
+          ARN=$(echo "$RESULT" | jq -r '.AssumedRoleUser.Arn')
+          echo "AssumedRole ARN: $ARN"
+          echo "$ARN" | grep -q "assumed-role/TestRole/ci-test"
+
+          # Verify GetCallerIdentity with the assumed role credentials
+          IDENTITY=$(AWS_ACCESS_KEY_ID="$AK" AWS_SECRET_ACCESS_KEY="$SK" AWS_SESSION_TOKEN="$ST" \
+            aws sts get-caller-identity)
+          IDENTITY_ACCOUNT=$(echo "$IDENTITY" | jq -r '.Account')
+          IDENTITY_ARN=$(echo "$IDENTITY" | jq -r '.Arn')
+          echo "Identity account: $IDENTITY_ACCOUNT, ARN: $IDENTITY_ARN"
+          [ "$IDENTITY_ACCOUNT" = "123456789012" ]
+          echo "$IDENTITY_ARN" | grep -q "assumed-role/TestRole/ci-test"
+
+      - name: "GetSessionToken"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws sts get-session-token)
+
+          AK=$(echo "$RESULT" | jq -r '.Credentials.AccessKeyId')
+          [ "$(echo "$AK" | head -c4)" = "ASIA" ]
+          echo "GetSessionToken: AccessKeyId=$AK"
+
+      - name: "GetAccessKeyInfo"
+        run: |
+          set -euo pipefail
+
+          ACCOUNT=$(aws sts get-access-key-info \
+            --access-key-id AKIAIOSFODNN7EXAMPLE \
+            --query "Account" --output text)
+          echo "Account for AKIAIOSFODNN7EXAMPLE: $ACCOUNT"
+          [ -n "$ACCOUNT" ]
+
+      - name: "AssumeRole with session tags"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws sts assume-role \
+            --role-arn arn:aws:iam::123456789012:role/TaggedRole \
+            --role-session-name tagged-session \
+            --tags Key=Project,Value=MyProject Key=Environment,Value=Dev \
+            --transitive-tag-keys Project)
+
+          AK=$(echo "$RESULT" | jq -r '.Credentials.AccessKeyId')
+          [ "$(echo "$AK" | head -c4)" = "ASIA" ]
+          echo "Tagged AssumeRole succeeded: $AK"
+
+      - name: "AssumeRole rejects invalid role ARN"
+        run: |
+          set -euo pipefail
+
+          if aws sts assume-role \
+            --role-arn "not-a-valid-arn" \
+            --role-session-name test 2>/dev/null; then
+            echo "::error::AssumeRole should reject invalid role ARN"
+            exit 1
+          fi
+          echo "Correctly rejected invalid role ARN"
+
+      - name: "AssumeRole rejects short session name"
+        run: |
+          set -euo pipefail
+
+          if aws sts assume-role \
+            --role-arn "arn:aws:iam::123456789012:role/R" \
+            --role-session-name "x" 2>/dev/null; then
+            echo "::error::AssumeRole should reject session name < 2 chars"
+            exit 1
+          fi
+          echo "Correctly rejected short session name"
+
+      # ── Phase 1: Federation and Advanced ───────────────────────────────
+      - name: "AssumeRoleWithWebIdentity"
+        run: |
+          set -euo pipefail
+
+          HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+          PAYLOAD=$(echo -n '{"sub":"user123","aud":"my-app","iss":"https://idp.example.com"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+          TOKEN="${HEADER}.${PAYLOAD}.fake-signature"
+
+          RESULT=$(aws sts assume-role-with-web-identity \
+            --role-arn arn:aws:iam::123456789012:role/WebRole \
+            --role-session-name web-test \
+            --web-identity-token "$TOKEN")
+
+          AK=$(echo "$RESULT" | jq -r '.Credentials.AccessKeyId')
+          [ "$(echo "$AK" | head -c4)" = "ASIA" ]
+          echo "AssumeRoleWithWebIdentity succeeded: $AK"
+
+      - name: "DecodeAuthorizationMessage"
+        run: |
+          set -euo pipefail
+
+          DECODED=$(aws sts decode-authorization-message \
+            --encoded-message "some-encoded-message" \
+            --query "DecodedMessage" --output text)
+          echo "$DECODED" | jq . > /dev/null
+          echo "DecodeAuthorizationMessage: valid JSON returned"
+
+      - name: "GetFederationToken"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws sts get-federation-token --name bob)
+
+          AK=$(echo "$RESULT" | jq -r '.Credentials.AccessKeyId')
+          [ "$(echo "$AK" | head -c4)" = "ASIA" ]
+
+          FED_ARN=$(echo "$RESULT" | jq -r '.FederatedUser.Arn')
+          echo "$FED_ARN" | grep -q "federated-user/bob"
+          echo "GetFederationToken succeeded: $FED_ARN"
+
+      - name: "GetFederationToken rejects short name"
+        run: |
+          set -euo pipefail
+
+          if aws sts get-federation-token --name "x" 2>/dev/null; then
+            echo "::error::GetFederationToken should reject name < 2 chars"
+            exit 1
+          fi
+          echo "Correctly rejected short federation name"
+
+      # ── Chained AssumeRole (tag propagation) ───────────────────────────
+      - name: "Chained AssumeRole with transitive tag propagation"
+        run: |
+          set -euo pipefail
+
+          # First AssumeRole with transitive tag
+          R1=$(aws sts assume-role \
+            --role-arn arn:aws:iam::123456789012:role/RoleA \
+            --role-session-name chain-a \
+            --tags Key=Project,Value=MyProject \
+            --transitive-tag-keys Project)
+
+          AK1=$(echo "$R1" | jq -r '.Credentials.AccessKeyId')
+          SK1=$(echo "$R1" | jq -r '.Credentials.SecretAccessKey')
+          ST1=$(echo "$R1" | jq -r '.Credentials.SessionToken')
+
+          # Second AssumeRole using first credentials (transitive tags propagate)
+          R2=$(AWS_ACCESS_KEY_ID="$AK1" AWS_SECRET_ACCESS_KEY="$SK1" AWS_SESSION_TOKEN="$ST1" \
+            aws sts assume-role \
+            --role-arn arn:aws:iam::123456789012:role/RoleB \
+            --role-session-name chain-b)
+
+          AK2=$(echo "$R2" | jq -r '.Credentials.AccessKeyId')
+          [ "$(echo "$AK2" | head -c4)" = "ASIA" ]
+          echo "Chained AssumeRole succeeded: tag propagation works"
+
+      # ── GetAccessKeyInfo for assumed role key ──────────────────────────
+      - name: "GetAccessKeyInfo for ASIA key"
+        run: |
+          set -euo pipefail
+
+          RESULT=$(aws sts assume-role \
+            --role-arn arn:aws:iam::123456789012:role/InfoRole \
+            --role-session-name info-test)
+
+          AK=$(echo "$RESULT" | jq -r '.Credentials.AccessKeyId')
+
+          ACCOUNT=$(aws sts get-access-key-info \
+            --access-key-id "$AK" \
+            --query "Account" --output text)
+          echo "Account for ASIA key: $ACCOUNT"
+          [ "$ACCOUNT" = "123456789012" ]
+
+      # ── Rust Integration Tests ─────────────────────────────────────────
+      - name: "Rust integration tests"
+        run: |
+          cargo test -p ruststack-integration test_sts -- --ignored

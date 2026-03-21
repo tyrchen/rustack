@@ -21,14 +21,14 @@ http = "1.4"
 http-body = "1.0"
 http-body-util = "0.1"
 bytes = "1.11"
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "signal", "sync", "io-util"] }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "signal", "sync", "io-util"] }
 chrono = { version = "0.4", features = ["serde"] }
 percent-encoding = "2.3"
 tracing = "0.1"
 thiserror = "2.0"
 futures = "0.3"
 pin-project-lite = "0.2"
-uuid = { version = "1.21", features = ["v4"] }
+uuid = { version = "1.22", features = ["v4"] }
 mime = "0.3"
 sha2 = { workspace = true }
 hex = { workspace = true }

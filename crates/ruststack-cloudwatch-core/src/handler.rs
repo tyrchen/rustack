@@ -1,7 +1,8 @@
 //! CloudWatch handler implementation bridging HTTP to business logic.
 //!
-//! Parses form-urlencoded request bodies, dispatches to the provider,
-//! and serializes XML responses following the awsQuery protocol.
+//! Supports two wire protocols:
+//! - **awsQuery**: parses form-urlencoded bodies, serializes XML responses.
+//! - **rpcv2Cbor**: deserializes CBOR bodies via serde, serializes CBOR responses.
 //!
 //! Covers all 31 CloudWatch operations: metrics, alarms, dashboards,
 //! insight rules, anomaly detectors, metric streams, and tagging.
@@ -11,15 +12,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use serde::Serialize;
 
 use ruststack_cloudwatch_http::body::CloudWatchResponseBody;
-use ruststack_cloudwatch_http::dispatch::CloudWatchHandler;
+use ruststack_cloudwatch_http::dispatch::{CloudWatchHandler, Protocol};
 use ruststack_cloudwatch_http::request::{
     get_optional_bool, get_optional_f64, get_optional_i32, get_optional_param, get_required_param,
     parse_dimension_filters, parse_dimensions, parse_form_params, parse_string_list,
     parse_struct_list, parse_tag_list,
 };
-use ruststack_cloudwatch_http::response::{XmlWriter, xml_response};
+use ruststack_cloudwatch_http::response::{XmlWriter, cbor_response, xml_response};
 use ruststack_cloudwatch_model::error::{CloudWatchError, CloudWatchErrorCode};
 use ruststack_cloudwatch_model::input::{
     DeleteAlarmsInput, DeleteAnomalyDetectorInput, DeleteDashboardsInput, DeleteInsightRulesInput,
@@ -63,6 +65,7 @@ impl CloudWatchHandler for RustStackCloudWatchHandler {
         &self,
         op: CloudWatchOperation,
         body: Bytes,
+        protocol: Protocol,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<http::Response<CloudWatchResponseBody>, CloudWatchError>>
@@ -70,7 +73,12 @@ impl CloudWatchHandler for RustStackCloudWatchHandler {
         >,
     > {
         let provider = Arc::clone(&self.provider);
-        Box::pin(async move { dispatch(provider.as_ref(), op, &body) })
+        Box::pin(async move {
+            match protocol {
+                Protocol::AwsQuery => dispatch(provider.as_ref(), op, &body),
+                Protocol::RpcV2Cbor => cbor_dispatch(provider.as_ref(), op, &body),
+            }
+        })
     }
 }
 
@@ -728,6 +736,458 @@ fn dispatch(
             w.write_response_metadata(&request_id);
             w.end_element("GetMetricStreamResponse");
             Ok(xml_response(w.into_string(), &request_id))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rpcv2Cbor dispatch
+// ---------------------------------------------------------------------------
+
+/// Deserialize a CBOR body into an input type via serde.
+fn cbor_decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, CloudWatchError> {
+    if body.is_empty() {
+        // Many operations accept an empty body; default-construct.
+        return serde_json::from_value(serde_json::Value::Object(serde_json::Map::default()))
+            .map_err(|e| {
+                CloudWatchError::with_message(
+                    CloudWatchErrorCode::InvalidParameterValueException,
+                    format!("Failed to build default input: {e}"),
+                )
+            });
+    }
+    // Parse CBOR into intermediate Value
+    let cbor_value: ciborium::Value = ciborium::from_reader(body).map_err(|e| {
+        CloudWatchError::with_message(
+            CloudWatchErrorCode::InvalidParameterValueException,
+            format!("CBOR decode: {e}"),
+        )
+    })?;
+    // Convert to JSON with timestamp transformation
+    let json_value = cbor_to_json(cbor_value);
+    // Deserialize from JSON into target type
+    serde_json::from_value(json_value).map_err(|e| {
+        CloudWatchError::with_message(
+            CloudWatchErrorCode::InvalidParameterValueException,
+            format!("CBOR field mapping: {e}"),
+        )
+    })
+}
+
+/// Serialize an output value to CBOR bytes, transforming timestamps to CBOR tag 1.
+fn cbor_encode<T: Serialize>(output: &T) -> Result<Vec<u8>, CloudWatchError> {
+    // Serialize to JSON first
+    let json_value = serde_json::to_value(output)
+        .map_err(|e| CloudWatchError::internal_error(format!("JSON encode: {e}")))?;
+    // Convert to CBOR with timestamp transformation
+    let cbor_value = json_to_cbor(json_value);
+    // Encode to CBOR bytes
+    let mut buf = Vec::new();
+    ciborium::into_writer(&cbor_value, &mut buf)
+        .map_err(|e| CloudWatchError::internal_error(format!("CBOR encode: {e}")))?;
+    Ok(buf)
+}
+
+/// Serialize an empty CBOR map `{}` for void operations.
+fn cbor_empty_response(
+    request_id: &str,
+) -> Result<http::Response<CloudWatchResponseBody>, CloudWatchError> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(&ciborium::Value::Map(Vec::new()), &mut buf)
+        .map_err(|e| CloudWatchError::internal_error(format!("CBOR encode: {e}")))?;
+    Ok(cbor_response(buf, request_id))
+}
+
+/// Convert a CBOR value to a JSON value, transforming epoch-seconds floats/ints
+/// in known timestamp fields to ISO 8601 strings for chrono deserialization.
+fn cbor_to_json(value: ciborium::Value) -> serde_json::Value {
+    match value {
+        ciborium::Value::Map(entries) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in entries {
+                let key = match &k {
+                    ciborium::Value::Text(s) => s.clone(),
+                    _ => continue,
+                };
+                let json_val = if is_timestamp_field(&key) {
+                    convert_timestamp_value_to_json(v)
+                } else {
+                    cbor_to_json(v)
+                };
+                map.insert(key, json_val);
+            }
+            serde_json::Value::Object(map)
+        }
+        ciborium::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(cbor_to_json).collect())
+        }
+        ciborium::Value::Text(s) => serde_json::Value::String(s),
+        ciborium::Value::Integer(i) => {
+            let n: i128 = i.into();
+            #[allow(clippy::cast_possible_truncation)]
+            serde_json::Value::Number(serde_json::Number::from(n as i64))
+        }
+        ciborium::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        ciborium::Value::Bool(b) => serde_json::Value::Bool(b),
+        ciborium::Value::Tag(_tag, boxed) => {
+            // CBOR tag 1 = epoch timestamp. Convert to ISO string.
+            epoch_to_iso_string(&boxed)
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Check if a `PascalCase` field name is a timestamp field.
+fn is_timestamp_field(name: &str) -> bool {
+    // AWS CloudWatch timestamp field patterns (singular and plural)
+    name.ends_with("Time")
+        || name.ends_with("Times")
+        || name.ends_with("Timestamp")
+        || name.ends_with("Timestamps")
+        || name.ends_with("Date")
+        || name == "LastModified"
+        || name == "CreationDate"
+        || name == "LastUpdateDate"
+}
+
+/// Convert a CBOR timestamp value (single or array) to JSON.
+fn convert_timestamp_value_to_json(value: ciborium::Value) -> serde_json::Value {
+    match value {
+        ciborium::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(|v| epoch_to_iso_string(&v)).collect())
+        }
+        other => epoch_to_iso_string(&other),
+    }
+}
+
+/// Convert a JSON timestamp value (single or array) to CBOR with tag 1.
+fn convert_timestamp_value_to_cbor(value: serde_json::Value) -> ciborium::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            ciborium::Value::Array(items.into_iter().map(|v| iso_string_to_epoch(&v)).collect())
+        }
+        other => iso_string_to_epoch(&other),
+    }
+}
+
+/// Convert an epoch-seconds CBOR value to an ISO 8601 string.
+fn epoch_to_iso_string(value: &ciborium::Value) -> serde_json::Value {
+    let epoch = match value {
+        ciborium::Value::Float(f) => *f,
+        ciborium::Value::Integer(i) => {
+            let n: i128 = (*i).into();
+            #[allow(clippy::cast_precision_loss)]
+            let f = n as f64;
+            f
+        }
+        ciborium::Value::Tag(_, inner) => {
+            return epoch_to_iso_string(inner);
+        }
+        ciborium::Value::Text(s) => {
+            // Already a string, pass through
+            return serde_json::Value::String(s.clone());
+        }
+        _ => return serde_json::Value::Null,
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let dt =
+        chrono::DateTime::from_timestamp(epoch as i64, (epoch.fract() * 1_000_000_000.0) as u32);
+    match dt {
+        Some(dt) => serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Convert a JSON value to a CBOR value, transforming ISO 8601 string timestamps
+/// in known fields to CBOR tag 1 + epoch-seconds for Smithy `rpcv2Cbor` compat.
+fn json_to_cbor(value: serde_json::Value) -> ciborium::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let entries: Vec<(ciborium::Value, ciborium::Value)> = map
+                .into_iter()
+                .map(|(k, v)| {
+                    let cbor_val = if is_timestamp_field(&k) {
+                        convert_timestamp_value_to_cbor(v)
+                    } else {
+                        json_to_cbor(v)
+                    };
+                    (ciborium::Value::Text(k), cbor_val)
+                })
+                .collect();
+            ciborium::Value::Map(entries)
+        }
+        serde_json::Value::Array(items) => {
+            ciborium::Value::Array(items.into_iter().map(json_to_cbor).collect())
+        }
+        serde_json::Value::String(s) => ciborium::Value::Text(s),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                ciborium::Value::Integer(i.into())
+            } else if let Some(f) = n.as_f64() {
+                ciborium::Value::Float(f)
+            } else {
+                ciborium::Value::Null
+            }
+        }
+        serde_json::Value::Bool(b) => ciborium::Value::Bool(b),
+        serde_json::Value::Null => ciborium::Value::Null,
+    }
+}
+
+/// Convert an ISO 8601 string to a CBOR epoch timestamp (tag 1 + float).
+fn iso_string_to_epoch(value: &serde_json::Value) -> ciborium::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                #[allow(clippy::cast_precision_loss)]
+                let epoch = dt.timestamp() as f64
+                    + f64::from(dt.timestamp_subsec_nanos()) / 1_000_000_000.0;
+                ciborium::Value::Tag(1, Box::new(ciborium::Value::Float(epoch)))
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ") {
+                #[allow(clippy::cast_precision_loss)]
+                let epoch = dt.and_utc().timestamp() as f64;
+                ciborium::Value::Tag(1, Box::new(ciborium::Value::Float(epoch)))
+            } else {
+                ciborium::Value::Text(s.clone())
+            }
+        }
+        serde_json::Value::Null => ciborium::Value::Null,
+        _ => json_to_cbor(value.clone()),
+    }
+}
+
+/// Dispatch a CloudWatch operation using the rpcv2Cbor protocol.
+///
+/// Deserializes input from CBOR, calls the provider, and serializes output
+/// back to CBOR. All model types implement serde `Serialize`/`Deserialize`
+/// with `PascalCase` field names, matching the Smithy CBOR wire format.
+#[allow(clippy::too_many_lines)]
+fn cbor_dispatch(
+    provider: &RustStackCloudWatch,
+    op: CloudWatchOperation,
+    body: &[u8],
+) -> Result<http::Response<CloudWatchResponseBody>, CloudWatchError> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    match op {
+        // ---- Metric Data ----
+        CloudWatchOperation::PutMetricData => {
+            let input: PutMetricDataInput = cbor_decode(body)?;
+            provider.put_metric_data(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        CloudWatchOperation::GetMetricStatistics => {
+            let input: GetMetricStatisticsInput = cbor_decode(body)?;
+            let output = provider.get_metric_statistics(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::GetMetricData => {
+            let input: GetMetricDataInput = cbor_decode(body)?;
+            let output = provider.get_metric_data(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::ListMetrics => {
+            let input: ListMetricsInput = cbor_decode(body)?;
+            let output = provider.list_metrics(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Alarms ----
+        CloudWatchOperation::PutMetricAlarm => {
+            let input: PutMetricAlarmInput = cbor_decode(body)?;
+            provider.put_metric_alarm(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        CloudWatchOperation::DescribeAlarms => {
+            let input: DescribeAlarmsInput = cbor_decode(body)?;
+            let output = provider.describe_alarms(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DescribeAlarmsForMetric => {
+            let input: DescribeAlarmsForMetricInput = cbor_decode(body)?;
+            let output = provider.describe_alarms_for_metric(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DeleteAlarms => {
+            let input: DeleteAlarmsInput = cbor_decode(body)?;
+            provider.delete_alarms(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        CloudWatchOperation::SetAlarmState => {
+            let input: SetAlarmStateInput = cbor_decode(body)?;
+            provider.set_alarm_state(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        CloudWatchOperation::EnableAlarmActions => {
+            let input: EnableAlarmActionsInput = cbor_decode(body)?;
+            provider.enable_alarm_actions(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        CloudWatchOperation::DisableAlarmActions => {
+            let input: DisableAlarmActionsInput = cbor_decode(body)?;
+            provider.disable_alarm_actions(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        CloudWatchOperation::DescribeAlarmHistory => {
+            let input: DescribeAlarmHistoryInput = cbor_decode(body)?;
+            let output = provider.describe_alarm_history(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Composite Alarms ----
+        CloudWatchOperation::PutCompositeAlarm => {
+            let input: PutCompositeAlarmInput = cbor_decode(body)?;
+            provider.put_composite_alarm(input)?;
+            cbor_empty_response(&request_id)
+        }
+
+        // ---- Tagging ----
+        CloudWatchOperation::TagResource => {
+            let input: TagResourceInput = cbor_decode(body)?;
+            let output = provider.tag_resource(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::UntagResource => {
+            let input: UntagResourceInput = cbor_decode(body)?;
+            let output = provider.untag_resource(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::ListTagsForResource => {
+            let input: ListTagsForResourceInput = cbor_decode(body)?;
+            let output = provider.list_tags_for_resource(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Dashboards ----
+        CloudWatchOperation::PutDashboard => {
+            let input: PutDashboardInput = cbor_decode(body)?;
+            let output = provider.put_dashboard(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::GetDashboard => {
+            let input: GetDashboardInput = cbor_decode(body)?;
+            let output = provider.get_dashboard(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DeleteDashboards => {
+            let input: DeleteDashboardsInput = cbor_decode(body)?;
+            let output = provider.delete_dashboards(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::ListDashboards => {
+            let input: ListDashboardsInput = cbor_decode(body)?;
+            let output = provider.list_dashboards(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Insight Rules ----
+        CloudWatchOperation::PutInsightRule => {
+            let input: PutInsightRuleInput = cbor_decode(body)?;
+            let output = provider.put_insight_rule(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DeleteInsightRules => {
+            let input: DeleteInsightRulesInput = cbor_decode(body)?;
+            let output = provider.delete_insight_rules(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DescribeInsightRules => {
+            let input: DescribeInsightRulesInput = cbor_decode(body)?;
+            let output = provider.describe_insight_rules(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Anomaly Detectors ----
+        CloudWatchOperation::PutAnomalyDetector => {
+            let input: PutAnomalyDetectorInput = cbor_decode(body)?;
+            let output = provider.put_anomaly_detector(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DescribeAnomalyDetectors => {
+            let input: DescribeAnomalyDetectorsInput = cbor_decode(body)?;
+            let output = provider.describe_anomaly_detectors(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DeleteAnomalyDetector => {
+            let input: DeleteAnomalyDetectorInput = cbor_decode(body)?;
+            let output = provider.delete_anomaly_detector(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Managed Insight Rules ----
+        CloudWatchOperation::PutManagedInsightRules => {
+            let input: PutManagedInsightRulesInput = cbor_decode(body)?;
+            let output = provider.put_managed_insight_rules(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        // ---- Metric Streams ----
+        CloudWatchOperation::PutMetricStream => {
+            let input: PutMetricStreamInput = cbor_decode(body)?;
+            let output = provider.put_metric_stream(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::DeleteMetricStream => {
+            let input: DeleteMetricStreamInput = cbor_decode(body)?;
+            let output = provider.delete_metric_stream(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::ListMetricStreams => {
+            let input: ListMetricStreamsInput = cbor_decode(body)?;
+            let output = provider.list_metric_streams(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
+        }
+
+        CloudWatchOperation::GetMetricStream => {
+            let input: GetMetricStreamInput = cbor_decode(body)?;
+            let output = provider.get_metric_stream(input)?;
+            let buf = cbor_encode(&output)?;
+            Ok(cbor_response(buf, &request_id))
         }
     }
 }
