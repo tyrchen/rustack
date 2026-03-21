@@ -53,6 +53,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          aws --version
+
+          aws cloudwatch put-metric-data \
+            --namespace "CI/Test" \
+            --metric-name "RequestCount" \
+            --value 42 \
+            --unit Count \
+            --debug 2>&1 | grep -iE "method|content-type|authorization|smithy|Sending http" || true
+
           aws cloudwatch put-metric-data \
             --namespace "CI/Test" \
             --metric-name "RequestCount" \
