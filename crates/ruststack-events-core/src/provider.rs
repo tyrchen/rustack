@@ -11,7 +11,7 @@ use ruststack_events_model::{
     error::EventsError,
     input::{
         CreateEventBusInput, DeleteEventBusInput, DeleteRuleInput, DescribeEventBusInput,
-        DescribeRuleInput, DisableRuleInput, EnableRuleInput, ListEventBusesInput,
+        DescribeRuleInput, DisableRuleInput, EnableRuleInput, GenericInput, ListEventBusesInput,
         ListRuleNamesByTargetInput, ListRulesInput, ListTagsForResourceInput,
         ListTargetsByRuleInput, PutEventsInput, PutPermissionInput, PutRuleInput, PutTargetsInput,
         RemovePermissionInput, RemoveTargetsInput, TagResourceInput, TestEventPatternInput,
@@ -19,11 +19,11 @@ use ruststack_events_model::{
     },
     output::{
         CreateEventBusOutput, DeleteEventBusOutput, DeleteRuleOutput, DescribeEventBusOutput,
-        DescribeRuleOutput, DisableRuleOutput, EnableRuleOutput, ListEventBusesOutput,
-        ListRuleNamesByTargetOutput, ListRulesOutput, ListTagsForResourceOutput,
-        ListTargetsByRuleOutput, PutEventsOutput, PutPermissionOutput, PutRuleOutput,
-        PutTargetsOutput, RemovePermissionOutput, RemoveTargetsOutput, TagResourceOutput,
-        TestEventPatternOutput, UntagResourceOutput, UpdateEventBusOutput,
+        DescribeRuleOutput, DisableRuleOutput, EnableRuleOutput, GenericOutput,
+        ListEventBusesOutput, ListRuleNamesByTargetOutput, ListRulesOutput,
+        ListTagsForResourceOutput, ListTargetsByRuleOutput, PutEventsOutput, PutPermissionOutput,
+        PutRuleOutput, PutTargetsOutput, RemovePermissionOutput, RemoveTargetsOutput,
+        TagResourceOutput, TestEventPatternOutput, UntagResourceOutput, UpdateEventBusOutput,
     },
     types::{EventBus, InputTransformer, PutEventsResultEntry, Rule, Tag, Target},
 };
@@ -103,6 +103,16 @@ pub struct RustStackEvents {
     config: EventsConfig,
     buses: DashMap<String, EventBusState>,
     delivery: Arc<dyn TargetDelivery>,
+    /// Phase 3: Archive metadata storage (key = archive name).
+    archives: DashMap<String, serde_json::Value>,
+    /// Phase 3: Connection metadata storage (key = connection name).
+    connections: DashMap<String, serde_json::Value>,
+    /// Phase 3: API Destination metadata storage (key = destination name).
+    api_destinations: DashMap<String, serde_json::Value>,
+    /// Phase 3: Endpoint metadata storage (key = endpoint name).
+    endpoints: DashMap<String, serde_json::Value>,
+    /// Phase 3: Replay metadata storage (key = replay name).
+    replays: DashMap<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for RustStackEvents {
@@ -110,6 +120,11 @@ impl std::fmt::Debug for RustStackEvents {
         f.debug_struct("RustStackEvents")
             .field("config", &self.config)
             .field("bus_count", &self.buses.len())
+            .field("archive_count", &self.archives.len())
+            .field("connection_count", &self.connections.len())
+            .field("api_destination_count", &self.api_destinations.len())
+            .field("endpoint_count", &self.endpoints.len())
+            .field("replay_count", &self.replays.len())
             .finish_non_exhaustive()
     }
 }
@@ -123,6 +138,11 @@ impl RustStackEvents {
             config,
             buses: DashMap::new(),
             delivery,
+            archives: DashMap::new(),
+            connections: DashMap::new(),
+            api_destinations: DashMap::new(),
+            endpoints: DashMap::new(),
+            replays: DashMap::new(),
         };
         provider.create_default_bus();
         provider
@@ -1168,6 +1188,693 @@ impl RustStackEvents {
             name: Some(bus.name.clone()),
             description: bus.description.clone(),
             ..Default::default()
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Generic resource helpers
+    // -----------------------------------------------------------------------
+
+    fn build_resource_arn(&self, resource_type: &str, name: &str) -> String {
+        format!(
+            "arn:aws:events:{}:{}:{}/{}",
+            self.config.default_region, self.config.account_id, resource_type, name,
+        )
+    }
+
+    fn now_timestamp() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
+    /// Extract a required string field from JSON input, returning a validation error if missing.
+    fn require_name(input: &serde_json::Value, field: &str) -> Result<String, EventsError> {
+        input
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                EventsError::validation(format!(
+                    "1 validation error detected: Value at '{field}' failed to satisfy \
+                     constraint: Member must not be null"
+                ))
+            })
+    }
+
+    /// Generic create for a `DashMap<String, Value>` resource collection.
+    fn generic_create(
+        store: &DashMap<String, serde_json::Value>,
+        name: &str,
+        mut record: serde_json::Value,
+        arn: &str,
+        initial_state: &str,
+        resource_label: &str,
+    ) -> Result<serde_json::Value, EventsError> {
+        let now = Self::now_timestamp();
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("Arn".to_owned(), serde_json::Value::String(arn.to_owned()));
+            obj.insert(
+                "State".to_owned(),
+                serde_json::Value::String(initial_state.to_owned()),
+            );
+            obj.insert(
+                "CreationTime".to_owned(),
+                serde_json::Value::String(now.clone()),
+            );
+            obj.insert(
+                "LastModifiedTime".to_owned(),
+                serde_json::Value::String(now),
+            );
+        }
+
+        match store.entry(name.to_owned()) {
+            Entry::Occupied(_) => Err(EventsError::resource_already_exists(format!(
+                "{resource_label} {name} already exists."
+            ))),
+            Entry::Vacant(v) => {
+                let response = record.clone();
+                v.insert(record);
+                Ok(response)
+            }
+        }
+    }
+
+    /// Generic describe: look up a resource by name.
+    fn generic_describe(
+        store: &DashMap<String, serde_json::Value>,
+        name: &str,
+        resource_label: &str,
+    ) -> Result<serde_json::Value, EventsError> {
+        store.get(name).map(|r| r.value().clone()).ok_or_else(|| {
+            EventsError::resource_not_found(format!("{resource_label} {name} does not exist."))
+        })
+    }
+
+    /// Generic delete: remove a resource by name.
+    fn generic_delete(
+        store: &DashMap<String, serde_json::Value>,
+        name: &str,
+        resource_label: &str,
+    ) -> Result<serde_json::Value, EventsError> {
+        store
+            .remove(name)
+            .map(|_| serde_json::json!({}))
+            .ok_or_else(|| {
+                EventsError::resource_not_found(format!("{resource_label} {name} does not exist."))
+            })
+    }
+
+    /// Generic update: merge fields from input JSON into stored record.
+    fn generic_update(
+        store: &DashMap<String, serde_json::Value>,
+        name: &str,
+        updates: &serde_json::Value,
+        resource_label: &str,
+    ) -> Result<serde_json::Value, EventsError> {
+        let mut entry = store.get_mut(name).ok_or_else(|| {
+            EventsError::resource_not_found(format!("{resource_label} {name} does not exist."))
+        })?;
+
+        let now = Self::now_timestamp();
+        if let (Some(stored), Some(input_obj)) = (entry.as_object_mut(), updates.as_object()) {
+            for (k, v) in input_obj {
+                // Skip the name/key field itself, don't overwrite ARN or creation time.
+                if k == "Name"
+                    || k == "ReplayName"
+                    || k == "ConnectionName"
+                    || k == "ArchiveName"
+                    || k == "ApiDestinationName"
+                    || k == "EndpointName"
+                    || k == "Arn"
+                    || k == "CreationTime"
+                {
+                    continue;
+                }
+                stored.insert(k.clone(), v.clone());
+            }
+            stored.insert(
+                "LastModifiedTime".to_owned(),
+                serde_json::Value::String(now),
+            );
+        }
+
+        Ok(entry.clone())
+    }
+
+    /// Generic list: iterate all items in a collection, optionally filter by name prefix.
+    fn generic_list(
+        store: &DashMap<String, serde_json::Value>,
+        name_prefix: Option<&str>,
+        list_key: &str,
+    ) -> serde_json::Value {
+        let items: Vec<serde_json::Value> = store
+            .iter()
+            .filter(|entry| name_prefix.is_none_or(|prefix| entry.key().starts_with(prefix)))
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        serde_json::json!({ list_key: items })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Archives
+    // -----------------------------------------------------------------------
+
+    /// Handle `CreateArchive`.
+    pub fn handle_create_archive(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ArchiveName")?;
+        let arn = self.build_resource_arn("archive", &name);
+        let result = Self::generic_create(
+            &self.archives,
+            &name,
+            input.value.clone(),
+            &arn,
+            "ENABLED",
+            "Archive",
+        )?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ArchiveArn": result.get("Arn"),
+                "ArchiveName": name,
+                "State": "ENABLED",
+                "CreationTime": result.get("CreationTime"),
+            }),
+        })
+    }
+
+    /// Handle `DeleteArchive`.
+    pub fn handle_delete_archive(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ArchiveName")?;
+        let result = Self::generic_delete(&self.archives, &name, "Archive")?;
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `DescribeArchive`.
+    pub fn handle_describe_archive(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ArchiveName")?;
+        let stored = Self::generic_describe(&self.archives, &name, "Archive")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ArchiveArn": stored.get("Arn"),
+                "ArchiveName": name,
+                "Description": stored.get("Description"),
+                "EventSourceArn": stored.get("EventSourceArn"),
+                "EventPattern": stored.get("EventPattern"),
+                "State": stored.get("State"),
+                "RetentionDays": stored.get("RetentionDays"),
+                "SizeBytes": 0,
+                "EventCount": 0,
+                "CreationTime": stored.get("CreationTime"),
+            }),
+        })
+    }
+
+    /// Handle `ListArchives`.
+    pub fn handle_list_archives(&self, input: &GenericInput) -> Result<GenericOutput, EventsError> {
+        let prefix = input
+            .value
+            .get("NamePrefix")
+            .and_then(serde_json::Value::as_str);
+        let result = Self::generic_list(&self.archives, prefix, "Archives");
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `UpdateArchive`.
+    pub fn handle_update_archive(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ArchiveName")?;
+        let updated = Self::generic_update(&self.archives, &name, &input.value, "Archive")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ArchiveArn": updated.get("Arn"),
+                "ArchiveName": name,
+                "State": updated.get("State"),
+                "CreationTime": updated.get("CreationTime"),
+            }),
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Replays
+    // -----------------------------------------------------------------------
+
+    /// Handle `StartReplay`.
+    pub fn handle_start_replay(&self, input: &GenericInput) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ReplayName")?;
+        let arn = self.build_resource_arn("replay", &name);
+        let result = Self::generic_create(
+            &self.replays,
+            &name,
+            input.value.clone(),
+            &arn,
+            "STARTING",
+            "Replay",
+        )?;
+
+        // Transition immediately to RUNNING for local dev simulation.
+        if let Some(mut entry) = self.replays.get_mut(&name) {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "State".to_owned(),
+                    serde_json::Value::String("RUNNING".to_owned()),
+                );
+            }
+        }
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ReplayArn": result.get("Arn"),
+                "ReplayName": name,
+                "State": "STARTING",
+                "StateReason": "Replay starting",
+                "ReplayStartTime": result.get("CreationTime"),
+            }),
+        })
+    }
+
+    /// Handle `CancelReplay`.
+    pub fn handle_cancel_replay(&self, input: &GenericInput) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ReplayName")?;
+
+        let mut entry = self.replays.get_mut(&name).ok_or_else(|| {
+            EventsError::resource_not_found(format!("Replay {name} does not exist."))
+        })?;
+
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "State".to_owned(),
+                serde_json::Value::String("CANCELLED".to_owned()),
+            );
+            obj.insert(
+                "LastModifiedTime".to_owned(),
+                serde_json::Value::String(Self::now_timestamp()),
+            );
+        }
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ReplayArn": entry.get("Arn"),
+                "ReplayName": name,
+                "State": "CANCELLING",
+                "StateReason": "Replay is being cancelled",
+            }),
+        })
+    }
+
+    /// Handle `DescribeReplay`.
+    pub fn handle_describe_replay(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "ReplayName")?;
+        let stored = Self::generic_describe(&self.replays, &name, "Replay")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ReplayArn": stored.get("Arn"),
+                "ReplayName": name,
+                "Description": stored.get("Description"),
+                "State": stored.get("State"),
+                "StateReason": stored.get("StateReason"),
+                "EventSourceArn": stored.get("EventSourceArn"),
+                "Destination": stored.get("Destination"),
+                "EventStartTime": stored.get("EventStartTime"),
+                "EventEndTime": stored.get("EventEndTime"),
+                "EventLastReplayedTime": stored.get("EventLastReplayedTime"),
+                "ReplayStartTime": stored.get("CreationTime"),
+                "ReplayEndTime": stored.get("ReplayEndTime"),
+            }),
+        })
+    }
+
+    /// Handle `ListReplays`.
+    pub fn handle_list_replays(&self, input: &GenericInput) -> Result<GenericOutput, EventsError> {
+        let prefix = input
+            .value
+            .get("NamePrefix")
+            .and_then(serde_json::Value::as_str);
+        let result = Self::generic_list(&self.replays, prefix, "Replays");
+        Ok(GenericOutput { value: result })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: API Destinations
+    // -----------------------------------------------------------------------
+
+    /// Handle `CreateApiDestination`.
+    pub fn handle_create_api_destination(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let arn = self.build_resource_arn("api-destination", &name);
+        let result = Self::generic_create(
+            &self.api_destinations,
+            &name,
+            input.value.clone(),
+            &arn,
+            "ACTIVE",
+            "ApiDestination",
+        )?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ApiDestinationArn": result.get("Arn"),
+                "ApiDestinationState": "ACTIVE",
+                "CreationTime": result.get("CreationTime"),
+                "LastModifiedTime": result.get("LastModifiedTime"),
+            }),
+        })
+    }
+
+    /// Handle `DeleteApiDestination`.
+    pub fn handle_delete_api_destination(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let result = Self::generic_delete(&self.api_destinations, &name, "ApiDestination")?;
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `DescribeApiDestination`.
+    pub fn handle_describe_api_destination(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let stored = Self::generic_describe(&self.api_destinations, &name, "ApiDestination")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ApiDestinationArn": stored.get("Arn"),
+                "Name": name,
+                "Description": stored.get("Description"),
+                "ApiDestinationState": stored.get("State"),
+                "ConnectionArn": stored.get("ConnectionArn"),
+                "InvocationEndpoint": stored.get("InvocationEndpoint"),
+                "HttpMethod": stored.get("HttpMethod"),
+                "InvocationRateLimitPerSecond": stored.get("InvocationRateLimitPerSecond"),
+                "CreationTime": stored.get("CreationTime"),
+                "LastModifiedTime": stored.get("LastModifiedTime"),
+            }),
+        })
+    }
+
+    /// Handle `ListApiDestinations`.
+    pub fn handle_list_api_destinations(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let prefix = input
+            .value
+            .get("NamePrefix")
+            .and_then(serde_json::Value::as_str);
+        let result = Self::generic_list(&self.api_destinations, prefix, "ApiDestinations");
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `UpdateApiDestination`.
+    pub fn handle_update_api_destination(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let updated = Self::generic_update(
+            &self.api_destinations,
+            &name,
+            &input.value,
+            "ApiDestination",
+        )?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ApiDestinationArn": updated.get("Arn"),
+                "ApiDestinationState": updated.get("State"),
+                "CreationTime": updated.get("CreationTime"),
+                "LastModifiedTime": updated.get("LastModifiedTime"),
+            }),
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Connections
+    // -----------------------------------------------------------------------
+
+    /// Handle `CreateConnection`.
+    pub fn handle_create_connection(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let arn = self.build_resource_arn("connection", &name);
+        let result = Self::generic_create(
+            &self.connections,
+            &name,
+            input.value.clone(),
+            &arn,
+            "AUTHORIZED",
+            "Connection",
+        )?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ConnectionArn": result.get("Arn"),
+                "ConnectionState": "AUTHORIZED",
+                "CreationTime": result.get("CreationTime"),
+                "LastModifiedTime": result.get("LastModifiedTime"),
+            }),
+        })
+    }
+
+    /// Handle `DeleteConnection`.
+    pub fn handle_delete_connection(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let stored = self.connections.remove(&name).ok_or_else(|| {
+            EventsError::resource_not_found(format!("Connection {name} does not exist."))
+        })?;
+        let (_, val) = stored;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ConnectionArn": val.get("Arn"),
+                "ConnectionState": "DELETING",
+                "CreationTime": val.get("CreationTime"),
+                "LastModifiedTime": val.get("LastModifiedTime"),
+                "LastAuthorizedTime": val.get("LastAuthorizedTime"),
+            }),
+        })
+    }
+
+    /// Handle `DescribeConnection`.
+    pub fn handle_describe_connection(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let stored = Self::generic_describe(&self.connections, &name, "Connection")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ConnectionArn": stored.get("Arn"),
+                "Name": name,
+                "Description": stored.get("Description"),
+                "ConnectionState": stored.get("State"),
+                "AuthorizationType": stored.get("AuthorizationType"),
+                "AuthParameters": stored.get("AuthParameters"),
+                "SecretArn": stored.get("SecretArn"),
+                "CreationTime": stored.get("CreationTime"),
+                "LastModifiedTime": stored.get("LastModifiedTime"),
+                "LastAuthorizedTime": stored.get("LastAuthorizedTime"),
+            }),
+        })
+    }
+
+    /// Handle `ListConnections`.
+    pub fn handle_list_connections(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let prefix = input
+            .value
+            .get("NamePrefix")
+            .and_then(serde_json::Value::as_str);
+        let result = Self::generic_list(&self.connections, prefix, "Connections");
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `UpdateConnection`.
+    pub fn handle_update_connection(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let updated = Self::generic_update(&self.connections, &name, &input.value, "Connection")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ConnectionArn": updated.get("Arn"),
+                "ConnectionState": updated.get("State"),
+                "CreationTime": updated.get("CreationTime"),
+                "LastModifiedTime": updated.get("LastModifiedTime"),
+                "LastAuthorizedTime": updated.get("LastAuthorizedTime"),
+            }),
+        })
+    }
+
+    /// Handle `DeauthorizeConnection`.
+    pub fn handle_deauthorize_connection(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+
+        let mut entry = self.connections.get_mut(&name).ok_or_else(|| {
+            EventsError::resource_not_found(format!("Connection {name} does not exist."))
+        })?;
+
+        let now = Self::now_timestamp();
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "State".to_owned(),
+                serde_json::Value::String("DEAUTHORIZING".to_owned()),
+            );
+            obj.insert(
+                "LastModifiedTime".to_owned(),
+                serde_json::Value::String(now),
+            );
+        }
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "ConnectionArn": entry.get("Arn"),
+                "ConnectionState": "DEAUTHORIZING",
+                "CreationTime": entry.get("CreationTime"),
+                "LastModifiedTime": entry.get("LastModifiedTime"),
+                "LastAuthorizedTime": entry.get("LastAuthorizedTime"),
+            }),
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Endpoints
+    // -----------------------------------------------------------------------
+
+    /// Handle `CreateEndpoint`.
+    pub fn handle_create_endpoint(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let arn = self.build_resource_arn("endpoint", &name);
+        let result = Self::generic_create(
+            &self.endpoints,
+            &name,
+            input.value.clone(),
+            &arn,
+            "ACTIVE",
+            "Endpoint",
+        )?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "Arn": result.get("Arn"),
+                "Name": name,
+                "State": "CREATING",
+                "EventBuses": result.get("EventBuses"),
+                "RoutingConfig": result.get("RoutingConfig"),
+                "ReplicationConfig": result.get("ReplicationConfig"),
+                "RoleArn": result.get("RoleArn"),
+            }),
+        })
+    }
+
+    /// Handle `DeleteEndpoint`.
+    pub fn handle_delete_endpoint(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let result = Self::generic_delete(&self.endpoints, &name, "Endpoint")?;
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `DescribeEndpoint`.
+    pub fn handle_describe_endpoint(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let stored = Self::generic_describe(&self.endpoints, &name, "Endpoint")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "Arn": stored.get("Arn"),
+                "Name": name,
+                "Description": stored.get("Description"),
+                "State": stored.get("State"),
+                "StateReason": stored.get("StateReason"),
+                "EventBuses": stored.get("EventBuses"),
+                "RoutingConfig": stored.get("RoutingConfig"),
+                "ReplicationConfig": stored.get("ReplicationConfig"),
+                "RoleArn": stored.get("RoleArn"),
+                "EndpointId": stored.get("EndpointId"),
+                "EndpointUrl": stored.get("EndpointUrl"),
+                "CreationTime": stored.get("CreationTime"),
+                "LastModifiedTime": stored.get("LastModifiedTime"),
+            }),
+        })
+    }
+
+    /// Handle `ListEndpoints`.
+    pub fn handle_list_endpoints(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let prefix = input
+            .value
+            .get("NamePrefix")
+            .and_then(serde_json::Value::as_str);
+        let result = Self::generic_list(&self.endpoints, prefix, "Endpoints");
+        Ok(GenericOutput { value: result })
+    }
+
+    /// Handle `UpdateEndpoint`.
+    pub fn handle_update_endpoint(
+        &self,
+        input: &GenericInput,
+    ) -> Result<GenericOutput, EventsError> {
+        let name = Self::require_name(&input.value, "Name")?;
+        let updated = Self::generic_update(&self.endpoints, &name, &input.value, "Endpoint")?;
+
+        Ok(GenericOutput {
+            value: serde_json::json!({
+                "Arn": updated.get("Arn"),
+                "Name": name,
+                "State": "UPDATING",
+                "EventBuses": updated.get("EventBuses"),
+                "RoutingConfig": updated.get("RoutingConfig"),
+                "ReplicationConfig": updated.get("ReplicationConfig"),
+                "RoleArn": updated.get("RoleArn"),
+                "EndpointId": updated.get("EndpointId"),
+                "EndpointUrl": updated.get("EndpointUrl"),
+            }),
         })
     }
 }

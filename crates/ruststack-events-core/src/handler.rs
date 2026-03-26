@@ -176,33 +176,143 @@ fn dispatch(
             serialize(&output, &request_id)
         }
 
-        // Phase 3: Stubs - return empty JSON object
-        EventsOperation::CreateArchive
-        | EventsOperation::DeleteArchive
-        | EventsOperation::DescribeArchive
-        | EventsOperation::ListArchives
-        | EventsOperation::UpdateArchive
-        | EventsOperation::StartReplay
-        | EventsOperation::CancelReplay
-        | EventsOperation::DescribeReplay
-        | EventsOperation::ListReplays
-        | EventsOperation::CreateApiDestination
-        | EventsOperation::DeleteApiDestination
-        | EventsOperation::DescribeApiDestination
-        | EventsOperation::ListApiDestinations
-        | EventsOperation::UpdateApiDestination
-        | EventsOperation::CreateConnection
-        | EventsOperation::DeleteConnection
-        | EventsOperation::DescribeConnection
-        | EventsOperation::ListConnections
-        | EventsOperation::UpdateConnection
-        | EventsOperation::DeauthorizeConnection
-        | EventsOperation::CreateEndpoint
-        | EventsOperation::DeleteEndpoint
-        | EventsOperation::DescribeEndpoint
-        | EventsOperation::ListEndpoints
-        | EventsOperation::UpdateEndpoint
-        | EventsOperation::ActivateEventSource
+        // Phase 3: Archives
+        EventsOperation::CreateArchive => {
+            let input = deserialize(body)?;
+            let output = provider.handle_create_archive(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DeleteArchive => {
+            let input = deserialize(body)?;
+            let output = provider.handle_delete_archive(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DescribeArchive => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_archive(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::ListArchives => {
+            let input = deserialize(body)?;
+            let output = provider.handle_list_archives(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::UpdateArchive => {
+            let input = deserialize(body)?;
+            let output = provider.handle_update_archive(&input)?;
+            serialize(&output, &request_id)
+        }
+
+        // Phase 3: Replays
+        EventsOperation::StartReplay => {
+            let input = deserialize(body)?;
+            let output = provider.handle_start_replay(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::CancelReplay => {
+            let input = deserialize(body)?;
+            let output = provider.handle_cancel_replay(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DescribeReplay => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_replay(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::ListReplays => {
+            let input = deserialize(body)?;
+            let output = provider.handle_list_replays(&input)?;
+            serialize(&output, &request_id)
+        }
+
+        // Phase 3: API Destinations
+        EventsOperation::CreateApiDestination => {
+            let input = deserialize(body)?;
+            let output = provider.handle_create_api_destination(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DeleteApiDestination => {
+            let input = deserialize(body)?;
+            let output = provider.handle_delete_api_destination(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DescribeApiDestination => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_api_destination(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::ListApiDestinations => {
+            let input = deserialize(body)?;
+            let output = provider.handle_list_api_destinations(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::UpdateApiDestination => {
+            let input = deserialize(body)?;
+            let output = provider.handle_update_api_destination(&input)?;
+            serialize(&output, &request_id)
+        }
+
+        // Phase 3: Connections
+        EventsOperation::CreateConnection => {
+            let input = deserialize(body)?;
+            let output = provider.handle_create_connection(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DeleteConnection => {
+            let input = deserialize(body)?;
+            let output = provider.handle_delete_connection(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DescribeConnection => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_connection(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::ListConnections => {
+            let input = deserialize(body)?;
+            let output = provider.handle_list_connections(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::UpdateConnection => {
+            let input = deserialize(body)?;
+            let output = provider.handle_update_connection(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DeauthorizeConnection => {
+            let input = deserialize(body)?;
+            let output = provider.handle_deauthorize_connection(&input)?;
+            serialize(&output, &request_id)
+        }
+
+        // Phase 3: Endpoints
+        EventsOperation::CreateEndpoint => {
+            let input = deserialize(body)?;
+            let output = provider.handle_create_endpoint(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DeleteEndpoint => {
+            let input = deserialize(body)?;
+            let output = provider.handle_delete_endpoint(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::DescribeEndpoint => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_endpoint(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::ListEndpoints => {
+            let input = deserialize(body)?;
+            let output = provider.handle_list_endpoints(&input)?;
+            serialize(&output, &request_id)
+        }
+        EventsOperation::UpdateEndpoint => {
+            let input = deserialize(body)?;
+            let output = provider.handle_update_endpoint(&input)?;
+            serialize(&output, &request_id)
+        }
+
+        // Phase 3: Partner event sources stubs - return empty JSON
+        EventsOperation::ActivateEventSource
         | EventsOperation::CreatePartnerEventSource
         | EventsOperation::DeactivateEventSource
         | EventsOperation::DeletePartnerEventSource

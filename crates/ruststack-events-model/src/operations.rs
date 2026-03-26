@@ -277,6 +277,7 @@ impl EventsOperation {
     pub fn is_implemented(&self) -> bool {
         matches!(
             self,
+            // Phase 0
             Self::CreateEventBus
                 | Self::DeleteEventBus
                 | Self::DescribeEventBus
@@ -292,13 +293,45 @@ impl EventsOperation {
                 | Self::ListTargetsByRule
                 | Self::PutEvents
                 | Self::TestEventPattern
+                // Phase 1
                 | Self::TagResource
                 | Self::UntagResource
                 | Self::ListTagsForResource
                 | Self::PutPermission
                 | Self::RemovePermission
                 | Self::ListRuleNamesByTarget
+                // Phase 2
                 | Self::UpdateEventBus
+                // Phase 3: Archives
+                | Self::CreateArchive
+                | Self::DeleteArchive
+                | Self::DescribeArchive
+                | Self::ListArchives
+                | Self::UpdateArchive
+                // Phase 3: Replays
+                | Self::StartReplay
+                | Self::CancelReplay
+                | Self::DescribeReplay
+                | Self::ListReplays
+                // Phase 3: API Destinations
+                | Self::CreateApiDestination
+                | Self::DeleteApiDestination
+                | Self::DescribeApiDestination
+                | Self::ListApiDestinations
+                | Self::UpdateApiDestination
+                // Phase 3: Connections
+                | Self::CreateConnection
+                | Self::DeleteConnection
+                | Self::DescribeConnection
+                | Self::ListConnections
+                | Self::UpdateConnection
+                | Self::DeauthorizeConnection
+                // Phase 3: Endpoints
+                | Self::CreateEndpoint
+                | Self::DeleteEndpoint
+                | Self::DescribeEndpoint
+                | Self::ListEndpoints
+                | Self::UpdateEndpoint
         )
     }
 }
