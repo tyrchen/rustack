@@ -146,6 +146,23 @@ pub struct InstanceProfileRecord {
     pub roles: Vec<String>,
 }
 
+/// Internal record for an OIDC identity provider.
+#[derive(Debug, Clone)]
+pub struct OidcProviderRecord {
+    /// The Amazon Resource Name (ARN) that identifies the provider.
+    pub arn: String,
+    /// The URL of the identity provider (e.g., `https://accounts.google.com`).
+    pub url: String,
+    /// A list of client IDs (audiences) registered with the provider.
+    pub client_id_list: Vec<String>,
+    /// A list of server certificate thumbprints for the provider.
+    pub thumbprint_list: Vec<String>,
+    /// Tags attached to this provider as `(key, value)` pairs.
+    pub tags: Vec<(String, String)>,
+    /// ISO 8601 date-time when the provider was created.
+    pub create_date: String,
+}
+
 /// Internal record for an IAM access key.
 #[derive(Debug, Clone)]
 pub struct AccessKeyRecord {

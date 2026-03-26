@@ -175,6 +175,28 @@ fn dispatch(
         IamOperation::GetAccountAuthorizationDetails => {
             provider.get_account_authorization_details(&params)?
         }
+
+        // Phase 4: OIDC Providers
+        IamOperation::CreateOpenIDConnectProvider => {
+            provider.create_open_id_connect_provider(&params)?
+        }
+        IamOperation::GetOpenIDConnectProvider => provider.get_open_id_connect_provider(&params)?,
+        IamOperation::DeleteOpenIDConnectProvider => {
+            provider.delete_open_id_connect_provider(&params)?
+        }
+        IamOperation::ListOpenIDConnectProviders => {
+            provider.list_open_id_connect_providers(&params)?
+        }
+
+        // Phase 4: Policy Tags
+        IamOperation::TagPolicy => provider.tag_policy(&params)?,
+        IamOperation::UntagPolicy => provider.untag_policy(&params)?,
+        IamOperation::ListPolicyTags => provider.list_policy_tags(&params)?,
+
+        // Phase 4: Instance Profile Tags
+        IamOperation::TagInstanceProfile => provider.tag_instance_profile(&params)?,
+        IamOperation::UntagInstanceProfile => provider.untag_instance_profile(&params)?,
+        IamOperation::ListInstanceProfileTags => provider.list_instance_profile_tags(&params)?,
     };
 
     Ok(xml_response(xml, &request_id))

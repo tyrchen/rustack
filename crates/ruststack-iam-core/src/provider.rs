@@ -35,7 +35,7 @@ use crate::{
     store::IamStore,
     types::{
         AccessKeyRecord, GroupRecord, InstanceProfileRecord, ManagedPolicyRecord,
-        PolicyVersionRecord, RoleRecord, UserRecord,
+        OidcProviderRecord, PolicyVersionRecord, RoleRecord, UserRecord,
     },
     validation::{
         validate_entity_name, validate_max_session_duration, validate_path,
@@ -3495,5 +3495,345 @@ fn capitalize_service_name(name: &str) -> String {
             result
         }
         None => String::new(),
+    }
+}
+
+// ============================================================================
+// Phase 4 operations
+// ============================================================================
+
+impl RustStackIam {
+    // ---- OIDC Providers ----
+
+    /// Normalize an OIDC provider URL by stripping the `https://` scheme.
+    fn normalize_oidc_url(url: &str) -> String {
+        url.strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(url)
+            .trim_end_matches('/')
+            .to_owned()
+    }
+
+    /// Create an OIDC identity provider.
+    pub fn create_open_id_connect_provider(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let url = get_required_param(params, "Url")?;
+        let client_id_list = parse_string_list(params, "ClientIDList");
+        let thumbprint_list = parse_string_list(params, "ThumbprintList");
+        let tags = parse_tag_list(params);
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        if url.is_empty() {
+            return Err(IamError::invalid_input("Url must not be empty"));
+        }
+
+        if thumbprint_list.is_empty() {
+            return Err(IamError::invalid_input(
+                "ThumbprintList must contain at least one thumbprint",
+            ));
+        }
+
+        if tags.len() > MAX_TAGS_PER_ENTITY {
+            return Err(IamError::limit_exceeded(format!(
+                "Cannot exceed {MAX_TAGS_PER_ENTITY} tags per entity"
+            )));
+        }
+
+        let normalized = Self::normalize_oidc_url(url);
+        let arn = format!(
+            "arn:aws:iam::{}:oidc-provider/{}",
+            self.config.account_id, normalized
+        );
+
+        if self.store.oidc_providers.contains_key(&arn) {
+            return Err(IamError::entity_already_exists(format!(
+                "Provider with url {url} already exists."
+            )));
+        }
+
+        let record = OidcProviderRecord {
+            arn: arn.clone(),
+            url: url.to_owned(),
+            client_id_list,
+            thumbprint_list,
+            tags,
+            create_date: now_iso8601(),
+        };
+
+        self.store.oidc_providers.insert(arn.clone(), record);
+
+        debug!(url, arn, "created OIDC provider");
+
+        let mut w = XmlWriter::new();
+        w.start_response("CreateOpenIDConnectProvider");
+        w.start_result("CreateOpenIDConnectProvider");
+        w.write_element("OpenIDConnectProviderArn", &arn);
+        w.end_element("CreateOpenIDConnectProviderResult");
+        w.write_response_metadata(&request_id);
+        w.end_element("CreateOpenIDConnectProviderResponse");
+
+        Ok((w.into_string(), request_id))
+    }
+
+    /// Get an OIDC identity provider.
+    pub fn get_open_id_connect_provider(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let arn = get_required_param(params, "OpenIDConnectProviderArn")?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = self.store.oidc_providers.get(arn).ok_or_else(|| {
+            IamError::no_such_entity(format!("OpenIDConnect provider not found for ARN: {arn}"))
+        })?;
+
+        let mut w = XmlWriter::new();
+        w.start_response("GetOpenIDConnectProvider");
+        w.start_result("GetOpenIDConnectProvider");
+        w.write_element("Url", &provider.url);
+        w.start_element("ClientIDList");
+        for cid in &provider.client_id_list {
+            w.write_element("member", cid);
+        }
+        w.end_element("ClientIDList");
+        w.start_element("ThumbprintList");
+        for tp in &provider.thumbprint_list {
+            w.write_element("member", tp);
+        }
+        w.end_element("ThumbprintList");
+        w.write_element("CreateDate", &provider.create_date);
+        if !provider.tags.is_empty() {
+            write_tags_xml(&mut w, &provider.tags);
+        }
+        w.end_element("GetOpenIDConnectProviderResult");
+        w.write_response_metadata(&request_id);
+        w.end_element("GetOpenIDConnectProviderResponse");
+
+        Ok((w.into_string(), request_id))
+    }
+
+    /// Delete an OIDC identity provider.
+    pub fn delete_open_id_connect_provider(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let arn = get_required_param(params, "OpenIDConnectProviderArn")?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        if self.store.oidc_providers.remove(arn).is_none() {
+            return Err(IamError::no_such_entity(format!(
+                "OpenIDConnect provider not found for ARN: {arn}"
+            )));
+        }
+
+        debug!(arn, "deleted OIDC provider");
+        Ok((
+            empty_response("DeleteOpenIDConnectProvider", &request_id),
+            request_id,
+        ))
+    }
+
+    /// List all OIDC identity providers.
+    pub fn list_open_id_connect_providers(
+        &self,
+        _params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut w = XmlWriter::new();
+        w.start_response("ListOpenIDConnectProviders");
+        w.start_result("ListOpenIDConnectProviders");
+        w.start_element("OpenIDConnectProviderList");
+        for entry in &self.store.oidc_providers {
+            w.start_element("member");
+            w.write_element("Arn", &entry.value().arn);
+            w.end_element("member");
+        }
+        w.end_element("OpenIDConnectProviderList");
+        w.end_element("ListOpenIDConnectProvidersResult");
+        w.write_response_metadata(&request_id);
+        w.end_element("ListOpenIDConnectProvidersResponse");
+
+        Ok((w.into_string(), request_id))
+    }
+
+    // ---- Policy Tags ----
+
+    /// Tag a managed policy.
+    pub fn tag_policy(&self, params: &[(String, String)]) -> Result<(String, String), IamError> {
+        let policy_arn = get_required_param(params, "PolicyArn")?;
+        let new_tags = parse_tag_list(params);
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut policy = self.store.policies.get_mut(policy_arn).ok_or_else(|| {
+            IamError::no_such_entity(format!("Policy {policy_arn} does not exist."))
+        })?;
+
+        let mut merged_tags = policy.tags.clone();
+        for (key, value) in &new_tags {
+            if let Some(existing) = merged_tags.iter_mut().find(|(k, _)| k == key) {
+                existing.1.clone_from(value);
+            } else {
+                merged_tags.push((key.clone(), value.clone()));
+            }
+        }
+
+        if merged_tags.len() > MAX_TAGS_PER_ENTITY {
+            return Err(IamError::limit_exceeded(format!(
+                "Cannot exceed {MAX_TAGS_PER_ENTITY} tags per entity"
+            )));
+        }
+
+        policy.tags = merged_tags;
+
+        debug!(policy_arn, count = new_tags.len(), "tagged policy");
+        Ok((empty_response("TagPolicy", &request_id), request_id))
+    }
+
+    /// Remove tags from a managed policy.
+    pub fn untag_policy(&self, params: &[(String, String)]) -> Result<(String, String), IamError> {
+        let policy_arn = get_required_param(params, "PolicyArn")?;
+        let tag_keys = parse_string_list(params, "TagKeys");
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut policy = self.store.policies.get_mut(policy_arn).ok_or_else(|| {
+            IamError::no_such_entity(format!("Policy {policy_arn} does not exist."))
+        })?;
+
+        policy.tags.retain(|(k, _)| !tag_keys.contains(k));
+
+        debug!(policy_arn, count = tag_keys.len(), "untagged policy");
+        Ok((empty_response("UntagPolicy", &request_id), request_id))
+    }
+
+    /// List tags for a managed policy.
+    pub fn list_policy_tags(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let policy_arn = get_required_param(params, "PolicyArn")?;
+        let (marker, max_items) = parse_pagination(params);
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let policy = self.store.policies.get(policy_arn).ok_or_else(|| {
+            IamError::no_such_entity(format!("Policy {policy_arn} does not exist."))
+        })?;
+
+        let (page, is_truncated, next_marker) = paginate(&policy.tags, marker, max_items);
+
+        let mut w = XmlWriter::new();
+        w.start_response("ListPolicyTags");
+        w.start_result("ListPolicyTags");
+        write_tags_xml(&mut w, page);
+        w.write_bool_element("IsTruncated", is_truncated);
+        if let Some(ref m) = next_marker {
+            w.write_element("Marker", m);
+        }
+        w.end_element("ListPolicyTagsResult");
+        w.write_response_metadata(&request_id);
+        w.end_element("ListPolicyTagsResponse");
+
+        Ok((w.into_string(), request_id))
+    }
+
+    // ---- Instance Profile Tags ----
+
+    /// Tag an instance profile.
+    pub fn tag_instance_profile(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let ip_name = get_required_param(params, "InstanceProfileName")?;
+        let new_tags = parse_tag_list(params);
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut ip = self
+            .store
+            .instance_profiles
+            .get_mut(ip_name)
+            .ok_or_else(|| {
+                IamError::no_such_entity(format!("Instance profile {ip_name} does not exist."))
+            })?;
+
+        let mut merged_tags = ip.tags.clone();
+        for (key, value) in &new_tags {
+            if let Some(existing) = merged_tags.iter_mut().find(|(k, _)| k == key) {
+                existing.1.clone_from(value);
+            } else {
+                merged_tags.push((key.clone(), value.clone()));
+            }
+        }
+
+        if merged_tags.len() > MAX_TAGS_PER_ENTITY {
+            return Err(IamError::limit_exceeded(format!(
+                "Cannot exceed {MAX_TAGS_PER_ENTITY} tags per entity"
+            )));
+        }
+
+        ip.tags = merged_tags;
+
+        debug!(ip_name, count = new_tags.len(), "tagged instance profile");
+        Ok((
+            empty_response("TagInstanceProfile", &request_id),
+            request_id,
+        ))
+    }
+
+    /// Remove tags from an instance profile.
+    pub fn untag_instance_profile(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let ip_name = get_required_param(params, "InstanceProfileName")?;
+        let tag_keys = parse_string_list(params, "TagKeys");
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut ip = self
+            .store
+            .instance_profiles
+            .get_mut(ip_name)
+            .ok_or_else(|| {
+                IamError::no_such_entity(format!("Instance profile {ip_name} does not exist."))
+            })?;
+
+        ip.tags.retain(|(k, _)| !tag_keys.contains(k));
+
+        debug!(ip_name, count = tag_keys.len(), "untagged instance profile");
+        Ok((
+            empty_response("UntagInstanceProfile", &request_id),
+            request_id,
+        ))
+    }
+
+    /// List tags for an instance profile.
+    pub fn list_instance_profile_tags(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<(String, String), IamError> {
+        let ip_name = get_required_param(params, "InstanceProfileName")?;
+        let (marker, max_items) = parse_pagination(params);
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let ip = self.store.instance_profiles.get(ip_name).ok_or_else(|| {
+            IamError::no_such_entity(format!("Instance profile {ip_name} does not exist."))
+        })?;
+
+        let (page, is_truncated, next_marker) = paginate(&ip.tags, marker, max_items);
+
+        let mut w = XmlWriter::new();
+        w.start_response("ListInstanceProfileTags");
+        w.start_result("ListInstanceProfileTags");
+        write_tags_xml(&mut w, page);
+        w.write_bool_element("IsTruncated", is_truncated);
+        if let Some(ref m) = next_marker {
+            w.write_element("Marker", m);
+        }
+        w.end_element("ListInstanceProfileTagsResult");
+        w.write_response_metadata(&request_id);
+        w.end_element("ListInstanceProfileTagsResponse");
+
+        Ok((w.into_string(), request_id))
     }
 }

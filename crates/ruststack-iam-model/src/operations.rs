@@ -151,6 +151,26 @@ pub enum IamOperation {
     ListEntitiesForPolicy,
     /// The GetAccountAuthorizationDetails operation.
     GetAccountAuthorizationDetails,
+    /// The CreateOpenIDConnectProvider operation.
+    CreateOpenIDConnectProvider,
+    /// The GetOpenIDConnectProvider operation.
+    GetOpenIDConnectProvider,
+    /// The DeleteOpenIDConnectProvider operation.
+    DeleteOpenIDConnectProvider,
+    /// The ListOpenIDConnectProviders operation.
+    ListOpenIDConnectProviders,
+    /// The TagPolicy operation.
+    TagPolicy,
+    /// The UntagPolicy operation.
+    UntagPolicy,
+    /// The ListPolicyTags operation.
+    ListPolicyTags,
+    /// The TagInstanceProfile operation.
+    TagInstanceProfile,
+    /// The UntagInstanceProfile operation.
+    UntagInstanceProfile,
+    /// The ListInstanceProfileTags operation.
+    ListInstanceProfileTags,
 }
 
 impl IamOperation {
@@ -232,6 +252,16 @@ impl IamOperation {
             Self::SimulateCustomPolicy => "SimulateCustomPolicy",
             Self::ListEntitiesForPolicy => "ListEntitiesForPolicy",
             Self::GetAccountAuthorizationDetails => "GetAccountAuthorizationDetails",
+            Self::CreateOpenIDConnectProvider => "CreateOpenIDConnectProvider",
+            Self::GetOpenIDConnectProvider => "GetOpenIDConnectProvider",
+            Self::DeleteOpenIDConnectProvider => "DeleteOpenIDConnectProvider",
+            Self::ListOpenIDConnectProviders => "ListOpenIDConnectProviders",
+            Self::TagPolicy => "TagPolicy",
+            Self::UntagPolicy => "UntagPolicy",
+            Self::ListPolicyTags => "ListPolicyTags",
+            Self::TagInstanceProfile => "TagInstanceProfile",
+            Self::UntagInstanceProfile => "UntagInstanceProfile",
+            Self::ListInstanceProfileTags => "ListInstanceProfileTags",
         }
     }
 
@@ -313,6 +343,16 @@ impl IamOperation {
             "SimulateCustomPolicy" => Some(Self::SimulateCustomPolicy),
             "ListEntitiesForPolicy" => Some(Self::ListEntitiesForPolicy),
             "GetAccountAuthorizationDetails" => Some(Self::GetAccountAuthorizationDetails),
+            "CreateOpenIDConnectProvider" => Some(Self::CreateOpenIDConnectProvider),
+            "GetOpenIDConnectProvider" => Some(Self::GetOpenIDConnectProvider),
+            "DeleteOpenIDConnectProvider" => Some(Self::DeleteOpenIDConnectProvider),
+            "ListOpenIDConnectProviders" => Some(Self::ListOpenIDConnectProviders),
+            "TagPolicy" => Some(Self::TagPolicy),
+            "UntagPolicy" => Some(Self::UntagPolicy),
+            "ListPolicyTags" => Some(Self::ListPolicyTags),
+            "TagInstanceProfile" => Some(Self::TagInstanceProfile),
+            "UntagInstanceProfile" => Some(Self::UntagInstanceProfile),
+            "ListInstanceProfileTags" => Some(Self::ListInstanceProfileTags),
             _ => None,
         }
     }

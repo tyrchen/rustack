@@ -5,8 +5,8 @@
 use dashmap::DashMap;
 
 use crate::types::{
-    AccessKeyRecord, GroupRecord, InstanceProfileRecord, ManagedPolicyRecord, RoleRecord,
-    UserRecord,
+    AccessKeyRecord, GroupRecord, InstanceProfileRecord, ManagedPolicyRecord, OidcProviderRecord,
+    RoleRecord, UserRecord,
 };
 
 /// Concurrent in-memory store holding all IAM entity collections.
@@ -24,6 +24,8 @@ pub struct IamStore {
     pub instance_profiles: DashMap<String, InstanceProfileRecord>,
     /// Access keys keyed by access key ID.
     pub access_keys: DashMap<String, AccessKeyRecord>,
+    /// OIDC providers keyed by provider ARN.
+    pub oidc_providers: DashMap<String, OidcProviderRecord>,
 }
 
 impl IamStore {
@@ -37,6 +39,7 @@ impl IamStore {
             policies: DashMap::new(),
             instance_profiles: DashMap::new(),
             access_keys: DashMap::new(),
+            oidc_providers: DashMap::new(),
         }
     }
 }
