@@ -308,8 +308,7 @@ mod tests {
     #[test]
     fn test_should_parse_multipart_with_policy_fields() {
         let boundary = "xyzzy";
-        let body =
-            "--xyzzy\r\nContent-Disposition: form-data; \
+        let body = "--xyzzy\r\nContent-Disposition: form-data; \
              name=\"key\"\r\n\r\nuploads/test.bin\r\n--xyzzy\r\nContent-Disposition: form-data; \
              name=\"policy\"\r\n\r\neyJjb25kaXRpb25zIjpbXX0=\r\n--xyzzy\r\nContent-Disposition: \
              form-data; \
