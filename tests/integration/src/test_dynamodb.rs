@@ -645,4 +645,360 @@ mod tests {
             .await
             .unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // Tagging
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_tag_and_list_tags() {
+        use aws_sdk_dynamodb::types::Tag;
+
+        let client = dynamodb_client();
+        let table_name = test_table_name("tag");
+
+        create_simple_table(&client, &table_name).await;
+
+        // Get the table ARN for tagging operations.
+        let desc = client
+            .describe_table()
+            .table_name(&table_name)
+            .send()
+            .await
+            .unwrap();
+        let table_arn = desc
+            .table()
+            .unwrap()
+            .table_arn()
+            .unwrap()
+            .to_owned();
+
+        // Tag the table with 2 tags.
+        client
+            .tag_resource()
+            .resource_arn(&table_arn)
+            .tags(
+                Tag::builder()
+                    .key("env")
+                    .value("test")
+                    .build()
+                    .unwrap(),
+            )
+            .tags(
+                Tag::builder()
+                    .key("team")
+                    .value("backend")
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        // List tags and verify both are present.
+        let resp = client
+            .list_tags_of_resource()
+            .resource_arn(&table_arn)
+            .send()
+            .await
+            .unwrap();
+
+        let tags = resp.tags();
+        assert_eq!(tags.len(), 2);
+
+        let tag_map: std::collections::HashMap<&str, &str> = tags
+            .iter()
+            .map(|t| (t.key(), t.value()))
+            .collect();
+        assert_eq!(tag_map.get("env"), Some(&"test"));
+        assert_eq!(tag_map.get("team"), Some(&"backend"));
+
+        // Untag one tag.
+        client
+            .untag_resource()
+            .resource_arn(&table_arn)
+            .tag_keys("team")
+            .send()
+            .await
+            .unwrap();
+
+        // Verify only one tag remains.
+        let resp = client
+            .list_tags_of_resource()
+            .resource_arn(&table_arn)
+            .send()
+            .await
+            .unwrap();
+
+        let tags = resp.tags();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key(), "env");
+        assert_eq!(tags[0].value(), "test");
+
+        // Cleanup.
+        client
+            .delete_table()
+            .table_name(&table_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // TTL
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_update_and_describe_ttl() {
+        use aws_sdk_dynamodb::types::TimeToLiveSpecification;
+
+        let client = dynamodb_client();
+        let table_name = test_table_name("ttl");
+
+        create_simple_table(&client, &table_name).await;
+
+        // Enable TTL on the "expires_at" attribute.
+        client
+            .update_time_to_live()
+            .table_name(&table_name)
+            .time_to_live_specification(
+                TimeToLiveSpecification::builder()
+                    .enabled(true)
+                    .attribute_name("expires_at")
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        // Describe TTL and verify it is enabled.
+        let resp = client
+            .describe_time_to_live()
+            .table_name(&table_name)
+            .send()
+            .await
+            .unwrap();
+
+        let ttl_desc = resp.time_to_live_description().unwrap();
+        assert_eq!(ttl_desc.attribute_name(), Some("expires_at"));
+        // TTL status should be ENABLED or ENABLING.
+        let status = ttl_desc.time_to_live_status().unwrap();
+        assert!(
+            matches!(
+                status,
+                aws_sdk_dynamodb::types::TimeToLiveStatus::Enabled
+                    | aws_sdk_dynamodb::types::TimeToLiveStatus::Enabling
+            ),
+            "expected TTL to be ENABLED or ENABLING, got {status:?}"
+        );
+
+        // Cleanup.
+        client
+            .delete_table()
+            .table_name(&table_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Transactions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_transact_write_and_get_items() {
+        use aws_sdk_dynamodb::types::{Get, Put, TransactGetItem, TransactWriteItem};
+
+        let client = dynamodb_client();
+        let table_name = test_table_name("txwr");
+
+        create_simple_table(&client, &table_name).await;
+
+        // TransactWriteItems: put 3 items in a single transaction.
+        let write_items: Vec<TransactWriteItem> = (1..=3)
+            .map(|i| {
+                TransactWriteItem::builder()
+                    .put(
+                        Put::builder()
+                            .table_name(&table_name)
+                            .item("pk", AttributeValue::S(format!("txn{i}")))
+                            .item("data", AttributeValue::S(format!("value{i}")))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+            })
+            .collect();
+
+        client
+            .transact_write_items()
+            .set_transact_items(Some(write_items))
+            .send()
+            .await
+            .unwrap();
+
+        // TransactGetItems: read all 3 items back.
+        let get_items: Vec<TransactGetItem> = (1..=3)
+            .map(|i| {
+                TransactGetItem::builder()
+                    .get(
+                        Get::builder()
+                            .table_name(&table_name)
+                            .key("pk", AttributeValue::S(format!("txn{i}")))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+            })
+            .collect();
+
+        let resp = client
+            .transact_get_items()
+            .set_transact_items(Some(get_items))
+            .send()
+            .await
+            .unwrap();
+
+        let responses = resp.responses();
+        assert_eq!(responses.len(), 3);
+
+        for (i, item_resp) in responses.iter().enumerate() {
+            let item = item_resp.item().unwrap();
+            assert_eq!(
+                item.get("pk").unwrap().as_s().unwrap(),
+                &format!("txn{}", i + 1)
+            );
+            assert_eq!(
+                item.get("data").unwrap().as_s().unwrap(),
+                &format!("value{}", i + 1)
+            );
+        }
+
+        // Cleanup.
+        client
+            .delete_table()
+            .table_name(&table_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_fail_transact_write_on_condition() {
+        use aws_sdk_dynamodb::types::{ConditionCheck, Put, TransactWriteItem};
+
+        let client = dynamodb_client();
+        let table_name = test_table_name("txcond");
+
+        create_simple_table(&client, &table_name).await;
+
+        // Put an existing item.
+        client
+            .put_item()
+            .table_name(&table_name)
+            .item("pk", AttributeValue::S("existing".to_owned()))
+            .item("status", AttributeValue::S("active".to_owned()))
+            .send()
+            .await
+            .unwrap();
+
+        // TransactWriteItems with a ConditionCheck that fails:
+        // check that "existing" item has status = "inactive" (it does not).
+        let err = client
+            .transact_write_items()
+            .transact_items(
+                TransactWriteItem::builder()
+                    .condition_check(
+                        ConditionCheck::builder()
+                            .table_name(&table_name)
+                            .key("pk", AttributeValue::S("existing".to_owned()))
+                            .condition_expression("#s = :expected")
+                            .expression_attribute_names("#s", "status")
+                            .expression_attribute_values(
+                                ":expected",
+                                AttributeValue::S("inactive".to_owned()),
+                            )
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+            .transact_items(
+                TransactWriteItem::builder()
+                    .put(
+                        Put::builder()
+                            .table_name(&table_name)
+                            .item("pk", AttributeValue::S("new_item".to_owned()))
+                            .item("data", AttributeValue::S("should_not_exist".to_owned()))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+            .send()
+            .await;
+
+        // The transaction should fail with TransactionCanceledException.
+        assert!(err.is_err());
+        let err_str = format!("{:?}", err.unwrap_err());
+        assert!(
+            err_str.contains("TransactionCanceled"),
+            "expected TransactionCanceledException, got: {err_str}"
+        );
+
+        // Verify the new item was NOT written (transaction is atomic).
+        let resp = client
+            .get_item()
+            .table_name(&table_name)
+            .key("pk", AttributeValue::S("new_item".to_owned()))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.item().is_none());
+
+        // Cleanup.
+        client
+            .delete_table()
+            .table_name(&table_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Describe Limits & Endpoints
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_describe_limits() {
+        let client = dynamodb_client();
+
+        let resp = client.describe_limits().send().await.unwrap();
+
+        // DynamoDB default account limits.
+        assert_eq!(resp.table_max_read_capacity_units(), Some(80_000));
+        assert_eq!(resp.table_max_write_capacity_units(), Some(40_000));
+        assert_eq!(resp.account_max_read_capacity_units(), Some(80_000));
+        assert_eq!(resp.account_max_write_capacity_units(), Some(40_000));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_describe_endpoints() {
+        let client = dynamodb_client();
+
+        let resp = client.describe_endpoints().send().await.unwrap();
+
+        let endpoints = resp.endpoints();
+        assert!(
+            !endpoints.is_empty(),
+            "expected at least one endpoint from DescribeEndpoints"
+        );
+    }
 }

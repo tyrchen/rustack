@@ -656,4 +656,451 @@ mod tests {
 
         cleanup_function(&client, &name).await;
     }
+
+    // ---------------------------------------------------------------------------
+    // Layers: PublishLayerVersion + GetLayerVersion
+    // ---------------------------------------------------------------------------
+
+    /// Minimal valid zip file (22-byte empty zip archive).
+    fn minimal_zip_blob() -> Blob {
+        Blob::new(vec![
+            80, 75, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])
+    }
+
+    /// Helper: generate a unique layer name.
+    fn layer_name(prefix: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string()[..8].to_owned();
+        format!("test-layer-{prefix}-{id}")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_publish_and_get_layer_version() {
+        use aws_sdk_lambda::types::LayerVersionContentInput;
+
+        let client = lambda_client();
+        let name = layer_name("pub-get");
+
+        // Publish a layer version.
+        let published = client
+            .publish_layer_version()
+            .layer_name(&name)
+            .description("Test layer v1")
+            .content(
+                LayerVersionContentInput::builder()
+                    .zip_file(minimal_zip_blob())
+                    .build(),
+            )
+            .compatible_runtimes(Runtime::Python312)
+            .send()
+            .await
+            .expect("publish layer version should succeed");
+
+        assert_eq!(published.version(), 1);
+        assert!(published.layer_arn().is_some(), "layer ARN should be present");
+        assert!(
+            published
+                .layer_arn()
+                .unwrap_or_default()
+                .contains(&name),
+            "layer ARN should contain the layer name"
+        );
+        assert_eq!(published.description(), Some("Test layer v1"));
+
+        // Get the layer version.
+        let got = client
+            .get_layer_version()
+            .layer_name(&name)
+            .version_number(1)
+            .send()
+            .await
+            .expect("get layer version should succeed");
+
+        assert_eq!(got.version(), 1);
+        assert_eq!(got.description(), Some("Test layer v1"));
+        assert!(got.content().is_some());
+
+        // Cleanup: delete the layer version.
+        let _ = client
+            .delete_layer_version()
+            .layer_name(&name)
+            .version_number(1)
+            .send()
+            .await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layers: ListLayers
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_list_layers() {
+        use aws_sdk_lambda::types::LayerVersionContentInput;
+
+        let client = lambda_client();
+        let name = layer_name("list");
+
+        // Publish a layer version.
+        client
+            .publish_layer_version()
+            .layer_name(&name)
+            .description("Layer for listing")
+            .content(
+                LayerVersionContentInput::builder()
+                    .zip_file(minimal_zip_blob())
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("publish layer should succeed");
+
+        // List layers and verify ours appears.
+        let resp = client
+            .list_layers()
+            .send()
+            .await
+            .expect("list layers should succeed");
+
+        let found = resp
+            .layers()
+            .iter()
+            .any(|l| {
+                l.layer_name()
+                    .is_some_and(|n| n == name)
+            });
+        assert!(found, "published layer should appear in list_layers");
+
+        // Cleanup.
+        let _ = client
+            .delete_layer_version()
+            .layer_name(&name)
+            .version_number(1)
+            .send()
+            .await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layers: DeleteLayerVersion
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_delete_layer_version() {
+        use aws_sdk_lambda::types::LayerVersionContentInput;
+
+        let client = lambda_client();
+        let name = layer_name("delete");
+
+        // Publish a layer version.
+        client
+            .publish_layer_version()
+            .layer_name(&name)
+            .content(
+                LayerVersionContentInput::builder()
+                    .zip_file(minimal_zip_blob())
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("publish layer should succeed");
+
+        // Delete the layer version.
+        client
+            .delete_layer_version()
+            .layer_name(&name)
+            .version_number(1)
+            .send()
+            .await
+            .expect("delete layer version should succeed");
+
+        // Getting the deleted layer version should fail.
+        let err = client
+            .get_layer_version()
+            .layer_name(&name)
+            .version_number(1)
+            .send()
+            .await;
+        assert!(err.is_err(), "get deleted layer version should return error");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Event Source Mappings: Create + List
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_create_and_list_event_source_mappings() {
+        let client = lambda_client();
+        let name = create_test_function(&client, "esm-create").await;
+
+        let fake_sqs_arn = format!(
+            "arn:aws:sqs:us-east-1:000000000000:test-queue-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+
+        // Create an event source mapping.
+        let created = client
+            .create_event_source_mapping()
+            .function_name(&name)
+            .event_source_arn(&fake_sqs_arn)
+            .batch_size(10)
+            .enabled(true)
+            .send()
+            .await
+            .expect("create event source mapping should succeed");
+
+        let esm_uuid = created.uuid().expect("should have UUID").to_owned();
+        assert_eq!(created.batch_size(), Some(10));
+        assert_eq!(created.event_source_arn(), Some(fake_sqs_arn.as_str()));
+
+        // List event source mappings for the function.
+        let resp = client
+            .list_event_source_mappings()
+            .function_name(&name)
+            .send()
+            .await
+            .expect("list event source mappings should succeed");
+
+        let found = resp
+            .event_source_mappings()
+            .iter()
+            .any(|m| m.uuid() == Some(esm_uuid.as_str()));
+        assert!(found, "created ESM should appear in list");
+
+        // Cleanup.
+        let _ = client
+            .delete_event_source_mapping()
+            .uuid(&esm_uuid)
+            .send()
+            .await;
+        cleanup_function(&client, &name).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Event Source Mappings: Update
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_update_event_source_mapping() {
+        let client = lambda_client();
+        let name = create_test_function(&client, "esm-update").await;
+
+        let fake_sqs_arn = format!(
+            "arn:aws:sqs:us-east-1:000000000000:test-queue-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+
+        // Create an event source mapping.
+        let created = client
+            .create_event_source_mapping()
+            .function_name(&name)
+            .event_source_arn(&fake_sqs_arn)
+            .batch_size(5)
+            .send()
+            .await
+            .expect("create ESM should succeed");
+
+        let esm_uuid = created.uuid().expect("should have UUID").to_owned();
+
+        // Update batch size.
+        let updated = client
+            .update_event_source_mapping()
+            .uuid(&esm_uuid)
+            .batch_size(20)
+            .send()
+            .await
+            .expect("update ESM should succeed");
+
+        assert_eq!(updated.batch_size(), Some(20));
+
+        // Get and verify.
+        let got = client
+            .get_event_source_mapping()
+            .uuid(&esm_uuid)
+            .send()
+            .await
+            .expect("get ESM should succeed");
+
+        assert_eq!(got.batch_size(), Some(20));
+
+        // Cleanup.
+        let _ = client
+            .delete_event_source_mapping()
+            .uuid(&esm_uuid)
+            .send()
+            .await;
+        cleanup_function(&client, &name).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Event Source Mappings: Delete
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_delete_event_source_mapping() {
+        let client = lambda_client();
+        let name = create_test_function(&client, "esm-delete").await;
+
+        let fake_sqs_arn = format!(
+            "arn:aws:sqs:us-east-1:000000000000:test-queue-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+
+        // Create an event source mapping.
+        let created = client
+            .create_event_source_mapping()
+            .function_name(&name)
+            .event_source_arn(&fake_sqs_arn)
+            .batch_size(10)
+            .send()
+            .await
+            .expect("create ESM should succeed");
+
+        let esm_uuid = created.uuid().expect("should have UUID").to_owned();
+
+        // Delete the event source mapping.
+        client
+            .delete_event_source_mapping()
+            .uuid(&esm_uuid)
+            .send()
+            .await
+            .expect("delete ESM should succeed");
+
+        // Getting the deleted ESM should fail.
+        let err = client
+            .get_event_source_mapping()
+            .uuid(&esm_uuid)
+            .send()
+            .await;
+        assert!(err.is_err(), "get deleted ESM should return error");
+
+        cleanup_function(&client, &name).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Function Concurrency: Put + Get + Delete
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_put_and_get_function_concurrency() {
+        let client = lambda_client();
+        let name = create_test_function(&client, "concurrency").await;
+
+        // Put function concurrency.
+        let put_resp = client
+            .put_function_concurrency()
+            .function_name(&name)
+            .reserved_concurrent_executions(50)
+            .send()
+            .await
+            .expect("put concurrency should succeed");
+
+        assert_eq!(put_resp.reserved_concurrent_executions(), Some(50));
+
+        // Get function concurrency (via get_function and checking concurrency).
+        let get_resp = client
+            .get_function()
+            .function_name(&name)
+            .send()
+            .await
+            .expect("get function should succeed");
+
+        let concurrency = get_resp.concurrency();
+        assert!(concurrency.is_some(), "should have concurrency info");
+        assert_eq!(
+            concurrency
+                .expect("concurrency should be present")
+                .reserved_concurrent_executions(),
+            Some(50)
+        );
+
+        // Delete function concurrency.
+        client
+            .delete_function_concurrency()
+            .function_name(&name)
+            .send()
+            .await
+            .expect("delete concurrency should succeed");
+
+        // Verify concurrency is removed.
+        let after = client
+            .get_function()
+            .function_name(&name)
+            .send()
+            .await
+            .expect("get function after delete should succeed");
+
+        // After deletion, concurrency should be None or have no reserved executions.
+        if let Some(c) = after.concurrency() {
+            assert!(
+                c.reserved_concurrent_executions().is_none()
+                    || c.reserved_concurrent_executions() == Some(0),
+                "concurrency should be cleared after deletion"
+            );
+        }
+
+        cleanup_function(&client, &name).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Event Invoke Config: Put + List
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_put_and_list_event_invoke_config() {
+        let client = lambda_client();
+        let name = create_test_function(&client, "invoke-cfg").await;
+
+        // Put function event invoke config.
+        let put_resp = client
+            .put_function_event_invoke_config()
+            .function_name(&name)
+            .maximum_retry_attempts(1)
+            .maximum_event_age_in_seconds(300)
+            .send()
+            .await
+            .expect("put event invoke config should succeed");
+
+        assert_eq!(put_resp.maximum_retry_attempts(), Some(1));
+        assert_eq!(put_resp.maximum_event_age_in_seconds(), Some(300));
+
+        // List function event invoke configs.
+        let list_resp = client
+            .list_function_event_invoke_configs()
+            .function_name(&name)
+            .send()
+            .await
+            .expect("list event invoke configs should succeed");
+
+        let configs = list_resp.function_event_invoke_configs();
+        assert!(
+            !configs.is_empty(),
+            "should have at least one event invoke config"
+        );
+
+        let our_config = configs
+            .iter()
+            .find(|c| {
+                c.function_arn()
+                    .is_some_and(|arn| arn.contains(&name))
+            })
+            .expect("should find config for our function");
+
+        assert_eq!(our_config.maximum_retry_attempts(), Some(1));
+        assert_eq!(our_config.maximum_event_age_in_seconds(), Some(300));
+
+        // Cleanup: delete event invoke config, then function.
+        let _ = client
+            .delete_function_event_invoke_config()
+            .function_name(&name)
+            .send()
+            .await;
+        cleanup_function(&client, &name).await;
+    }
 }

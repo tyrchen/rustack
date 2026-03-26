@@ -849,3 +849,274 @@ async fn test_should_get_account_authorization_details() {
         .await
         .expect("delete role");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: OIDC Providers + Policy Tags + Instance Profile Tags
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires running RustStack server"]
+async fn test_should_create_and_get_oidc_provider() {
+    let client = iam_client();
+
+    let create = client
+        .create_open_id_connect_provider()
+        .url("https://token.example.com")
+        .client_id_list("my-client-id")
+        .thumbprint_list("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .send()
+        .await
+        .expect("create OIDC provider");
+
+    let provider_arn = create
+        .open_id_connect_provider_arn()
+        .expect("provider ARN")
+        .to_string();
+
+    assert!(provider_arn.contains("oidc-provider/token.example.com"));
+
+    // Get and verify
+    let get = client
+        .get_open_id_connect_provider()
+        .open_id_connect_provider_arn(&provider_arn)
+        .send()
+        .await
+        .expect("get OIDC provider");
+
+    assert_eq!(get.url(), Some("https://token.example.com"));
+    assert!(
+        get.client_id_list()
+            .iter()
+            .any(|c| c == "my-client-id"),
+        "client ID list should contain my-client-id"
+    );
+    assert!(
+        get.thumbprint_list()
+            .iter()
+            .any(|t| t == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "thumbprint list should contain the expected thumbprint"
+    );
+
+    // Cleanup
+    client
+        .delete_open_id_connect_provider()
+        .open_id_connect_provider_arn(&provider_arn)
+        .send()
+        .await
+        .expect("delete OIDC provider");
+}
+
+#[tokio::test]
+#[ignore = "requires running RustStack server"]
+async fn test_should_list_oidc_providers() {
+    let client = iam_client();
+
+    let create = client
+        .create_open_id_connect_provider()
+        .url("https://list-test.example.com")
+        .thumbprint_list("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .send()
+        .await
+        .expect("create OIDC provider");
+
+    let provider_arn = create
+        .open_id_connect_provider_arn()
+        .expect("provider ARN")
+        .to_string();
+
+    let list = client
+        .list_open_id_connect_providers()
+        .send()
+        .await
+        .expect("list OIDC providers");
+
+    assert!(
+        list.open_id_connect_provider_list()
+            .iter()
+            .any(|p| p.arn() == Some(provider_arn.as_str())),
+        "provider should appear in the list"
+    );
+
+    // Cleanup
+    client
+        .delete_open_id_connect_provider()
+        .open_id_connect_provider_arn(&provider_arn)
+        .send()
+        .await
+        .expect("delete OIDC provider");
+}
+
+#[tokio::test]
+#[ignore = "requires running RustStack server"]
+async fn test_should_delete_oidc_provider() {
+    let client = iam_client();
+
+    let create = client
+        .create_open_id_connect_provider()
+        .url("https://delete-test.example.com")
+        .thumbprint_list("cccccccccccccccccccccccccccccccccccccccc")
+        .send()
+        .await
+        .expect("create OIDC provider");
+
+    let provider_arn = create
+        .open_id_connect_provider_arn()
+        .expect("provider ARN")
+        .to_string();
+
+    // Delete
+    client
+        .delete_open_id_connect_provider()
+        .open_id_connect_provider_arn(&provider_arn)
+        .send()
+        .await
+        .expect("delete OIDC provider");
+
+    // Get should fail with NoSuchEntity
+    let result = client
+        .get_open_id_connect_provider()
+        .open_id_connect_provider_arn(&provider_arn)
+        .send()
+        .await;
+
+    assert!(result.is_err(), "get after delete should fail");
+    let err = result.unwrap_err();
+    let service_err = err
+        .as_service_error()
+        .expect("should be a service error");
+    assert!(
+        service_err.is_no_such_entity_exception(),
+        "error should be NoSuchEntity, got: {service_err:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires running RustStack server"]
+async fn test_should_tag_and_list_policy_tags() {
+    let client = iam_client();
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+
+    let create = client
+        .create_policy()
+        .policy_name("tag-test-policy")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .expect("create policy");
+
+    let policy_arn = create
+        .policy()
+        .expect("policy")
+        .arn()
+        .expect("arn")
+        .to_string();
+
+    // Tag the policy
+    client
+        .tag_policy()
+        .policy_arn(&policy_arn)
+        .tags(
+            aws_sdk_iam::types::Tag::builder()
+                .key("CostCenter")
+                .value("12345")
+                .build()
+                .expect("tag"),
+        )
+        .tags(
+            aws_sdk_iam::types::Tag::builder()
+                .key("Project")
+                .value("alpha")
+                .build()
+                .expect("tag"),
+        )
+        .send()
+        .await
+        .expect("tag policy");
+
+    // List tags
+    let tags = client
+        .list_policy_tags()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .expect("list policy tags");
+
+    assert_eq!(tags.tags().len(), 2);
+    assert!(
+        tags.tags().iter().any(|t| t.key() == "CostCenter" && t.value() == "12345"),
+        "should contain CostCenter tag"
+    );
+    assert!(
+        tags.tags().iter().any(|t| t.key() == "Project" && t.value() == "alpha"),
+        "should contain Project tag"
+    );
+
+    // Cleanup
+    client
+        .delete_policy()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .expect("delete policy");
+}
+
+#[tokio::test]
+#[ignore = "requires running RustStack server"]
+async fn test_should_tag_and_list_instance_profile_tags() {
+    let client = iam_client();
+
+    client
+        .create_instance_profile()
+        .instance_profile_name("tag-test-profile")
+        .send()
+        .await
+        .expect("create instance profile");
+
+    // Tag the instance profile
+    client
+        .tag_instance_profile()
+        .instance_profile_name("tag-test-profile")
+        .tags(
+            aws_sdk_iam::types::Tag::builder()
+                .key("Environment")
+                .value("staging")
+                .build()
+                .expect("tag"),
+        )
+        .tags(
+            aws_sdk_iam::types::Tag::builder()
+                .key("Owner")
+                .value("platform-team")
+                .build()
+                .expect("tag"),
+        )
+        .send()
+        .await
+        .expect("tag instance profile");
+
+    // List tags
+    let tags = client
+        .list_instance_profile_tags()
+        .instance_profile_name("tag-test-profile")
+        .send()
+        .await
+        .expect("list instance profile tags");
+
+    assert_eq!(tags.tags().len(), 2);
+    assert!(
+        tags.tags().iter().any(|t| t.key() == "Environment" && t.value() == "staging"),
+        "should contain Environment tag"
+    );
+    assert!(
+        tags.tags().iter().any(|t| t.key() == "Owner" && t.value() == "platform-team"),
+        "should contain Owner tag"
+    );
+
+    // Cleanup
+    client
+        .delete_instance_profile()
+        .instance_profile_name("tag-test-profile")
+        .send()
+        .await
+        .expect("delete instance profile");
+}

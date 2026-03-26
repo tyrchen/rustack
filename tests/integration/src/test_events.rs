@@ -533,4 +533,274 @@ mod tests {
         events.delete_rule().name(&rule_name).send().await.unwrap();
         delete_test_queue(&sqs, &queue_url).await;
     }
+
+    // -----------------------------------------------------------------------
+    // Archives
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_create_and_describe_archive() {
+        let client = events_client();
+        let archive_name = format!(
+            "test-archive-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_owned()
+        );
+
+        let create = client
+            .create_archive()
+            .archive_name(&archive_name)
+            .event_source_arn("arn:aws:events:us-east-1:000000000000:event-bus/default")
+            .send()
+            .await
+            .unwrap();
+
+        assert!(create.archive_arn().is_some());
+        assert_eq!(
+            create.state(),
+            Some(&eventbridge::types::ArchiveState::Enabled)
+        );
+
+        // Describe
+        let describe = client
+            .describe_archive()
+            .archive_name(&archive_name)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(describe.archive_name(), Some(archive_name.as_str()));
+        assert_eq!(
+            describe.state(),
+            Some(&eventbridge::types::ArchiveState::Enabled)
+        );
+        assert!(describe.archive_arn().is_some());
+
+        // Cleanup
+        client
+            .delete_archive()
+            .archive_name(&archive_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_list_archives() {
+        let client = events_client();
+        let archive_name = format!(
+            "test-archive-list-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_owned()
+        );
+
+        client
+            .create_archive()
+            .archive_name(&archive_name)
+            .event_source_arn("arn:aws:events:us-east-1:000000000000:event-bus/default")
+            .send()
+            .await
+            .unwrap();
+
+        let list = client.list_archives().send().await.unwrap();
+        assert!(
+            list.archives()
+                .iter()
+                .any(|a| a.archive_name() == Some(archive_name.as_str())),
+            "archive should appear in list"
+        );
+
+        // Cleanup
+        client
+            .delete_archive()
+            .archive_name(&archive_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_delete_archive() {
+        let client = events_client();
+        let archive_name = format!(
+            "test-archive-del-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_owned()
+        );
+
+        client
+            .create_archive()
+            .archive_name(&archive_name)
+            .event_source_arn("arn:aws:events:us-east-1:000000000000:event-bus/default")
+            .send()
+            .await
+            .unwrap();
+
+        // Delete
+        client
+            .delete_archive()
+            .archive_name(&archive_name)
+            .send()
+            .await
+            .unwrap();
+
+        // Describe should fail
+        let result = client
+            .describe_archive()
+            .archive_name(&archive_name)
+            .send()
+            .await;
+        assert!(result.is_err(), "describe after delete should fail");
+    }
+
+    // -----------------------------------------------------------------------
+    // Connections
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_create_and_describe_connection() {
+        let client = events_client();
+        let conn_name = format!(
+            "test-conn-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_owned()
+        );
+
+        let auth_params = eventbridge::types::CreateConnectionAuthRequestParameters::builder()
+            .api_key_auth_parameters(
+                eventbridge::types::CreateConnectionApiKeyAuthRequestParameters::builder()
+                    .api_key_name("x-api-key")
+                    .api_key_value("secret-key-value")
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+
+        let create = client
+            .create_connection()
+            .name(&conn_name)
+            .authorization_type(eventbridge::types::ConnectionAuthorizationType::ApiKey)
+            .auth_parameters(auth_params)
+            .send()
+            .await
+            .unwrap();
+
+        assert!(create.connection_arn().is_some());
+        assert_eq!(
+            create.connection_state(),
+            Some(&eventbridge::types::ConnectionState::Authorized)
+        );
+
+        // Describe
+        let describe = client
+            .describe_connection()
+            .name(&conn_name)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(describe.name(), Some(conn_name.as_str()));
+        assert_eq!(
+            describe.authorization_type(),
+            Some(&eventbridge::types::ConnectionAuthorizationType::ApiKey)
+        );
+
+        // Cleanup
+        client
+            .delete_connection()
+            .name(&conn_name)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // API Destinations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_create_and_describe_api_destination() {
+        let client = events_client();
+        let conn_name = format!(
+            "test-apidest-conn-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_owned()
+        );
+        let dest_name = format!(
+            "test-apidest-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_owned()
+        );
+
+        // Create a connection first (required for API destinations)
+        let auth_params = eventbridge::types::CreateConnectionAuthRequestParameters::builder()
+            .api_key_auth_parameters(
+                eventbridge::types::CreateConnectionApiKeyAuthRequestParameters::builder()
+                    .api_key_name("x-api-key")
+                    .api_key_value("secret-key-value")
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+
+        let conn = client
+            .create_connection()
+            .name(&conn_name)
+            .authorization_type(eventbridge::types::ConnectionAuthorizationType::ApiKey)
+            .auth_parameters(auth_params)
+            .send()
+            .await
+            .unwrap();
+
+        let connection_arn = conn.connection_arn().unwrap().to_string();
+
+        // Create API destination
+        let create = client
+            .create_api_destination()
+            .name(&dest_name)
+            .connection_arn(&connection_arn)
+            .invocation_endpoint("https://httpbin.org/post")
+            .http_method(eventbridge::types::ApiDestinationHttpMethod::Post)
+            .send()
+            .await
+            .unwrap();
+
+        assert!(create.api_destination_arn().is_some());
+        assert_eq!(
+            create.api_destination_state(),
+            Some(&eventbridge::types::ApiDestinationState::Active)
+        );
+
+        // Describe
+        let describe = client
+            .describe_api_destination()
+            .name(&dest_name)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(describe.name(), Some(dest_name.as_str()));
+        assert_eq!(
+            describe.invocation_endpoint(),
+            Some("https://httpbin.org/post")
+        );
+        assert_eq!(
+            describe.http_method(),
+            Some(&eventbridge::types::ApiDestinationHttpMethod::Post)
+        );
+        assert_eq!(describe.connection_arn(), Some(connection_arn.as_str()));
+
+        // Cleanup
+        client
+            .delete_api_destination()
+            .name(&dest_name)
+            .send()
+            .await
+            .unwrap();
+        client
+            .delete_connection()
+            .name(&conn_name)
+            .send()
+            .await
+            .unwrap();
+    }
 }
