@@ -415,55 +415,55 @@ pub const LAMBDA_ROUTES: &[LambdaRoute] = &[
         operation: LambdaOperation::ListFunctionUrlConfigs,
         success_status: 200,
     },
-    // --- /2019-09-25/functions/{name}/event-invoke-config/list ---
+    // --- /functions/{name}/event-invoke-config/list ---
     LambdaRoute {
         method: http::Method::GET,
-        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config/list",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/event-invoke-config/list",
         operation: LambdaOperation::ListFunctionEventInvokeConfigs,
         success_status: 200,
     },
-    // --- /2019-09-25/functions/{name}/event-invoke-config ---
+    // --- /functions/{name}/event-invoke-config ---
     LambdaRoute {
         method: http::Method::PUT,
-        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/event-invoke-config",
         operation: LambdaOperation::PutFunctionEventInvokeConfig,
         success_status: 200,
     },
     LambdaRoute {
         method: http::Method::GET,
-        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/event-invoke-config",
         operation: LambdaOperation::GetFunctionEventInvokeConfig,
         success_status: 200,
     },
     LambdaRoute {
         method: http::Method::POST,
-        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/event-invoke-config",
         operation: LambdaOperation::UpdateFunctionEventInvokeConfig,
         success_status: 200,
     },
     LambdaRoute {
         method: http::Method::DELETE,
-        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/event-invoke-config",
         operation: LambdaOperation::DeleteFunctionEventInvokeConfig,
         success_status: 204,
     },
-    // --- /2019-09-25/functions/{name}/concurrency ---
+    // --- /functions/{name}/concurrency (GET) ---
     LambdaRoute {
         method: http::Method::GET,
-        path_pattern: "/2019-09-25/functions/{FunctionName}/concurrency",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/concurrency",
         operation: LambdaOperation::GetFunctionConcurrency,
         success_status: 200,
     },
-    // --- /2017-10-31/functions/{name}/concurrency ---
+    // --- /functions/{name}/concurrency (PUT/DELETE) ---
     LambdaRoute {
         method: http::Method::PUT,
-        path_pattern: "/2017-10-31/functions/{FunctionName}/concurrency",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/concurrency",
         operation: LambdaOperation::PutFunctionConcurrency,
         success_status: 200,
     },
     LambdaRoute {
         method: http::Method::DELETE,
-        path_pattern: "/2017-10-31/functions/{FunctionName}/concurrency",
+        path_pattern: "/2015-03-31/functions/{FunctionName}/concurrency",
         operation: LambdaOperation::DeleteFunctionConcurrency,
         success_status: 204,
     },

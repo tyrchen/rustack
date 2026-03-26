@@ -1202,8 +1202,13 @@ impl RustStackEvents {
         )
     }
 
-    fn now_timestamp() -> String {
-        chrono::Utc::now().to_rfc3339()
+    fn now_timestamp() -> serde_json::Value {
+        // EventBridge returns timestamps as epoch seconds (float) in JSON.
+        let secs = chrono::Utc::now().timestamp() as f64;
+        serde_json::Value::Number(
+            serde_json::Number::from_f64(secs)
+                .unwrap_or_else(|| serde_json::Number::from(chrono::Utc::now().timestamp())),
+        )
     }
 
     /// Extract a required string field from JSON input, returning a validation error if missing.
@@ -1236,14 +1241,8 @@ impl RustStackEvents {
                 "State".to_owned(),
                 serde_json::Value::String(initial_state.to_owned()),
             );
-            obj.insert(
-                "CreationTime".to_owned(),
-                serde_json::Value::String(now.clone()),
-            );
-            obj.insert(
-                "LastModifiedTime".to_owned(),
-                serde_json::Value::String(now),
-            );
+            obj.insert("CreationTime".to_owned(), now.clone());
+            obj.insert("LastModifiedTime".to_owned(), now);
         }
 
         match store.entry(name.to_owned()) {
@@ -1311,10 +1310,7 @@ impl RustStackEvents {
                 }
                 stored.insert(k.clone(), v.clone());
             }
-            stored.insert(
-                "LastModifiedTime".to_owned(),
-                serde_json::Value::String(now),
-            );
+            stored.insert("LastModifiedTime".to_owned(), now);
         }
 
         Ok(entry.clone())
@@ -1478,10 +1474,7 @@ impl RustStackEvents {
                 "State".to_owned(),
                 serde_json::Value::String("CANCELLED".to_owned()),
             );
-            obj.insert(
-                "LastModifiedTime".to_owned(),
-                serde_json::Value::String(Self::now_timestamp()),
-            );
+            obj.insert("LastModifiedTime".to_owned(), Self::now_timestamp());
         }
 
         Ok(GenericOutput {
@@ -1755,10 +1748,7 @@ impl RustStackEvents {
                 "State".to_owned(),
                 serde_json::Value::String("DEAUTHORIZING".to_owned()),
             );
-            obj.insert(
-                "LastModifiedTime".to_owned(),
-                serde_json::Value::String(now),
-            );
+            obj.insert("LastModifiedTime".to_owned(), now);
         }
 
         Ok(GenericOutput {

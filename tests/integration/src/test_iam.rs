@@ -885,9 +885,7 @@ async fn test_should_create_and_get_oidc_provider() {
 
     assert_eq!(get.url(), Some("https://token.example.com"));
     assert!(
-        get.client_id_list()
-            .iter()
-            .any(|c| c == "my-client-id"),
+        get.client_id_list().iter().any(|c| c == "my-client-id"),
         "client ID list should contain my-client-id"
     );
     assert!(
@@ -981,9 +979,7 @@ async fn test_should_delete_oidc_provider() {
 
     assert!(result.is_err(), "get after delete should fail");
     let err = result.unwrap_err();
-    let service_err = err
-        .as_service_error()
-        .expect("should be a service error");
+    let service_err = err.as_service_error().expect("should be a service error");
     assert!(
         service_err.is_no_such_entity_exception(),
         "error should be NoSuchEntity, got: {service_err:?}"
@@ -1043,11 +1039,15 @@ async fn test_should_tag_and_list_policy_tags() {
 
     assert_eq!(tags.tags().len(), 2);
     assert!(
-        tags.tags().iter().any(|t| t.key() == "CostCenter" && t.value() == "12345"),
+        tags.tags()
+            .iter()
+            .any(|t| t.key() == "CostCenter" && t.value() == "12345"),
         "should contain CostCenter tag"
     );
     assert!(
-        tags.tags().iter().any(|t| t.key() == "Project" && t.value() == "alpha"),
+        tags.tags()
+            .iter()
+            .any(|t| t.key() == "Project" && t.value() == "alpha"),
         "should contain Project tag"
     );
 
@@ -1104,11 +1104,15 @@ async fn test_should_tag_and_list_instance_profile_tags() {
 
     assert_eq!(tags.tags().len(), 2);
     assert!(
-        tags.tags().iter().any(|t| t.key() == "Environment" && t.value() == "staging"),
+        tags.tags()
+            .iter()
+            .any(|t| t.key() == "Environment" && t.value() == "staging"),
         "should contain Environment tag"
     );
     assert!(
-        tags.tags().iter().any(|t| t.key() == "Owner" && t.value() == "platform-team"),
+        tags.tags()
+            .iter()
+            .any(|t| t.key() == "Owner" && t.value() == "platform-team"),
         "should contain Owner tag"
     );
 

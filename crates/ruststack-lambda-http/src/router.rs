@@ -120,27 +120,30 @@ fn normalize_date_prefix(path: &str) -> Option<String> {
     }
 
     // Map resource prefix to canonical date.
+    // The AWS SDK may use different date versions in the path prefix. We
+    // normalize everything to the date used in LAMBDA_ROUTES so that the
+    // route matcher can find the operation.
     let canonical_date = if rest.starts_with("functions") {
-        // Function URLs use 2021-10-31, function CRUD uses 2015-03-31.
-        // Detect URL-related paths: /functions/{name}/url or /functions/{name}/urls
+        // Function URLs use 2021-10-31, everything else uses 2015-03-31.
         let is_url_path = rest.contains("/url") || rest.ends_with("/urls");
-        let target_date = if is_url_path {
+        if is_url_path {
             "2021-10-31"
         } else {
             "2015-03-31"
-        };
-        if date_part == target_date {
-            return None; // Already canonical.
         }
-        target_date
     } else if rest.starts_with("tags") || rest == "account-settings" {
-        if date_part == "2015-03-31" {
-            return None; // Already canonical.
-        }
+        "2015-03-31"
+    } else if rest.starts_with("layers") {
+        "2018-10-31"
+    } else if rest.starts_with("event-source-mappings") {
         "2015-03-31"
     } else {
         return None;
     };
+
+    if date_part == canonical_date {
+        return None; // Already canonical.
+    }
 
     Some(format!("/{canonical_date}/{rest}"))
 }

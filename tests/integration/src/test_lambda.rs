@@ -698,12 +698,12 @@ mod tests {
             .expect("publish layer version should succeed");
 
         assert_eq!(published.version(), 1);
-        assert!(published.layer_arn().is_some(), "layer ARN should be present");
         assert!(
-            published
-                .layer_arn()
-                .unwrap_or_default()
-                .contains(&name),
+            published.layer_arn().is_some(),
+            "layer ARN should be present"
+        );
+        assert!(
+            published.layer_arn().unwrap_or_default().contains(&name),
             "layer ARN should contain the layer name"
         );
         assert_eq!(published.description(), Some("Test layer v1"));
@@ -766,10 +766,7 @@ mod tests {
         let found = resp
             .layers()
             .iter()
-            .any(|l| {
-                l.layer_name()
-                    .is_some_and(|n| n == name)
-            });
+            .any(|l| l.layer_name().is_some_and(|n| n == name));
         assert!(found, "published layer should appear in list_layers");
 
         // Cleanup.
@@ -822,7 +819,10 @@ mod tests {
             .version_number(1)
             .send()
             .await;
-        assert!(err.is_err(), "get deleted layer version should return error");
+        assert!(
+            err.is_err(),
+            "get deleted layer version should return error"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1086,10 +1086,7 @@ mod tests {
 
         let our_config = configs
             .iter()
-            .find(|c| {
-                c.function_arn()
-                    .is_some_and(|arn| arn.contains(&name))
-            })
+            .find(|c| c.function_arn().is_some_and(|arn| arn.contains(&name)))
             .expect("should find config for our function");
 
         assert_eq!(our_config.maximum_retry_attempts(), Some(1));

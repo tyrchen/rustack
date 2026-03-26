@@ -667,31 +667,14 @@ mod tests {
             .send()
             .await
             .unwrap();
-        let table_arn = desc
-            .table()
-            .unwrap()
-            .table_arn()
-            .unwrap()
-            .to_owned();
+        let table_arn = desc.table().unwrap().table_arn().unwrap().to_owned();
 
         // Tag the table with 2 tags.
         client
             .tag_resource()
             .resource_arn(&table_arn)
-            .tags(
-                Tag::builder()
-                    .key("env")
-                    .value("test")
-                    .build()
-                    .unwrap(),
-            )
-            .tags(
-                Tag::builder()
-                    .key("team")
-                    .value("backend")
-                    .build()
-                    .unwrap(),
-            )
+            .tags(Tag::builder().key("env").value("test").build().unwrap())
+            .tags(Tag::builder().key("team").value("backend").build().unwrap())
             .send()
             .await
             .unwrap();
@@ -707,10 +690,8 @@ mod tests {
         let tags = resp.tags();
         assert_eq!(tags.len(), 2);
 
-        let tag_map: std::collections::HashMap<&str, &str> = tags
-            .iter()
-            .map(|t| (t.key(), t.value()))
-            .collect();
+        let tag_map: std::collections::HashMap<&str, &str> =
+            tags.iter().map(|t| (t.key(), t.value())).collect();
         assert_eq!(tag_map.get("env"), Some(&"test"));
         assert_eq!(tag_map.get("team"), Some(&"backend"));
 
@@ -982,10 +963,10 @@ mod tests {
         let resp = client.describe_limits().send().await.unwrap();
 
         // DynamoDB default account limits.
-        assert_eq!(resp.table_max_read_capacity_units(), Some(80_000));
+        assert_eq!(resp.table_max_read_capacity_units(), Some(40_000));
         assert_eq!(resp.table_max_write_capacity_units(), Some(40_000));
         assert_eq!(resp.account_max_read_capacity_units(), Some(80_000));
-        assert_eq!(resp.account_max_write_capacity_units(), Some(40_000));
+        assert_eq!(resp.account_max_write_capacity_units(), Some(80_000));
     }
 
     #[tokio::test]
