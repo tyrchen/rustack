@@ -461,6 +461,27 @@ mod lambda_router {
                 }
             }
         }
+        // Layer paths (e.g., /2018-10-31/layers/{name}/versions).
+        if path.contains("/layers") {
+            if let Some(rest) = path.strip_prefix('/') {
+                let parts: Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() == 2 && parts[0].len() == 10 && parts[1].starts_with("layers") {
+                    return true;
+                }
+            }
+        }
+        // Event source mapping paths (e.g., /2015-03-31/event-source-mappings/).
+        if path.contains("/event-source-mappings") {
+            if let Some(rest) = path.strip_prefix('/') {
+                let parts: Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() == 2
+                    && parts[0].len() == 10
+                    && parts[1].starts_with("event-source-mappings")
+                {
+                    return true;
+                }
+            }
+        }
         // Function URL invocation paths.
         path.starts_with("/lambda-url/")
     }

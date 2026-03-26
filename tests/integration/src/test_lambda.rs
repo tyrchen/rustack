@@ -1002,22 +1002,15 @@ mod tests {
 
         assert_eq!(put_resp.reserved_concurrent_executions(), Some(50));
 
-        // Get function concurrency (via get_function and checking concurrency).
+        // Get function concurrency directly.
         let get_resp = client
-            .get_function()
+            .get_function_concurrency()
             .function_name(&name)
             .send()
             .await
-            .expect("get function should succeed");
+            .expect("get concurrency should succeed");
 
-        let concurrency = get_resp.concurrency();
-        assert!(concurrency.is_some(), "should have concurrency info");
-        assert_eq!(
-            concurrency
-                .expect("concurrency should be present")
-                .reserved_concurrent_executions(),
-            Some(50)
-        );
+        assert_eq!(get_resp.reserved_concurrent_executions(), Some(50));
 
         // Delete function concurrency.
         client
@@ -1027,22 +1020,19 @@ mod tests {
             .await
             .expect("delete concurrency should succeed");
 
-        // Verify concurrency is removed.
+        // Verify concurrency is removed — get_function_concurrency returns None or 0.
         let after = client
-            .get_function()
+            .get_function_concurrency()
             .function_name(&name)
             .send()
             .await
-            .expect("get function after delete should succeed");
+            .expect("get concurrency after delete should succeed");
 
-        // After deletion, concurrency should be None or have no reserved executions.
-        if let Some(c) = after.concurrency() {
-            assert!(
-                c.reserved_concurrent_executions().is_none()
-                    || c.reserved_concurrent_executions() == Some(0),
-                "concurrency should be cleared after deletion"
-            );
-        }
+        assert!(
+            after.reserved_concurrent_executions().is_none()
+                || after.reserved_concurrent_executions() == Some(0),
+            "concurrency should be cleared after deletion"
+        );
 
         cleanup_function(&client, &name).await;
     }
