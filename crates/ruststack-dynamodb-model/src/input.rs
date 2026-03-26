@@ -578,3 +578,17 @@ pub struct TransactGetItemsInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_consumed_capacity: Option<ReturnConsumedCapacity>,
 }
+
+// ---------------------------------------------------------------------------
+// Describe operations
+// ---------------------------------------------------------------------------
+
+/// Input for the `DescribeLimits` operation (empty).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DescribeLimitsInput {}
+
+/// Input for the `DescribeEndpoints` operation (empty).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DescribeEndpointsInput {}

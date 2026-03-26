@@ -12,7 +12,8 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use ruststack_lambda_model::types::{
-    Cors, DeadLetterConfig, ImageConfig, LoggingConfig, SnapStart, TracingConfig, VpcConfig,
+    Cors, DeadLetterConfig, DestinationConfig, ImageConfig, LoggingConfig, SnapStart,
+    TracingConfig, VpcConfig,
 };
 use sha2::{Digest, Sha256};
 
@@ -48,8 +49,29 @@ pub struct FunctionRecord {
     pub tags: HashMap<String, String>,
     /// Function URL configuration.
     pub url_config: Option<FunctionUrlConfigRecord>,
+    /// Reserved concurrent executions.
+    pub reserved_concurrent_executions: Option<i32>,
+    /// Event invoke configurations keyed by qualifier.
+    pub event_invoke_configs: HashMap<String, EventInvokeConfigRecord>,
     /// ISO 8601 creation timestamp.
     pub created_at: String,
+}
+
+/// Stored event invoke configuration for a function qualifier.
+#[derive(Debug, Clone)]
+pub struct EventInvokeConfigRecord {
+    /// The qualified function ARN.
+    pub function_arn: String,
+    /// The qualifier (version or alias, defaults to `$LATEST`).
+    pub qualifier: String,
+    /// Maximum retry attempts (0-2).
+    pub maximum_retry_attempts: Option<i32>,
+    /// Maximum event age in seconds (60-21600).
+    pub maximum_event_age_in_seconds: Option<i32>,
+    /// ISO 8601 last-modified timestamp.
+    pub last_modified: String,
+    /// Destination configuration.
+    pub destination_config: Option<DestinationConfig>,
 }
 
 /// A snapshot of function configuration at a specific version.
@@ -672,6 +694,8 @@ mod tests {
             policy: PolicyDocument::default(),
             tags: HashMap::new(),
             url_config: None,
+            reserved_concurrent_executions: None,
+            event_invoke_configs: HashMap::new(),
             created_at: "2024-01-01T00:00:00.000+0000".to_owned(),
         }
     }

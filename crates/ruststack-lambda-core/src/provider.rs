@@ -20,9 +20,9 @@ use ruststack_lambda_model::{
     input::{
         AddLayerVersionPermissionInput, AddPermissionInput, CreateAliasInput,
         CreateEventSourceMappingInput, CreateFunctionInput, CreateFunctionUrlConfigInput,
-        PublishLayerVersionInput, PublishVersionInput, TagResourceInput, UpdateAliasInput,
-        UpdateEventSourceMappingInput, UpdateFunctionCodeInput, UpdateFunctionConfigurationInput,
-        UpdateFunctionUrlConfigInput,
+        EventInvokeConfigInput, PublishLayerVersionInput, PublishVersionInput, TagResourceInput,
+        UpdateAliasInput, UpdateEventSourceMappingInput, UpdateFunctionCodeInput,
+        UpdateFunctionConfigurationInput, UpdateFunctionUrlConfigInput,
     },
     output::{
         AccountLimit, AccountUsage, AddLayerVersionPermissionOutput, AddPermissionOutput,
@@ -32,11 +32,11 @@ use ruststack_lambda_model::{
         ListVersionsOutput, PublishLayerVersionOutput,
     },
     types::{
-        AliasConfiguration, AliasRoutingConfiguration, EnvironmentResponse, EphemeralStorage,
-        EventSourceMappingConfiguration, FunctionCodeLocation, FunctionConfiguration,
-        FunctionUrlConfig, ImageConfigResponse, Layer, LayerVersionContentOutput,
-        LayerVersionsListItem, LayersListItem, SnapStartResponse, TracingConfigResponse,
-        VpcConfigResponse,
+        AliasConfiguration, AliasRoutingConfiguration, Concurrency, EnvironmentResponse,
+        EphemeralStorage, EventSourceMappingConfiguration, FunctionCodeLocation,
+        FunctionConfiguration, FunctionEventInvokeConfig, FunctionUrlConfig, ImageConfigResponse,
+        Layer, LayerVersionContentOutput, LayerVersionsListItem, LayersListItem, SnapStartResponse,
+        TracingConfigResponse, VpcConfigResponse,
     },
 };
 
@@ -48,9 +48,9 @@ use crate::{
         parse_layer_version_arn, resolve_function_ref, resolve_version,
     },
     storage::{
-        AliasRecord, EventSourceMappingRecord, EventSourceMappingStore, FunctionRecord,
-        FunctionStore, FunctionUrlConfigRecord, LayerStore, LayerVersionRecord, PolicyDocument,
-        PolicyStatement, VersionRecord, compute_sha256,
+        AliasRecord, EventInvokeConfigRecord, EventSourceMappingRecord, EventSourceMappingStore,
+        FunctionRecord, FunctionStore, FunctionUrlConfigRecord, LayerStore, LayerVersionRecord,
+        PolicyDocument, PolicyStatement, VersionRecord, compute_sha256,
     },
 };
 
@@ -313,6 +313,8 @@ impl RustStackLambda {
             policy: PolicyDocument::default(),
             tags: input.tags.clone().unwrap_or_default(),
             url_config: None,
+            reserved_concurrent_executions: None,
+            event_invoke_configs: HashMap::new(),
             created_at: now,
         };
 
@@ -2118,6 +2120,202 @@ impl RustStackLambda {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Phase 6: Concurrency
+    // -----------------------------------------------------------------
+
+    /// Put (set) reserved concurrency for a function.
+    pub fn put_function_concurrency(
+        &self,
+        function_ref: &str,
+        reserved: i32,
+    ) -> Result<Concurrency, LambdaServiceError> {
+        let (name, _) = resolve_function_ref(function_ref)?;
+        let _ = self.get_record(&name)?;
+
+        self.store.update(&name, |rec| {
+            rec.reserved_concurrent_executions = Some(reserved);
+        })?;
+
+        Ok(Concurrency {
+            reserved_concurrent_executions: Some(reserved),
+        })
+    }
+
+    /// Get reserved concurrency for a function.
+    pub fn get_function_concurrency(
+        &self,
+        function_ref: &str,
+    ) -> Result<Concurrency, LambdaServiceError> {
+        let (name, _) = resolve_function_ref(function_ref)?;
+        let record = self.get_record(&name)?;
+        Ok(Concurrency {
+            reserved_concurrent_executions: record.reserved_concurrent_executions,
+        })
+    }
+
+    /// Delete reserved concurrency for a function.
+    pub fn delete_function_concurrency(
+        &self,
+        function_ref: &str,
+    ) -> Result<(), LambdaServiceError> {
+        let (name, _) = resolve_function_ref(function_ref)?;
+        let _ = self.get_record(&name)?;
+        self.store.update(&name, |rec| {
+            rec.reserved_concurrent_executions = None;
+        })?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 6: Event Invoke Config
+    // -----------------------------------------------------------------
+
+    /// Put (create/replace) an event invoke config for a function qualifier.
+    pub fn put_function_event_invoke_config(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+        input: &EventInvokeConfigInput,
+    ) -> Result<FunctionEventInvokeConfig, LambdaServiceError> {
+        let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
+        let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        let record = self.get_record(&name)?;
+        let fn_arn = self.build_qualified_arn(&name, qualifier);
+        let now = chrono::Utc::now();
+        let now_iso = now.format("%Y-%m-%dT%H:%M:%S%.3f%z").to_string();
+        let epoch_millis = millis_to_f64(now.timestamp_millis());
+
+        let config_record = EventInvokeConfigRecord {
+            function_arn: fn_arn.clone(),
+            qualifier: qualifier.to_owned(),
+            maximum_retry_attempts: input.maximum_retry_attempts,
+            maximum_event_age_in_seconds: input.maximum_event_age_in_seconds,
+            last_modified: now_iso,
+            destination_config: input.destination_config.clone(),
+        };
+
+        drop(record);
+        self.store.update(&name, |rec| {
+            rec.event_invoke_configs
+                .insert(qualifier.to_owned(), config_record.clone());
+        })?;
+
+        Ok(build_event_invoke_config(&config_record, epoch_millis))
+    }
+
+    /// Get an event invoke config for a function qualifier.
+    pub fn get_function_event_invoke_config(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+    ) -> Result<FunctionEventInvokeConfig, LambdaServiceError> {
+        let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
+        let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        let record = self.get_record(&name)?;
+
+        let config_record = record.event_invoke_configs.get(qualifier).ok_or_else(|| {
+            LambdaServiceError::EventInvokeConfigNotFound {
+                function_name: name.clone(),
+                qualifier: qualifier.to_owned(),
+            }
+        })?;
+
+        let epoch_millis = parse_epoch_millis(&config_record.last_modified);
+
+        Ok(build_event_invoke_config(config_record, epoch_millis))
+    }
+
+    /// Update (merge) an event invoke config for a function qualifier.
+    pub fn update_function_event_invoke_config(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+        input: &EventInvokeConfigInput,
+    ) -> Result<FunctionEventInvokeConfig, LambdaServiceError> {
+        let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
+        let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        let _ = self.get_record(&name)?;
+        let fn_arn = self.build_qualified_arn(&name, qualifier);
+        let now = chrono::Utc::now();
+        let now_iso = now.format("%Y-%m-%dT%H:%M:%S%.3f%z").to_string();
+        let epoch_millis = millis_to_f64(now.timestamp_millis());
+
+        let result = self.store.update(&name, |rec| {
+            let entry = rec
+                .event_invoke_configs
+                .entry(qualifier.to_owned())
+                .or_insert_with(|| EventInvokeConfigRecord {
+                    function_arn: fn_arn.clone(),
+                    qualifier: qualifier.to_owned(),
+                    maximum_retry_attempts: None,
+                    maximum_event_age_in_seconds: None,
+                    last_modified: now_iso.clone(),
+                    destination_config: None,
+                });
+
+            if let Some(v) = input.maximum_retry_attempts {
+                entry.maximum_retry_attempts = Some(v);
+            }
+            if let Some(v) = input.maximum_event_age_in_seconds {
+                entry.maximum_event_age_in_seconds = Some(v);
+            }
+            if let Some(ref dc) = input.destination_config {
+                entry.destination_config = Some(dc.clone());
+            }
+            entry.last_modified.clone_from(&now_iso);
+            entry.clone()
+        })?;
+
+        Ok(build_event_invoke_config(&result, epoch_millis))
+    }
+
+    /// Delete an event invoke config for a function qualifier.
+    pub fn delete_function_event_invoke_config(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+    ) -> Result<(), LambdaServiceError> {
+        let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
+        let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        let _ = self.get_record(&name)?;
+
+        self.store.update(&name, |rec| {
+            rec.event_invoke_configs.remove(qualifier);
+        })?;
+        Ok(())
+    }
+
+    /// List all event invoke configs for a function.
+    pub fn list_function_event_invoke_configs(
+        &self,
+        function_ref: &str,
+    ) -> Result<Vec<FunctionEventInvokeConfig>, LambdaServiceError> {
+        let (name, _) = resolve_function_ref(function_ref)?;
+        let record = self.get_record(&name)?;
+
+        let configs: Vec<FunctionEventInvokeConfig> = record
+            .event_invoke_configs
+            .values()
+            .map(|cr| {
+                let epoch_millis = parse_epoch_millis(&cr.last_modified);
+                build_event_invoke_config(cr, epoch_millis)
+            })
+            .collect();
+
+        Ok(configs)
+    }
+
+    /// Build a qualified ARN for a function + qualifier.
+    fn build_qualified_arn(&self, function_name: &str, qualifier: &str) -> String {
+        function_version_arn(
+            &self.config.default_region,
+            &self.config.account_id,
+            function_name,
+            qualifier,
+        )
+    }
+
     /// Get a function record by name, returning `FunctionNotFound` if absent.
     fn get_record(&self, name: &str) -> Result<FunctionRecord, LambdaServiceError> {
         self.store
@@ -2298,6 +2496,37 @@ fn now_iso8601() -> String {
     chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3f+0000")
         .to_string()
+}
+
+/// Convert an `i64` millis timestamp to `f64` for the API response.
+///
+/// The AWS Lambda API returns `LastModified` as epoch milliseconds in a float.
+/// Precision loss is acceptable since timestamps fit well within f64 mantissa range
+/// for any reasonable date (up to year ~285,000).
+#[allow(clippy::cast_precision_loss)]
+fn millis_to_f64(millis: i64) -> f64 {
+    millis as f64
+}
+
+/// Parse an ISO 8601 timestamp string into epoch millis as `f64`.
+fn parse_epoch_millis(iso: &str) -> f64 {
+    chrono::DateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S%.3f%z")
+        .map(|dt| millis_to_f64(dt.timestamp_millis()))
+        .unwrap_or(0.0)
+}
+
+/// Convert an `EventInvokeConfigRecord` to the output type.
+fn build_event_invoke_config(
+    record: &EventInvokeConfigRecord,
+    epoch_millis: f64,
+) -> FunctionEventInvokeConfig {
+    FunctionEventInvokeConfig {
+        function_arn: Some(record.function_arn.clone()),
+        maximum_retry_attempts: record.maximum_retry_attempts,
+        maximum_event_age_in_seconds: record.maximum_event_age_in_seconds,
+        last_modified: Some(epoch_millis),
+        destination_config: record.destination_config.clone(),
+    }
 }
 
 #[cfg(test)]

@@ -20,11 +20,13 @@ use ruststack_lambda_model::{
     input::{
         AddLayerVersionPermissionInput, AddPermissionInput, CreateAliasInput,
         CreateEventSourceMappingInput, CreateFunctionInput, CreateFunctionUrlConfigInput,
-        PublishLayerVersionInput, PublishVersionInput, TagResourceInput, UpdateAliasInput,
+        EventInvokeConfigInput, PublishLayerVersionInput, PublishVersionInput,
+        PutFunctionConcurrencyInput, TagResourceInput, UpdateAliasInput,
         UpdateEventSourceMappingInput, UpdateFunctionCodeInput, UpdateFunctionConfigurationInput,
         UpdateFunctionUrlConfigInput,
     },
     operations::LambdaOperation,
+    output::ListFunctionEventInvokeConfigsOutput,
     types::InvocationType,
 };
 
@@ -594,6 +596,97 @@ async fn dispatch(
                 marker,
                 max_items,
             );
+            wrap_json_response(200, &output)
+        }
+
+        // ---- Phase 6: Concurrency ----
+        LambdaOperation::PutFunctionConcurrency => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let input: PutFunctionConcurrencyInput = serde_json::from_slice(body).map_err(|e| {
+                LambdaError::invalid_parameter(format!("Invalid request body: {e}"))
+            })?;
+            let output = provider
+                .put_function_concurrency(function_name, input.reserved_concurrent_executions)
+                .map_err(LambdaError::from)?;
+            wrap_json_response(200, &output)
+        }
+
+        LambdaOperation::GetFunctionConcurrency => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let output = provider
+                .get_function_concurrency(function_name)
+                .map_err(LambdaError::from)?;
+            wrap_json_response(200, &output)
+        }
+
+        LambdaOperation::DeleteFunctionConcurrency => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            provider
+                .delete_function_concurrency(function_name)
+                .map_err(LambdaError::from)?;
+            wrap_empty_response(204)
+        }
+
+        // ---- Phase 6: Event Invoke Config ----
+        LambdaOperation::PutFunctionEventInvokeConfig => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let input: EventInvokeConfigInput = if body.is_empty() {
+                EventInvokeConfigInput::default()
+            } else {
+                serde_json::from_slice(body).map_err(|e| {
+                    LambdaError::invalid_parameter(format!("Invalid request body: {e}"))
+                })?
+            };
+            let output = provider
+                .put_function_event_invoke_config(function_name, qualifier, &input)
+                .map_err(LambdaError::from)?;
+            wrap_json_response(200, &output)
+        }
+
+        LambdaOperation::GetFunctionEventInvokeConfig => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let output = provider
+                .get_function_event_invoke_config(function_name, qualifier)
+                .map_err(LambdaError::from)?;
+            wrap_json_response(200, &output)
+        }
+
+        LambdaOperation::UpdateFunctionEventInvokeConfig => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let input: EventInvokeConfigInput = if body.is_empty() {
+                EventInvokeConfigInput::default()
+            } else {
+                serde_json::from_slice(body).map_err(|e| {
+                    LambdaError::invalid_parameter(format!("Invalid request body: {e}"))
+                })?
+            };
+            let output = provider
+                .update_function_event_invoke_config(function_name, qualifier, &input)
+                .map_err(LambdaError::from)?;
+            wrap_json_response(200, &output)
+        }
+
+        LambdaOperation::DeleteFunctionEventInvokeConfig => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            provider
+                .delete_function_event_invoke_config(function_name, qualifier)
+                .map_err(LambdaError::from)?;
+            wrap_empty_response(204)
+        }
+
+        LambdaOperation::ListFunctionEventInvokeConfigs => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let configs = provider
+                .list_function_event_invoke_configs(function_name)
+                .map_err(LambdaError::from)?;
+            let output = ListFunctionEventInvokeConfigsOutput {
+                function_event_invoke_configs: if configs.is_empty() {
+                    None
+                } else {
+                    Some(configs)
+                },
+                next_marker: None,
+            };
             wrap_json_response(200, &output)
         }
 

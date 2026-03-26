@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     AliasConfiguration, EventSourceMappingConfiguration, FunctionCodeLocation,
-    FunctionConfiguration, FunctionUrlConfig, LayerVersionContentOutput, LayerVersionsListItem,
-    LayersListItem,
+    FunctionConfiguration, FunctionEventInvokeConfig, FunctionUrlConfig, LayerVersionContentOutput,
+    LayerVersionsListItem, LayersListItem,
 };
 
 /// Output for `GetFunction`.
@@ -239,4 +239,16 @@ pub struct AddLayerVersionPermissionOutput {
     /// Revision ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<String>,
+}
+
+/// Output for `ListFunctionEventInvokeConfigs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ListFunctionEventInvokeConfigsOutput {
+    /// List of event invoke configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_event_invoke_configs: Option<Vec<FunctionEventInvokeConfig>>,
+    /// Next pagination marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_marker: Option<String>,
 }

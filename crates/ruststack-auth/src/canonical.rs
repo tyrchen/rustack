@@ -302,6 +302,7 @@ mod tests {
             &signed,
         );
         let expected = "host:examplebucket.s3.amazonaws.com\nrange:bytes=0-9\\
+                        \
                         nx-amz-content-sha256:\
                         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\
                         nx-amz-date:20130524T000000Z";
@@ -353,8 +354,10 @@ mod tests {
         );
 
         let expected = "GET\n/test.txt\n\nhost:examplebucket.s3.amazonaws.com\nrange:bytes=0-9\\
+                        \
                         nx-amz-content-sha256:\
                         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\
+                        \
                         nx-amz-date:20130524T000000Z\n\nhost;range;x-amz-content-sha256;\
                         x-amz-date\\
                         ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

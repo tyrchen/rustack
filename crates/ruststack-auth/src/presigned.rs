@@ -411,6 +411,7 @@ mod tests {
 
         let canonical_request = format!(
             "GET\n{canonical_uri}\n{canonical_query}\nhost:examplebucket.s3.amazonaws.com\n\nhost\\
+             \
              nUNSIGNED-PAYLOAD"
         );
 

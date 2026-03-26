@@ -58,6 +58,12 @@ pub enum DynamoDBOperation {
     TransactGetItems,
     /// Write items atomically across tables.
     TransactWriteItems,
+
+    // Describe
+    /// Describe account limits for DynamoDB.
+    DescribeLimits,
+    /// Describe regional endpoints for DynamoDB.
+    DescribeEndpoints,
 }
 
 impl DynamoDBOperation {
@@ -85,6 +91,8 @@ impl DynamoDBOperation {
             Self::UpdateTimeToLive => "UpdateTimeToLive",
             Self::TransactGetItems => "TransactGetItems",
             Self::TransactWriteItems => "TransactWriteItems",
+            Self::DescribeLimits => "DescribeLimits",
+            Self::DescribeEndpoints => "DescribeEndpoints",
         }
     }
 
@@ -112,6 +120,8 @@ impl DynamoDBOperation {
             "UpdateTimeToLive" => Some(Self::UpdateTimeToLive),
             "TransactGetItems" => Some(Self::TransactGetItems),
             "TransactWriteItems" => Some(Self::TransactWriteItems),
+            "DescribeLimits" => Some(Self::DescribeLimits),
+            "DescribeEndpoints" => Some(Self::DescribeEndpoints),
             _ => None,
         }
     }

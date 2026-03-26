@@ -315,3 +315,43 @@ pub struct TransactGetItemsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<Vec<ItemResponse>>,
 }
+
+// ---------------------------------------------------------------------------
+// Describe operations
+// ---------------------------------------------------------------------------
+
+/// Output for the `DescribeLimits` operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DescribeLimitsOutput {
+    /// Maximum read capacity units per account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_max_read_capacity_units: Option<i64>,
+    /// Maximum write capacity units per account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_max_write_capacity_units: Option<i64>,
+    /// Maximum read capacity units per table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_max_read_capacity_units: Option<i64>,
+    /// Maximum write capacity units per table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_max_write_capacity_units: Option<i64>,
+}
+
+/// Output for the `DescribeEndpoints` operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DescribeEndpointsOutput {
+    /// The list of endpoints.
+    pub endpoints: Vec<Endpoint>,
+}
+
+/// A DynamoDB endpoint descriptor.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Endpoint {
+    /// The endpoint address.
+    pub address: String,
+    /// The cache period in minutes.
+    pub cache_period_in_minutes: i64,
+}

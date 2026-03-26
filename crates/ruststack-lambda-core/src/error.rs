@@ -79,6 +79,15 @@ pub enum LambdaServiceError {
         uuid: String,
     },
 
+    /// Event invoke config does not exist.
+    #[error("Event invoke config not found: {function_name}:{qualifier}")]
+    EventInvokeConfigNotFound {
+        /// Function name.
+        function_name: String,
+        /// Qualifier.
+        qualifier: String,
+    },
+
     /// Policy statement not found.
     #[error("Policy not found: {sid}")]
     PolicyNotFound {
@@ -154,6 +163,13 @@ impl From<LambdaServiceError> for LambdaError {
             LambdaServiceError::PolicyNotFound { ref sid } => {
                 LambdaError::resource_not_found(format!("No policy is found for: {sid}"))
             }
+            LambdaServiceError::EventInvokeConfigNotFound {
+                ref function_name,
+                ref qualifier,
+            } => LambdaError::resource_not_found(format!(
+                "The function {function_name} doesn't have an EventInvokeConfig for qualifier \
+                 {qualifier}"
+            )),
             LambdaServiceError::Internal { ref message } => {
                 LambdaError::service_error(message.clone())
             }

@@ -785,3 +785,71 @@ pub struct EventSourceMappingConfiguration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_response_types: Option<Vec<String>>,
 }
+
+// ---------------------------------------------------------------------------
+// Concurrency
+// ---------------------------------------------------------------------------
+
+/// Concurrency configuration for a Lambda function.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Concurrency {
+    /// The number of reserved concurrent executions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved_concurrent_executions: Option<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// Event Invoke Config
+// ---------------------------------------------------------------------------
+
+/// Destination configuration for asynchronous invocations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DestinationConfig {
+    /// Destination for successful invocations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_success: Option<OnSuccess>,
+    /// Destination for failed invocations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailure>,
+}
+
+/// Destination for successful asynchronous invocations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct OnSuccess {
+    /// The ARN of the destination resource.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+/// Destination for failed asynchronous invocations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct OnFailure {
+    /// The ARN of the destination resource.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+/// Event invoke configuration for a function.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct FunctionEventInvokeConfig {
+    /// The function ARN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_arn: Option<String>,
+    /// Maximum retry attempts (0-2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum_retry_attempts: Option<i32>,
+    /// Maximum event age in seconds (60-21600).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum_event_age_in_seconds: Option<i32>,
+    /// Last modified timestamp as epoch millis (float).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<f64>,
+    /// Destination configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_config: Option<DestinationConfig>,
+}

@@ -10,17 +10,19 @@ use ruststack_dynamodb_model::{
     error::DynamoDBError,
     input::{
         BatchGetItemInput, BatchWriteItemInput, CreateTableInput, DeleteItemInput,
-        DeleteTableInput, DescribeTableInput, DescribeTimeToLiveInput, GetItemInput,
-        ListTablesInput, ListTagsOfResourceInput, PutItemInput, QueryInput, ScanInput,
-        TagResourceInput, TransactGetItemsInput, TransactWriteItemsInput, UntagResourceInput,
-        UpdateItemInput, UpdateTableInput, UpdateTimeToLiveInput,
+        DeleteTableInput, DescribeEndpointsInput, DescribeLimitsInput, DescribeTableInput,
+        DescribeTimeToLiveInput, GetItemInput, ListTablesInput, ListTagsOfResourceInput,
+        PutItemInput, QueryInput, ScanInput, TagResourceInput, TransactGetItemsInput,
+        TransactWriteItemsInput, UntagResourceInput, UpdateItemInput, UpdateTableInput,
+        UpdateTimeToLiveInput,
     },
     output::{
         BatchGetItemOutput, BatchWriteItemOutput, CreateTableOutput, DeleteItemOutput,
-        DeleteTableOutput, DescribeTableOutput, DescribeTimeToLiveOutput, GetItemOutput,
-        ListTablesOutput, ListTagsOfResourceOutput, PutItemOutput, QueryOutput, ScanOutput,
-        TagResourceOutput, TransactGetItemsOutput, TransactWriteItemsOutput, UntagResourceOutput,
-        UpdateItemOutput, UpdateTableOutput, UpdateTimeToLiveOutput,
+        DeleteTableOutput, DescribeEndpointsOutput, DescribeLimitsOutput, DescribeTableOutput,
+        DescribeTimeToLiveOutput, Endpoint, GetItemOutput, ListTablesOutput,
+        ListTagsOfResourceOutput, PutItemOutput, QueryOutput, ScanOutput, TagResourceOutput,
+        TransactGetItemsOutput, TransactWriteItemsOutput, UntagResourceOutput, UpdateItemOutput,
+        UpdateTableOutput, UpdateTimeToLiveOutput,
     },
     types::{
         AttributeAction, AttributeDefinition, AttributeValueUpdate, BillingMode,
@@ -2171,6 +2173,45 @@ impl RustStackDynamoDB {
 
         Ok(DescribeTimeToLiveOutput {
             time_to_live_description: Some(description),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Describe operations
+// ---------------------------------------------------------------------------
+
+impl RustStackDynamoDB {
+    /// Handle `DescribeLimits`.
+    ///
+    /// Returns hardcoded account and table capacity limits matching the default
+    /// AWS DynamoDB provisioned-mode limits.
+    pub fn handle_describe_limits(
+        &self,
+        _input: DescribeLimitsInput,
+    ) -> Result<DescribeLimitsOutput, DynamoDBError> {
+        Ok(DescribeLimitsOutput {
+            account_max_read_capacity_units: Some(80_000),
+            account_max_write_capacity_units: Some(80_000),
+            table_max_read_capacity_units: Some(40_000),
+            table_max_write_capacity_units: Some(40_000),
+        })
+    }
+
+    /// Handle `DescribeEndpoints`.
+    ///
+    /// Returns a single endpoint for the configured region with a 1440-minute
+    /// (24 hour) cache period, matching the real DynamoDB behaviour.
+    pub fn handle_describe_endpoints(
+        &self,
+        _input: DescribeEndpointsInput,
+    ) -> Result<DescribeEndpointsOutput, DynamoDBError> {
+        let address = format!("dynamodb.{}.amazonaws.com", self.config.default_region);
+        Ok(DescribeEndpointsOutput {
+            endpoints: vec![Endpoint {
+                address,
+                cache_period_in_minutes: 1440,
+            }],
         })
     }
 }

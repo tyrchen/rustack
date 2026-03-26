@@ -150,6 +150,16 @@ fn dispatch(
             let output = provider.handle_transact_write_items(input)?;
             serialize(&output, &request_id)
         }
+        DynamoDBOperation::DescribeLimits => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_limits(input)?;
+            serialize(&output, &request_id)
+        }
+        DynamoDBOperation::DescribeEndpoints => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_endpoints(input)?;
+            serialize(&output, &request_id)
+        }
     }
 }
 

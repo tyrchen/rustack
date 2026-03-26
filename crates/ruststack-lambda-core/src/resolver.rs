@@ -254,6 +254,8 @@ mod tests {
             policy: PolicyDocument::default(),
             tags: HashMap::new(),
             url_config: None,
+            reserved_concurrent_executions: None,
+            event_invoke_configs: HashMap::new(),
             created_at: "2024-01-01T00:00:00.000+0000".to_owned(),
         }
     }

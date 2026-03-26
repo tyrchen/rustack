@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AliasRoutingConfiguration, Cors, DeadLetterConfig, Environment, EphemeralStorage, FunctionCode,
-    ImageConfig, LayerVersionContentInput, LoggingConfig, SnapStart, TracingConfig, VpcConfig,
+    AliasRoutingConfiguration, Cors, DeadLetterConfig, DestinationConfig, Environment,
+    EphemeralStorage, FunctionCode, ImageConfig, LayerVersionContentInput, LoggingConfig,
+    SnapStart, TracingConfig, VpcConfig,
 };
 
 /// Input for `CreateFunction`.
@@ -391,4 +392,35 @@ pub struct AddLayerVersionPermissionInput {
     /// Revision ID for optimistic concurrency.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency
+// ---------------------------------------------------------------------------
+
+/// Input for `PutFunctionConcurrency`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PutFunctionConcurrencyInput {
+    /// The number of reserved concurrent executions.
+    pub reserved_concurrent_executions: i32,
+}
+
+// ---------------------------------------------------------------------------
+// Event Invoke Config
+// ---------------------------------------------------------------------------
+
+/// Input for `PutFunctionEventInvokeConfig` and `UpdateFunctionEventInvokeConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct EventInvokeConfigInput {
+    /// Maximum retry attempts (0-2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum_retry_attempts: Option<i32>,
+    /// Maximum event age in seconds (60-21600).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum_event_age_in_seconds: Option<i32>,
+    /// Destination configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_config: Option<DestinationConfig>,
 }

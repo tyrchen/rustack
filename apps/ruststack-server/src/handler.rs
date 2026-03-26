@@ -623,6 +623,7 @@ async fn dispatch_post_object(
             let xml = format!(
                 "<?xml version=\"1.0\" \
                  encoding=\"UTF-8\"?>\n<PostResponse>\n<Location>{location}</Location>\\
+                 \
                  n<Bucket>{bucket_name}</Bucket>\n<Key>{key}</Key>\n<ETag>{etag}</ETag>\n</\
                  PostResponse>"
             );

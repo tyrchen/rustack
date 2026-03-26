@@ -99,6 +99,26 @@ pub enum LambdaOperation {
     DeleteEventSourceMapping,
     /// List event source mappings.
     ListEventSourceMappings,
+
+    // Phase 6: Concurrency
+    /// Set reserved concurrency for a function.
+    PutFunctionConcurrency,
+    /// Get reserved concurrency for a function.
+    GetFunctionConcurrency,
+    /// Delete reserved concurrency for a function.
+    DeleteFunctionConcurrency,
+
+    // Phase 6: Event Invoke Config
+    /// Create an event invoke config for a function.
+    PutFunctionEventInvokeConfig,
+    /// Get an event invoke config for a function.
+    GetFunctionEventInvokeConfig,
+    /// Update an event invoke config for a function.
+    UpdateFunctionEventInvokeConfig,
+    /// Delete an event invoke config for a function.
+    DeleteFunctionEventInvokeConfig,
+    /// List event invoke configs for a function.
+    ListFunctionEventInvokeConfigs,
 }
 
 impl LambdaOperation {
@@ -147,6 +167,14 @@ impl LambdaOperation {
             Self::UpdateEventSourceMapping => "UpdateEventSourceMapping",
             Self::DeleteEventSourceMapping => "DeleteEventSourceMapping",
             Self::ListEventSourceMappings => "ListEventSourceMappings",
+            Self::PutFunctionConcurrency => "PutFunctionConcurrency",
+            Self::GetFunctionConcurrency => "GetFunctionConcurrency",
+            Self::DeleteFunctionConcurrency => "DeleteFunctionConcurrency",
+            Self::PutFunctionEventInvokeConfig => "PutFunctionEventInvokeConfig",
+            Self::GetFunctionEventInvokeConfig => "GetFunctionEventInvokeConfig",
+            Self::UpdateFunctionEventInvokeConfig => "UpdateFunctionEventInvokeConfig",
+            Self::DeleteFunctionEventInvokeConfig => "DeleteFunctionEventInvokeConfig",
+            Self::ListFunctionEventInvokeConfigs => "ListFunctionEventInvokeConfigs",
         }
     }
 }
@@ -386,6 +414,58 @@ pub const LAMBDA_ROUTES: &[LambdaRoute] = &[
         path_pattern: "/2021-10-31/functions/{FunctionName}/urls",
         operation: LambdaOperation::ListFunctionUrlConfigs,
         success_status: 200,
+    },
+    // --- /2019-09-25/functions/{name}/event-invoke-config/list ---
+    LambdaRoute {
+        method: http::Method::GET,
+        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config/list",
+        operation: LambdaOperation::ListFunctionEventInvokeConfigs,
+        success_status: 200,
+    },
+    // --- /2019-09-25/functions/{name}/event-invoke-config ---
+    LambdaRoute {
+        method: http::Method::PUT,
+        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        operation: LambdaOperation::PutFunctionEventInvokeConfig,
+        success_status: 200,
+    },
+    LambdaRoute {
+        method: http::Method::GET,
+        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        operation: LambdaOperation::GetFunctionEventInvokeConfig,
+        success_status: 200,
+    },
+    LambdaRoute {
+        method: http::Method::POST,
+        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        operation: LambdaOperation::UpdateFunctionEventInvokeConfig,
+        success_status: 200,
+    },
+    LambdaRoute {
+        method: http::Method::DELETE,
+        path_pattern: "/2019-09-25/functions/{FunctionName}/event-invoke-config",
+        operation: LambdaOperation::DeleteFunctionEventInvokeConfig,
+        success_status: 204,
+    },
+    // --- /2019-09-25/functions/{name}/concurrency ---
+    LambdaRoute {
+        method: http::Method::GET,
+        path_pattern: "/2019-09-25/functions/{FunctionName}/concurrency",
+        operation: LambdaOperation::GetFunctionConcurrency,
+        success_status: 200,
+    },
+    // --- /2017-10-31/functions/{name}/concurrency ---
+    LambdaRoute {
+        method: http::Method::PUT,
+        path_pattern: "/2017-10-31/functions/{FunctionName}/concurrency",
+        operation: LambdaOperation::PutFunctionConcurrency,
+        success_status: 200,
+    },
+    LambdaRoute {
+        method: http::Method::DELETE,
+        path_pattern: "/2017-10-31/functions/{FunctionName}/concurrency",
+        operation: LambdaOperation::DeleteFunctionConcurrency,
+        success_status: 204,
     },
     // --- /2015-03-31/event-source-mappings/{UUID} ---
     LambdaRoute {
