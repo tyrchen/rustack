@@ -2057,8 +2057,8 @@ impl RustStackLambda {
     fn record_to_configuration(
         record: &EventSourceMappingRecord,
     ) -> EventSourceMappingConfiguration {
-        let last_modified_str = chrono::DateTime::from_timestamp(record.last_modified, 0)
-            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3f+0000").to_string());
+        #[allow(clippy::cast_precision_loss)]
+        let last_modified_f64 = record.last_modified as f64;
 
         EventSourceMappingConfiguration {
             uuid: Some(record.uuid.clone()),
@@ -2066,7 +2066,7 @@ impl RustStackLambda {
             function_arn: Some(record.function_arn.clone()),
             state: Some(record.state.clone()),
             state_transition_reason: Some(record.state_transition_reason.clone()),
-            last_modified: last_modified_str,
+            last_modified: Some(last_modified_f64),
             last_processing_result: Some(record.last_processing_result.clone()),
             batch_size: Some(record.batch_size),
             maximum_batching_window_in_seconds: Some(record.maximum_batching_window_in_seconds),

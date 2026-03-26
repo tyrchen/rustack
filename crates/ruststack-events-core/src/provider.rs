@@ -1203,12 +1203,8 @@ impl RustStackEvents {
     }
 
     fn now_timestamp() -> serde_json::Value {
-        // EventBridge returns timestamps as epoch seconds (float) in JSON.
-        let secs = chrono::Utc::now().timestamp() as f64;
-        serde_json::Value::Number(
-            serde_json::Number::from_f64(secs)
-                .unwrap_or_else(|| serde_json::Number::from(chrono::Utc::now().timestamp())),
-        )
+        // EventBridge returns timestamps as epoch seconds in JSON.
+        serde_json::Value::Number(serde_json::Number::from(chrono::Utc::now().timestamp()))
     }
 
     /// Extract a required string field from JSON input, returning a validation error if missing.

@@ -751,9 +751,9 @@ pub struct EventSourceMappingConfiguration {
     /// Reason for the current state transition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_transition_reason: Option<String>,
-    /// Last modified timestamp (ISO 8601).
+    /// Last modified timestamp (epoch seconds).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_modified: Option<String>,
+    pub last_modified: Option<f64>,
     /// Result of the last processing attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_processing_result: Option<String>,
