@@ -2831,9 +2831,8 @@ mod tests {
 
     #[test]
     fn test_should_publish_and_get_layer_version() {
-        let provider = test_provider();
-
         use base64::Engine;
+        let provider = test_provider();
         let zip_data = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04layer");
         let input = PublishLayerVersionInput {
             description: Some("Test layer".to_owned()),
