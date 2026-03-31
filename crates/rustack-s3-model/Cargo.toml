@@ -1,5 +1,6 @@
 [package]
 name = "rustack-s3-model"
+description = "Rustack S3 data model types and structures"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
