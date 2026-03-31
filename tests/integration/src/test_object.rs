@@ -37,7 +37,10 @@ mod tests {
             Some("text/plain"),
             "content_type should match"
         );
-        assert_eq!(resp.content_length(), Some(i64::try_from(body.len()).unwrap()));
+        assert_eq!(
+            resp.content_length(),
+            Some(i64::try_from(body.len()).unwrap())
+        );
 
         let data = resp
             .body
