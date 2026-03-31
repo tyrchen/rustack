@@ -446,7 +446,7 @@ dynamodb-test-start: mint-build
 		DYNAMODB_SKIP_SIGNATURE_VALIDATION=false \
 		GATEWAY_LISTEN=0.0.0.0:4566 \
 		LOG_LEVEL=warn \
-		cargo run --release -p rustack-server &
+		cargo run --release -p rustack &
 	@# Wait for server...
 
 dynamodb-test-run: alternator-tests-setup
@@ -502,7 +502,7 @@ PR Checks (fast feedback):
   - cargo clippy, cargo fmt
 
 Merge / Nightly (thorough validation):
-  - Start rustack-server
+  - Start rustack
   - Run Alternator tests (Tier 2) -- selective subset initially
   - Upload test artifacts (pytest output, pass/fail counts)
 ```

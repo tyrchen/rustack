@@ -212,7 +212,7 @@ For SES v1, the service name is `email`. For SNS, the service name is `sns`. The
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -2108,7 +2108,7 @@ impl SesError {
 SES support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses"]
 ses = ["dep:rustack-ses-core", "dep:rustack-ses-http"]
@@ -2452,7 +2452,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: ./target/release/rustack-server &
+      - run: ./target/release/rustack &
       - run: sleep 2
       - run: |
           # AWS CLI smoke tests

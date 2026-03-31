@@ -214,7 +214,7 @@ Routing logic: check `X-Amz-Target` header. If prefix is `AWSEvents.`, route to 
 ### 4.4 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -2082,7 +2082,7 @@ mod events_router {
 ### 13.2 Feature Gate
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "events"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http", "dep:rustack-s3-model"]

@@ -181,7 +181,7 @@ Routing logic: check `X-Amz-Target` header. If prefix is `TrentService.`, route 
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1617,7 +1617,7 @@ KMS uses short error type names (no namespace prefix), same as SSM.
 KMS support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "kms"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http"]

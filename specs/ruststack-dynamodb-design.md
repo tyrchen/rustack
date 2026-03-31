@@ -175,7 +175,7 @@ DynamoDB and S3 are distinguishable by their request signatures:
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app) ← unified binary
+rustack (app) ← unified binary
 ├── rustack-core
 ├── rustack-auth
 ├── rustack-s3-core
@@ -588,7 +588,7 @@ rustack-dynamodb-core = { path = "crates/rustack-dynamodb-core" }
 The server binary (`apps/rustack-s3-server/`) should be renamed or extended to serve both S3 and DynamoDB. Two approaches:
 
 **Option A: Unified Binary** (recommended)
-Rename to `apps/rustack-server/`. Single binary, single port (4566), gateway router dispatches by protocol.
+Rename to `apps/rustack/`. Single binary, single port (4566), gateway router dispatches by protocol.
 
 **Option B: Separate Binaries**
 Keep `apps/rustack-s3-server/` and add `apps/rustack-dynamodb-server/`. Simpler but requires running two processes.
@@ -1704,7 +1704,7 @@ fn test_condition_expression_parsing(#[case] expr: &str, #[case] should_parse: b
 
 #### Step 0.6: Server Integration
 - Implement `GatewayService` for S3+DynamoDB routing
-- Rename server binary to `rustack-server`
+- Rename server binary to `rustack`
 - Update Docker image, GitHub Action
 
 #### Step 0.7: Testing
@@ -1791,9 +1791,9 @@ PartiQL (SQL-compatible query language) is used by some newer SDKs. How much eff
 
 ### 17.4 Unified vs Separate Server Binary
 
-Should we rename `rustack-s3-server` to `rustack-server` now, or keep separate binaries?
+Should we rename `rustack-s3-server` to `rustack` now, or keep separate binaries?
 
-**Recommendation**: Rename to `rustack-server` with a gateway router. This matches LocalStack's single-port architecture and simplifies Docker/CI configuration.
+**Recommendation**: Rename to `rustack` with a gateway router. This matches LocalStack's single-port architecture and simplifies Docker/CI configuration.
 
 ### 17.5 DynamoDB Streams
 

@@ -177,7 +177,7 @@ Routing logic: check `X-Amz-Target` header. If prefix is `secretsmanager.`, rout
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1247,7 +1247,7 @@ Note: Secrets Manager uses `"Message"` (capital M) in error responses, unlike SS
 Secrets Manager support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "secretsmanager"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http"]
@@ -1333,7 +1333,7 @@ impl SecretsManagerConfig {
 
 ### 12.6 Docker Image / GitHub Action
 
-The existing Docker image and GitHub Action gain Secrets Manager support automatically when the feature is enabled. The same `rustack-server` binary serves all services. The GitHub Action `action.yml` should be updated to list `secretsmanager` as a supported service.
+The existing Docker image and GitHub Action gain Secrets Manager support automatically when the feature is enabled. The same `rustack` binary serves all services. The GitHub Action `action.yml` should be updated to list `secretsmanager` as a supported service.
 
 ---
 
@@ -1549,7 +1549,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: ./target/release/rustack-server &
+      - run: ./target/release/rustack &
       - run: sleep 2
       - run: |
           # AWS CLI smoke tests

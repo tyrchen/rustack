@@ -161,7 +161,7 @@ Routing logic: check `X-Amz-Target` header. If prefix is `AmazonSSM.`, route to 
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -887,7 +887,7 @@ SSM uses short error type names (no namespace prefix), unlike DynamoDB which use
 SSM support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "ssm"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http"]
@@ -1034,7 +1034,7 @@ Chamber (`segmentio/chamber`) uses all 10 core Parameter Store operations and is
 ```makefile
 test-ssm-chamber:
 	@echo "Starting Rustack..."
-	@./target/release/rustack-server &
+	@./target/release/rustack &
 	@sleep 1
 	@AWS_REGION=us-east-1 \
 	 AWS_ACCESS_KEY_ID=test \

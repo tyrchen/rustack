@@ -195,7 +195,7 @@ Alternatively, SNS can be updated to also check `service=sns` in the credential 
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1750,7 +1750,7 @@ pub fn error_to_response(error: &StsError, request_id: &str) -> http::Response<S
 STS support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "sts"]
 sts = ["dep:rustack-sts-core", "dep:rustack-sts-http"]
@@ -2165,7 +2165,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: ./target/release/rustack-server &
+      - run: ./target/release/rustack &
       - run: sleep 2
       - run: |
           # AWS CLI smoke tests

@@ -82,7 +82,7 @@ runs:
     - name: Pull Rustack image
       shell: bash
       run: |
-        docker pull "ghcr.io/tyrchen/rustack:${{ inputs.image-tag }}"
+        docker pull "ghcr.io/tyrchen/ruststack:${{ inputs.image-tag }}"
 
     - name: Start Rustack
       id: start
@@ -103,7 +103,7 @@ runs:
           -e "SECRET_KEY=${{ inputs.secret-key }}" \
           -e "PERSISTENCE=${{ inputs.persistence }}" \
           -e "SERVICES=${{ inputs.services }}" \
-          "ghcr.io/tyrchen/rustack:${{ inputs.image-tag }}")
+          "ghcr.io/tyrchen/ruststack:${{ inputs.image-tag }}")
 
         echo "container_id=$CONTAINER_ID" >> "$GITHUB_OUTPUT"
         echo "endpoint=http://localhost:${{ inputs.port }}" >> "$GITHUB_OUTPUT"

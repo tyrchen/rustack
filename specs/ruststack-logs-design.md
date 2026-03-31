@@ -176,7 +176,7 @@ Routing logic: check `X-Amz-Target` header. If prefix is `Logs_20140328.`, route
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1341,7 +1341,7 @@ CW Logs uses short error type names (no namespace prefix), same as SSM.
 ### 12.1 Feature Gate
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "logs"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http"]
@@ -1533,7 +1533,7 @@ fluent-bit is the most important log shipper to validate against. It uses `Creat
 ```makefile
 test-logs-fluentbit:
 	@echo "Starting Rustack..."
-	@./target/release/rustack-server &
+	@./target/release/rustack &
 	@sleep 1
 	@echo '{"log": "test message from fluent-bit"}' | fluent-bit \
 	    -i stdin \

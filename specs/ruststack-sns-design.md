@@ -264,7 +264,7 @@ SNS requests are distinguished from other services by their characteristics:
 ### 4.4 Crate Dependency Graph
 
 ```
-rustack-server (app) <-- unified binary
+rustack (app) <-- unified binary
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -289,7 +289,7 @@ rustack-sns-core
 +-- serde_json (for filter policy evaluation, message JSON wrapping)
 +-- regex (for filter policy pattern matching)
 
-rustack-server (wiring layer)
+rustack (wiring layer)
 +-- rustack-sns-core
 +-- rustack-sqs-core       <-- for SqsPublisher integration
 ```
@@ -2037,7 +2037,7 @@ impl ServiceRouter for QueryServiceRouter {
 ### 12.2 Feature Gate
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "sns"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http", "dep:rustack-s3-model"]

@@ -206,7 +206,7 @@ The `/v2/` prefix is unambiguous and cannot conflict with S3 bucket names or oth
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-apigatewayv2-model      <-- NEW (auto-generated)
@@ -2372,7 +2372,7 @@ Note: API Gateway v2 uses lowercase `message` in error responses (not `Message` 
 ### 12.1 Feature Gate
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "apigatewayv2"]
 apigatewayv2 = ["dep:rustack-apigatewayv2-core", "dep:rustack-apigatewayv2-http"]
@@ -2537,7 +2537,7 @@ rustack-lambda-core = { workspace = true, optional = true }
 At server initialization, the Lambda provider is shared with the API Gateway v2 provider:
 
 ```rust
-// In apps/rustack-server/src/main.rs
+// In apps/rustack/src/main.rs
 #[cfg(all(feature = "apigatewayv2", feature = "lambda"))]
 {
     let apigwv2_provider = RustackApiGatewayV2::new(

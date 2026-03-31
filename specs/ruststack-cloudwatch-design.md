@@ -243,7 +243,7 @@ fn extract_sigv4_service(req: &http::Request<Incoming>) -> Option<&str> {
 ### 4.4 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1763,7 +1763,7 @@ The `<Type>` field is either `Sender` (client error, 4xx) or `Receiver` (server 
 CloudWatch Metrics support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "sns", "events", "logs", "kms", "kinesis", "secretsmanager", "cloudwatch"]
 cloudwatch = ["dep:rustack-cloudwatch-core", "dep:rustack-cloudwatch-http"]
@@ -2112,7 +2112,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: ./target/release/rustack-server &
+      - run: ./target/release/rustack &
       - run: sleep 2
       - run: |
           # AWS CLI smoke tests

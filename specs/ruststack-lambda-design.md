@@ -189,7 +189,7 @@ Lambda must be registered before S3 in the gateway because S3 is the catch-all. 
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -2250,7 +2250,7 @@ impl<H: LambdaHandler> ServiceRouter for LambdaServiceRouter<H> {
 ### 13.2 Feature Gate
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "lambda"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http"]

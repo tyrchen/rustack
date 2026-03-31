@@ -187,7 +187,7 @@ Routing logic: check `X-Amz-Target` header. If prefix is `Kinesis_20131202.`, ro
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app) <-- unified binary
+rustack (app) <-- unified binary
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1953,7 +1953,7 @@ pub use kinesis_router::KinesisServiceRouter;
 ### 13.2 Feature Gate
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "kinesis"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http", "dep:rustack-s3-model"]

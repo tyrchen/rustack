@@ -752,7 +752,7 @@ PR Checks (fast feedback):
   - cargo clippy, cargo fmt
 
 Merge / Nightly (thorough validation):
-  - Start rustack-server
+  - Start rustack
   - Run pytest + boto3 suite (Tier 2) -- all SQS tests
   - Upload test artifacts (pytest output, pass/fail counts)
 ```

@@ -165,7 +165,7 @@ Note that both services share the same SigV4 service name (`dynamodb`), which me
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-dynamodb-{model,core,http}
@@ -215,7 +215,7 @@ The key architectural insight is that `rustack-dynamodb-core` does NOT depend on
                                  ^
                                  | wired by
                     +------------+------------+
-                    | rustack-server (main.rs)    |
+                    | rustack (main.rs)    |
                     | let emitter = StreamEmitter;  |
                     | dynamodb.set_emitter(emitter); |
                     +-------------------------------+
@@ -1597,7 +1597,7 @@ Alternative approach (simpler): since the server binary has access to both the D
 The recommended approach uses a `StreamLifecycleManager` in the server binary:
 
 ```rust
-// In rustack-server main.rs or a bridge module:
+// In rustack main.rs or a bridge module:
 
 /// Manages the lifecycle of DynamoDB Streams alongside DynamoDB tables.
 ///
@@ -1770,7 +1770,7 @@ DynamoDB Streams uses lowercase `"message"` in error responses (same as DynamoDB
 DynamoDB Streams is gated behind its own cargo feature but automatically enabled when DynamoDB is enabled:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "dynamodbstreams", "sqs", "ssm", ...]
 dynamodb = ["dep:rustack-dynamodb-core", "dep:rustack-dynamodb-http"]
@@ -2145,7 +2145,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: ./target/release/rustack-server &
+      - run: ./target/release/rustack &
       - run: sleep 2
       - run: |
           # Full pipeline smoke test

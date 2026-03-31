@@ -239,7 +239,7 @@ If SigV4 parsing fails (e.g., unsigned requests in permissive mode), the gateway
 ### 4.3 Crate Dependency Graph
 
 ```
-rustack-server (app)
+rustack (app)
 +-- rustack-core
 +-- rustack-auth
 +-- rustack-s3-{model,core,http}
@@ -1759,7 +1759,7 @@ This is the same XML error format as SNS, with a different namespace URI.
 IAM support is gated behind a cargo feature:
 
 ```toml
-# apps/rustack-server/Cargo.toml
+# apps/rustack/Cargo.toml
 [features]
 default = ["s3", "dynamodb", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "iam"]
 iam = ["dep:rustack-iam-core", "dep:rustack-iam-http"]
@@ -2129,7 +2129,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: ./target/release/rustack-server &
+      - run: ./target/release/rustack &
       - run: sleep 2
       - run: |
           # AWS CLI smoke tests
@@ -2179,7 +2179,7 @@ jobs:
    - Implement HTTP layer: router, service, XML response builder
    - Implement `IamServiceRouter` with SigV4 service detection
    - Integrate into gateway `build_services()` and health endpoint
-   - Add feature gate to `apps/rustack-server/Cargo.toml`
+   - Add feature gate to `apps/rustack/Cargo.toml`
 
 5. **Day 5: Tests + Polish**
    - Unit tests for all Phase 0 operations
