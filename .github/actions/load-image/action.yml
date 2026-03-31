@@ -1,0 +1,15 @@
+name: "Load Rustack Docker image"
+description: "Download and load the Rustack Docker image from build artifact"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download image artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: rustack-image
+        path: /tmp
+
+    - name: Load Docker image
+      shell: bash
+      run: gunzip -c /tmp/rustack-image.tar.gz | docker load

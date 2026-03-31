@@ -12,7 +12,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ruststack
+  IMAGE_NAME: ${{ github.repository_owner }}/rustack
 
 jobs:
   # Wait for the build workflow to pass before pushing the Docker image.

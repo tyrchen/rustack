@@ -12,7 +12,7 @@ cargo install rustack
 cargo install --git https://github.com/tyrchen/rustack
 
 # Or use Docker
-docker run -p 4566:4566 ghcr.io/tyrchen/ruststack:latest
+docker run -p 4566:4566 ghcr.io/tyrchen/rustack:latest
 ```
 
 ## Quick Start
@@ -40,7 +40,7 @@ aws sqs create-queue --queue-name my-queue
 ```yaml
 services:
   rustack:
-    image: ghcr.io/tyrchen/ruststack:latest
+    image: ghcr.io/tyrchen/rustack:latest
     ports:
       - "4566:4566"
     environment:
