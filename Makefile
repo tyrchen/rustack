@@ -135,7 +135,7 @@ mint-start: mint-build
 		DYNAMODB_SKIP_SIGNATURE_VALIDATION=false \
 		GATEWAY_LISTEN=0.0.0.0:4566 \
 		LOG_LEVEL=warn \
-		cargo run --release -p rustack &
+		cargo run --release -p rustack-cli &
 	@for i in $$(seq 1 30); do \
 		if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then \
 			echo "Server is ready"; \

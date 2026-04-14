@@ -1,5 +1,5 @@
 [package]
-name = "rustack"
+name = "rustack-cli"
 description = "A high-performance, LocalStack-compatible AWS service emulator written in Rust — 18 services, <1s startup, ~8 MB Docker image"
 version.workspace = true
 edition.workspace = true

@@ -94,7 +94,7 @@ CORE_CRATES=(
 
 # Layer 5: App
 APP_CRATES=(
-    rustack
+    rustack-cli
 )
 
 echo "Publishing model crates..."
