@@ -15,7 +15,7 @@ name = "rustack"
 path = "src/main.rs"
 
 [features]
-default = ["s3", "dynamodb", "dynamodbstreams", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses", "apigatewayv2", "cloudwatch", "iam", "sts"]
+default = ["s3", "dynamodb", "dynamodbstreams", "sqs", "ssm", "sns", "lambda", "events", "logs", "kms", "kinesis", "secretsmanager", "ses", "apigatewayv2", "cloudwatch", "iam", "sts", "cloudfront", "cloudfront-dataplane"]
 s3 = ["dep:rustack-s3-core", "dep:rustack-s3-http", "dep:rustack-s3-model"]
 dynamodb = ["dep:rustack-dynamodb-core", "dep:rustack-dynamodb-http"]
 dynamodbstreams = ["dynamodb", "dep:rustack-dynamodbstreams-core", "dep:rustack-dynamodbstreams-http"]
@@ -33,6 +33,8 @@ apigatewayv2 = ["dep:rustack-apigatewayv2-core", "dep:rustack-apigatewayv2-http"
 cloudwatch = ["dep:rustack-cloudwatch-core", "dep:rustack-cloudwatch-http"]
 iam = ["dep:rustack-iam-core", "dep:rustack-iam-http"]
 sts = ["dep:rustack-sts-core", "dep:rustack-sts-http"]
+cloudfront = ["dep:rustack-cloudfront-core", "dep:rustack-cloudfront-http", "dep:rustack-cloudfront-model"]
+cloudfront-dataplane = ["cloudfront", "s3", "dep:rustack-cloudfront-dataplane"]
 
 [dependencies]
 # Internal crates - shared
@@ -108,6 +110,12 @@ rustack-iam-http = { workspace = true, optional = true }
 # Internal crates - STS (optional, gated by "sts" feature)
 rustack-sts-core = { workspace = true, optional = true }
 rustack-sts-http = { workspace = true, optional = true }
+
+# Internal crates - CloudFront (optional, gated by "cloudfront" feature)
+rustack-cloudfront-core = { workspace = true, optional = true }
+rustack-cloudfront-http = { workspace = true, optional = true }
+rustack-cloudfront-model = { workspace = true, optional = true }
+rustack-cloudfront-dataplane = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

@@ -1489,3 +1489,156 @@ mod sts_router {
 
 #[cfg(feature = "sts")]
 pub use sts_router::StsServiceRouter;
+
+// ---------------------------------------------------------------------------
+// CloudFront management
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cloudfront")]
+mod cloudfront_router {
+    use std::{convert::Infallible, future::Future, pin::Pin};
+
+    use http_body_util::BodyExt;
+    use hyper::{body::Incoming, service::Service};
+    use rustack_cloudfront_http::{dispatch::CloudFrontHandler, service::CloudFrontHttpService};
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Extract SigV4 service name.
+    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
+        let auth = headers.get("authorization")?.to_str().ok()?;
+        let credential_start = auth.find("Credential=")? + "Credential=".len();
+        let credential_end = auth[credential_start..]
+            .find(',')
+            .map_or(auth.len(), |i| credential_start + i);
+        let parts: Vec<&str> = auth[credential_start..credential_end].split('/').collect();
+        if parts.len() >= 4 {
+            Some(parts[3])
+        } else {
+            None
+        }
+    }
+
+    /// Routes requests to the CloudFront management service.
+    ///
+    /// Matches `/2020-05-31/` path prefix OR SigV4 signing service `cloudfront`.
+    pub struct CloudFrontServiceRouter<H: CloudFrontHandler> {
+        inner: CloudFrontHttpService<H>,
+    }
+
+    impl<H: CloudFrontHandler> CloudFrontServiceRouter<H> {
+        /// Wrap service.
+        pub fn new(inner: CloudFrontHttpService<H>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<H: CloudFrontHandler> ServiceRouter for CloudFrontServiceRouter<H> {
+        fn name(&self) -> &'static str {
+            "cloudfront"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            if req.uri().path().starts_with("/2020-05-31/") {
+                return true;
+            }
+            extract_sigv4_service(req.headers()).is_some_and(|s| s == "cloudfront")
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let svc = self.inner.clone();
+            Box::pin(async move {
+                let resp = svc.call(req).await;
+                Ok(resp
+                    .unwrap_or_else(|e| match e {})
+                    .map(|b| b.map_err(std::io::Error::other).boxed()))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "cloudfront")]
+pub use cloudfront_router::CloudFrontServiceRouter;
+
+// ---------------------------------------------------------------------------
+// CloudFront data plane
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cloudfront-dataplane")]
+mod cloudfront_dataplane_router {
+    use std::{convert::Infallible, future::Future, pin::Pin};
+
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use rustack_cloudfront_dataplane::DataPlane;
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Routes requests to the CloudFront pass-through data plane.
+    pub struct CloudFrontDataPlaneRouter {
+        plane: DataPlane,
+    }
+
+    impl CloudFrontDataPlaneRouter {
+        /// Wrap a `DataPlane`.
+        pub fn new(plane: DataPlane) -> Self {
+            Self { plane }
+        }
+    }
+
+    impl ServiceRouter for CloudFrontDataPlaneRouter {
+        fn name(&self) -> &'static str {
+            "cloudfront-dataplane"
+        }
+
+        fn matches(&self, req: &http::Request<Incoming>) -> bool {
+            if req.uri().path().starts_with("/_aws/cloudfront/") {
+                return true;
+            }
+            if let Some(host) = req
+                .headers()
+                .get(http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+            {
+                return self.plane.matches_host(host);
+            }
+            false
+        }
+
+        fn call(
+            &self,
+            req: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let plane = self.plane.clone();
+            Box::pin(async move {
+                let (parts, incoming) = req.into_parts();
+                let body_bytes: Bytes = match incoming.collect().await {
+                    Ok(c) => c.to_bytes(),
+                    Err(_) => Bytes::new(),
+                };
+                let resp = plane
+                    .handle_request(
+                        parts.method.clone(),
+                        parts.uri.clone(),
+                        parts.headers.clone(),
+                        body_bytes,
+                    )
+                    .await;
+                let (rparts, rbody) = resp.into_parts();
+                let body: GatewayBody = Full::new(rbody)
+                    .map_err(|never: Infallible| match never {})
+                    .boxed();
+                Ok(http::Response::from_parts(rparts, body))
+            })
+        }
+    }
+}
+
+#[cfg(feature = "cloudfront-dataplane")]
+pub use cloudfront_dataplane_router::CloudFrontDataPlaneRouter;

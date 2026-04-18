@@ -2666,6 +2666,10 @@ dependencies = [
  "rustack-apigatewayv2-core",
  "rustack-apigatewayv2-http",
  "rustack-auth",
+ "rustack-cloudfront-core",
+ "rustack-cloudfront-dataplane",
+ "rustack-cloudfront-http",
+ "rustack-cloudfront-model",
  "rustack-cloudwatch-core",
  "rustack-cloudwatch-http",
  "rustack-core",
@@ -2707,6 +2711,78 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rustack-cloudfront-core"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "dashmap",
+ "parking_lot",
+ "rand",
+ "rustack-cloudfront-model",
+ "rustack-core",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rustack-cloudfront-dataplane"
+version = "0.6.0"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "parking_lot",
+ "reqwest 0.13.2",
+ "rustack-cloudfront-core",
+ "rustack-cloudfront-model",
+ "rustack-s3-core",
+ "rustack-s3-model",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rustack-cloudfront-http"
+version = "0.6.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "chrono",
+ "form_urlencoded",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "percent-encoding",
+ "quick-xml",
+ "rustack-auth",
+ "rustack-cloudfront-core",
+ "rustack-cloudfront-model",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rustack-cloudfront-model"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "quick-xml",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
