@@ -1,3 +1,4 @@
+#![allow(unused_imports, dead_code)]
 //! Integration tests for the CloudFront **data plane**.
 //!
 //! These tests require a running Rustack server at `localhost:4566` with

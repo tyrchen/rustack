@@ -140,7 +140,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     else \
       RUST_TARGET=x86_64-unknown-linux-musl; \
     fi && \
-    cargo build --release --target "$RUST_TARGET" -p rustack 2>/dev/null || true
+    cargo build --release --target "$RUST_TARGET" -p rustack-cli 2>/dev/null || true
 
 # Copy real source code.
 COPY crates/ crates/
@@ -158,7 +158,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     else \
       RUST_TARGET=x86_64-unknown-linux-musl; \
     fi && \
-    cargo build --release --target "$RUST_TARGET" -p rustack && \
+    cargo build --release --target "$RUST_TARGET" -p rustack-cli && \
     cp "/src/target/$RUST_TARGET/release/rustack" /rustack
 
 # ---------------------------------------------------------------------------

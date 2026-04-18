@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared helpers for CloudFront integration tests.
 //!
 //! CloudFront is restXml, so we exercise the wire format directly via
