@@ -43,3 +43,4 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+urlencoding = "2.1"

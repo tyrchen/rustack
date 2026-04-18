@@ -480,9 +480,11 @@ pub fn sts_client_with_credentials(
     aws_sdk_sts::Client::from_conf(config)
 }
 
+mod cloudfront_helpers;
 mod test_apigatewayv2;
 mod test_bucket;
 mod test_cloudfront;
+mod test_cloudfront_dataplane;
 mod test_cloudwatch;
 mod test_cors;
 mod test_dynamodb;
