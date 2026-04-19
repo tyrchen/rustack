@@ -27,13 +27,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --release -p rustack
+        run: cargo build --release -p rustack-cli
 
       - name: Start server in background
         run: |
           GATEWAY_LISTEN=127.0.0.1:4566 \
           LOG_LEVEL=info \
-          cargo run --release -p rustack &
+          cargo run --release -p rustack-cli &
 
           # Wait for the server to be ready.
           for i in $(seq 1 30); do
@@ -67,13 +67,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --release -p rustack
+        run: cargo build --release -p rustack-cli
 
       - name: Start server in background
         run: |
           GATEWAY_LISTEN=0.0.0.0:4566 \
           LOG_LEVEL=warn \
-          cargo run --release -p rustack &
+          cargo run --release -p rustack-cli &
 
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
@@ -135,13 +135,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --release -p rustack
+        run: cargo build --release -p rustack-cli
 
       - name: Start server in background
         run: |
           GATEWAY_LISTEN=0.0.0.0:4566 \
           LOG_LEVEL=warn \
-          cargo run --release -p rustack &
+          cargo run --release -p rustack-cli &
 
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
@@ -205,13 +205,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --release -p rustack
+        run: cargo build --release -p rustack-cli
 
       - name: Start server in background
         run: |
           GATEWAY_LISTEN=0.0.0.0:4566 \
           LOG_LEVEL=warn \
-          cargo run --release -p rustack &
+          cargo run --release -p rustack-cli &
 
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then
@@ -271,13 +271,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --release -p rustack
+        run: cargo build --release -p rustack-cli
 
       - name: Start server in background
         run: |
           GATEWAY_LISTEN=0.0.0.0:4566 \
           LOG_LEVEL=warn \
-          cargo run --release -p rustack &
+          cargo run --release -p rustack-cli &
 
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:4566/_localstack/health > /dev/null 2>&1; then

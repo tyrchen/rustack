@@ -45,6 +45,12 @@ use rustack_apigatewayv2_core::handler::RustackApiGatewayV2Handler;
 use rustack_apigatewayv2_core::provider::RustackApiGatewayV2;
 #[cfg(feature = "apigatewayv2")]
 use rustack_apigatewayv2_http::service::{ApiGatewayV2HttpConfig, ApiGatewayV2HttpService};
+#[cfg(feature = "cloudfront")]
+use rustack_cloudfront_core::{CloudFrontConfig, RustackCloudFront};
+#[cfg(feature = "cloudfront-dataplane")]
+use rustack_cloudfront_dataplane::{DataPlane, DataPlaneConfig};
+#[cfg(feature = "cloudfront")]
+use rustack_cloudfront_http::service::{CloudFrontHttpConfig, CloudFrontHttpService};
 #[cfg(feature = "cloudwatch")]
 use rustack_cloudwatch_core::config::CloudWatchConfig;
 #[cfg(feature = "cloudwatch")]
@@ -409,6 +415,17 @@ fn build_iam_http_config(config: &IamConfig) -> IamHttpConfig {
     }
 }
 
+/// Build the [`CloudFrontHttpConfig`] from the [`CloudFrontConfig`].
+#[cfg(feature = "cloudfront")]
+fn build_cloudfront_http_config(config: &CloudFrontConfig) -> CloudFrontHttpConfig {
+    let credential_provider = build_credential_provider();
+    CloudFrontHttpConfig {
+        skip_signature_validation: config.skip_signature_validation,
+        region: config.default_region.clone(),
+        credential_provider,
+    }
+}
+
 /// Build the [`StsHttpConfig`] from the [`StsConfig`].
 #[cfg(feature = "sts")]
 fn build_sts_http_config(config: &StsConfig) -> StsHttpConfig {
@@ -440,7 +457,8 @@ fn build_sts_http_config(config: &StsConfig) -> StsHttpConfig {
     feature = "cloudwatch",
     feature = "dynamodbstreams",
     feature = "iam",
-    feature = "sts"
+    feature = "sts",
+    feature = "cloudfront"
 ))]
 fn build_credential_provider() -> Option<Arc<dyn rustack_auth::CredentialProvider>> {
     use rustack_auth::StaticCredentialProvider;
@@ -529,6 +547,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "dynamodbstreams" && cfg!(feature = "dynamodbstreams"))
         || (name == "iam" && cfg!(feature = "iam"))
         || (name == "sts" && cfg!(feature = "sts"))
+        || (name == "cloudfront" && cfg!(feature = "cloudfront"))
 }
 
 /// Parse the `SERVICES` environment variable into a list of service names.
@@ -597,6 +616,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "sts") {
             all.push("sts".to_string());
+        }
+        if cfg!(feature = "cloudfront") {
+            all.push("cloudfront".to_string());
         }
         all
     } else {
@@ -968,8 +990,9 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     }
 
     // ----- S3 (catch-all, must be last) -----
+    // Build the S3 provider early so that the CloudFront data plane can share it.
     #[cfg(feature = "s3")]
-    if is_enabled("s3") {
+    let s3_provider_arc: Option<Arc<RustackS3>> = if is_enabled("s3") {
         let s3_config = S3Config::from_env();
         info!(
             s3_domain = %s3_config.s3_domain,
@@ -977,8 +1000,50 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             s3_skip_signature_validation = s3_config.s3_skip_signature_validation,
             "initializing S3 service",
         );
-        let s3_provider = RustackS3::new(s3_config.clone());
-        let s3_handler = handler::RustackHandler(s3_provider);
+        Some(Arc::new(RustackS3::new(s3_config)))
+    } else {
+        None
+    };
+
+    // ----- CloudFront (management + data plane, register before S3 catch-all) -----
+    #[cfg(feature = "cloudfront")]
+    if is_enabled("cloudfront") {
+        let cf_config = CloudFrontConfig::from_env();
+        info!(
+            cloudfront_skip_signature_validation = cf_config.skip_signature_validation,
+            cloudfront_domain_suffix = %cf_config.domain_suffix,
+            "initializing CloudFront service",
+        );
+        let cf_provider = Arc::new(RustackCloudFront::new(cf_config.clone()));
+        let cf_http_config = build_cloudfront_http_config(&cf_config);
+        let cf_service =
+            CloudFrontHttpService::new(Arc::new(Arc::clone(&cf_provider)), cf_http_config);
+
+        // Data plane (register first — it matches a narrower path prefix).
+        #[cfg(feature = "cloudfront-dataplane")]
+        {
+            let mut builder = DataPlane::builder()
+                .cloudfront(Arc::clone(&cf_provider))
+                .config(DataPlaneConfig::from_env());
+            if let Some(s3) = s3_provider_arc.as_ref() {
+                builder = builder.s3(Arc::clone(s3));
+            }
+            match builder.build() {
+                Ok(plane) => {
+                    services.push(Box::new(service::CloudFrontDataPlaneRouter::new(plane)));
+                }
+                Err(e) => warn!(error = %e, "failed to initialise CloudFront data plane"),
+            }
+        }
+
+        services.push(Box::new(service::CloudFrontServiceRouter::new(cf_service)));
+    }
+
+    // Register S3 last if enabled.
+    #[cfg(feature = "s3")]
+    if let Some(s3_provider) = s3_provider_arc {
+        let s3_config = S3Config::from_env();
+        let s3_handler = handler::RustackHandler((*s3_provider).clone());
         let s3_http_config = build_s3_http_config(&s3_config);
         let s3_service = S3HttpService::new(s3_handler, s3_http_config);
         services.push(Box::new(service::S3ServiceRouter::new(s3_service)));

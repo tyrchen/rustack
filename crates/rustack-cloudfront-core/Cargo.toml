@@ -1,0 +1,25 @@
+[package]
+name = "rustack-cloudfront-core"
+description = "CloudFront business logic for Rustack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustack-core = { workspace = true }
+rustack-cloudfront-model = { workspace = true }
+
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

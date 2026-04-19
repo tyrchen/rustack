@@ -436,6 +436,23 @@ pub fn sts_client() -> aws_sdk_sts::Client {
     aws_sdk_sts::Client::from_conf(config)
 }
 
+/// Create a configured CloudFront client pointing at the local server.
+#[must_use]
+pub fn cloudfront_client() -> aws_sdk_cloudfront::Client {
+    init_tracing();
+
+    let creds = Credentials::new("test", "test", None, None, "integration-test");
+
+    let config = aws_sdk_cloudfront::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .endpoint_url(endpoint_url())
+        .build();
+
+    aws_sdk_cloudfront::Client::from_conf(config)
+}
+
 /// Create a configured STS client with specific credentials.
 #[must_use]
 pub fn sts_client_with_credentials(
@@ -463,8 +480,11 @@ pub fn sts_client_with_credentials(
     aws_sdk_sts::Client::from_conf(config)
 }
 
+mod cloudfront_helpers;
 mod test_apigatewayv2;
 mod test_bucket;
+mod test_cloudfront;
+mod test_cloudfront_dataplane;
 mod test_cloudwatch;
 mod test_cors;
 mod test_dynamodb;
