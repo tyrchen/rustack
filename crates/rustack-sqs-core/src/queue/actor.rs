@@ -253,6 +253,16 @@ impl QueueActor {
                         QueueCommand::Shutdown => break,
                         cmd => self.handle_command(cmd),
                     }
+                    // After any command that may have enqueued messages,
+                    // try to fulfill waiting long-poll receivers directly.
+                    // We cannot rely on message_notify here because
+                    // notify_waiters() called inside handle_command() fires
+                    // while the notified() future is not being polled (it
+                    // lost the select race to commands.recv()), so the
+                    // wakeup is lost.
+                    if !self.pending_long_polls.is_empty() {
+                        self.fulfill_pending_long_polls();
+                    }
                 }
                 _ = cleanup_interval.tick() => {
                     self.periodic_cleanup();
@@ -859,6 +869,10 @@ fn try_receive_fifo(
 // ---------------------------------------------------------------------------
 
 /// Handle to a running queue actor.
+///
+/// `Clone` is derived so that callers can take an owned copy without holding
+/// a `DashMap` guard across `.await` points (which would deadlock).
+#[derive(Clone)]
 pub struct QueueHandle {
     /// Channel to send commands to the queue actor.
     pub sender: mpsc::Sender<QueueCommand>,
@@ -866,8 +880,8 @@ pub struct QueueHandle {
     pub message_notify: Arc<Notify>,
     /// Queue metadata (read-only after creation).
     pub metadata: QueueMetadata,
-    /// Actor task join handle.
-    pub task: tokio::task::JoinHandle<()>,
+    /// Actor task join handle (wrapped in Arc for Clone).
+    pub task: Arc<tokio::task::JoinHandle<()>>,
     /// Shutdown flag.
     pub shutdown: Arc<AtomicBool>,
 }
