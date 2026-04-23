@@ -225,6 +225,31 @@ def is_aws(dynamodb):
 
 
 # ---------------------------------------------------------------------------
+# Skip helpers (stand-ins for test.pylib.skip_types)
+# ---------------------------------------------------------------------------
+
+
+def skip_env(reason):
+    """Runtime skip for a missing environment requirement."""
+    pytest.skip(reason)
+
+
+def skip_bug(reason):
+    """Runtime skip for a known bug."""
+    pytest.skip(reason)
+
+
+def skip_not_implemented(reason):
+    """Runtime skip for a feature that is not yet implemented."""
+    pytest.skip(reason)
+
+
+def skip_slow(reason):
+    """Runtime skip for a test that is too slow for regular CI."""
+    pytest.skip(reason)
+
+
+# ---------------------------------------------------------------------------
 # ScyllaDB-specific stubs (no-ops for non-Scylla targets)
 # ---------------------------------------------------------------------------
 

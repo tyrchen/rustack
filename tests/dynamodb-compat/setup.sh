@@ -94,8 +94,11 @@ echo "  Patching relative imports..."
 for f in "${VENDOR_DIR}"/test_*.py; do
     # from .util import ... -> from util import ...
     sed -i.bak 's/^from \.util import/from util import/' "$f"
-    # from .util import ... (indented, shouldn't happen but just in case)
+    # from test.alternator.util import ... -> from util import ...
     sed -i.bak 's/^from test\.alternator\.util import/from util import/' "$f"
+    # from test.pylib.skip_types import ... -> from util import ...
+    # Our util.py provides stand-in implementations of skip_env/skip_bug/etc.
+    sed -i.bak 's/^from test\.pylib\.skip_types import/from util import/' "$f"
     rm -f "$f.bak"
 done
 

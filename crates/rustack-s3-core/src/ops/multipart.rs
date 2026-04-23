@@ -464,26 +464,39 @@ impl RustackS3 {
 
         // Compute the combined checksum for the final object if the multipart
         // upload was created with a checksum algorithm.
+        //
+        // FULL_OBJECT: the checksum of the concatenated object bytes (no `-N`
+        // suffix). AWS CLI verifies downloaded multipart objects by recomputing
+        // this over the body and comparing to the header value.
+        //
+        // COMPOSITE: the hash of concatenated per-part checksums, with `-N`
+        // suffix. Used for SHA-1/SHA-256 multipart uploads.
         let final_checksum = if let Some(ref algo_str) = upload.checksum_algorithm {
             if let Ok(algo) = CoreChecksumAlgorithm::from_str(algo_str) {
                 let checksum_type_str = upload.checksum_type.as_deref().unwrap_or("COMPOSITE");
 
-                // Collect part checksums in order.
-                let part_checksums: Vec<String> = part_numbers
-                    .iter()
-                    .filter_map(|&num| {
-                        upload
-                            .get_part(num)
-                            .and_then(|p| p.checksum.as_ref())
-                            .map(|c| c.value.clone())
-                    })
-                    .collect();
-
-                // Compute the composite checksum (hash of concatenated part
-                // checksums with `-N` suffix). True FULL_OBJECT CRC combination
-                // using GF(2) math is not yet implemented; composite is used as
-                // a fallback for all checksum types.
-                let value = compute_composite_checksum(algo, &part_checksums);
+                let value = if checksum_type_str == "FULL_OBJECT" {
+                    let assembled = self
+                        .storage
+                        .read_object(&bucket_name, &key, &version_id, None)
+                        .await
+                        .map_err(|e| {
+                            S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error()
+                        })?;
+                    compute_checksum(algo, &assembled)
+                } else {
+                    // Collect part checksums in order for composite calculation.
+                    let part_checksums: Vec<String> = part_numbers
+                        .iter()
+                        .filter_map(|&num| {
+                            upload
+                                .get_part(num)
+                                .and_then(|p| p.checksum.as_ref())
+                                .map(|c| c.value.clone())
+                        })
+                        .collect();
+                    compute_composite_checksum(algo, &part_checksums)
+                };
 
                 Some(ChecksumData {
                     algorithm: algo_str.clone(),
