@@ -10,6 +10,14 @@
 //! GATEWAY_LISTEN=0.0.0.0:4566 rustack
 //! ```
 //!
+//! # Flags
+//!
+//! | Flag | Description |
+//! |------|-------------|
+//! | `-h`, `--help` | Print help and exit |
+//! | `-v`, `--version` | Print version and exit |
+//! | `--health-check` | Probe the gateway health endpoint (exit 0 if healthy) |
+//!
 //! # Environment Variables
 //!
 //! | Variable | Default | Description |
@@ -199,6 +207,92 @@ use crate::{gateway::GatewayService, service::ServiceRouter};
 
 /// Server version reported in health check responses.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Binary name reported in `--help` / `--version` output.
+const BIN_NAME: &str = "rustack";
+
+/// Short product description used by `--help`.
+const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
+
+/// Classification of command-line invocation.
+///
+/// Parsed once up front by [`classify_args`] so `main` can dispatch without
+/// scanning argv repeatedly.
+#[derive(Debug, PartialEq, Eq)]
+enum CliAction {
+    /// Start the gateway server (the default).
+    Run,
+    /// Print help text to stdout and exit 0.
+    Help,
+    /// Print version to stdout and exit 0.
+    Version,
+    /// Probe the gateway health endpoint (used by Docker `HEALTHCHECK`).
+    HealthCheck,
+    /// An unrecognised flag was supplied.
+    UnknownFlag(String),
+}
+
+/// Classify a sequence of CLI arguments (including argv\[0\]) into a [`CliAction`].
+///
+/// Precedence: `--help` > `--version` > `--health-check`. Positional args are
+/// ignored (the binary takes no positional arguments today). Any other token
+/// that starts with `-` is treated as an unknown flag.
+fn classify_args<I, S>(args: I) -> CliAction
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut action = CliAction::Run;
+    let mut iter = args.into_iter();
+    // Skip the program name (argv[0]).
+    iter.next();
+    for arg in iter {
+        match arg.as_ref() {
+            "-h" | "--help" => return CliAction::Help,
+            "-v" | "--version" => return CliAction::Version,
+            "--health-check" => action = CliAction::HealthCheck,
+            other if other.starts_with('-') => {
+                return CliAction::UnknownFlag(other.to_string());
+            }
+            _ => {}
+        }
+    }
+    action
+}
+
+/// Render the `--help` text. Kept pure so it can be snapshot-tested.
+fn help_text() -> String {
+    let services = parse_services_value("").join(", ");
+    format!(
+        "{BIN_NAME} {VERSION}\n\
+         {DESCRIPTION}\n\
+         \n\
+         USAGE:\n    \
+         {BIN_NAME} [FLAGS]\n\
+         \n\
+         FLAGS:\n    \
+         -h, --help            Print this help message and exit\n    \
+         -v, --version         Print version information and exit\n        \
+         --health-check    Probe the gateway health endpoint, exit 0 if healthy\n\
+         \n\
+         ENVIRONMENT:\n    \
+         GATEWAY_LISTEN        Bind address (default: 0.0.0.0:4566)\n    \
+         SERVICES              Comma-separated list of services to enable (default: all compiled-in)\n    \
+         LOG_LEVEL             Log level filter (default: info)\n    \
+         RUST_LOG              Fine-grained tracing filter (overrides LOG_LEVEL)\n    \
+         ACCESS_KEY,SECRET_KEY Static credentials (also accepts AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)\n\
+         \n\
+         COMPILED-IN SERVICES:\n    \
+         {services}\n\
+         \n\
+         See https://github.com/tyrchen/rustack for full documentation.\n"
+    )
+}
+
+/// Render the `--version` text.
+fn version_text() -> String {
+    format!("{BIN_NAME} {VERSION}\n")
+}
 
 /// Initialize the tracing subscriber.
 ///
@@ -1055,15 +1149,32 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let listen_addr = gateway_listen_addr();
-
-    // Handle --health-check flag for Docker HEALTHCHECK.
-    if std::env::args().any(|a| a == "--health-check") {
-        let addr = listen_addr.replace("0.0.0.0", "127.0.0.1");
-        let healthy = run_health_check(&addr).await.is_ok();
-        std::process::exit(i32::from(!healthy));
+    // Parse CLI flags once and dispatch. Help / version are handled before
+    // any tracing or config work so they're cheap and side-effect free.
+    match classify_args(std::env::args()) {
+        CliAction::Help => {
+            print!("{}", help_text());
+            return Ok(());
+        }
+        CliAction::Version => {
+            print!("{}", version_text());
+            return Ok(());
+        }
+        CliAction::UnknownFlag(flag) => {
+            eprintln!("error: unrecognised flag '{flag}'\n");
+            eprint!("{}", help_text());
+            std::process::exit(2);
+        }
+        CliAction::HealthCheck => {
+            let listen_addr = gateway_listen_addr();
+            let addr = listen_addr.replace("0.0.0.0", "127.0.0.1");
+            let healthy = run_health_check(&addr).await.is_ok();
+            std::process::exit(i32::from(!healthy));
+        }
+        CliAction::Run => {}
     }
 
+    let listen_addr = gateway_listen_addr();
     let log = log_level();
     init_tracing(&log)?;
 
@@ -1183,6 +1294,72 @@ mod tests {
             config.s3_skip_signature_validation
         );
         assert_eq!(http_config.region, config.default_region);
+    }
+
+    #[test]
+    fn test_should_classify_no_args_as_run() {
+        assert_eq!(classify_args(["rustack"]), CliAction::Run);
+    }
+
+    #[test]
+    fn test_should_classify_long_help_flag() {
+        assert_eq!(classify_args(["rustack", "--help"]), CliAction::Help);
+    }
+
+    #[test]
+    fn test_should_classify_short_help_flag() {
+        assert_eq!(classify_args(["rustack", "-h"]), CliAction::Help);
+    }
+
+    #[test]
+    fn test_should_classify_long_version_flag() {
+        assert_eq!(classify_args(["rustack", "--version"]), CliAction::Version);
+    }
+
+    #[test]
+    fn test_should_classify_short_version_flag() {
+        assert_eq!(classify_args(["rustack", "-v"]), CliAction::Version);
+    }
+
+    #[test]
+    fn test_should_classify_health_check_flag() {
+        assert_eq!(
+            classify_args(["rustack", "--health-check"]),
+            CliAction::HealthCheck
+        );
+    }
+
+    #[test]
+    fn test_should_prefer_help_over_other_flags() {
+        // Help wins even when combined with --health-check.
+        assert_eq!(
+            classify_args(["rustack", "--health-check", "--help"]),
+            CliAction::Help
+        );
+    }
+
+    #[test]
+    fn test_should_classify_unknown_flag() {
+        assert_eq!(
+            classify_args(["rustack", "--nope"]),
+            CliAction::UnknownFlag("--nope".to_string())
+        );
+    }
+
+    #[test]
+    fn test_help_text_includes_binary_name_and_version() {
+        let text = help_text();
+        assert!(text.contains(BIN_NAME));
+        assert!(text.contains(VERSION));
+        assert!(text.contains("--help"));
+        assert!(text.contains("--version"));
+        assert!(text.contains("--health-check"));
+        assert!(text.contains("GATEWAY_LISTEN"));
+    }
+
+    #[test]
+    fn test_version_text_is_name_and_version() {
+        assert_eq!(version_text(), format!("{BIN_NAME} {VERSION}\n"));
     }
 
     #[cfg(feature = "dynamodb")]
