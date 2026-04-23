@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use dashmap::DashMap;
-use rand::Rng;
+use rand::RngExt;
 use rustack_secretsmanager_model::{
     error::{SecretsManagerError, SecretsManagerErrorCode},
     types::{RotationRulesType, Tag},

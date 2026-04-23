@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
 use tracing::debug;

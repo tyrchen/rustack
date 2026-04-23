@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use rand::Rng;
+use rand::RngExt;
 use rustack_apigatewayv2_model::types::{
     AccessLogSettings, AuthorizationType, AuthorizerType, ConnectionType, ContentHandlingStrategy,
     Cors, DeploymentStatus, DomainNameConfiguration, IntegrationType, IpAddressType,

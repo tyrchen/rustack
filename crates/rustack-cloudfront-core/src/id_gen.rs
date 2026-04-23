@@ -6,7 +6,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use rand::Rng;
+use rand::RngExt;
 
 const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
