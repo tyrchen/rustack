@@ -1,6 +1,6 @@
 //! Temporary credential generation.
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Generate temporary AWS credentials.
 #[derive(Debug)]

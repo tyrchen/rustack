@@ -1,6 +1,6 @@
 //! Random password generation with configurable constraints.
 
-use rand::Rng;
+use rand::RngExt;
 use rustack_secretsmanager_model::error::{SecretsManagerError, SecretsManagerErrorCode};
 
 /// Default password length.

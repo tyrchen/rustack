@@ -6,7 +6,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
-use rand::Rng;
+use rand::RngExt;
 use uuid::Uuid;
 
 use crate::error::S3ServiceError;

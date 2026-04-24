@@ -54,7 +54,7 @@ pub struct InFlightMessage {
 pub fn md5_of_body(body: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(body.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Compute the MD5 hex digest of message attributes following the AWS specification.
@@ -93,7 +93,7 @@ pub fn md5_of_message_attributes(attrs: &HashMap<String, MessageAttributeValue>)
             hasher.update(binary_value);
         }
     }
-    Some(format!("{:x}", hasher.finalize()))
+    Some(hex::encode(hasher.finalize()))
 }
 
 /// Generate a receipt handle for a received message.

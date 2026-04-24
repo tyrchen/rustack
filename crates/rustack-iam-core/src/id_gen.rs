@@ -5,7 +5,7 @@
 //! - Access key IDs: `AKIA` + 16 uppercase alphanumeric characters
 //! - Secret access keys: 40 mixed-case alphanumeric + special characters
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Uppercase alphanumeric character set for IAM IDs.
 const UPPER_ALPHANUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";

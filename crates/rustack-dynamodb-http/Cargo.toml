@@ -1,7 +1,7 @@
 [package]
 name = "rustack-dynamodb-http"
 description = "DynamoDB HTTP service layer for Rustack"
-version.workspace = true
+version = "0.7.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
