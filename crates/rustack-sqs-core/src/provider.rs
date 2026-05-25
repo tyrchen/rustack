@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use dashmap::{DashMap, mapref::multiple::RefMulti};
+use dashmap::DashMap;
 use rustack_sqs_model::{
     error::SqsError,
     input::{
@@ -46,7 +46,7 @@ use crate::{
 #[derive(Debug)]
 pub struct RustackSqs {
     /// Queue registry: queue_name -> QueueHandle.
-    queues: DashMap<String, QueueHandle>,
+    queues: DashMap<String, Arc<QueueHandle>>,
     /// Configuration.
     config: Arc<SqsConfig>,
 }
@@ -73,17 +73,17 @@ impl RustackSqs {
             })
     }
 
-    /// Get a reference to a queue handle by URL.
-    fn get_queue(
-        &self,
-        queue_url_str: &str,
-    ) -> Result<dashmap::mapref::one::Ref<'_, String, QueueHandle>, SqsError> {
+    /// Get an owned queue handle by URL.
+    fn get_queue(&self, queue_url_str: &str) -> Result<Arc<QueueHandle>, SqsError> {
         let name = Self::resolve_queue_name(queue_url_str)?;
-        self.queues.get(&name).ok_or_else(|| {
-            SqsError::non_existent_queue(
-                "The specified queue does not exist for this wsdl version.",
-            )
-        })
+        self.queues
+            .get(&name)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| {
+                SqsError::non_existent_queue(
+                    "The specified queue does not exist for this wsdl version.",
+                )
+            })
     }
 
     // ---- Queue Management Operations ----
@@ -118,7 +118,11 @@ impl RustackSqs {
 
         // Idempotent create: if queue exists with same attributes, return existing URL.
         // If attributes differ, return QueueAlreadyExists.
-        if let Some(existing) = self.queues.get(queue_name) {
+        if let Some(existing) = self
+            .queues
+            .get(queue_name)
+            .map(|entry| Arc::clone(entry.value()))
+        {
             if !input.attributes.is_empty() {
                 let existing_attrs = existing
                     .get_attributes(vec!["All".to_owned()])
@@ -175,7 +179,7 @@ impl RustackSqs {
         );
         let task = tokio::spawn(actor.run());
 
-        let handle = QueueHandle {
+        let handle = Arc::new(QueueHandle {
             sender,
             metadata: QueueMetadata {
                 name: queue_name.clone(),
@@ -186,7 +190,7 @@ impl RustackSqs {
             },
             task,
             shutdown: Arc::new(AtomicBool::new(false)),
-        };
+        });
 
         self.queues.insert(queue_name.clone(), handle);
         tracing::info!(queue = %queue_name, "created SQS queue");
@@ -236,14 +240,14 @@ impl RustackSqs {
         let mut urls: Vec<String> = self
             .queues
             .iter()
-            .filter(|entry: &RefMulti<'_, String, QueueHandle>| {
+            .filter(|entry| {
                 if let Some(ref prefix) = input.queue_name_prefix {
                     entry.key().starts_with(prefix.as_str())
                 } else {
                     true
                 }
             })
-            .map(|entry: RefMulti<'_, String, QueueHandle>| entry.value().metadata.url.clone())
+            .map(|entry| entry.value().metadata.url.clone())
             .collect();
 
         urls.sort();
@@ -506,12 +510,15 @@ impl RustackSqs {
     ) -> Result<ListDeadLetterSourceQueuesOutput, SqsError> {
         let target_handle = self.get_queue(&input.queue_url)?;
         let target_arn = target_handle.metadata.arn.clone();
-        drop(target_handle);
 
+        let source_handles: Vec<_> = self
+            .queues
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect();
         let mut source_urls = Vec::new();
-        for entry in &self.queues {
-            let attrs: Result<HashMap<String, String>, SqsError> = entry
-                .value()
+        for handle in source_handles {
+            let attrs: Result<HashMap<String, String>, SqsError> = handle
                 .get_attributes(vec!["RedrivePolicy".to_owned()])
                 .await;
             if let Ok(attrs) = attrs {
@@ -520,7 +527,7 @@ impl RustackSqs {
                         serde_json::from_str::<rustack_sqs_model::types::RedrivePolicy>(policy_json)
                     {
                         if policy.dead_letter_target_arn == target_arn {
-                            source_urls.push(entry.value().metadata.url.clone());
+                            source_urls.push(handle.metadata.url.clone());
                         }
                     }
                 }

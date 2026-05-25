@@ -197,6 +197,7 @@ impl std::fmt::Debug for QueueActor {
 
 impl QueueActor {
     /// Create a new queue actor.
+    #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
@@ -245,13 +246,11 @@ impl QueueActor {
 
             tokio::select! {
                 Some(cmd) = self.commands.recv() => {
-                    match cmd {
+                    let should_fulfill_long_polls = match cmd {
                         QueueCommand::Shutdown => break,
                         cmd => self.handle_command(cmd),
-                    }
-                    // After any command that may have enqueued messages,
-                    // try to fulfill waiting long-poll receivers directly.
-                    if !self.pending_long_polls.is_empty() {
+                    };
+                    if should_fulfill_long_polls && !self.pending_long_polls.is_empty() {
                         self.fulfill_pending_long_polls();
                     }
                 }
@@ -268,21 +267,25 @@ impl QueueActor {
 
     /// Handle a single command.
     #[allow(clippy::too_many_lines)]
-    fn handle_command(&mut self, cmd: QueueCommand) {
+    fn handle_command(&mut self, cmd: QueueCommand) -> bool {
         match cmd {
             QueueCommand::SendMessage { input, reply } => {
                 let result = self.handle_send_message(input);
-                let _ = reply.send(result);
+                let should_fulfill_long_polls = matches!(&result, Ok((_, true)));
+                let _ = reply.send(result.map(|(output, _)| output));
+                should_fulfill_long_polls
             }
             QueueCommand::ReceiveMessage { input, reply } => {
                 self.handle_receive_message(input, reply);
+                false
             }
             QueueCommand::DeleteMessage {
                 receipt_handle,
                 reply,
             } => {
-                let result = self.handle_delete_message(&receipt_handle);
-                let _ = reply.send(result);
+                let should_fulfill_long_polls = self.handle_delete_message(&receipt_handle);
+                let _ = reply.send(Ok(()));
+                should_fulfill_long_polls
             }
             QueueCommand::ChangeVisibility {
                 receipt_handle,
@@ -290,7 +293,9 @@ impl QueueActor {
                 reply,
             } => {
                 let result = self.handle_change_visibility(&receipt_handle, visibility_timeout);
-                let _ = reply.send(result);
+                let should_fulfill_long_polls = matches!(&result, Ok(true));
+                let _ = reply.send(result.map(|_| ()));
+                should_fulfill_long_polls
             }
             QueueCommand::GetAttributes {
                 attribute_names,
@@ -309,6 +314,7 @@ impl QueueActor {
                     counts,
                 );
                 let _ = reply.send(attrs);
+                false
             }
             QueueCommand::SetAttributes { attributes, reply } => {
                 let result = self.attributes.update_from_map(&attributes, self.is_fifo);
@@ -316,26 +322,32 @@ impl QueueActor {
                     self.last_modified_at = crate::message::now_epoch_seconds();
                 }
                 let _ = reply.send(result);
+                false
             }
             QueueCommand::Purge { reply } => {
                 let result = self.handle_purge();
                 let _ = reply.send(result);
+                false
             }
             QueueCommand::GetTags { reply } => {
                 let _ = reply.send(self.tags.clone());
+                false
             }
             QueueCommand::SetTags { tags, reply } => {
                 self.tags.extend(tags);
                 let _ = reply.send(());
+                false
             }
             QueueCommand::RemoveTags { keys, reply } => {
                 for key in &keys {
                     self.tags.remove(key);
                 }
                 let _ = reply.send(());
+                false
             }
             QueueCommand::Shutdown => {
                 // Handled in the event loop.
+                false
             }
         }
     }
@@ -345,7 +357,7 @@ impl QueueActor {
     fn handle_send_message(
         &mut self,
         input: SendMessageInput,
-    ) -> Result<SendMessageOutput, SqsError> {
+    ) -> Result<(SendMessageOutput, bool), SqsError> {
         // Validate message body.
         if input.message_body.is_empty() {
             return Err(SqsError::invalid_parameter_value(
@@ -380,7 +392,7 @@ impl QueueActor {
     fn handle_send_message_standard(
         &mut self,
         input: SendMessageInput,
-    ) -> Result<SendMessageOutput, SqsError> {
+    ) -> Result<(SendMessageOutput, bool), SqsError> {
         // Reject FIFO-only fields on standard queues.
         if input.message_group_id.is_some() {
             return Err(SqsError::invalid_parameter_value(
@@ -433,20 +445,25 @@ impl QueueActor {
             storage.available.push_back(msg);
         }
 
-        Ok(SendMessageOutput {
-            message_id: Some(message_id),
-            md5_of_message_body: Some(body_md5),
-            md5_of_message_attributes: attr_md5,
-            md5_of_message_system_attributes: None,
-            sequence_number: None,
-        })
+        let should_fulfill_long_polls = delay_seconds <= 0;
+
+        Ok((
+            SendMessageOutput {
+                message_id: Some(message_id),
+                md5_of_message_body: Some(body_md5),
+                md5_of_message_attributes: attr_md5,
+                md5_of_message_system_attributes: None,
+                sequence_number: None,
+            },
+            should_fulfill_long_polls,
+        ))
     }
 
     /// Send a message to a FIFO queue with deduplication and sequencing.
     fn handle_send_message_fifo(
         &mut self,
         input: SendMessageInput,
-    ) -> Result<SendMessageOutput, SqsError> {
+    ) -> Result<(SendMessageOutput, bool), SqsError> {
         let QueueStorage::Fifo(ref mut storage) = self.storage else {
             return Err(SqsError::internal_error("Storage type mismatch"));
         };
@@ -516,17 +533,29 @@ impl QueueActor {
             EnqueueResult::Enqueued {
                 message_id: mid,
                 sequence_number,
-            }
-            | EnqueueResult::Deduplicated {
+            } => Ok((
+                SendMessageOutput {
+                    message_id: Some(mid),
+                    md5_of_message_body: Some(body_md5),
+                    md5_of_message_attributes: attr_md5,
+                    md5_of_message_system_attributes: None,
+                    sequence_number: Some(sequence_number),
+                },
+                true,
+            )),
+            EnqueueResult::Deduplicated {
                 message_id: mid,
                 sequence_number,
-            } => Ok(SendMessageOutput {
-                message_id: Some(mid),
-                md5_of_message_body: Some(body_md5),
-                md5_of_message_attributes: attr_md5,
-                md5_of_message_system_attributes: None,
-                sequence_number: Some(sequence_number),
-            }),
+            } => Ok((
+                SendMessageOutput {
+                    message_id: Some(mid),
+                    md5_of_message_body: Some(body_md5),
+                    md5_of_message_attributes: attr_md5,
+                    md5_of_message_system_attributes: None,
+                    sequence_number: Some(sequence_number),
+                },
+                false,
+            )),
         }
     }
 
@@ -605,18 +634,14 @@ impl QueueActor {
     }
 
     /// Handle `DeleteMessage`.
-    #[allow(clippy::unnecessary_wraps)]
-    fn handle_delete_message(&mut self, receipt_handle: &str) -> Result<(), SqsError> {
+    fn handle_delete_message(&mut self, receipt_handle: &str) -> bool {
         match &mut self.storage {
             QueueStorage::Standard(storage) => {
                 storage.in_flight.remove(receipt_handle);
+                false
             }
-            QueueStorage::Fifo(storage) => {
-                storage.delete_message(receipt_handle);
-            }
+            QueueStorage::Fifo(storage) => storage.delete_message(receipt_handle),
         }
-        // AWS SQS is lenient: delete of non-existent receipt handle succeeds.
-        Ok(())
     }
 
     /// Handle `ChangeMessageVisibility`.
@@ -625,19 +650,23 @@ impl QueueActor {
         &mut self,
         receipt_handle: &str,
         visibility_timeout: i32,
-    ) -> Result<(), SqsError> {
+    ) -> Result<bool, SqsError> {
         match &mut self.storage {
             QueueStorage::Standard(storage) => {
-                if let Some(ifm) = storage.in_flight.get_mut(receipt_handle) {
-                    if visibility_timeout == 0 {
-                        let ifm = storage.in_flight.remove(receipt_handle).unwrap();
+                if visibility_timeout == 0 {
+                    if let Some(ifm) = storage.in_flight.remove(receipt_handle) {
                         storage.available.push_back(ifm.message);
-
+                        Ok(true)
                     } else {
-                        ifm.visible_at =
-                            Instant::now() + Duration::from_secs(visibility_timeout as u64);
+                        Err(SqsError::new(
+                            rustack_sqs_model::error::SqsErrorCode::MessageNotInflight,
+                            "Message does not exist or is not available for visibility timeout change.",
+                        ))
                     }
-                    Ok(())
+                } else if let Some(ifm) = storage.in_flight.get_mut(receipt_handle) {
+                    ifm.visible_at =
+                        Instant::now() + Duration::from_secs(visibility_timeout as u64);
+                    Ok(false)
                 } else {
                     Err(SqsError::new(
                         rustack_sqs_model::error::SqsErrorCode::MessageNotInflight,
@@ -652,10 +681,7 @@ impl QueueActor {
                     Instant::now() + Duration::from_secs(visibility_timeout as u64)
                 };
                 if storage.change_visibility(receipt_handle, visible_at) {
-                    if visibility_timeout == 0 {
-
-                    }
-                    Ok(())
+                    Ok(visibility_timeout == 0)
                 } else {
                     Err(SqsError::new(
                         rustack_sqs_model::error::SqsErrorCode::MessageNotInflight,
@@ -1119,4 +1145,131 @@ fn merge_attribute_names(old: &[String], new: &[String]) -> Vec<String> {
         }
     }
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use rustack_sqs_model::input::{ReceiveMessageInput, SendMessageInput};
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::{QueueActor, QueueCommand};
+    use crate::queue::attributes::QueueAttributes;
+
+    fn test_actor() -> QueueActor {
+        let (_sender, receiver) = mpsc::channel(8);
+        QueueActor::new(
+            "test-queue".to_owned(),
+            "arn:aws:sqs:us-east-1:000000000000:test-queue".to_owned(),
+            false,
+            QueueAttributes::default(),
+            receiver,
+            HashMap::new(),
+            "000000000000".to_owned(),
+            0,
+        )
+    }
+
+    fn receive_input(wait_time_seconds: i32) -> ReceiveMessageInput {
+        ReceiveMessageInput {
+            queue_url: "http://localhost:4566/000000000000/test-queue".to_owned(),
+            wait_time_seconds: Some(wait_time_seconds),
+            ..ReceiveMessageInput::default()
+        }
+    }
+
+    fn send_input(delay_seconds: Option<i32>) -> SendMessageInput {
+        SendMessageInput {
+            queue_url: "http://localhost:4566/000000000000/test-queue".to_owned(),
+            message_body: "test body".to_owned(),
+            delay_seconds,
+            ..SendMessageInput::default()
+        }
+    }
+
+    #[test]
+    fn receive_long_poll_registration_does_not_request_fulfill() {
+        let mut actor = test_actor();
+        let (reply, mut response) = oneshot::channel();
+
+        let should_fulfill = actor.handle_command(QueueCommand::ReceiveMessage {
+            input: receive_input(20),
+            reply,
+        });
+
+        assert!(!should_fulfill);
+        assert_eq!(actor.pending_long_polls.len(), 1);
+        assert!(response.try_recv().is_err());
+    }
+
+    #[test]
+    fn standard_send_wakeup_decision_tracks_immediate_visibility() {
+        let mut actor = test_actor();
+        let (reply, mut response) = oneshot::channel();
+
+        let should_fulfill = actor.handle_command(QueueCommand::SendMessage {
+            input: send_input(None),
+            reply,
+        });
+
+        assert!(should_fulfill);
+        assert!(
+            response
+                .try_recv()
+                .expect("send command should reply")
+                .is_ok()
+        );
+
+        let (reply, mut response) = oneshot::channel();
+        let should_fulfill = actor.handle_command(QueueCommand::SendMessage {
+            input: send_input(Some(5)),
+            reply,
+        });
+
+        assert!(!should_fulfill);
+        assert!(
+            response
+                .try_recv()
+                .expect("delayed send command should reply")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn immediate_send_fulfills_existing_long_poll() {
+        let mut actor = test_actor();
+        let (receive_reply, mut receive_response) = oneshot::channel();
+
+        let should_fulfill = actor.handle_command(QueueCommand::ReceiveMessage {
+            input: receive_input(20),
+            reply: receive_reply,
+        });
+
+        assert!(!should_fulfill);
+        assert_eq!(actor.pending_long_polls.len(), 1);
+
+        let (send_reply, mut send_response) = oneshot::channel();
+        let should_fulfill = actor.handle_command(QueueCommand::SendMessage {
+            input: send_input(None),
+            reply: send_reply,
+        });
+        assert!(should_fulfill);
+        assert!(
+            send_response
+                .try_recv()
+                .expect("send command should reply")
+                .is_ok()
+        );
+
+        actor.fulfill_pending_long_polls();
+
+        assert!(actor.pending_long_polls.is_empty());
+        let output = receive_response
+            .try_recv()
+            .expect("long poll should receive a response")
+            .expect("long poll should succeed");
+        assert_eq!(output.messages.len(), 1);
+        assert_eq!(output.messages[0].body.as_deref(), Some("test body"));
+    }
 }
