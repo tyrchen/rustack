@@ -1,0 +1,6 @@
+name: rustack-target
+runtime:
+  name: nodejs
+  options:
+    packagemanager: npm
+description: Pulumi AWS provider smoke program targeting Rustack.

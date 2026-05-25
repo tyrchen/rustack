@@ -1,0 +1,39 @@
+name: pulumi-test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pulumi-smoke:
+    name: Pulumi AWS provider smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: examples/pulumi/rustack-target/package-lock.json
+
+      - name: Install Pulumi
+        run: |
+          curl -fsSL https://get.pulumi.com | sh -s -- --version 3.243.0
+          echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"
+
+      - name: Run Pulumi smoke
+        run: make pulumi-smoke
