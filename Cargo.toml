@@ -40,7 +40,7 @@ rustack-dynamodb-http = { version = "0.7.1", path = "crates/rustack-dynamodb-htt
 rustack-dynamodb-core = { version = "0.7.1", path = "crates/rustack-dynamodb-core" }
 rustack-sqs-model = { version = "0.7.0", path = "crates/rustack-sqs-model" }
 rustack-sqs-http = { version = "0.7.1", path = "crates/rustack-sqs-http" }
-rustack-sqs-core = { version = "0.7.1", path = "crates/rustack-sqs-core" }
+rustack-sqs-core = { version = "0.7.2", path = "crates/rustack-sqs-core" }
 rustack-ssm-model = { version = "0.7.0", path = "crates/rustack-ssm-model" }
 rustack-ssm-http = { version = "0.7.1", path = "crates/rustack-ssm-http" }
 rustack-ssm-core = { version = "0.7.1", path = "crates/rustack-ssm-core" }

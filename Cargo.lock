@@ -2821,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cli"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sqs-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64",
