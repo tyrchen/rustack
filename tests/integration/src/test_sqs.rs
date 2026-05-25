@@ -851,4 +851,261 @@ mod tests {
 
         delete_test_queue(&client, &url).await;
     }
+
+    // ---------------------------------------------------------------------------
+    // Bug: Long-poll does not wake up when a message is sent mid-poll
+    // ---------------------------------------------------------------------------
+    //
+    // ReceiveMessage with WaitTimeSeconds>0 should return immediately when a
+    // message is sent to the queue while the long-poll is in progress.
+    //
+    // Root cause: the actor event loop uses `tokio::select!` with both
+    // `commands.recv()` and `message_notify.notified()` as arms. When a
+    // SendMessage command arrives via `commands.recv()`, it calls
+    // `notify_waiters()` inside `handle_command`. But the `notified()` future
+    // lost the select race and is not being polled, so the notification is lost.
+    // The pending long-poll is only fulfilled when it expires (WaitTimeSeconds
+    // later), not when the message becomes available.
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_long_poll_wakes_on_new_message() {
+        let client = sqs_client();
+        let (_, url) = create_test_queue(&client, "longpoll-wake").await;
+
+        let recv_client = sqs_client();
+        let recv_url = url.clone();
+
+        // Start a long-poll in a background task (20s wait time).
+        let recv_handle = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            let result = recv_client
+                .receive_message()
+                .queue_url(&recv_url)
+                .max_number_of_messages(1)
+                .wait_time_seconds(20)
+                .send()
+                .await
+                .unwrap();
+            (result, start.elapsed())
+        });
+
+        // Give the long-poll a moment to register.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Send a message while the long-poll is in progress.
+        client
+            .send_message()
+            .queue_url(&url)
+            .message_body("wake up!")
+            .send()
+            .await
+            .unwrap();
+
+        // The long-poll should return almost immediately (well under 20s).
+        let (result, elapsed) = recv_handle.await.unwrap();
+
+        assert_eq!(result.messages().len(), 1);
+        assert_eq!(result.messages()[0].body().unwrap(), "wake up!");
+        assert!(
+            elapsed.as_secs() < 5,
+            "long-poll took {elapsed:?} — should have woken up immediately, \
+             not waited for the full WaitTimeSeconds"
+        );
+
+        delete_test_queue(&client, &url).await;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Bug: DashMap guard held across .await causes deadlock under concurrency
+    // ---------------------------------------------------------------------------
+    //
+    // The SQS provider's `get_queue()` returns a `DashMap::Ref` (read guard).
+    // All operation methods (send_message, receive_message, etc.) hold this
+    // guard while `.await`-ing the actor's response via a oneshot channel.
+    //
+    // Under concurrent load — especially when CreateQueue and DeleteQueue run
+    // alongside message operations — the DashMap shard locks contend and the
+    // runtime deadlocks: a task holding a read guard awaits on the actor, while
+    // another task needs a write guard on the same shard to complete a delete,
+    // but cannot acquire it because the read guard is held across the await.
+    //
+    // This test reproduces the issue by hammering create/delete/send/receive
+    // concurrently on many queues.
+
+    /// Concurrent queue lifecycle operations stress test.
+    ///
+    /// Multiple tasks simultaneously create, use (idempotent re-create which
+    /// triggers `get_attributes` while holding a `DashMap` read guard), send,
+    /// receive via long-poll, and delete queues.  Under the original code the
+    /// `DashMap::Ref` returned by `get_queue()` is held across `.await` points
+    /// which can deadlock the tokio runtime when shard locks contend.
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_concurrent_queue_operations_do_not_deadlock() {
+        let client = std::sync::Arc::new(sqs_client());
+        let mut handles = Vec::new();
+
+        // Spawn 50 concurrent tasks.  Each task creates a queue, then
+        // re-creates it (idempotent path that calls get_attributes while
+        // holding the DashMap guard), sends messages, receives with a short
+        // long-poll, and deletes.  The mix of create+delete across tasks
+        // maximises DashMap shard contention.
+        for i in 0..50 {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                let name = format!(
+                    "test-deadlock-{}-{}",
+                    i,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
+
+                // First create.
+                let url = c
+                    .create_queue()
+                    .queue_name(&name)
+                    .send()
+                    .await
+                    .unwrap()
+                    .queue_url()
+                    .unwrap()
+                    .to_string();
+
+                // Idempotent re-create — this takes the code path that calls
+                // get_attributes while holding the DashMap read guard.
+                let url2 = c
+                    .create_queue()
+                    .queue_name(&name)
+                    .send()
+                    .await
+                    .unwrap()
+                    .queue_url()
+                    .unwrap()
+                    .to_string();
+                assert_eq!(url, url2);
+
+                // Send messages.
+                for j in 0..5 {
+                    c.send_message()
+                        .queue_url(&url)
+                        .message_body(format!("msg-{i}-{j}"))
+                        .send()
+                        .await
+                        .unwrap();
+                }
+
+                // Receive with a short long-poll so we also exercise the
+                // long-poll path concurrently.
+                let recv = c
+                    .receive_message()
+                    .queue_url(&url)
+                    .max_number_of_messages(10)
+                    .wait_time_seconds(1)
+                    .send()
+                    .await
+                    .unwrap();
+
+                assert!(
+                    !recv.messages().is_empty(),
+                    "queue {name} should have messages"
+                );
+
+                // Delete the queue — takes a write lock on the DashMap shard.
+                c.delete_queue().queue_url(&url).send().await.unwrap();
+            }));
+        }
+
+        // All tasks must complete within 30 seconds. A deadlock will cause
+        // this to time out.
+        let deadline = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            futures::future::join_all(handles),
+        )
+        .await
+        .expect("deadlock: concurrent queue operations did not complete within 30s");
+
+        for result in deadline {
+            result.expect("task panicked");
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Bug: ChangeMessageVisibility doesn't wake long-poll waiters
+    // ---------------------------------------------------------------------------
+    //
+    // When a consumer calls ChangeMessageVisibility with a short timeout (e.g.
+    // 1 second) to retry a message quickly, the message becomes available after
+    // the timeout expires but any pending ReceiveMessage long-poll is not woken
+    // up. The periodic_cleanup (1s interval) moves expired in-flight messages
+    // back to the available queue and calls notify_waiters(), but the
+    // notification is lost because the notified() future in the actor's
+    // tokio::select! loop is not being polled at that moment.
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_change_visibility_wakes_long_poll() {
+        let client = sqs_client();
+        let (_, url) = create_test_queue(&client, "vis-wake").await;
+
+        // Send a message.
+        client
+            .send_message()
+            .queue_url(&url)
+            .message_body("retry me")
+            .send()
+            .await
+            .unwrap();
+
+        // Receive it with a long visibility timeout.
+        let recv = client
+            .receive_message()
+            .queue_url(&url)
+            .visibility_timeout(60)
+            .wait_time_seconds(0)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(recv.messages().len(), 1);
+        let receipt_handle = recv.messages()[0].receipt_handle().unwrap().to_owned();
+
+        // Change visibility to 1 second — simulates a consumer requesting
+        // a quick retry after a transient error.
+        client
+            .change_message_visibility()
+            .queue_url(&url)
+            .receipt_handle(&receipt_handle)
+            .visibility_timeout(1)
+            .send()
+            .await
+            .unwrap();
+
+        // Start a long-poll that should pick up the message after the 1s
+        // visibility timeout expires.
+        let start = std::time::Instant::now();
+        let recv2 = client
+            .receive_message()
+            .queue_url(&url)
+            .max_number_of_messages(1)
+            .wait_time_seconds(10)
+            .send()
+            .await
+            .unwrap();
+
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            recv2.messages().len(),
+            1,
+            "expected message to be redelivered after visibility timeout"
+        );
+        assert_eq!(recv2.messages()[0].body().unwrap(), "retry me");
+        assert!(
+            elapsed.as_secs() < 5,
+            "long-poll took {elapsed:?} — should have returned within ~2s \
+             (1s visibility + 1s cleanup interval), not waited for the full \
+             WaitTimeSeconds"
+        );
+
+        delete_test_queue(&client, &url).await;
+    }
 }

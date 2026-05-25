@@ -20,7 +20,7 @@ use rustack_sqs_model::{
     types::Message,
 };
 use tokio::{
-    sync::{Notify, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     time::Instant,
 };
 
@@ -156,8 +156,6 @@ pub struct QueueActor {
     storage: QueueStorage,
     /// Command channel receiver.
     commands: mpsc::Receiver<QueueCommand>,
-    /// Notification for long-polling consumers.
-    message_notify: Arc<Notify>,
     /// Tags.
     tags: HashMap<String, String>,
     /// Creation timestamp (epoch seconds).
@@ -206,7 +204,6 @@ impl QueueActor {
         is_fifo: bool,
         attributes: QueueAttributes,
         commands: mpsc::Receiver<QueueCommand>,
-        message_notify: Arc<Notify>,
         tags: HashMap<String, String>,
         account_id: String,
         created_at: u64,
@@ -224,7 +221,6 @@ impl QueueActor {
             attributes,
             storage,
             commands,
-            message_notify,
             tags,
             created_at,
             last_modified_at: created_at,
@@ -253,12 +249,14 @@ impl QueueActor {
                         QueueCommand::Shutdown => break,
                         cmd => self.handle_command(cmd),
                     }
+                    // After any command that may have enqueued messages,
+                    // try to fulfill waiting long-poll receivers directly.
+                    if !self.pending_long_polls.is_empty() {
+                        self.fulfill_pending_long_polls();
+                    }
                 }
                 _ = cleanup_interval.tick() => {
                     self.periodic_cleanup();
-                }
-                () = self.message_notify.notified(), if !self.pending_long_polls.is_empty() => {
-                    self.fulfill_pending_long_polls();
                 }
                 () = tokio::time::sleep_until(next_poll_deadline), if !self.pending_long_polls.is_empty() => {
                     self.expire_long_polls();
@@ -433,7 +431,6 @@ impl QueueActor {
             storage.delayed.push(msg);
         } else {
             storage.available.push_back(msg);
-            self.message_notify.notify_waiters();
         }
 
         Ok(SendMessageOutput {
@@ -513,7 +510,6 @@ impl QueueActor {
         };
 
         let enqueue_result = storage.enqueue(msg, &effective_dedup_key);
-        self.message_notify.notify_waiters();
 
         // On dedup, return the original message's ID and sequence number per AWS spec.
         match enqueue_result {
@@ -616,11 +612,7 @@ impl QueueActor {
                 storage.in_flight.remove(receipt_handle);
             }
             QueueStorage::Fifo(storage) => {
-                if storage.delete_message(receipt_handle) {
-                    // Unblocking a FIFO group may make messages available
-                    // for pending long-poll requests.
-                    self.message_notify.notify_waiters();
-                }
+                storage.delete_message(receipt_handle);
             }
         }
         // AWS SQS is lenient: delete of non-existent receipt handle succeeds.
@@ -640,7 +632,7 @@ impl QueueActor {
                     if visibility_timeout == 0 {
                         let ifm = storage.in_flight.remove(receipt_handle).unwrap();
                         storage.available.push_back(ifm.message);
-                        self.message_notify.notify_waiters();
+
                     } else {
                         ifm.visible_at =
                             Instant::now() + Duration::from_secs(visibility_timeout as u64);
@@ -661,7 +653,7 @@ impl QueueActor {
                 };
                 if storage.change_visibility(receipt_handle, visible_at) {
                     if visibility_timeout == 0 {
-                        self.message_notify.notify_waiters();
+
                     }
                     Ok(())
                 } else {
@@ -704,8 +696,8 @@ impl QueueActor {
             }
         };
 
-        if changed {
-            self.message_notify.notify_waiters();
+        if changed && !self.pending_long_polls.is_empty() {
+            self.fulfill_pending_long_polls();
         }
 
         self.expire_long_polls();
@@ -862,8 +854,6 @@ fn try_receive_fifo(
 pub struct QueueHandle {
     /// Channel to send commands to the queue actor.
     pub sender: mpsc::Sender<QueueCommand>,
-    /// Notify for long-polling wakeup (shared with actor).
-    pub message_notify: Arc<Notify>,
     /// Queue metadata (read-only after creation).
     pub metadata: QueueMetadata,
     /// Actor task join handle.

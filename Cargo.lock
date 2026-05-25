@@ -3274,6 +3274,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "base64",
  "bytes",
+ "futures",
  "rand 0.10.1",
  "reqwest 0.13.2",
  "rustack-lambda-core",

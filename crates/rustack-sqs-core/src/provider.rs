@@ -30,7 +30,7 @@ use rustack_sqs_model::{
         StartMessageMoveTaskOutput, TagQueueOutput, UntagQueueOutput,
     },
 };
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
     config::SqsConfig,
@@ -161,7 +161,6 @@ impl RustackSqs {
 
         // Spawn queue actor.
         let (sender, receiver) = mpsc::channel(256);
-        let notify = Arc::new(Notify::new());
         let now = now_epoch_seconds();
 
         let actor = QueueActor::new(
@@ -170,7 +169,6 @@ impl RustackSqs {
             is_fifo,
             attributes,
             receiver,
-            Arc::clone(&notify),
             input.tags,
             self.config.account_id.clone(),
             now,
@@ -179,7 +177,6 @@ impl RustackSqs {
 
         let handle = QueueHandle {
             sender,
-            message_notify: notify,
             metadata: QueueMetadata {
                 name: queue_name.clone(),
                 url: url.clone(),
