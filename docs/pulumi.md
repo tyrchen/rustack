@@ -14,6 +14,18 @@ The target runs `examples/pulumi/rustack-target`, which validates STS and
 creates representative resources across every currently provisionable Rustack
 service.
 
+For a larger real-world serverless topology, run:
+
+```bash
+RUSTACK_ENDPOINT=http://127.0.0.1:4567 make pulumi-hackathon-smoke
+```
+
+That target runs `examples/pulumi/hackathon-app`, which provisions a hackathon
+application stack with CloudFront, S3 frontend/protected/upload buckets, API
+Gateway V2, Lambda API and worker functions, DynamoDB, SQS, SSM SecureString,
+IAM inline policy, CloudFront Origin Access Control, CloudFront Function token
+guard, and S3 bucket policies.
+
 ## Provider Contract
 
 Use one explicit AWS provider and pass it to every resource:
@@ -86,3 +98,13 @@ can call APIs beyond the obvious create/read/delete operations. `make
 pulumi-smoke` is the compatibility check for this provider-specific behavior.
 During cleanup, SQS queue deletion can sit in the provider waiter for around two
 minutes; this is expected and not a Rustack hang.
+
+`make pulumi-hackathon-smoke` uses the same runner and deploys the richer
+serverless topology. It also validates these Pulumi resources:
+
+- API Gateway V2: `aws.apigatewayv2.Integration`, `aws.apigatewayv2.Route`
+- CloudFront: `aws.cloudfront.Distribution`,
+  `aws.cloudfront.OriginAccessControl`
+- IAM: `aws.iam.RolePolicy`
+- Lambda: `aws.lambda.EventSourceMapping`, `aws.lambda.Permission`
+- S3: `aws.s3.BucketPolicy`

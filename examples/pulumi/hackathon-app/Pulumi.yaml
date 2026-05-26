@@ -1,0 +1,3 @@
+name: rustack-hackathon-app
+runtime: nodejs
+description: Real-world AWS serverless Pulumi stack targeting Rustack.

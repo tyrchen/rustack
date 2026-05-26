@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXAMPLE_DIR="$ROOT_DIR/examples/pulumi/rustack-target"
+EXAMPLE_DIR="${PULUMI_EXAMPLE_DIR:-$ROOT_DIR/examples/pulumi/rustack-target}"
 ENDPOINT="${RUSTACK_ENDPOINT:-http://127.0.0.1:4566}"
 STACK_NAME="${PULUMI_STACK:-rustack-smoke}"
 RUSTACK_LOG="${RUSTACK_LOG:-/tmp/rustack-pulumi-smoke.log}"
@@ -26,6 +26,7 @@ cleanup() {
       fi
       echo "Removing Pulumi smoke stack"
       pulumi stack rm "$STACK_NAME" --yes >/dev/null 2>&1
+      rm -f "Pulumi.$STACK_NAME.yaml"
     )
   fi
 
@@ -79,20 +80,20 @@ start_rustack_if_needed() {
     exit 1
   fi
 
-  case "$ENDPOINT" in
-    http://127.0.0.1:4566|http://localhost:4566) ;;
-    *)
-      echo "Cannot auto-start Rustack for non-default endpoint: $ENDPOINT" >&2
-      echo "Start Rustack yourself or use RUSTACK_ENDPOINT=http://127.0.0.1:4566." >&2
-      exit 1
-      ;;
-  esac
+  local listen_addr
+  if [[ "$ENDPOINT" =~ ^http://(127\.0\.0\.1|localhost):([0-9]+)$ ]]; then
+    listen_addr="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+  else
+    echo "Cannot auto-start Rustack for endpoint: $ENDPOINT" >&2
+    echo "Start Rustack yourself or use a local http://127.0.0.1:<port> endpoint." >&2
+    exit 1
+  fi
 
   echo "Building Rustack release binary"
   cargo build --release -p rustack-cli
 
   echo "Starting Rustack for Pulumi smoke test"
-  GATEWAY_LISTEN=127.0.0.1:4566 \
+  GATEWAY_LISTEN="$listen_addr" \
     LOG_LEVEL=warn \
     cargo run --release -p rustack-cli >"$RUSTACK_LOG" 2>&1 &
   SERVER_PID=$!

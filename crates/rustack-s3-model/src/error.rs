@@ -275,7 +275,8 @@ impl S3ErrorCode {
             Self::ObjectNotInActiveTierError => {
                 "The source object of the COPY operation is not in the active tier"
             }
-            Self::ObjectLockConfigurationNotFoundError => {
+            Self::ObjectLockConfigurationNotFoundError
+            | Self::NoSuchObjectLockConfiguration => {
                 "Object Lock configuration does not exist for this bucket"
             }
             Self::PreconditionFailed => {
@@ -289,9 +290,6 @@ impl S3ErrorCode {
             Self::BadDigest => "The Content-MD5 you specified did not match what we received",
             Self::ConditionalRequestConflict => "The conditional request cannot be processed",
             Self::MaxMessageLengthExceeded => "Your request was too big",
-            Self::NoSuchObjectLockConfiguration => {
-                "Object Lock configuration does not exist for this bucket"
-            }
             Self::NoSuchPublicAccessBlockConfiguration => {
                 "The public access block configuration was not found"
             }

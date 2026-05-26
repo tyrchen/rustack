@@ -164,6 +164,19 @@ can be targeted by the Pulumi AWS provider. Adding a new Rustack service or a
 new high-value resource type should extend this stack and require a passing
 `make pulumi-smoke` run.
 
+`examples/pulumi/hackathon-app` is the higher-fidelity application stack. It
+uses the same provider contract but validates cross-service provisioning for a
+CloudFront-fronted serverless app:
+
+- frontend route: CloudFront distribution -> S3 site bucket;
+- API route: CloudFront distribution -> API Gateway V2 -> Lambda -> DynamoDB,
+  S3 upload bucket, SQS queue, and SSM SecureString parameter;
+- protected-data route: CloudFront Function token guard -> S3 protected bucket;
+- async image route: API Lambda -> S3/SQS -> Lambda event source mapping ->
+  worker Lambda -> S3/DynamoDB.
+
+The repository target is `make pulumi-hackathon-smoke`.
+
 ### Compatibility Matrix
 
 | Rustack service | Pulumi coverage | Notes |
@@ -187,6 +200,16 @@ new high-value resource type should extend this stack and require a passing
 | SSM | `aws.ssm.Parameter` | Empty `AllowedPattern` from the provider is treated as unset. |
 | STS | `aws.getCallerIdentityOutput` | Data source coverage, not a provisioned resource. |
 
+Additional hackathon-stack compatibility coverage:
+
+| Rustack service | Pulumi coverage | Notes |
+|-----------------|-----------------|-------|
+| API Gateway V2 | `aws.apigatewayv2.Integration`, `aws.apigatewayv2.Route` | Covers Lambda proxy integration and path route CRUD. |
+| CloudFront | `aws.cloudfront.Distribution`, `aws.cloudfront.OriginAccessControl` | Covers multi-origin distribution, ordered cache behaviors, OAC, and function association provisioning. |
+| IAM | `aws.iam.RolePolicy` | Covers inline role policy CRUD for Lambda permissions. |
+| Lambda | `aws.lambda.EventSourceMapping`, `aws.lambda.Permission` | Covers SQS worker subscription and API Gateway invoke permission. |
+| S3 | `aws.s3.BucketPolicy` | Covers bucket policies for CloudFront OAC read access. |
+
 ## 8. Script Contract
 
 `scripts/pulumi-rustack-smoke.sh`:
@@ -200,7 +223,8 @@ new high-value resource type should extend this stack and require a passing
 7. Runs `npm run typecheck`.
 8. Creates a stack, sets provider config, runs `pulumi up --yes --skip-preview`.
 9. Prints stack outputs as JSON.
-10. Destroys resources, removes the temporary stack, stops the child Rustack process, and removes temporary state on exit.
+10. Destroys resources, removes the temporary stack and local stack config file,
+    stops the child Rustack process, and removes temporary state on exit.
 
 The cleanup path destroys resources after a successful `pulumi up`. If
 `pulumi up` fails, the script still removes the temporary stack, stops any child

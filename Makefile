@@ -230,6 +230,11 @@ sqs-compat-run:
 pulumi-smoke:
 	@bash scripts/pulumi-rustack-smoke.sh
 
+pulumi-hackathon-smoke:
+	@PULUMI_EXAMPLE_DIR="$(CURDIR)/examples/pulumi/hackathon-app" \
+		PULUMI_STACK="$${PULUMI_STACK:-rustack-hackathon}" \
+		bash scripts/pulumi-rustack-smoke.sh
+
 test-events-unit:
 	@cargo test -p rustack-events-model -p rustack-events-core -p rustack-events-http
 
@@ -266,7 +271,7 @@ test-iam-integration:
 	mint mint-build mint-start mint-run mint-stop \
 	alternator alternator-setup alternator-run alternator-stop \
 	sqs-compat sqs-compat-setup sqs-compat-run \
-	pulumi-smoke \
+	pulumi-smoke pulumi-hackathon-smoke \
 	test-events-unit test-events-patterns test-events-integration \
 	test-apigatewayv2-unit test-apigatewayv2-integration \
 	test-iam-unit test-iam-integration
