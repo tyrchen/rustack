@@ -78,6 +78,8 @@ pub enum S3ErrorCode {
     NotImplemented,
     /// ObjectNotInActiveTierError error.
     ObjectNotInActiveTierError,
+    /// ObjectLockConfigurationNotFoundError error.
+    ObjectLockConfigurationNotFoundError,
     /// PreconditionFailed error.
     PreconditionFailed,
     /// SignatureDoesNotMatch error.
@@ -148,6 +150,7 @@ impl S3ErrorCode {
             Self::NoSuchWebsiteConfiguration => "NoSuchWebsiteConfiguration",
             Self::NotImplemented => "NotImplemented",
             Self::ObjectNotInActiveTierError => "ObjectNotInActiveTierError",
+            Self::ObjectLockConfigurationNotFoundError => "ObjectLockConfigurationNotFoundError",
             Self::PreconditionFailed => "PreconditionFailed",
             Self::SignatureDoesNotMatch => "SignatureDoesNotMatch",
             Self::TooManyBuckets => "TooManyBuckets",
@@ -201,6 +204,7 @@ impl S3ErrorCode {
             | Self::NoSuchCORSConfiguration
             | Self::NoSuchKey
             | Self::NoSuchLifecycleConfiguration
+            | Self::ObjectLockConfigurationNotFoundError
             | Self::NoSuchObjectLockConfiguration
             | Self::NoSuchPublicAccessBlockConfiguration
             | Self::NoSuchUpload
@@ -270,6 +274,9 @@ impl S3ErrorCode {
             Self::NotImplemented => "The functionality is not implemented",
             Self::ObjectNotInActiveTierError => {
                 "The source object of the COPY operation is not in the active tier"
+            }
+            Self::ObjectLockConfigurationNotFoundError => {
+                "Object Lock configuration does not exist for this bucket"
             }
             Self::PreconditionFailed => {
                 "At least one of the preconditions you specified did not hold"

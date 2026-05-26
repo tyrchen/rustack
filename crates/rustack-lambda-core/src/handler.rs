@@ -155,6 +155,14 @@ async fn dispatch(
             wrap_json_response(200, &config)
         }
 
+        LambdaOperation::GetFunctionCodeSigningConfig => {
+            let function_name = require_path_param(path_params, "FunctionName")?;
+            let output = provider
+                .get_function_code_signing_config(function_name)
+                .map_err(LambdaError::from)?;
+            wrap_json_response(200, &output)
+        }
+
         LambdaOperation::UpdateFunctionCode => {
             let function_name = require_path_param(path_params, "FunctionName")?;
             let input: UpdateFunctionCodeInput = serde_json::from_slice(body).map_err(|e| {

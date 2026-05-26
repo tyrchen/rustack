@@ -10,25 +10,28 @@ use rustack_dynamodb_model::{
     error::DynamoDBError,
     input::{
         BatchGetItemInput, BatchWriteItemInput, CreateTableInput, DeleteItemInput,
-        DeleteTableInput, DescribeEndpointsInput, DescribeLimitsInput, DescribeTableInput,
-        DescribeTimeToLiveInput, GetItemInput, ListTablesInput, ListTagsOfResourceInput,
-        PutItemInput, QueryInput, ScanInput, TagResourceInput, TransactGetItemsInput,
-        TransactWriteItemsInput, UntagResourceInput, UpdateItemInput, UpdateTableInput,
-        UpdateTimeToLiveInput,
+        DeleteTableInput, DescribeContinuousBackupsInput, DescribeEndpointsInput,
+        DescribeLimitsInput, DescribeTableInput, DescribeTimeToLiveInput, GetItemInput,
+        ListTablesInput, ListTagsOfResourceInput, PutItemInput, QueryInput, ScanInput,
+        TagResourceInput, TransactGetItemsInput, TransactWriteItemsInput, UntagResourceInput,
+        UpdateContinuousBackupsInput, UpdateItemInput, UpdateTableInput, UpdateTimeToLiveInput,
     },
     output::{
         BatchGetItemOutput, BatchWriteItemOutput, CreateTableOutput, DeleteItemOutput,
-        DeleteTableOutput, DescribeEndpointsOutput, DescribeLimitsOutput, DescribeTableOutput,
-        DescribeTimeToLiveOutput, Endpoint, GetItemOutput, ListTablesOutput,
-        ListTagsOfResourceOutput, PutItemOutput, QueryOutput, ScanOutput, TagResourceOutput,
-        TransactGetItemsOutput, TransactWriteItemsOutput, UntagResourceOutput, UpdateItemOutput,
-        UpdateTableOutput, UpdateTimeToLiveOutput,
+        DeleteTableOutput, DescribeContinuousBackupsOutput, DescribeEndpointsOutput,
+        DescribeLimitsOutput, DescribeTableOutput, DescribeTimeToLiveOutput, Endpoint,
+        GetItemOutput, ListTablesOutput, ListTagsOfResourceOutput, PutItemOutput, QueryOutput,
+        ScanOutput, TagResourceOutput, TransactGetItemsOutput, TransactWriteItemsOutput,
+        UntagResourceOutput, UpdateContinuousBackupsOutput, UpdateItemOutput, UpdateTableOutput,
+        UpdateTimeToLiveOutput,
     },
     types::{
         AttributeAction, AttributeDefinition, AttributeValueUpdate, BillingMode,
         CancellationReason, ComparisonOperator, Condition, ConditionalOperator,
-        ExpectedAttributeValue, ItemResponse, KeyType, ReturnValue, ScalarAttributeType, Select,
-        TableStatus, TimeToLiveDescription,
+        ContinuousBackupsDescription, ContinuousBackupsStatus, ExpectedAttributeValue,
+        ItemResponse, KeyType, PointInTimeRecoveryDescription, PointInTimeRecoverySpecification,
+        PointInTimeRecoveryStatus, ReturnValue, ScalarAttributeType, Select, TableStatus,
+        TimeToLiveDescription,
     },
 };
 
@@ -578,6 +581,9 @@ impl RustackDynamoDB {
             sse_specification: input.sse_specification,
             tags: parking_lot::RwLock::new(input.tags),
             ttl: parking_lot::RwLock::new(None),
+            point_in_time_recovery: parking_lot::RwLock::new(
+                PointInTimeRecoverySpecification::default(),
+            ),
             arn,
             table_id: uuid::Uuid::new_v4().to_string(),
             created_at: chrono::Utc::now(),
@@ -2178,6 +2184,88 @@ impl RustackDynamoDB {
             time_to_live_description: Some(description),
         })
     }
+
+    /// Handle `DescribeContinuousBackups`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn handle_describe_continuous_backups(
+        &self,
+        input: DescribeContinuousBackupsInput,
+    ) -> Result<DescribeContinuousBackupsOutput, DynamoDBError> {
+        validate_table_name(&input.table_name)?;
+        let table = self.state.require_table(&input.table_name)?;
+        let pitr = table.point_in_time_recovery.read().clone();
+
+        Ok(DescribeContinuousBackupsOutput {
+            continuous_backups_description: continuous_backups_description(&pitr),
+        })
+    }
+
+    /// Handle `UpdateContinuousBackups`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn handle_update_continuous_backups(
+        &self,
+        input: UpdateContinuousBackupsInput,
+    ) -> Result<UpdateContinuousBackupsOutput, DynamoDBError> {
+        validate_table_name(&input.table_name)?;
+        let table = self.state.require_table(&input.table_name)?;
+
+        if let Some(days) = input
+            .point_in_time_recovery_specification
+            .recovery_period_in_days
+        {
+            if !(1..=35).contains(&days) {
+                return Err(DynamoDBError::validation(
+                    "RecoveryPeriodInDays must be between 1 and 35",
+                ));
+            }
+        }
+
+        let spec = input.point_in_time_recovery_specification;
+        *table.point_in_time_recovery.write() = spec.clone();
+
+        Ok(UpdateContinuousBackupsOutput {
+            continuous_backups_description: continuous_backups_description(&spec),
+        })
+    }
+}
+
+fn continuous_backups_description(
+    spec: &PointInTimeRecoverySpecification,
+) -> ContinuousBackupsDescription {
+    let pitr_enabled = spec.point_in_time_recovery_enabled;
+    let recovery_period_in_days = spec.recovery_period_in_days.unwrap_or(35);
+
+    let (recovery_period, earliest, latest) = if pitr_enabled {
+        let now = chrono::Utc::now();
+        let latest = now - chrono::Duration::minutes(5);
+        let earliest = now - chrono::Duration::days(i64::from(recovery_period_in_days));
+        (
+            Some(recovery_period_in_days),
+            Some(to_epoch_seconds(earliest)),
+            Some(to_epoch_seconds(latest)),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    ContinuousBackupsDescription {
+        continuous_backups_status: ContinuousBackupsStatus::Enabled,
+        point_in_time_recovery_description: Some(PointInTimeRecoveryDescription {
+            point_in_time_recovery_status: Some(if pitr_enabled {
+                PointInTimeRecoveryStatus::Enabled
+            } else {
+                PointInTimeRecoveryStatus::Disabled
+            }),
+            recovery_period_in_days: recovery_period,
+            earliest_restorable_date_time: earliest,
+            latest_restorable_date_time: latest,
+        }),
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn to_epoch_seconds(value: chrono::DateTime<chrono::Utc>) -> f64 {
+    value.timestamp_millis() as f64 / 1000.0
 }
 
 // ---------------------------------------------------------------------------
@@ -4733,7 +4821,10 @@ fn gsi_build_last_key(
 mod tests {
     use rustack_dynamodb_model::{
         error::DynamoDBErrorCode,
-        input::{BatchWriteItemInput, CreateTableInput, UpdateItemInput},
+        input::{
+            BatchWriteItemInput, CreateTableInput, DescribeContinuousBackupsInput,
+            DescribeTableInput, UpdateContinuousBackupsInput, UpdateItemInput,
+        },
         types::{
             AttributeDefinition, KeySchemaElement, KeyType, PutRequest, ScalarAttributeType,
             WriteRequest,
@@ -4774,6 +4865,60 @@ mod tests {
         };
         let result = provider.handle_update_item(input);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_should_return_active_warm_throughput_for_provider_waiters() {
+        let provider = setup_provider_with_table();
+        let output = provider
+            .handle_describe_table(DescribeTableInput {
+                table_name: "TestTable".to_owned(),
+            })
+            .unwrap();
+
+        let table = output.table.unwrap();
+        let warm = table.warm_throughput.expect("warm throughput description");
+        assert_eq!(warm.status, Some(TableStatus::Active));
+        assert_eq!(warm.read_units_per_second, Some(12_000));
+        assert_eq!(warm.write_units_per_second, Some(4_000));
+    }
+
+    #[test]
+    fn test_should_describe_and_update_continuous_backups() {
+        let provider = setup_provider_with_table();
+
+        let initial = provider
+            .handle_describe_continuous_backups(DescribeContinuousBackupsInput {
+                table_name: "TestTable".to_owned(),
+            })
+            .unwrap();
+        let pitr = initial
+            .continuous_backups_description
+            .point_in_time_recovery_description
+            .unwrap();
+        assert_eq!(
+            pitr.point_in_time_recovery_status,
+            Some(PointInTimeRecoveryStatus::Disabled)
+        );
+
+        let updated = provider
+            .handle_update_continuous_backups(UpdateContinuousBackupsInput {
+                table_name: "TestTable".to_owned(),
+                point_in_time_recovery_specification: PointInTimeRecoverySpecification {
+                    point_in_time_recovery_enabled: true,
+                    recovery_period_in_days: Some(7),
+                },
+            })
+            .unwrap();
+        let pitr = updated
+            .continuous_backups_description
+            .point_in_time_recovery_description
+            .unwrap();
+        assert_eq!(
+            pitr.point_in_time_recovery_status,
+            Some(PointInTimeRecoveryStatus::Enabled)
+        );
+        assert_eq!(pitr.recovery_period_in_days, Some(7));
     }
 
     #[test]

@@ -106,6 +106,8 @@ pub struct TopicAttributes {
     pub content_based_deduplication: bool,
     /// FIFO throughput limit.
     pub fifo_throughput_limit: Option<String>,
+    /// Provider-managed AWS SNS attributes that Rustack does not interpret yet.
+    pub passthrough_attributes: HashMap<String, String>,
     /// The topic owner account ID.
     pub owner: String,
 }
@@ -129,6 +131,11 @@ impl TopicAttributes {
                     .get("ContentBasedDeduplication")
                     .is_some_and(|v| v.eq_ignore_ascii_case("true")),
             fifo_throughput_limit: attrs.get("FifoThroughputLimit").cloned(),
+            passthrough_attributes: attrs
+                .iter()
+                .filter(|(key, _)| is_passthrough_topic_attribute(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
             owner: owner.to_owned(),
         }
     }
@@ -178,6 +185,36 @@ impl TopicAttributes {
             }
         }
 
+        map.extend(self.passthrough_attributes.clone());
+
         map
     }
+}
+
+/// Returns true for AWS SNS topic attributes that are accepted and round-tripped
+/// for IaC provider compatibility, even when Rustack does not execute the
+/// underlying behavior locally.
+#[must_use]
+pub fn is_passthrough_topic_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        "ApplicationSuccessFeedbackRoleArn"
+            | "ApplicationSuccessFeedbackSampleRate"
+            | "ApplicationFailureFeedbackRoleArn"
+            | "HTTPSuccessFeedbackRoleArn"
+            | "HTTPSuccessFeedbackSampleRate"
+            | "HTTPFailureFeedbackRoleArn"
+            | "LambdaSuccessFeedbackRoleArn"
+            | "LambdaSuccessFeedbackSampleRate"
+            | "LambdaFailureFeedbackRoleArn"
+            | "FirehoseSuccessFeedbackRoleArn"
+            | "FirehoseSuccessFeedbackSampleRate"
+            | "FirehoseFailureFeedbackRoleArn"
+            | "SQSSuccessFeedbackRoleArn"
+            | "SQSSuccessFeedbackSampleRate"
+            | "SQSFailureFeedbackRoleArn"
+            | "TracingConfig"
+            | "ArchivePolicy"
+            | "FifoThroughputScope"
+    )
 }

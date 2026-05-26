@@ -7,10 +7,12 @@ use rustack_dynamodb_model::{
     error::DynamoDBError,
     types::{
         AttributeDefinition, BillingMode, BillingModeSummary, GlobalSecondaryIndex,
-        GlobalSecondaryIndexDescription, IndexStatus, KeySchemaElement, LocalSecondaryIndex,
-        LocalSecondaryIndexDescription, ProvisionedThroughput, ProvisionedThroughputDescription,
+        GlobalSecondaryIndexDescription, GlobalSecondaryIndexWarmThroughputDescription,
+        IndexStatus, KeySchemaElement, LocalSecondaryIndex, LocalSecondaryIndexDescription,
+        PointInTimeRecoverySpecification, ProvisionedThroughput, ProvisionedThroughputDescription,
         SSEDescription, SSESpecification, SseStatus, SseType, StreamSpecification,
-        TableDescription, TableStatus, Tag, TimeToLiveSpecification,
+        TableDescription, TableStatus, TableWarmThroughputDescription, Tag,
+        TimeToLiveSpecification,
     },
 };
 
@@ -122,6 +124,8 @@ pub struct DynamoDBTable {
     pub tags: parking_lot::RwLock<Vec<Tag>>,
     /// Time-to-Live specification.
     pub ttl: parking_lot::RwLock<Option<TimeToLiveSpecification>>,
+    /// Point-in-time recovery specification.
+    pub point_in_time_recovery: parking_lot::RwLock<PointInTimeRecoverySpecification>,
     /// Table ARN.
     pub arn: String,
     /// Stable table ID (UUID v4), assigned at creation time.
@@ -155,6 +159,7 @@ impl DynamoDBTable {
                 last_update_to_pay_per_request_date_time: Some(creation_time),
             }),
             provisioned_throughput: Some(self.provisioned_throughput_description()),
+            warm_throughput: Some(default_table_warm_throughput()),
             global_secondary_indexes: self
                 .gsi_definitions
                 .iter()
@@ -171,6 +176,7 @@ impl DynamoDBTable {
                         }
                     }),
                     index_size_bytes: Some(0),
+                    warm_throughput: Some(default_gsi_warm_throughput()),
                     item_count: Some(0),
                     index_arn: Some(format!("{}/index/{}", self.arn, gsi.index_name)),
                     ..Default::default()
@@ -221,6 +227,7 @@ impl DynamoDBTable {
                 last_update_to_pay_per_request_date_time: Some(creation_time),
             }),
             provisioned_throughput: Some(self.provisioned_throughput_description()),
+            warm_throughput: Some(default_table_warm_throughput()),
             ..Default::default()
         }
     }
@@ -241,5 +248,21 @@ impl DynamoDBTable {
                 ..Default::default()
             },
         )
+    }
+}
+
+fn default_table_warm_throughput() -> TableWarmThroughputDescription {
+    TableWarmThroughputDescription {
+        read_units_per_second: Some(12_000),
+        write_units_per_second: Some(4_000),
+        status: Some(TableStatus::Active),
+    }
+}
+
+fn default_gsi_warm_throughput() -> GlobalSecondaryIndexWarmThroughputDescription {
+    GlobalSecondaryIndexWarmThroughputDescription {
+        read_units_per_second: Some(12_000),
+        write_units_per_second: Some(4_000),
+        status: Some(IndexStatus::Active),
     }
 }

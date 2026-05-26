@@ -27,7 +27,8 @@ Rustack already implements the key bootstrap APIs Pulumi needs:
 - STS `GetCallerIdentity` for account discovery and credential validation.
 - IAM awsQuery routing for IAM-backed resource workflows.
 - S3 path-style operations.
-- SQS/SNS/DynamoDB management APIs.
+- SQS/SNS/DynamoDB management APIs, including the read-after-write fields the
+  Pulumi AWS provider waits on.
 - Gateway routing by SigV4 service name for awsQuery services sharing `POST /`.
 
 ## 3. Decision
@@ -40,11 +41,25 @@ const rustack = new aws.Provider("rustack", {
   secretKey: pulumi.secret("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"),
   region: "us-east-1",
   endpoints: [{
-    s3: "http://127.0.0.1:4566",
+    apigatewayv2: "http://127.0.0.1:4566",
+    cloudfront: "http://127.0.0.1:4566",
+    cloudwatch: "http://127.0.0.1:4566",
+    cloudwatchlogs: "http://127.0.0.1:4566",
     dynamodb: "http://127.0.0.1:4566",
-    sqs: "http://127.0.0.1:4566",
-    sns: "http://127.0.0.1:4566",
+    eventbridge: "http://127.0.0.1:4566",
+    events: "http://127.0.0.1:4566",
     iam: "http://127.0.0.1:4566",
+    kinesis: "http://127.0.0.1:4566",
+    kms: "http://127.0.0.1:4566",
+    lambda: "http://127.0.0.1:4566",
+    logs: "http://127.0.0.1:4566",
+    s3: "http://127.0.0.1:4566",
+    secretsmanager: "http://127.0.0.1:4566",
+    ses: "http://127.0.0.1:4566",
+    sesv2: "http://127.0.0.1:4566",
+    sns: "http://127.0.0.1:4566",
+    sqs: "http://127.0.0.1:4566",
+    ssm: "http://127.0.0.1:4566",
     sts: "http://127.0.0.1:4566",
   }],
   s3UsePathStyle: true,
@@ -61,7 +76,7 @@ This decision keeps Rustack aligned with Terraform, CDK, AWS SDKs, and AWS CLI b
 
 1. Provide a runnable Pulumi project that deploys real resources into Rustack.
 2. Validate Rustack STS through an explicit Pulumi data-source call after provider initialization.
-3. Cover provider initialization, STS data-source routing, and one stable resource CRUD path.
+3. Cover provider initialization, STS data-source routing, and a representative CRUD path for every currently provisionable Rustack service.
 4. Make the smoke test self-contained: it can build/start Rustack, create a temporary Pulumi backend, deploy, destroy, and clean state.
 5. Document the provider configuration users need to copy into their own Pulumi programs.
 6. Keep the implementation independent from Pulumi Cloud credentials by using a local file backend.
@@ -73,6 +88,7 @@ This decision keeps Rustack aligned with Terraform, CDK, AWS SDKs, and AWS CLI b
 3. Do not promise that every `@pulumi/aws` resource works; compatibility is bounded by Rustack's implemented AWS API surface and the provider's read-after-write calls.
 4. Do not use Pulumi Deployments/Pulumi Cloud as the default test path.
 5. Do not persist Rustack data across smoke-test runs.
+6. Do not simulate non-provisioning data planes as Pulumi-managed resources. For example, CloudFront's local data plane is exercised by HTTP requests, not by a Pulumi resource.
 
 ## 6. Provider Contract
 
@@ -120,9 +136,56 @@ The example sets all currently relevant keys so users can extend the program wit
 The checked Pulumi stack creates:
 
 - `aws.getCallerIdentityOutput`
+- `aws.apigatewayv2.Api`
+- `aws.apigatewayv2.Stage`
+- `aws.cloudfront.Function`
+- `aws.cloudwatch.EventBus`
+- `aws.cloudwatch.EventRule`
+- `aws.cloudwatch.LogGroup`
+- `aws.cloudwatch.MetricAlarm`
+- `aws.dynamodb.Table` with `streamEnabled`
+- `aws.iam.Role`
+- `aws.kinesis.Stream`
+- `aws.kms.Key`
+- `aws.lambda.Function`
+- `aws.s3.Bucket`
+- `aws.s3.BucketObject`
+- `aws.secretsmanager.Secret`
+- `aws.secretsmanager.SecretVersion`
+- `aws.ses.EmailIdentity`
+- `aws.ses.Template`
+- `aws.sns.Topic`
 - `aws.sqs.Queue`
+- `aws.ssm.Parameter`
 
-This set is intentionally conservative. These resources cover a data-source call plus one stable resource CRUD protocol without requiring currently unsupported provider-specific read-after-write behavior. Future expansions should add one resource at a time with a passing smoke run.
+This set is intentionally representative rather than exhaustive. It proves that
+each current Rustack service with a Pulumi-provisionable control-plane resource
+can be targeted by the Pulumi AWS provider. Adding a new Rustack service or a
+new high-value resource type should extend this stack and require a passing
+`make pulumi-smoke` run.
+
+### Compatibility Matrix
+
+| Rustack service | Pulumi coverage | Notes |
+|-----------------|-----------------|-------|
+| API Gateway V2 | `aws.apigatewayv2.Api`, `aws.apigatewayv2.Stage` | Covers HTTP API and stage CRUD. |
+| CloudFront | `aws.cloudfront.Function` | Covers function create/read/publish/delete routes. Distribution resources are broader than the current smoke. |
+| CloudWatch | `aws.cloudwatch.MetricAlarm` | Covers monitoring awsQuery routing. |
+| DynamoDB | `aws.dynamodb.Table` | Covers table waiter, PITR read path, tags, warm throughput response fields, and delete. |
+| DynamoDB Streams | `aws.dynamodb.Table` with streams enabled | Streams are provisioned through the table's stream specification. |
+| EventBridge | `aws.cloudwatch.EventBus`, `aws.cloudwatch.EventRule` | Pulumi uses the historical `cloudwatch` namespace for EventBridge resources. |
+| IAM | `aws.iam.Role` | Covers awsQuery IAM routing and policy document handling. |
+| Kinesis | `aws.kinesis.Stream` | Covers stream create/read/delete waiters. |
+| KMS | `aws.kms.Key` | Covers key lifecycle used by local IaC tests. |
+| Lambda | `aws.lambda.Function` | Covers archive upload, function read, concurrency read, event invoke config read, and code signing config read. |
+| Logs | `aws.cloudwatch.LogGroup` | Covers log group create/read/delete. |
+| S3 | `aws.s3.Bucket`, `aws.s3.BucketObject` | Requires path-style addressing. |
+| Secrets Manager | `aws.secretsmanager.Secret`, `aws.secretsmanager.SecretVersion` | Covers secret metadata and version lifecycle. |
+| SES | `aws.ses.EmailIdentity`, `aws.ses.Template` | Covers SES query routing and template CRUD. |
+| SNS | `aws.sns.Topic` | Covers provider-managed topic attributes and default policy. |
+| SQS | `aws.sqs.Queue` | Delete cleanup waits around two minutes due the Terraform AWS provider waiter. |
+| SSM | `aws.ssm.Parameter` | Empty `AllowedPattern` from the provider is treated as unset. |
+| STS | `aws.getCallerIdentityOutput` | Data source coverage, not a provisioned resource. |
 
 ## 8. Script Contract
 
@@ -139,7 +202,12 @@ This set is intentionally conservative. These resources cover a data-source call
 9. Prints stack outputs as JSON.
 10. Destroys resources, removes the temporary stack, stops the child Rustack process, and removes temporary state on exit.
 
-The cleanup path destroys resources after a successful `pulumi up`. If `pulumi up` fails, the script still stops any child Rustack process and removes temporary state; for the default auto-started path, Rustack's in-memory resources are discarded with the process.
+The cleanup path destroys resources after a successful `pulumi up`. If
+`pulumi up` fails, the script still removes the temporary stack, stops any child
+Rustack process, and removes temporary state; for the default auto-started path,
+Rustack's in-memory resources are discarded with the process. SQS queue delete
+confirmation can take around two minutes because the Terraform AWS provider
+requires repeated not-found confirmations before completing the delete.
 
 ## 9. Compatibility Risks
 
@@ -175,14 +243,25 @@ The Pulumi AWS provider validates static credential shape before making resource
 
 Mitigation: use AWS documentation-style fake credentials by default while keeping all calls pointed at Rustack.
 
-## 10. Future Work
+## 10. Compatibility Fixes Implemented
 
-1. Fix the observed provider compatibility gaps: S3 bucket reads expect Object Lock-not-configured semantics compatible with the Terraform AWS provider, SNS topic creation sets feedback attributes such as `ApplicationSuccessFeedbackSampleRate`, DynamoDB table creation must satisfy Pulumi's post-create table waiter, and SSM parameter creation sends an empty `AllowedPattern` that Rustack should treat as absent.
-2. Expand the stack to S3, SNS, DynamoDB, SSM, CloudWatch Logs, IAM role, Lambda, KMS, and EventBridge as provider-specific read-after-write gaps are closed.
-3. Add a machine-readable compatibility matrix generated from successful Pulumi smoke runs.
-4. Consider a small helper package only if users repeatedly need a typed Rustack provider factory; do not build a native provider unless Rustack exposes non-AWS resources that Pulumi should manage directly.
+The full smoke stack exposed provider-specific behavior that direct SDK tests did
+not cover. The implementation now includes these compatibility fixes:
 
-## 11. References
+1. SSM treats an empty `AllowedPattern` as absent because the Pulumi AWS provider sends an empty string for the default case.
+2. SNS accepts and round-trips provider-managed topic feedback attributes, returns a default JSON policy, and maps `FifoThroughputLimit` to Rustack's stored FIFO throughput scope.
+3. S3 returns `ObjectLockConfigurationNotFoundError` for buckets without object lock configuration, matching the AWS error name expected by the provider.
+4. DynamoDB table descriptions include `WarmThroughput`, and Rustack implements `DescribeContinuousBackups` and `UpdateContinuousBackups` for the provider's PITR read path.
+5. CloudFront routes `DescribeFunction` and `GetFunction` using the AWS paths emitted by the provider.
+6. Lambda implements `GetFunctionCodeSigningConfig`; functions without a code signing config return a successful response with an empty ARN, which is what the Terraform AWS provider expects.
+
+## 11. Future Work
+
+1. Add a machine-readable compatibility matrix generated from successful Pulumi smoke runs.
+2. Extend the smoke stack when Rustack adds new provisionable services or high-value resource types such as broader CloudFront distribution coverage.
+3. Consider a small helper package only if users repeatedly need a typed Rustack provider factory; do not build a native provider unless Rustack exposes non-AWS resources that Pulumi should manage directly.
+
+## 12. References
 
 - Pulumi AWS provider `aws.Provider` endpoint and validation options: https://www.pulumi.com/registry/packages/aws/api-docs/provider/
 - Pulumi resource providers concept: https://www.pulumi.com/docs/iac/concepts/providers/

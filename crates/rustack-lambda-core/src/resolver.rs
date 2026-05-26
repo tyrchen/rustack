@@ -253,6 +253,7 @@ mod tests {
             aliases,
             policy: PolicyDocument::default(),
             tags: HashMap::new(),
+            code_signing_config_arn: None,
             url_config: None,
             reserved_concurrent_executions: None,
             event_invoke_configs: HashMap::new(),

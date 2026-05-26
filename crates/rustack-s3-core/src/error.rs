@@ -336,7 +336,7 @@ fn error_code(err: &S3ServiceError) -> S3ErrorCode {
             S3ErrorCode::ServerSideEncryptionConfigurationNotFoundError
         }
         S3ServiceError::ObjectLockConfigurationNotFoundError => {
-            S3ErrorCode::NoSuchObjectLockConfiguration
+            S3ErrorCode::ObjectLockConfigurationNotFoundError
         }
         S3ServiceError::OwnershipControlsNotFoundError => {
             S3ErrorCode::OwnershipControlsNotFoundError
@@ -482,7 +482,7 @@ mod tests {
             ),
             (
                 S3ServiceError::ObjectLockConfigurationNotFoundError,
-                S3ErrorCode::NoSuchObjectLockConfiguration,
+                S3ErrorCode::ObjectLockConfigurationNotFoundError,
             ),
             (
                 S3ServiceError::OwnershipControlsNotFoundError,

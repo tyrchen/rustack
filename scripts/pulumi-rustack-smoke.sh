@@ -17,11 +17,13 @@ cleanup() {
   local exit_code=$?
   set +e
 
-  if [[ "$STACK_READY" == "1" && "$UP_SUCCEEDED" == "1" ]]; then
+  if [[ "$STACK_READY" == "1" ]]; then
     (
       cd "$EXAMPLE_DIR" || exit 0
-      echo "Destroying Pulumi smoke resources"
-      pulumi destroy --stack "$STACK_NAME" --yes --skip-preview >/dev/null 2>&1
+      if [[ "$UP_SUCCEEDED" == "1" ]]; then
+        echo "Destroying Pulumi smoke resources (SQS delete confirmation can take around 2 minutes)"
+        pulumi destroy --stack "$STACK_NAME" --yes --skip-preview >/dev/null 2>&1
+      fi
       echo "Removing Pulumi smoke stack"
       pulumi stack rm "$STACK_NAME" --yes >/dev/null 2>&1
     )
