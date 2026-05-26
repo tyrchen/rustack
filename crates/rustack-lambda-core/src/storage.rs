@@ -47,6 +47,8 @@ pub struct FunctionRecord {
     pub policy: PolicyDocument,
     /// Resource tags.
     pub tags: HashMap<String, String>,
+    /// Associated code signing config ARN.
+    pub code_signing_config_arn: Option<String>,
     /// Function URL configuration.
     pub url_config: Option<FunctionUrlConfigRecord>,
     /// Reserved concurrent executions.
@@ -805,6 +807,7 @@ mod tests {
             aliases: HashMap::new(),
             policy: PolicyDocument::default(),
             tags: HashMap::new(),
+            code_signing_config_arn: None,
             url_config: None,
             reserved_concurrent_executions: None,
             event_invoke_configs: HashMap::new(),

@@ -14,6 +14,10 @@ pub enum DynamoDBOperation {
     UpdateTable,
     /// Describe a table.
     DescribeTable,
+    /// Describe continuous backup settings.
+    DescribeContinuousBackups,
+    /// Update continuous backup settings.
+    UpdateContinuousBackups,
     /// List all tables.
     ListTables,
 
@@ -75,6 +79,8 @@ impl DynamoDBOperation {
             Self::DeleteTable => "DeleteTable",
             Self::UpdateTable => "UpdateTable",
             Self::DescribeTable => "DescribeTable",
+            Self::DescribeContinuousBackups => "DescribeContinuousBackups",
+            Self::UpdateContinuousBackups => "UpdateContinuousBackups",
             Self::ListTables => "ListTables",
             Self::PutItem => "PutItem",
             Self::GetItem => "GetItem",
@@ -104,6 +110,8 @@ impl DynamoDBOperation {
             "DeleteTable" => Some(Self::DeleteTable),
             "UpdateTable" => Some(Self::UpdateTable),
             "DescribeTable" => Some(Self::DescribeTable),
+            "DescribeContinuousBackups" => Some(Self::DescribeContinuousBackups),
+            "UpdateContinuousBackups" => Some(Self::UpdateContinuousBackups),
             "ListTables" => Some(Self::ListTables),
             "PutItem" => Some(Self::PutItem),
             "GetItem" => Some(Self::GetItem),

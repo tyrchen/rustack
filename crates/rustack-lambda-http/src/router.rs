@@ -420,6 +420,18 @@ mod tests {
     }
 
     #[test]
+    fn test_should_resolve_get_function_code_signing_config() {
+        let (op, params, status) = resolve_operation(
+            &Method::GET,
+            "/2015-03-31/functions/my-func/code-signing-config",
+        )
+        .expect("should resolve");
+        assert_eq!(op, LambdaOperation::GetFunctionCodeSigningConfig);
+        assert_eq!(params.get("FunctionName"), Some("my-func"));
+        assert_eq!(status, 200);
+    }
+
+    #[test]
     fn test_should_resolve_remove_permission() {
         let (op, params, status) = resolve_operation(
             &Method::DELETE,

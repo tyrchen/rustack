@@ -25,6 +25,16 @@ pub struct GetFunctionOutput {
     pub tags: Option<HashMap<String, String>>,
 }
 
+/// Output for `GetFunctionCodeSigningConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct GetFunctionCodeSigningConfigOutput {
+    /// Function name or ARN from the request.
+    pub function_name: String,
+    /// Associated code signing config ARN.
+    pub code_signing_config_arn: String,
+}
+
 /// Output for `ListFunctions`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]

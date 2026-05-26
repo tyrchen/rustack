@@ -13,9 +13,10 @@ use crate::{
     types::{
         AttributeDefinition, AttributeValueUpdate, BillingMode, Condition, ConditionalOperator,
         ExpectedAttributeValue, GlobalSecondaryIndex, KeySchemaElement, KeysAndAttributes,
-        LocalSecondaryIndex, ProvisionedThroughput, ReturnConsumedCapacity,
-        ReturnItemCollectionMetrics, ReturnValue, SSESpecification, Select, StreamSpecification,
-        Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
+        LocalSecondaryIndex, PointInTimeRecoverySpecification, ProvisionedThroughput,
+        ReturnConsumedCapacity, ReturnItemCollectionMetrics, ReturnValue, SSESpecification, Select,
+        StreamSpecification, Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem,
+        WriteRequest,
     },
 };
 
@@ -100,6 +101,24 @@ pub struct UpdateTableInput {
 pub struct DescribeTableInput {
     /// The name of the table to describe.
     pub table_name: String,
+}
+
+/// Input for the `DescribeContinuousBackups` operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DescribeContinuousBackupsInput {
+    /// The name of the table.
+    pub table_name: String,
+}
+
+/// Input for the `UpdateContinuousBackups` operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateContinuousBackupsInput {
+    /// The name of the table.
+    pub table_name: String,
+    /// The desired point-in-time recovery settings.
+    pub point_in_time_recovery_specification: PointInTimeRecoverySpecification,
 }
 
 /// Input for the `ListTables` operation.

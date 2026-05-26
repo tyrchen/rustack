@@ -241,8 +241,8 @@ jobs:
 
           # List object versions
           VERSIONS=$(aws s3api list-object-versions --bucket test-versioning --prefix doc.txt)
-          echo "$VERSIONS" | grep -q "$V1"
-          echo "$VERSIONS" | grep -q "$V2"
+          echo "$VERSIONS" | grep -q -- "$V1"
+          echo "$VERSIONS" | grep -q -- "$V2"
 
           # Delete creates a delete marker
           DEL=$(aws s3api delete-object --bucket test-versioning --key doc.txt)

@@ -6,7 +6,11 @@ use bytes::Bytes;
 use rustack_dynamodb_http::{
     body::DynamoDBResponseBody, dispatch::DynamoDBHandler, response::json_response,
 };
-use rustack_dynamodb_model::{error::DynamoDBError, operations::DynamoDBOperation};
+use rustack_dynamodb_model::{
+    error::DynamoDBError,
+    input::{CreateTableInput, DescribeTableInput},
+    operations::DynamoDBOperation,
+};
 
 use crate::provider::RustackDynamoDB;
 
@@ -51,7 +55,8 @@ fn dispatch(
 
     match op {
         DynamoDBOperation::CreateTable => {
-            let input = deserialize(body)?;
+            let input: CreateTableInput = deserialize(body)?;
+            tracing::debug!(table_name = %input.table_name, "handling DynamoDB CreateTable");
             let output = provider.handle_create_table(input)?;
             serialize(&output, &request_id)
         }
@@ -66,8 +71,19 @@ fn dispatch(
             serialize(&output, &request_id)
         }
         DynamoDBOperation::DescribeTable => {
-            let input = deserialize(body)?;
+            let input: DescribeTableInput = deserialize(body)?;
+            tracing::debug!(table_name = %input.table_name, "handling DynamoDB DescribeTable");
             let output = provider.handle_describe_table(input)?;
+            serialize(&output, &request_id)
+        }
+        DynamoDBOperation::DescribeContinuousBackups => {
+            let input = deserialize(body)?;
+            let output = provider.handle_describe_continuous_backups(input)?;
+            serialize(&output, &request_id)
+        }
+        DynamoDBOperation::UpdateContinuousBackups => {
+            let input = deserialize(body)?;
+            let output = provider.handle_update_continuous_backups(input)?;
             serialize(&output, &request_id)
         }
         DynamoDBOperation::ListTables => {

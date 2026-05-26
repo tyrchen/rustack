@@ -161,6 +161,28 @@ impl std::fmt::Display for TableStatus {
     }
 }
 
+/// Continuous backups status for a DynamoDB table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContinuousBackupsStatus {
+    /// Continuous backups are enabled.
+    #[serde(rename = "ENABLED")]
+    Enabled,
+    /// Continuous backups are disabled.
+    #[serde(rename = "DISABLED")]
+    Disabled,
+}
+
+/// Point-in-time recovery status for a DynamoDB table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PointInTimeRecoveryStatus {
+    /// Point-in-time recovery is enabled.
+    #[serde(rename = "ENABLED")]
+    Enabled,
+    /// Point-in-time recovery is disabled.
+    #[serde(rename = "DISABLED")]
+    Disabled,
+}
+
 /// Billing mode for a DynamoDB table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum BillingMode {
@@ -726,6 +748,79 @@ pub struct ProvisionedThroughputDescription {
     pub last_decrease_date_time: Option<f64>,
 }
 
+/// Warm throughput description for a base table.
+///
+/// Recent AWS providers wait for this nested status to become `ACTIVE` after
+/// table creation, even when warm throughput was not explicitly configured.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct TableWarmThroughputDescription {
+    /// The table warm read units per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_units_per_second: Option<i64>,
+    /// The table warm write units per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_units_per_second: Option<i64>,
+    /// The warm throughput status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<TableStatus>,
+}
+
+/// Warm throughput description for a global secondary index.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct GlobalSecondaryIndexWarmThroughputDescription {
+    /// The index warm read units per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_units_per_second: Option<i64>,
+    /// The index warm write units per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_units_per_second: Option<i64>,
+    /// The index warm throughput status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<IndexStatus>,
+}
+
+/// Point-in-time recovery settings applied to a table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PointInTimeRecoverySpecification {
+    /// Whether point-in-time recovery is enabled.
+    pub point_in_time_recovery_enabled: bool,
+    /// Optional recovery period in days.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_period_in_days: Option<i32>,
+}
+
+/// Point-in-time recovery description for a table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PointInTimeRecoveryDescription {
+    /// The current point-in-time recovery status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_in_time_recovery_status: Option<PointInTimeRecoveryStatus>,
+    /// The configured recovery period in days.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_period_in_days: Option<i32>,
+    /// Earliest restorable timestamp as epoch seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub earliest_restorable_date_time: Option<f64>,
+    /// Latest restorable timestamp as epoch seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_restorable_date_time: Option<f64>,
+}
+
+/// Continuous backups description for a table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ContinuousBackupsDescription {
+    /// Whether continuous backups are enabled for the table.
+    pub continuous_backups_status: ContinuousBackupsStatus,
+    /// The nested point-in-time recovery description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_in_time_recovery_description: Option<PointInTimeRecoveryDescription>,
+}
+
 // ---------------------------------------------------------------------------
 // Structs - Projection
 // ---------------------------------------------------------------------------
@@ -793,6 +888,9 @@ pub struct GlobalSecondaryIndexDescription {
     /// The total size of the index in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_size_bytes: Option<i64>,
+    /// The warm throughput status and capacity values for this index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_throughput: Option<GlobalSecondaryIndexWarmThroughputDescription>,
     /// The number of items in the index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_count: Option<i64>,
@@ -1142,6 +1240,9 @@ pub struct TableDescription {
     /// The provisioned throughput settings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provisioned_throughput: Option<ProvisionedThroughputDescription>,
+    /// The warm throughput status and capacity values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_throughput: Option<TableWarmThroughputDescription>,
     /// The global secondary indexes on the table.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global_secondary_indexes: Vec<GlobalSecondaryIndexDescription>,
@@ -1670,6 +1771,11 @@ mod tests {
             },
             "BillingModeSummary": {
                 "BillingMode": "PROVISIONED"
+            },
+            "WarmThroughput": {
+                "ReadUnitsPerSecond": 12000,
+                "WriteUnitsPerSecond": 4000,
+                "Status": "ACTIVE"
             }
         }"#;
         let desc: TableDescription =
@@ -1686,6 +1792,12 @@ mod tests {
                 .as_ref()
                 .and_then(|b| b.billing_mode.as_ref()),
             Some(&BillingMode::Provisioned)
+        );
+        assert_eq!(
+            desc.warm_throughput
+                .as_ref()
+                .and_then(|w| w.status.as_ref()),
+            Some(&TableStatus::Active)
         );
     }
 
@@ -1774,6 +1886,11 @@ mod tests {
                 ..Default::default()
             }),
             index_size_bytes: Some(1024),
+            warm_throughput: Some(GlobalSecondaryIndexWarmThroughputDescription {
+                read_units_per_second: Some(12_000),
+                write_units_per_second: Some(4_000),
+                status: Some(IndexStatus::Active),
+            }),
             item_count: Some(10),
             index_arn: Some(
                 "arn:aws:dynamodb:us-east-1:123456789012:table/T/index/gsi-status".to_owned(),
@@ -1784,6 +1901,13 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize GlobalSecondaryIndexDescription");
         assert_eq!(desc.index_name, parsed.index_name);
         assert_eq!(desc.index_status, parsed.index_status);
+        assert_eq!(
+            parsed
+                .warm_throughput
+                .as_ref()
+                .and_then(|w| w.status.as_ref()),
+            Some(&IndexStatus::Active)
+        );
         assert_eq!(desc.item_count, parsed.item_count);
     }
 }

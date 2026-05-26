@@ -69,7 +69,7 @@ use crate::{
     subscription::{
         FilterPolicyScope, SubscriptionAttributes, SubscriptionProtocol, SubscriptionRecord,
     },
-    topic::{TopicAttributes, TopicRecord},
+    topic::{TopicAttributes, TopicRecord, is_passthrough_topic_attribute},
 };
 
 /// Maximum number of topics returned per `ListTopics` page.
@@ -236,8 +236,11 @@ impl RustackSns {
             return Ok(CreateTopicOutput { topic_arn: arn });
         }
 
-        let attributes =
+        let mut attributes =
             TopicAttributes::from_input(&input.attributes, is_fifo, &self.config.account_id);
+        attributes
+            .policy
+            .get_or_insert_with(|| default_policy(&arn, &self.config.account_id).to_string());
 
         let tags: HashMap<String, String> =
             input.tags.into_iter().map(|t| (t.key, t.value)).collect();
@@ -312,6 +315,7 @@ impl RustackSns {
             }
             "KmsMasterKeyId" => topic.attributes.kms_master_key_id = Some(value),
             "SignatureVersion" => topic.attributes.signature_version = value,
+            "FifoThroughputLimit" => topic.attributes.fifo_throughput_limit = Some(value),
             "ContentBasedDeduplication" => {
                 if topic.is_fifo {
                     topic.attributes.content_based_deduplication =
@@ -321,6 +325,16 @@ impl RustackSns {
                         "Invalid parameter: ContentBasedDeduplication Reason: Content-based \
                          deduplication can only be set for FIFO topics",
                     ));
+                }
+            }
+            other if is_passthrough_topic_attribute(other) => {
+                if value.is_empty() {
+                    topic.attributes.passthrough_attributes.remove(other);
+                } else {
+                    topic
+                        .attributes
+                        .passthrough_attributes
+                        .insert(other.to_owned(), value);
                 }
             }
             other => {
@@ -1932,6 +1946,59 @@ mod tests {
             })
             .unwrap();
         assert_eq!(o1.topic_arn, o2.topic_arn);
+    }
+
+    #[test]
+    fn test_should_round_trip_passthrough_topic_attributes() {
+        let provider = make_provider();
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "ApplicationSuccessFeedbackSampleRate".to_owned(),
+            "0".to_owned(),
+        );
+
+        let output = provider
+            .create_topic(CreateTopicInput {
+                name: "pulumi-topic".to_owned(),
+                attributes,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let attrs = provider
+            .get_topic_attributes(&GetTopicAttributesInput {
+                topic_arn: output.topic_arn.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            attrs
+                .attributes
+                .get("ApplicationSuccessFeedbackSampleRate")
+                .map(String::as_str),
+            Some("0")
+        );
+        serde_json::from_str::<serde_json::Value>(
+            attrs.attributes.get("Policy").expect("Policy should exist"),
+        )
+        .expect("default Policy should be valid JSON");
+
+        provider
+            .set_topic_attributes(SetTopicAttributesInput {
+                topic_arn: output.topic_arn.clone(),
+                attribute_name: "TracingConfig".to_owned(),
+                attribute_value: Some("Active".to_owned()),
+            })
+            .unwrap();
+
+        let attrs = provider
+            .get_topic_attributes(&GetTopicAttributesInput {
+                topic_arn: output.topic_arn,
+            })
+            .unwrap();
+        assert_eq!(
+            attrs.attributes.get("TracingConfig").map(String::as_str),
+            Some("Active")
+        );
     }
 
     #[test]

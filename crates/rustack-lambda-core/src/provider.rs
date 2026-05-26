@@ -26,10 +26,11 @@ use rustack_lambda_model::{
     },
     output::{
         AccountLimit, AccountUsage, AddLayerVersionPermissionOutput, AddPermissionOutput,
-        GetAccountSettingsOutput, GetFunctionOutput, GetLayerVersionPolicyOutput, GetPolicyOutput,
-        ListAliasesOutput, ListEventSourceMappingsOutput, ListFunctionUrlConfigsOutput,
-        ListFunctionsOutput, ListLayerVersionsOutput, ListLayersOutput, ListTagsOutput,
-        ListVersionsOutput, PublishLayerVersionOutput,
+        GetAccountSettingsOutput, GetFunctionCodeSigningConfigOutput, GetFunctionOutput,
+        GetLayerVersionPolicyOutput, GetPolicyOutput, ListAliasesOutput,
+        ListEventSourceMappingsOutput, ListFunctionUrlConfigsOutput, ListFunctionsOutput,
+        ListLayerVersionsOutput, ListLayersOutput, ListTagsOutput, ListVersionsOutput,
+        PublishLayerVersionOutput,
     },
     types::{
         AliasConfiguration, AliasRoutingConfiguration, Concurrency, EnvironmentResponse,
@@ -405,6 +406,7 @@ impl RustackLambda {
             aliases: HashMap::new(),
             policy: PolicyDocument::default(),
             tags: input.tags.clone().unwrap_or_default(),
+            code_signing_config_arn: input.code_signing_config_arn.clone(),
             url_config: None,
             reserved_concurrent_executions: None,
             event_invoke_configs: HashMap::new(),
@@ -476,6 +478,20 @@ impl RustackLambda {
         let record = self.get_record(&name)?;
         let version = resolve_version(&record, qualifier)?;
         Ok(self.build_function_configuration(&record, version))
+    }
+
+    /// Get the code signing config association for a function.
+    pub fn get_function_code_signing_config(
+        &self,
+        function_ref: &str,
+    ) -> Result<GetFunctionCodeSigningConfigOutput, LambdaServiceError> {
+        let (name, _) = resolve_function_ref(function_ref)?;
+        let record = self.get_record(&name)?;
+
+        Ok(GetFunctionCodeSigningConfigOutput {
+            function_name: function_ref.to_owned(),
+            code_signing_config_arn: record.code_signing_config_arn.unwrap_or_default(),
+        })
     }
 
     /// Update function code.
@@ -2716,6 +2732,41 @@ mod tests {
         assert_eq!(
             output.configuration.as_ref().unwrap().function_name,
             Some("my-func".to_owned()),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_return_empty_code_signing_config_when_unset() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("my-func"))
+            .await
+            .unwrap();
+
+        let output = provider
+            .get_function_code_signing_config("my-func")
+            .unwrap();
+
+        assert_eq!(output.function_name, "my-func");
+        assert!(output.code_signing_config_arn.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_should_return_code_signing_config_when_set() {
+        let provider = test_provider();
+        let mut input = sample_create_input("my-func");
+        input.code_signing_config_arn =
+            Some("arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-123".to_owned());
+
+        provider.create_function(input).await.unwrap();
+        let output = provider
+            .get_function_code_signing_config("my-func")
+            .unwrap();
+
+        assert_eq!(output.function_name, "my-func");
+        assert_eq!(
+            output.code_signing_config_arn,
+            "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-123"
         );
     }
 

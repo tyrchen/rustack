@@ -375,6 +375,9 @@ pub fn resolve(method: &http::Method, uri: &http::Uri) -> Result<RouteMatch, Clo
         ["function"] if m == Method::POST => Operation::CreateFunction,
         ["function"] if m == Method::GET => Operation::ListFunctions,
         ["function", name] if m == Method::GET => {
+            return ok_with_name(Operation::GetFunction, name);
+        }
+        ["function", name, "describe"] if m == Method::GET => {
             return ok_with_name(Operation::DescribeFunction, name);
         }
         ["function", name] if m == Method::DELETE => {
@@ -671,5 +674,25 @@ mod tests {
             "/2020-05-31/tagging?Operation=Tag&Resource=arn:aws:cloudfront::000:dist/E1",
         );
         assert_eq!(r.operation, Operation::TagResource);
+    }
+
+    #[test]
+    fn test_describe_function_route() {
+        let r = parse_url(
+            "GET",
+            "/2020-05-31/function/rustack-pulumi-cf-fn/describe?Stage=DEVELOPMENT",
+        );
+        assert_eq!(r.operation, Operation::DescribeFunction);
+        assert_eq!(r.path_params.name, "rustack-pulumi-cf-fn");
+    }
+
+    #[test]
+    fn test_get_function_route() {
+        let r = parse_url(
+            "GET",
+            "/2020-05-31/function/rustack-pulumi-cf-fn?Stage=DEVELOPMENT",
+        );
+        assert_eq!(r.operation, Operation::GetFunction);
+        assert_eq!(r.path_params.name, "rustack-pulumi-cf-fn");
     }
 }

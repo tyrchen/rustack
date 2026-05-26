@@ -303,6 +303,19 @@ The action starts the server, waits for healthy, and exports `AWS_ENDPOINT_URL`,
 
 See [action.yml](action.yml) for all inputs and outputs.
 
+## Pulumi
+
+Rustack can be used as a Pulumi deployment target through the standard Pulumi
+AWS provider by overriding service endpoints to `http://127.0.0.1:4566`.
+
+```bash
+make pulumi-smoke
+```
+
+The smoke target runs a TypeScript Pulumi program that validates STS and deploys
+an SQS queue into Rustack, then destroys it. See
+[docs/pulumi.md](docs/pulumi.md) for the provider configuration contract.
+
 ## Architecture
 
 ```

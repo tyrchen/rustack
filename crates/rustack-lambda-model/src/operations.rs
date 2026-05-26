@@ -13,6 +13,8 @@ pub enum LambdaOperation {
     GetFunction,
     /// Get function configuration only.
     GetFunctionConfiguration,
+    /// Get the function code signing config association.
+    GetFunctionCodeSigningConfig,
     /// Update function code.
     UpdateFunctionCode,
     /// Update function configuration.
@@ -129,6 +131,7 @@ impl LambdaOperation {
             Self::CreateFunction => "CreateFunction",
             Self::GetFunction => "GetFunction",
             Self::GetFunctionConfiguration => "GetFunctionConfiguration",
+            Self::GetFunctionCodeSigningConfig => "GetFunctionCodeSigningConfig",
             Self::UpdateFunctionCode => "UpdateFunctionCode",
             Self::UpdateFunctionConfiguration => "UpdateFunctionConfiguration",
             Self::DeleteFunction => "DeleteFunction",
@@ -274,6 +277,13 @@ pub const LAMBDA_ROUTES: &[LambdaRoute] = &[
         method: http::Method::GET,
         path_pattern: "/2015-03-31/functions/{FunctionName}/policy",
         operation: LambdaOperation::GetPolicy,
+        success_status: 200,
+    },
+    // --- /2015-03-31/functions/{name}/code-signing-config ---
+    LambdaRoute {
+        method: http::Method::GET,
+        path_pattern: "/2015-03-31/functions/{FunctionName}/code-signing-config",
+        operation: LambdaOperation::GetFunctionCodeSigningConfig,
         success_status: 200,
     },
     // --- /2015-03-31/functions/{name}/code ---

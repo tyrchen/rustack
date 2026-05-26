@@ -95,8 +95,12 @@ impl RustackSsm {
         // Validate tags.
         validate_tags(&input.tags)?;
 
+        // The AWS provider sends an empty AllowedPattern when the Pulumi field
+        // is unset; AWS treats that as absent rather than an invalid regex.
+        let allowed_pattern = input.allowed_pattern.filter(|pattern| !pattern.is_empty());
+
         // Validate allowed pattern.
-        if let Some(ref pattern) = input.allowed_pattern {
+        if let Some(ref pattern) = allowed_pattern {
             validate_allowed_pattern(pattern, &input.value)?;
         }
 
@@ -120,7 +124,7 @@ impl RustackSsm {
             input.description,
             input.key_id,
             overwrite,
-            input.allowed_pattern,
+            allowed_pattern,
             &input.tags,
             &tier,
             data_type,
@@ -370,4 +374,38 @@ fn validate_resource_type(resource_type: &str) -> Result<(), SsmError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_parameter_should_treat_empty_allowed_pattern_as_unset() {
+        let provider = RustackSsm::new(SsmConfig::default());
+
+        let output = provider
+            .handle_put_parameter(PutParameterInput {
+                name: "/pulumi/empty-allowed-pattern".to_owned(),
+                value: "value".to_owned(),
+                allowed_pattern: Some(String::new()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(output.version, 1);
+        provider
+            .handle_get_parameter(&GetParameterInput {
+                name: "/pulumi/empty-allowed-pattern".to_owned(),
+                with_decryption: None,
+            })
+            .unwrap();
+        let history = provider
+            .handle_get_parameter_history(&GetParameterHistoryInput {
+                name: "/pulumi/empty-allowed-pattern".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(history.parameters[0].allowed_pattern.is_none());
+    }
 }

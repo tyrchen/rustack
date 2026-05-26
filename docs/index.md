@@ -1,5 +1,7 @@
 # Documentation
 
+- [Pulumi](./pulumi.md) - Use Rustack as a Pulumi AWS provider deployment target.
+
 ## Research
 
 - [LocalStack S3 Implementation Research](./research/localstack-s3-research.md) - Comprehensive analysis of what a Rust-based LocalStack S3 service needs to support for feature parity.

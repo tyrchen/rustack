@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     attribute_value::AttributeValue,
     types::{
-        ConsumedCapacity, ItemCollectionMetrics, ItemResponse, KeysAndAttributes, TableDescription,
-        Tag, TimeToLiveDescription, TimeToLiveSpecification, WriteRequest,
+        ConsumedCapacity, ContinuousBackupsDescription, ItemCollectionMetrics, ItemResponse,
+        KeysAndAttributes, TableDescription, Tag, TimeToLiveDescription, TimeToLiveSpecification,
+        WriteRequest,
     },
 };
 
@@ -54,6 +55,22 @@ pub struct UpdateTableOutput {
     /// The properties of the updated table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_description: Option<TableDescription>,
+}
+
+/// Output for the `DescribeContinuousBackups` operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DescribeContinuousBackupsOutput {
+    /// The continuous backups and point-in-time recovery settings.
+    pub continuous_backups_description: ContinuousBackupsDescription,
+}
+
+/// Output for the `UpdateContinuousBackups` operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateContinuousBackupsOutput {
+    /// The updated continuous backups and point-in-time recovery settings.
+    pub continuous_backups_description: ContinuousBackupsDescription,
 }
 
 /// Output for the `ListTables` operation.
