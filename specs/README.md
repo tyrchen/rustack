@@ -31,5 +31,6 @@ All specs that for AI to generate code.
 | [ruststack-pulumi-hackathon-app](./ruststack-pulumi-hackathon-app.md) | Validation Spec | Implemented | Real-world serverless hackathon app Pulumi stack covering CloudFront, S3, API Gateway, Lambda, DynamoDB, SQS, SSM, IAM policies, OAC, bucket policies, and worker event source mapping |
 | [ruststack-snapshot-prd](./ruststack-snapshot-prd.md) | PRD | Draft | Named runtime snapshots for loading/saving Rustack resource and data-plane state across graceful restarts |
 | [ruststack-snapshot-design](./ruststack-snapshot-design.md) | Design | Draft | Snapshot layout, resource/data shard boundaries, runtime lifecycle, atomic save/load behavior, and service contracts |
+| [ruststack-snapshot-binary-archive-design](./ruststack-snapshot-binary-archive-design.md) | Design | Draft | Binary `*.ss.zst` snapshot archive format with per-service `meta.ss.zst`/`data.ss.zst`, parallel save/load, and hackathon perf budgets |
 | [ruststack-snapshot-impl-plan](./ruststack-snapshot-impl-plan.md) | Impl Plan | Draft | Phase plan for hackathon-app snapshot support, service shard implementation, smoke target, and quality gates |
 | [ruststack-snapshot-verification-plan](./ruststack-snapshot-verification-plan.md) | Verification Plan | Draft | Unit, integration, Pulumi, performance, and Rust quality gates for snapshot support |

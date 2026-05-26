@@ -33,9 +33,10 @@ The snapshot is a directory on disk with separate resource and data sections. Th
 | G1 | Named load/save UX | `rustack --snapshot <name>` loads an existing snapshot and saves on graceful shutdown. |
 | G2 | Pulumi resource persistence | A Pulumi stack created against Rustack can refresh/read resources after Rustack restarts from the same snapshot. |
 | G3 | Data-plane persistence | S3 object bodies and DynamoDB table items written before shutdown are present after restart. |
-| G4 | Fast enough load | The hackathon-app snapshot loads before the health endpoint becomes ready with no observable multi-second replay loop. |
+| G4 | Fast load | The hackathon-app snapshot loads before the health endpoint becomes ready in <= 200 ms on the local reference machine. |
 | G5 | Durable save semantics | Save is atomic: an interrupted save never corrupts the previous snapshot. |
 | G6 | Extensible service contract | Each service owns its own snapshot encode/decode boundary and can opt into resources, data, or both. |
+| G7 | Fast graceful save | The hackathon-app snapshot save path from SIGINT to process exit completes in <= 500 ms on the local reference machine. |
 
 ## 4. Non-Goals
 
@@ -65,5 +66,6 @@ The snapshot is a directory on disk with separate resource and data sections. Th
 - Snapshot root env override: `RUSTACK_SNAPSHOT_DIR`.
 - Default snapshot root: `.rustack/snapshots` relative to the current working directory.
 - Snapshot name charset: ASCII alphanumeric, `_`, `-`, and `.`; maximum 64 bytes; no path separators or `..`.
-- On-disk schema version: `1`.
+- On-disk schema version: `2`.
+- Primary artifact names: `manifest.ss.zst`, `services/<service>/meta.ss.zst`, and optional `services/<service>/data.ss.zst`.
 - Service snapshot modules use `snapshot.rs` inside the owning core crate.

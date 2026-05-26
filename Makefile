@@ -246,6 +246,12 @@ pulumi-hackathon-snapshot-smoke:
 		SNAPSHOT_DIR="$$TMP_DIR/snapshots"; \
 		PID1="$$TMP_DIR/rustack-save.pid"; \
 		PID2="$$TMP_DIR/rustack-load.pid"; \
+		LOAD_MS_FILE="$$TMP_DIR/rustack-load.ms"; \
+		PERF_FILE="$$TMP_DIR/snapshot-perf.txt"; \
+		SAVE_BUDGET_MS="$${RUSTACK_SNAPSHOT_SAVE_BUDGET_MS:-500}"; \
+		LOAD_BUDGET_MS="$${RUSTACK_SNAPSHOT_LOAD_BUDGET_MS:-200}"; \
+		now_ms() { node -e "process.stdout.write(String(Date.now()))"; }; \
+		metric_value() { grep "^$$1=" "$$PERF_FILE" | tail -n 1 | cut -d= -f2; }; \
 		stop_pid_file() { \
 			local pid_file="$$1"; \
 			if [[ -f "$$pid_file" ]]; then \
@@ -253,14 +259,26 @@ pulumi-hackathon-snapshot-smoke:
 				pid=$$(cat "$$pid_file"); \
 				if kill -0 "$$pid" >/dev/null 2>&1; then \
 					kill -INT "$$pid" >/dev/null 2>&1 || true; \
-					for _ in $$(seq 1 60); do \
+					for _ in $$(seq 1 1200); do \
 						if ! kill -0 "$$pid" >/dev/null 2>&1; then return 0; fi; \
-						sleep 1; \
+						sleep 0.05; \
 					done; \
 					echo "Rustack process $$pid did not stop after SIGINT" >&2; \
 					return 1; \
 				fi; \
 			fi; \
+		}; \
+		sum_named_files() { \
+			local root="$$1"; \
+			local name="$$2"; \
+			local total=0; \
+			local file; \
+			local size; \
+			while IFS= read -r -d "" file; do \
+				size=$$(wc -c <"$$file" | tr -d " "); \
+				total=$$((total + size)); \
+			done < <(find "$$root" -name "$$name" -type f -print0); \
+			printf "%s\n" "$$total"; \
 		}; \
 		cleanup() { \
 			stop_pid_file "$$PID1" >/dev/null 2>&1 || true; \
@@ -274,6 +292,7 @@ pulumi-hackathon-snapshot-smoke:
 			PULUMI_STACK="$$STACK" \
 			RUSTACK_ENDPOINT="$$ENDPOINT" \
 			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_SNAPSHOT_PERF_FILE="$$PERF_FILE" \
 			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
 			RUSTACK_KEEP_RUNNING=1 \
 			RUSTACK_PID_FILE="$$PID1" \
@@ -295,8 +314,18 @@ pulumi-hackathon-snapshot-smoke:
 			-H "x-amz-target: DynamoDB_20120810.PutItem" \
 			-H "content-type: application/x-amz-json-1.0" \
 			--data "{\"TableName\":\"$$PROJECTS_TABLE\",\"Item\":{\"pk\":{\"S\":\"PROJECT\"},\"sk\":{\"S\":\"snapshot-smoke\"},\"title\":{\"S\":\"Snapshot Smoke\"}}}" >/dev/null; \
+		SAVE_STARTED_MS=$$(now_ms); \
 		stop_pid_file "$$PID1"; \
-		test -f "$$SNAPSHOT_DIR/$$SNAPSHOT_NAME/manifest.json"; \
+		SAVE_WALL_MS=$$(( $$(now_ms) - SAVE_STARTED_MS )); \
+		SNAPSHOT_PATH="$$SNAPSHOT_DIR/$$SNAPSHOT_NAME"; \
+		test -f "$$SNAPSHOT_PATH/manifest.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/s3/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/s3/data.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/dynamodb/meta.ss.zst"; \
+		if find "$$SNAPSHOT_PATH" \( -path "*/objects/*.bin" -o -path "*/parts/*.bin" \) -type f | grep -q .; then \
+			echo "snapshot contains unpacked S3 payload files" >&2; \
+			exit 1; \
+		fi; \
 		echo "Reloading snapshot and refreshing Pulumi state"; \
 		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/hackathon-app" \
 			PULUMI_STATE_DIR="$$STATE_DIR" \
@@ -304,9 +333,11 @@ pulumi-hackathon-snapshot-smoke:
 			PULUMI_OPERATION=refresh \
 			RUSTACK_ENDPOINT="$$ENDPOINT" \
 			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_SNAPSHOT_PERF_FILE="$$PERF_FILE" \
 			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
 			RUSTACK_KEEP_RUNNING=1 \
 			RUSTACK_PID_FILE="$$PID2" \
+			RUSTACK_READY_MS_FILE="$$LOAD_MS_FILE" \
 			PULUMI_KEEP_STACK=1 \
 			PULUMI_SKIP_DESTROY=1 \
 			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
@@ -318,6 +349,21 @@ pulumi-hackathon-snapshot-smoke:
 			--data "{\"TableName\":\"$$PROJECTS_TABLE\",\"Key\":{\"pk\":{\"S\":\"PROJECT\"},\"sk\":{\"S\":\"snapshot-smoke\"}}}"); \
 		printf "%s" "$$DDB_ITEM" | grep -q "Snapshot Smoke"; \
 		stop_pid_file "$$PID2"; \
+		SAVE_MS=$$(metric_value save_ms); \
+		LOAD_MS=$$(metric_value load_ms); \
+		LOAD_READY_MS=$$(cat "$$LOAD_MS_FILE"); \
+		MANIFEST_BYTES=$$(wc -c <"$$SNAPSHOT_PATH/manifest.ss.zst" | tr -d " "); \
+		META_BYTES=$$(sum_named_files "$$SNAPSHOT_PATH/services" "meta.ss.zst"); \
+		DATA_BYTES=$$(sum_named_files "$$SNAPSHOT_PATH/services" "data.ss.zst"); \
+		echo "Hackathon snapshot perf: save_ms=$$SAVE_MS save_wall_ms=$$SAVE_WALL_MS load_ms=$$LOAD_MS load_ready_ms=$$LOAD_READY_MS manifest_bytes=$$MANIFEST_BYTES meta_bytes=$$META_BYTES data_bytes=$$DATA_BYTES"; \
+		if (( SAVE_MS > SAVE_BUDGET_MS )); then \
+			echo "snapshot save exceeded budget: $${SAVE_MS}ms > $${SAVE_BUDGET_MS}ms" >&2; \
+			exit 1; \
+		fi; \
+		if (( LOAD_MS > LOAD_BUDGET_MS )); then \
+			echo "snapshot load exceeded budget: $${LOAD_MS}ms > $${LOAD_BUDGET_MS}ms" >&2; \
+			exit 1; \
+		fi; \
 		echo "Hackathon snapshot smoke passed"; \
 	'
 

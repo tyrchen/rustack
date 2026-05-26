@@ -3,12 +3,17 @@
 use std::{
     collections::BTreeMap,
     io::ErrorKind,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
+use archive::{
+    ArchiveKind, ArchiveSection, ArchiveStats, SECTION_MANIFEST_CBOR, SECTION_STATE_CBOR,
+    from_cbor, get_required_section, pack_data_archive, read_archive, to_cbor, unpack_data_archive,
+    validated_relative_path, write_archive,
+};
 use async_trait::async_trait;
 #[cfg(feature = "apigatewayv2")]
 use rustack_apigatewayv2_core::{provider::RustackApiGatewayV2, storage::ApiStoreSnapshot};
@@ -29,18 +34,27 @@ use rustack_sqs_core::provider::{RustackSqs, SqsSnapshot};
 #[cfg(feature = "ssm")]
 use rustack_ssm_core::{provider::RustackSsm, storage::ParameterStoreSnapshot};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::fs;
+use tokio::{fs, io::AsyncWriteExt as _, sync::Semaphore, task::JoinSet};
 use tracing::{info, warn};
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+mod archive;
+
+const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 const SNAPSHOT_ROOT_ENV: &str = "RUSTACK_SNAPSHOT_DIR";
+const SNAPSHOT_PERF_FILE_ENV: &str = "RUSTACK_SNAPSHOT_PERF_FILE";
 const DEFAULT_SNAPSHOT_ROOT: &str = ".rustack/snapshots";
-const MANIFEST_FILE: &str = "manifest.json";
+const MANIFEST_FILE: &str = "manifest.ss.zst";
+const META_FILE: &str = "meta.ss.zst";
+const DATA_FILE: &str = "data.ss.zst";
+const SERVICES_DIR: &str = "services";
+const STAGING_DIR: &str = ".staging";
+const LOAD_STAGING_PREFIX: &str = ".load";
+const SNAPSHOT_SERVICE_PARALLELISM: usize = 4;
 
 /// Registry of services that support runtime snapshots.
 #[derive(Default)]
 pub(crate) struct RuntimeProviders {
-    services: Vec<Box<dyn SnapshotService>>,
+    services: Vec<Arc<dyn SnapshotService>>,
 }
 
 impl RuntimeProviders {
@@ -93,7 +107,7 @@ impl RuntimeProviders {
     where
         T: SnapshotService + 'static,
     {
-        self.services.push(Box::new(service));
+        self.services.push(Arc::new(service));
     }
 
     /// Stop stateful provider background workers after snapshot save.
@@ -109,7 +123,7 @@ impl RuntimeProviders {
         }
     }
 
-    fn services(&self) -> &[Box<dyn SnapshotService>] {
+    fn services(&self) -> &[Arc<dyn SnapshotService>] {
         &self.services
     }
 }
@@ -122,17 +136,9 @@ trait SnapshotService: Send + Sync {
         SnapshotKind::Resource
     }
 
-    async fn save_state(&self, state_file: &Path, data_dir: &Path) -> Result<()>;
+    async fn save_meta(&self, data_staging_dir: &Path) -> Result<Vec<u8>>;
 
-    async fn save_data(&self, _data_dir: &Path) -> Result<()> {
-        Ok(())
-    }
-
-    async fn load_data(&self, _data_dir: &Path) -> Result<()> {
-        Ok(())
-    }
-
-    async fn load_state(&self, state_file: &Path, data_dir: &Path) -> Result<()>;
+    async fn load_meta(&self, state_cbor: &[u8], data_staging_dir: &Path) -> Result<()>;
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
@@ -155,14 +161,16 @@ impl SnapshotService for S3SnapshotService {
         SnapshotKind::Data
     }
 
-    async fn save_state(&self, state_file: &Path, data_dir: &Path) -> Result<()> {
-        let snapshot = self.provider.export_snapshot(data_dir).await?;
-        write_json(state_file, &snapshot).await
+    async fn save_meta(&self, data_staging_dir: &Path) -> Result<Vec<u8>> {
+        let snapshot = self.provider.export_snapshot(data_staging_dir).await?;
+        encode_state(&snapshot)
     }
 
-    async fn load_state(&self, state_file: &Path, data_dir: &Path) -> Result<()> {
-        let snapshot: S3Snapshot = read_json(state_file).await?;
-        self.provider.import_snapshot(snapshot, data_dir).await?;
+    async fn load_meta(&self, state_cbor: &[u8], data_staging_dir: &Path) -> Result<()> {
+        let snapshot: S3Snapshot = decode_state(state_cbor)?;
+        self.provider
+            .import_snapshot(snapshot, data_staging_dir)
+            .await?;
         Ok(())
     }
 }
@@ -183,12 +191,12 @@ impl SnapshotService for DynamoDBSnapshotService {
         SnapshotKind::Data
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: DynamoDBSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: DynamoDBSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot)?;
         Ok(())
     }
@@ -206,12 +214,12 @@ impl SnapshotService for DynamoDBStreamsSnapshotService {
         "dynamodbstreams"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.store.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.store.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: StreamStoreSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: StreamStoreSnapshot = decode_state(state_cbor)?;
         self.store.import_snapshot(snapshot);
         Ok(())
     }
@@ -229,12 +237,12 @@ impl SnapshotService for SqsSnapshotService {
         "sqs"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot().await?).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot().await?)
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: SqsSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: SqsSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot).await?;
         Ok(())
     }
@@ -257,12 +265,12 @@ impl SnapshotService for SsmSnapshotService {
         "ssm"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: ParameterStoreSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: ParameterStoreSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot);
         Ok(())
     }
@@ -280,12 +288,12 @@ impl SnapshotService for IamSnapshotService {
         "iam"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: IamStoreSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: IamStoreSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot);
         Ok(())
     }
@@ -303,12 +311,12 @@ impl SnapshotService for LambdaSnapshotService {
         "lambda"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: LambdaSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: LambdaSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot).await?;
         Ok(())
     }
@@ -331,12 +339,12 @@ impl SnapshotService for ApiGatewayV2SnapshotService {
         "apigatewayv2"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: ApiStoreSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: ApiStoreSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot);
         Ok(())
     }
@@ -354,12 +362,12 @@ impl SnapshotService for CloudFrontSnapshotService {
         "cloudfront"
     }
 
-    async fn save_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        write_json(state_file, &self.provider.export_snapshot()).await
+    async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+        encode_state(&self.provider.export_snapshot())
     }
 
-    async fn load_state(&self, state_file: &Path, _data_dir: &Path) -> Result<()> {
-        let snapshot: CloudFrontStoreSnapshot = read_json(state_file).await?;
+    async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+        let snapshot: CloudFrontStoreSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot);
         Ok(())
     }
@@ -394,6 +402,7 @@ impl SnapshotConfig {
     ///
     /// Returns an error if the snapshot exists but cannot be parsed or applied.
     pub(crate) async fn load(&self, providers: &RuntimeProviders) -> Result<()> {
+        let started = Instant::now();
         let dir = self.snapshot_dir();
         if !path_exists(&dir).await? {
             info!(snapshot = %self.name.as_str(), path = %dir.display(), "snapshot not found, starting empty");
@@ -401,7 +410,7 @@ impl SnapshotConfig {
         }
 
         let manifest_path = dir.join(MANIFEST_FILE);
-        let manifest: SnapshotManifest = read_json(&manifest_path).await?;
+        let manifest = read_manifest(&manifest_path).await?;
         if manifest.schema_version != SNAPSHOT_SCHEMA_VERSION {
             bail!(
                 "unsupported snapshot schema version {} in {}",
@@ -410,22 +419,51 @@ impl SnapshotConfig {
             );
         }
 
+        let load_staging = self.root.join(format!(
+            ".{}.{}.{}",
+            self.name.as_str(),
+            LOAD_STAGING_PREFIX,
+            unique_suffix()?
+        ));
+        remove_dir_if_exists(&load_staging).await?;
+        fs::create_dir_all(&load_staging).await.with_context(|| {
+            format!(
+                "failed to create snapshot load staging dir {}",
+                load_staging.display()
+            )
+        })?;
+
+        let mut join_set = JoinSet::new();
+        let semaphore = Arc::new(Semaphore::new(SNAPSHOT_SERVICE_PARALLELISM));
         for service in providers.services() {
             let service_name = service.service_name();
             if let Some(entry) = manifest.services.get(service_name) {
-                let state_file = snapshot_child(&dir, &entry.file)?;
-                let data_dir = dir.join("data").join(service_name);
-                service
-                    .load_data(&data_dir)
-                    .await
-                    .with_context(|| format!("failed to load snapshot data for {service_name}"))?;
-                service
-                    .load_state(&state_file, &data_dir)
-                    .await
-                    .with_context(|| format!("failed to load snapshot state for {service_name}"))?;
+                let service = Arc::clone(service);
+                let entry = entry.clone();
+                let snapshot_dir = dir.clone();
+                let staging_root = load_staging.clone();
+                let semaphore = Arc::clone(&semaphore);
+                join_set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .context("snapshot load semaphore closed")?;
+                    load_service_snapshot(service, snapshot_dir, staging_root, entry).await
+                });
             }
         }
+        let load_result = async {
+            while let Some(result) = join_set.join_next().await {
+                result.context("snapshot load task failed")??;
+            }
+            Result::<()>::Ok(())
+        }
+        .await;
+        let cleanup_result = remove_dir_if_exists(&load_staging).await;
+        load_result?;
+        cleanup_result?;
 
+        record_snapshot_timing("load_ms", started.elapsed()).await;
         info!(snapshot = %self.name.as_str(), path = %dir.display(), "loaded runtime snapshot");
         Ok(())
     }
@@ -437,6 +475,7 @@ impl SnapshotConfig {
     /// Returns an error if state export, JSON serialization, or atomic directory
     /// replacement fails.
     pub(crate) async fn save(&self, providers: &RuntimeProviders, version: &str) -> Result<()> {
+        let started = Instant::now();
         fs::create_dir_all(&self.root)
             .await
             .with_context(|| format!("failed to create snapshot root {}", self.root.display()))?;
@@ -447,37 +486,39 @@ impl SnapshotConfig {
             .root
             .join(format!(".{}.tmp.{suffix}", self.name.as_str()));
         remove_dir_if_exists(&temp).await?;
-        fs::create_dir_all(temp.join("resources"))
+        fs::create_dir_all(temp.join(SERVICES_DIR))
             .await
             .with_context(|| format!("failed to create snapshot temp dir {}", temp.display()))?;
-        fs::create_dir_all(temp.join("data"))
+        fs::create_dir_all(temp.join(STAGING_DIR))
             .await
-            .with_context(|| format!("failed to create snapshot data dir {}", temp.display()))?;
+            .with_context(|| format!("failed to create snapshot staging dir {}", temp.display()))?;
 
         let mut manifest = SnapshotManifest::new(self.name.as_str(), version)?;
+        let mut join_set = JoinSet::new();
+        let semaphore = Arc::new(Semaphore::new(SNAPSHOT_SERVICE_PARALLELISM));
 
         for service in providers.services() {
-            let service_name = service.service_name();
-            let file = format!("resources/{service_name}.json");
-            let state_file = temp.join(&file);
-            let data_dir = temp.join("data").join(service_name);
-            fs::create_dir_all(&data_dir).await.with_context(|| {
-                format!("failed to create snapshot data dir {}", data_dir.display())
-            })?;
-            service
-                .save_state(&state_file, &data_dir)
-                .await
-                .with_context(|| format!("failed to save snapshot state for {service_name}"))?;
-            service
-                .save_data(&data_dir)
-                .await
-                .with_context(|| format!("failed to save snapshot data for {service_name}"))?;
-            manifest.add_service(service_name, &file, service.snapshot_kind());
+            let service = Arc::clone(service);
+            let snapshot_dir = temp.clone();
+            let semaphore = Arc::clone(&semaphore);
+            join_set.spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .context("snapshot save semaphore closed")?;
+                save_service_snapshot(service, snapshot_dir).await
+            });
         }
+        while let Some(result) = join_set.join_next().await {
+            let service = result.context("snapshot save task failed")??;
+            manifest.add_service(service.name, service.manifest);
+        }
+        remove_dir_if_exists(&temp.join(STAGING_DIR)).await?;
 
-        write_json(&temp.join(MANIFEST_FILE), &manifest).await?;
+        write_manifest(&temp.join(MANIFEST_FILE), &manifest).await?;
         replace_directory(&temp, &target, &self.root, self.name.as_str()).await?;
 
+        record_snapshot_timing("save_ms", started.elapsed()).await;
         info!(snapshot = %self.name.as_str(), path = %target.display(), "saved runtime snapshot");
         Ok(())
     }
@@ -524,7 +565,7 @@ struct SnapshotManifest {
     snapshot_name: String,
     created_by: String,
     rustack_version: String,
-    saved_at_unix_millis: u128,
+    saved_at_unix_millis: u64,
     services: BTreeMap<String, SnapshotServiceManifest>,
 }
 
@@ -540,14 +581,8 @@ impl SnapshotManifest {
         })
     }
 
-    fn add_service(&mut self, service: &str, file: &str, kind: SnapshotKind) {
-        self.services.insert(
-            service.to_owned(),
-            SnapshotServiceManifest {
-                file: file.to_owned(),
-                kind,
-            },
-        );
+    fn add_service(&mut self, service: String, manifest: SnapshotServiceManifest) {
+        self.services.insert(service, manifest);
     }
 }
 
@@ -561,8 +596,178 @@ enum SnapshotKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotServiceManifest {
-    file: String,
     kind: SnapshotKind,
+    meta_file: String,
+    data_file: Option<String>,
+    meta: ArchiveStats,
+    data: Option<ArchiveStats>,
+}
+
+#[derive(Debug)]
+struct ServiceSaveResult {
+    name: String,
+    manifest: SnapshotServiceManifest,
+}
+
+async fn save_service_snapshot(
+    service: Arc<dyn SnapshotService>,
+    snapshot_dir: PathBuf,
+) -> Result<ServiceSaveResult> {
+    let service_name = service.service_name();
+    let started = Instant::now();
+    let service_dir = snapshot_dir.join(SERVICES_DIR).join(service_name);
+    let staging_dir = snapshot_dir.join(STAGING_DIR).join(service_name);
+    fs::create_dir_all(&service_dir).await.with_context(|| {
+        format!(
+            "failed to create snapshot service dir {}",
+            service_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&staging_dir).await.with_context(|| {
+        format!(
+            "failed to create snapshot staging dir {}",
+            staging_dir.display()
+        )
+    })?;
+
+    let state_cbor = service
+        .save_meta(&staging_dir)
+        .await
+        .with_context(|| format!("failed to save snapshot metadata for {service_name}"))?;
+    let meta_path = service_dir.join(META_FILE);
+    let meta_stats = write_archive(
+        &meta_path,
+        ArchiveKind::ServiceMeta,
+        vec![ArchiveSection::new(SECTION_STATE_CBOR, state_cbor, 1)],
+    )
+    .await
+    .with_context(|| format!("failed to write snapshot metadata archive for {service_name}"))?;
+
+    let data_path = service_dir.join(DATA_FILE);
+    let data_stats = pack_data_archive(&staging_dir, &data_path)
+        .await
+        .with_context(|| format!("failed to write snapshot data archive for {service_name}"))?;
+    remove_dir_if_exists(&staging_dir).await?;
+
+    let data_file = data_stats
+        .as_ref()
+        .map(|_| format!("{SERVICES_DIR}/{service_name}/{DATA_FILE}"));
+    let manifest = SnapshotServiceManifest {
+        kind: service.snapshot_kind(),
+        meta_file: format!("{SERVICES_DIR}/{service_name}/{META_FILE}"),
+        data_file,
+        meta: meta_stats,
+        data: data_stats,
+    };
+    info!(
+        service = service_name,
+        elapsed_ms = started.elapsed().as_millis(),
+        meta_compressed_bytes = manifest.meta.compressed_bytes,
+        data_compressed_bytes = manifest.data.map_or(0, |stats| stats.compressed_bytes),
+        "saved service snapshot",
+    );
+    Ok(ServiceSaveResult {
+        name: service_name.to_owned(),
+        manifest,
+    })
+}
+
+async fn load_service_snapshot(
+    service: Arc<dyn SnapshotService>,
+    snapshot_dir: PathBuf,
+    staging_root: PathBuf,
+    manifest: SnapshotServiceManifest,
+) -> Result<()> {
+    let service_name = service.service_name();
+    let started = Instant::now();
+    let staging_dir = staging_root.join(service_name);
+    remove_dir_if_exists(&staging_dir).await?;
+    fs::create_dir_all(&staging_dir).await.with_context(|| {
+        format!(
+            "failed to create snapshot staging dir {}",
+            staging_dir.display()
+        )
+    })?;
+
+    if let Some(data_file) = manifest.data_file.as_ref() {
+        let data_path = snapshot_child(&snapshot_dir, data_file)?;
+        unpack_data_archive(&data_path, &staging_dir)
+            .await
+            .with_context(|| format!("failed to load snapshot data archive for {service_name}"))?;
+    }
+
+    let meta_path = snapshot_child(&snapshot_dir, &manifest.meta_file)?;
+    let sections = read_archive(&meta_path, ArchiveKind::ServiceMeta)
+        .await
+        .with_context(|| format!("failed to read snapshot metadata archive for {service_name}"))?;
+    let state_cbor = get_required_section(&sections, SECTION_STATE_CBOR)?;
+    service
+        .load_meta(state_cbor, &staging_dir)
+        .await
+        .with_context(|| format!("failed to load snapshot metadata for {service_name}"))?;
+
+    remove_dir_if_exists(&staging_dir).await?;
+    info!(
+        service = service_name,
+        elapsed_ms = started.elapsed().as_millis(),
+        meta_compressed_bytes = manifest.meta.compressed_bytes,
+        data_compressed_bytes = manifest.data.map_or(0, |stats| stats.compressed_bytes),
+        "loaded service snapshot",
+    );
+    Ok(())
+}
+
+fn encode_state<T>(value: &T) -> Result<Vec<u8>>
+where
+    T: Serialize,
+{
+    to_cbor(value)
+}
+
+fn decode_state<T>(bytes: &[u8]) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    from_cbor(bytes)
+}
+
+async fn write_manifest(path: &Path, manifest: &SnapshotManifest) -> Result<()> {
+    let manifest_cbor = to_cbor(manifest)?;
+    write_archive(
+        path,
+        ArchiveKind::Manifest,
+        vec![ArchiveSection::new(SECTION_MANIFEST_CBOR, manifest_cbor, 1)],
+    )
+    .await
+    .with_context(|| format!("failed to write snapshot manifest {}", path.display()))?;
+    Ok(())
+}
+
+async fn read_manifest(path: &Path) -> Result<SnapshotManifest> {
+    let sections = read_archive(path, ArchiveKind::Manifest)
+        .await
+        .with_context(|| format!("failed to read snapshot manifest {}", path.display()))?;
+    let manifest_cbor = get_required_section(&sections, SECTION_MANIFEST_CBOR)?;
+    from_cbor(manifest_cbor)
+}
+
+async fn record_snapshot_timing(metric: &str, elapsed: Duration) {
+    let Ok(path) = std::env::var(SNAPSHOT_PERF_FILE_ENV) else {
+        return;
+    };
+    let line = format!("{metric}={}\n", elapsed.as_millis());
+    let result = async {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        file.write_all(line.as_bytes()).await
+    }
+    .await;
+    if let Err(error) = result {
+        warn!(path = %path, error = %error, "failed to record snapshot timing");
+    }
 }
 
 fn snapshot_root() -> PathBuf {
@@ -571,37 +776,7 @@ fn snapshot_root() -> PathBuf {
 }
 
 fn snapshot_child(root: &Path, relative: &str) -> Result<PathBuf> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        bail!("snapshot manifest path must be a relative child path: {relative}");
-    }
-    Ok(root.join(path))
-}
-
-async fn read_json<T>(path: &Path) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let bytes = fs::read(path)
-        .await
-        .with_context(|| format!("failed to read snapshot file {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse snapshot file {}", path.display()))
-}
-
-async fn write_json<T>(path: &Path, value: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    let bytes = serde_json::to_vec_pretty(value)
-        .with_context(|| format!("failed to serialize snapshot file {}", path.display()))?;
-    fs::write(path, bytes)
-        .await
-        .with_context(|| format!("failed to write snapshot file {}", path.display()))
+    Ok(root.join(validated_relative_path(relative)?))
 }
 
 async fn path_exists(path: &Path) -> Result<bool> {
@@ -665,11 +840,12 @@ fn unique_suffix() -> Result<String> {
     Ok(format!("{}-{}", std::process::id(), now_unix_millis()?))
 }
 
-fn now_unix_millis() -> Result<u128> {
-    Ok(SystemTime::now()
+fn now_unix_millis() -> Result<u64> {
+    let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before UNIX epoch")?
-        .as_millis())
+        .as_millis();
+    u64::try_from(millis).context("current UNIX millis do not fit in u64")
 }
 
 #[cfg(test)]
@@ -702,7 +878,36 @@ mod tests {
 
     #[test]
     fn test_should_accept_manifest_child_path() {
-        let path = snapshot_child(Path::new("/tmp/snapshot"), "resources/s3.json");
+        let path = snapshot_child(Path::new("/tmp/snapshot"), "services/s3/meta.ss.zst");
         assert!(path.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_should_round_trip_manifest_archive() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(MANIFEST_FILE);
+        let mut manifest = SnapshotManifest::new("dev", "test-version")?;
+        manifest.add_service(
+            "s3".to_owned(),
+            SnapshotServiceManifest {
+                kind: SnapshotKind::Data,
+                meta_file: "services/s3/meta.ss.zst".to_owned(),
+                data_file: Some("services/s3/data.ss.zst".to_owned()),
+                meta: ArchiveStats {
+                    compressed_bytes: 10,
+                    uncompressed_bytes: 20,
+                },
+                data: Some(ArchiveStats {
+                    compressed_bytes: 30,
+                    uncompressed_bytes: 40,
+                }),
+            },
+        );
+
+        write_manifest(&path, &manifest).await?;
+        let loaded = read_manifest(&path).await?;
+        assert_eq!(loaded.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        assert!(loaded.services.contains_key("s3"));
+        Ok(())
     }
 }

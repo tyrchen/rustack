@@ -1,13 +1,15 @@
 # Rustack Runtime Snapshot Design
 
 **Date:** 2026-05-26
-**Status:** Draft
+**Status:** Draft (M0 JSON design, superseded for implementation by binary archive design)
 **Type:** Design
 **Depends on:** [ruststack-snapshot-prd](./ruststack-snapshot-prd.md), [ruststack-pulumi-hackathon-app](./ruststack-pulumi-hackathon-app.md)
 
 ## 1. Purpose
 
-Runtime snapshots provide local persistence for Rustack's in-memory service providers. The design keeps the CLI simple while making resource and data snapshots separate implementation concepts. This avoids a single huge JSON blob, allows S3 object bodies to live as files, and lets each service implement the persistence boundary closest to its internal store.
+Runtime snapshots provide local persistence for Rustack's in-memory service providers. The design keeps the CLI simple while making resource and data snapshots separate implementation concepts. This avoids a single huge JSON blob, allows S3 object bodies to live outside metadata, and lets each service implement the persistence boundary closest to its internal store.
+
+This document records the original M0 JSON shard design. The implementation target for the current PR is the v2 binary archive design in [ruststack-snapshot-binary-archive-design.md](./ruststack-snapshot-binary-archive-design.md): `manifest.ss.zst` plus per-service `meta.ss.zst` and optional `data.ss.zst`.
 
 ## 2. User Contract
 

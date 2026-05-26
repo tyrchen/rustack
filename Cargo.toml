@@ -117,6 +117,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ciborium = "0.2"
 quick-xml = "0.39"
+zstd = { version = "0.13.3", default-features = false }
 
 # Error handling
 anyhow = "1.0"
@@ -168,25 +169,88 @@ form_urlencoded = "1.2"
 
 # Testing
 tokio-test = "0.4"
-aws-config = "1.8"
-aws-sdk-s3 = "1.131"
-aws-sdk-dynamodb = "1.111"
-aws-sdk-dynamodbstreams = "1"
-aws-sdk-sqs = "1.98"
-aws-sdk-ssm = "1.109"
-aws-sdk-sns = "1.99"
-aws-sdk-lambda = "1.122"
-aws-sdk-cloudwatch = "1"
-aws-sdk-cloudwatchlogs = "1.127"
-aws-sdk-eventbridge = "1.105"
-aws-sdk-kms = "1"
-aws-sdk-kinesis = "1"
-aws-sdk-secretsmanager = "1"
-aws-sdk-ses = "1"
-aws-sdk-apigatewayv2 = "1"
-aws-sdk-iam = "1"
-aws-sdk-sts = "1"
-aws-sdk-cloudfront = "1"
+aws-config = { version = "1.8", default-features = false, features = [
+  "credentials-process",
+  "default-https-client",
+  "rt-tokio",
+  "sso",
+] }
+aws-sdk-s3 = { version = "1.131", default-features = false, features = [
+  "default-https-client",
+  "http-1x",
+  "rt-tokio",
+  "sigv4a",
+] }
+aws-sdk-dynamodb = { version = "1.111", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-dynamodbstreams = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-sqs = { version = "1.98", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-ssm = { version = "1.109", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-sns = { version = "1.99", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-lambda = { version = "1.122", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-cloudwatch = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-cloudwatchlogs = { version = "1.127", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-eventbridge = { version = "1.105", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+  "sigv4a",
+] }
+aws-sdk-kms = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-kinesis = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-ses = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-apigatewayv2 = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-iam = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-sts = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+  "sigv4a",
+] }
+aws-sdk-cloudfront = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
 reqwest = { version = "0.13", features = ["json"] }
 aws-credential-types = "1.2"
 aws-smithy-runtime-api = "1.12"

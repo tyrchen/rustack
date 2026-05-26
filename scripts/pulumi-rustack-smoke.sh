@@ -60,6 +60,10 @@ health_url() {
   printf '%s/_localstack/health' "${ENDPOINT%/}"
 }
 
+now_ms() {
+  node -e 'process.stdout.write(String(Date.now()))'
+}
+
 rustack_binary_path() {
   local target_dir
   target_dir="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
@@ -70,11 +74,17 @@ rustack_binary_path() {
 }
 
 wait_for_rustack() {
-  for _ in $(seq 1 60); do
+  local started_ms="$1"
+  for _ in $(seq 1 1200); do
     if curl -sf "$(health_url)" >/dev/null 2>&1; then
+      if [[ -n "${RUSTACK_READY_MS_FILE:-}" ]]; then
+        local ready_ms
+        ready_ms="$(now_ms)"
+        printf '%s\n' "$((ready_ms - started_ms))" >"$RUSTACK_READY_MS_FILE"
+      fi
       return 0
     fi
-    sleep 1
+    sleep 0.05
   done
 
   echo "Rustack did not become healthy at $(health_url)" >&2
@@ -87,6 +97,9 @@ wait_for_rustack() {
 start_rustack_if_needed() {
   if curl -sf "$(health_url)" >/dev/null 2>&1; then
     echo "Using existing Rustack at $ENDPOINT"
+    if [[ -n "${RUSTACK_READY_MS_FILE:-}" ]]; then
+      printf '0\n' >"$RUSTACK_READY_MS_FILE"
+    fi
     return
   fi
 
@@ -119,6 +132,8 @@ start_rustack_if_needed() {
     # shellcheck disable=SC2206
     rustack_args=(${RUSTACK_EXTRA_ARGS})
   fi
+  local started_ms
+  started_ms="$(now_ms)"
   GATEWAY_LISTEN="$listen_addr" \
     LOG_LEVEL=warn \
     "$rustack_bin" "${rustack_args[@]}" >"$RUSTACK_LOG" 2>&1 &
@@ -126,11 +141,12 @@ start_rustack_if_needed() {
   if [[ -n "${RUSTACK_PID_FILE:-}" ]]; then
     printf '%s\n' "$SERVER_PID" >"$RUSTACK_PID_FILE"
   fi
-  wait_for_rustack
+  wait_for_rustack "$started_ms"
 }
 
 need_cmd cargo
 need_cmd curl
+need_cmd node
 need_cmd npm
 need_cmd pulumi
 
