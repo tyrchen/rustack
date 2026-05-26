@@ -275,8 +275,7 @@ impl S3ErrorCode {
             Self::ObjectNotInActiveTierError => {
                 "The source object of the COPY operation is not in the active tier"
             }
-            Self::ObjectLockConfigurationNotFoundError
-            | Self::NoSuchObjectLockConfiguration => {
+            Self::ObjectLockConfigurationNotFoundError | Self::NoSuchObjectLockConfiguration => {
                 "Object Lock configuration does not exist for this bucket"
             }
             Self::PreconditionFailed => {
