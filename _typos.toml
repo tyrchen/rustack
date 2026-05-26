@@ -5,6 +5,10 @@ nonexistant = "nonexistant"
 ba = "ba"
 # HashiCorp is a company name
 Hashi = "Hashi"
+# CloudFront Field-Level Encryption abbreviation and local variable names.
+FLE = "FLE"
+fle = "fle"
+fo = "fo"
 
 [files]
 extend-exclude = ["CHANGELOG.md", "notebooks/*", "vendors/*", "codegen/smithy-model/*"]
