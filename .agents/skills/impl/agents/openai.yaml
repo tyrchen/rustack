@@ -1,0 +1,4 @@
+interface:
+  display_name: "Impl"
+  short_description: "Polish specs, then implement and review one phase"
+  default_prompt: "Use the impl skill to polish the relevant specs until implementation-ready, land the requested implementation-plan phase end-to-end, run quality gates, review the diff, and fix valid findings."
