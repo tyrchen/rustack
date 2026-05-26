@@ -4,9 +4,10 @@
 //! with the business logic handler. Given a [`RoutingContext`] and HTTP request parts/body,
 //! it:
 //!
-//! 1. Deserializes the HTTP request into the operation's typed Input struct (via [`FromS3Request`])
+//! 1. Deserializes the HTTP request into the operation's typed Input struct (via
+//!    [`crate::FromS3Request`])
 //! 2. Calls the appropriate method on the [`S3Handler`] trait
-//! 3. Serializes the Output struct into an HTTP response (via [`IntoS3Response`])
+//! 3. Serializes the Output struct into an HTTP response (via [`crate::IntoS3Response`])
 //!
 //! Phase 3 of the project will implement [`S3Handler`] on the `RustackS3` provider.
 //! For now, all operations return `NotImplemented` by default.

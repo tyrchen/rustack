@@ -6,15 +6,18 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use dashmap::DashMap;
 use rustack_lambda_model::types::{
     Cors, DeadLetterConfig, DestinationConfig, ImageConfig, LoggingConfig, SnapStart,
     TracingConfig, VpcConfig,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::LambdaServiceError;
@@ -60,7 +63,8 @@ pub struct FunctionRecord {
 }
 
 /// Stored event invoke configuration for a function qualifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EventInvokeConfigRecord {
     /// The qualified function ARN.
     pub function_arn: String,
@@ -134,7 +138,8 @@ pub struct VersionRecord {
 }
 
 /// Alias mapping to a function version.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AliasRecord {
     /// Alias name.
     pub name: String,
@@ -149,14 +154,16 @@ pub struct AliasRecord {
 }
 
 /// Resource-based policy document.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PolicyDocument {
     /// Policy statements.
     pub statements: Vec<PolicyStatement>,
 }
 
 /// A single policy statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PolicyStatement {
     /// Statement ID.
     pub sid: String,
@@ -173,7 +180,8 @@ pub struct PolicyStatement {
 }
 
 /// Function URL configuration record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FunctionUrlConfigRecord {
     /// The generated function URL.
     pub function_url: String,
@@ -190,7 +198,8 @@ pub struct FunctionUrlConfigRecord {
 }
 
 /// Complete record for a Lambda layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LayerRecord {
     /// Layer name.
     pub name: String,
@@ -203,7 +212,8 @@ pub struct LayerRecord {
 }
 
 /// A snapshot of a layer at a specific version.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LayerVersionRecord {
     /// Version number.
     pub version: u64,
@@ -313,6 +323,22 @@ impl LayerStore {
         records
     }
 
+    /// Export all layer metadata in deterministic order.
+    #[must_use]
+    pub fn export_snapshot(&self) -> LayerStoreSnapshot {
+        LayerStoreSnapshot {
+            layers: self.list_layers(),
+        }
+    }
+
+    /// Replace layer metadata from a snapshot.
+    pub fn import_snapshot(&self, snapshot: LayerStoreSnapshot) {
+        self.layers.clear();
+        for layer in snapshot.layers {
+            self.layers.insert(layer.name.clone(), layer);
+        }
+    }
+
     /// Delete a specific layer version.
     ///
     /// Returns `true` if the version existed and was removed.
@@ -365,8 +391,17 @@ impl Default for LayerStore {
     }
 }
 
+/// Serializable layer store snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerStoreSnapshot {
+    /// Layer records.
+    pub layers: Vec<LayerRecord>,
+}
+
 /// Complete record for a Lambda event source mapping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EventSourceMappingRecord {
     /// Unique identifier for the mapping.
     pub uuid: String,
@@ -489,11 +524,272 @@ impl EventSourceMappingStore {
         records.sort_by(|a, b| a.uuid.cmp(&b.uuid));
         records
     }
+
+    /// Export all event source mappings in deterministic order.
+    #[must_use]
+    pub fn export_snapshot(&self) -> EventSourceMappingStoreSnapshot {
+        EventSourceMappingStoreSnapshot {
+            mappings: self.list(None, None),
+        }
+    }
+
+    /// Replace all event source mappings from a snapshot.
+    pub fn import_snapshot(&self, snapshot: EventSourceMappingStoreSnapshot) {
+        self.mappings.clear();
+        for mapping in snapshot.mappings {
+            self.mappings.insert(mapping.uuid.clone(), mapping);
+        }
+    }
 }
 
 impl Default for EventSourceMappingStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Serializable event source mapping store snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSourceMappingStoreSnapshot {
+    /// Event source mapping records.
+    pub mappings: Vec<EventSourceMappingRecord>,
+}
+
+/// Serializable function store snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionStoreSnapshot {
+    /// Lambda function records.
+    pub functions: Vec<FunctionRecordSnapshot>,
+}
+
+/// Serializable Lambda function record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionRecordSnapshot {
+    /// Function name.
+    pub name: String,
+    /// Function ARN.
+    pub arn: String,
+    /// The `$LATEST` version record.
+    pub latest: VersionRecordSnapshot,
+    /// Published versions.
+    pub versions: BTreeMap<u64, VersionRecordSnapshot>,
+    /// Next version number to assign.
+    pub next_version: u64,
+    /// Named aliases.
+    pub aliases: HashMap<String, AliasRecord>,
+    /// Resource-based policy document.
+    pub policy: PolicyDocument,
+    /// Resource tags.
+    pub tags: HashMap<String, String>,
+    /// Associated code signing config ARN.
+    pub code_signing_config_arn: Option<String>,
+    /// Function URL configuration.
+    pub url_config: Option<FunctionUrlConfigRecord>,
+    /// Reserved concurrent executions.
+    pub reserved_concurrent_executions: Option<i32>,
+    /// Event invoke configurations keyed by qualifier.
+    pub event_invoke_configs: HashMap<String, EventInvokeConfigRecord>,
+    /// ISO 8601 creation timestamp.
+    pub created_at: String,
+}
+
+/// Serializable Lambda function version snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionRecordSnapshot {
+    /// Version string.
+    pub version: String,
+    /// Runtime identifier.
+    pub runtime: Option<String>,
+    /// Handler function identifier.
+    pub handler: Option<String>,
+    /// IAM execution role ARN.
+    pub role: String,
+    /// Description.
+    pub description: String,
+    /// Timeout in seconds.
+    pub timeout: u32,
+    /// Memory size in MB.
+    pub memory_size: u32,
+    /// Environment variables.
+    pub environment: HashMap<String, String>,
+    /// Package type.
+    pub package_type: String,
+    /// Container image URI.
+    pub image_uri: Option<String>,
+    /// Raw zip bytes encoded as standard base64.
+    pub zip_bytes_base64: Option<String>,
+    /// Function state.
+    pub state: String,
+    /// ISO 8601 last-modified timestamp.
+    pub last_modified: String,
+    /// Supported architectures.
+    pub architectures: Vec<String>,
+    /// Ephemeral storage size in MB.
+    pub ephemeral_storage_size: u32,
+    /// Base64-encoded SHA-256 of the deployment package.
+    pub code_sha256: String,
+    /// Code size in bytes.
+    pub code_size: u64,
+    /// Revision ID for optimistic concurrency.
+    pub revision_id: String,
+    /// Layer ARNs.
+    pub layers: Vec<String>,
+    /// VPC configuration.
+    pub vpc_config: Option<VpcConfig>,
+    /// Dead letter queue configuration.
+    pub dead_letter_config: Option<DeadLetterConfig>,
+    /// Tracing configuration.
+    pub tracing_config: Option<TracingConfig>,
+    /// Image configuration override.
+    pub image_config: Option<ImageConfig>,
+    /// Logging configuration.
+    pub logging_config: Option<LoggingConfig>,
+    /// SnapStart configuration.
+    pub snap_start: Option<SnapStart>,
+}
+
+impl FunctionRecordSnapshot {
+    fn from_record(record: FunctionRecord) -> Self {
+        Self {
+            name: record.name,
+            arn: record.arn,
+            latest: VersionRecordSnapshot::from_record(record.latest),
+            versions: record
+                .versions
+                .into_iter()
+                .map(|(version, record)| (version, VersionRecordSnapshot::from_record(record)))
+                .collect(),
+            next_version: record.next_version,
+            aliases: record.aliases,
+            policy: record.policy,
+            tags: record.tags,
+            code_signing_config_arn: record.code_signing_config_arn,
+            url_config: record.url_config,
+            reserved_concurrent_executions: record.reserved_concurrent_executions,
+            event_invoke_configs: record.event_invoke_configs,
+            created_at: record.created_at,
+        }
+    }
+
+    async fn into_record(
+        self,
+        store: &FunctionStore,
+    ) -> Result<FunctionRecord, LambdaServiceError> {
+        let name = self.name;
+        let latest = self.latest.into_record(store, &name).await?;
+        let mut versions = BTreeMap::new();
+        for (version, record) in self.versions {
+            versions.insert(version, record.into_record(store, &name).await?);
+        }
+        Ok(FunctionRecord {
+            name,
+            arn: self.arn,
+            latest,
+            versions,
+            next_version: self.next_version,
+            aliases: self.aliases,
+            policy: self.policy,
+            tags: self.tags,
+            code_signing_config_arn: self.code_signing_config_arn,
+            url_config: self.url_config,
+            reserved_concurrent_executions: self.reserved_concurrent_executions,
+            event_invoke_configs: self.event_invoke_configs,
+            created_at: self.created_at,
+        })
+    }
+}
+
+impl VersionRecordSnapshot {
+    fn from_record(record: VersionRecord) -> Self {
+        Self {
+            version: record.version,
+            runtime: record.runtime,
+            handler: record.handler,
+            role: record.role,
+            description: record.description,
+            timeout: record.timeout,
+            memory_size: record.memory_size,
+            environment: record.environment,
+            package_type: record.package_type,
+            image_uri: record.image_uri,
+            zip_bytes_base64: record
+                .zip_bytes
+                .as_ref()
+                .map(|bytes| STANDARD.encode(bytes.as_ref())),
+            state: record.state,
+            last_modified: record.last_modified,
+            architectures: record.architectures,
+            ephemeral_storage_size: record.ephemeral_storage_size,
+            code_sha256: record.code_sha256,
+            code_size: record.code_size,
+            revision_id: record.revision_id,
+            layers: record.layers,
+            vpc_config: record.vpc_config,
+            dead_letter_config: record.dead_letter_config,
+            tracing_config: record.tracing_config,
+            image_config: record.image_config,
+            logging_config: record.logging_config,
+            snap_start: record.snap_start,
+        }
+    }
+
+    async fn into_record(
+        self,
+        store: &FunctionStore,
+        function_name: &str,
+    ) -> Result<VersionRecord, LambdaServiceError> {
+        let zip_bytes = match self.zip_bytes_base64 {
+            Some(encoded) => {
+                let decoded = STANDARD.decode(encoded.as_bytes()).map_err(|source| {
+                    LambdaServiceError::Internal {
+                        message: format!("Failed to decode Lambda zip bytes: {source}"),
+                    }
+                })?;
+                Some(Bytes::from(decoded))
+            }
+            None => None,
+        };
+        let code_path = if let Some(bytes) = zip_bytes.as_ref() {
+            let (path, _, _) = store
+                .store_zip_code(function_name, &self.version, bytes.as_ref())
+                .await?;
+            Some(path)
+        } else {
+            None
+        };
+
+        Ok(VersionRecord {
+            version: self.version,
+            runtime: self.runtime,
+            handler: self.handler,
+            role: self.role,
+            description: self.description,
+            timeout: self.timeout,
+            memory_size: self.memory_size,
+            environment: self.environment,
+            package_type: self.package_type,
+            code_path,
+            image_uri: self.image_uri,
+            zip_bytes,
+            state: self.state,
+            last_modified: self.last_modified,
+            architectures: self.architectures,
+            ephemeral_storage_size: self.ephemeral_storage_size,
+            code_sha256: self.code_sha256,
+            code_size: self.code_size,
+            revision_id: self.revision_id,
+            layers: self.layers,
+            vpc_config: self.vpc_config,
+            dead_letter_config: self.dead_letter_config,
+            tracing_config: self.tracing_config,
+            image_config: self.image_config,
+            logging_config: self.logging_config,
+            snap_start: self.snap_start,
+        })
     }
 }
 
@@ -590,6 +886,50 @@ impl FunctionStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.functions.is_empty()
+    }
+
+    /// Export all function metadata and deployment package bytes.
+    #[must_use]
+    pub fn export_snapshot(&self) -> FunctionStoreSnapshot {
+        FunctionStoreSnapshot {
+            functions: self
+                .list()
+                .into_iter()
+                .map(FunctionRecordSnapshot::from_record)
+                .collect(),
+        }
+    }
+
+    /// Replace all functions from a snapshot and rebuild extracted code paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when code directory cleanup or zip restoration fails.
+    pub async fn import_snapshot(
+        &self,
+        snapshot: FunctionStoreSnapshot,
+    ) -> Result<(), LambdaServiceError> {
+        self.functions.clear();
+        match tokio::fs::remove_dir_all(&self.code_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(LambdaServiceError::Internal {
+                    message: format!("Failed to clear Lambda code directory: {error}"),
+                });
+            }
+        }
+        tokio::fs::create_dir_all(&self.code_dir)
+            .await
+            .map_err(|error| LambdaServiceError::Internal {
+                message: format!("Failed to create Lambda code directory: {error}"),
+            })?;
+
+        for function in snapshot.functions {
+            let record = function.into_record(self).await?;
+            self.functions.insert(record.name.clone(), record);
+        }
+        Ok(())
     }
 
     /// Store zip code bytes for a function version and extract them.

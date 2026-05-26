@@ -23,7 +23,7 @@ use crate::{
     config::SsmConfig,
     filter::validate_filters,
     selector::parse_name_with_selector,
-    storage::ParameterStore,
+    storage::{ParameterStore, ParameterStoreSnapshot},
     validation::{
         MAX_BATCH_SIZE, parse_parameter_type, parse_tier, validate_allowed_pattern,
         validate_description, validate_name, validate_tags, validate_value,
@@ -60,6 +60,17 @@ impl RustackSsm {
             config,
             store: ParameterStore::new(),
         }
+    }
+
+    /// Export SSM Parameter Store state for runtime snapshots.
+    #[must_use]
+    pub fn export_snapshot(&self) -> ParameterStoreSnapshot {
+        self.store.export_snapshot()
+    }
+
+    /// Import SSM Parameter Store state from a runtime snapshot.
+    pub fn import_snapshot(&self, snapshot: ParameterStoreSnapshot) {
+        self.store.import_snapshot(snapshot);
     }
 
     /// Handle `PutParameter`.

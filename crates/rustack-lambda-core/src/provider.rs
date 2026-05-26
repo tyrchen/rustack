@@ -8,6 +8,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 /// Maximum deployment package size (50 MB zipped, per Appendix C).
@@ -53,7 +54,8 @@ use crate::{
     },
     storage::{
         AliasRecord, EventInvokeConfigRecord, EventSourceMappingRecord, EventSourceMappingStore,
-        FunctionRecord, FunctionStore, FunctionUrlConfigRecord, LayerStore, LayerVersionRecord,
+        EventSourceMappingStoreSnapshot, FunctionRecord, FunctionStore, FunctionStoreSnapshot,
+        FunctionUrlConfigRecord, LayerStore, LayerStoreSnapshot, LayerVersionRecord,
         PolicyDocument, PolicyStatement, VersionRecord, compute_sha256,
     },
 };
@@ -122,6 +124,18 @@ pub struct RustackLambda {
     executor: Arc<dyn Executor>,
 }
 
+/// Serializable Lambda provider snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LambdaSnapshot {
+    /// Function metadata and deployment packages.
+    pub functions: FunctionStoreSnapshot,
+    /// Layer metadata.
+    pub layers: LayerStoreSnapshot,
+    /// Event source mappings.
+    pub event_source_mappings: EventSourceMappingStoreSnapshot,
+}
+
 impl RustackLambda {
     /// Create a new Lambda provider with the given store and config.
     ///
@@ -183,6 +197,32 @@ impl RustackLambda {
     /// graceful shutdown path.
     pub async fn shutdown(&self) {
         self.executor.shutdown().await;
+    }
+
+    /// Export a point-in-time snapshot of Lambda resources.
+    #[must_use]
+    pub fn export_snapshot(&self) -> LambdaSnapshot {
+        LambdaSnapshot {
+            functions: self.store.export_snapshot(),
+            layers: self.layer_store.export_snapshot(),
+            event_source_mappings: self.esm_store.export_snapshot(),
+        }
+    }
+
+    /// Replace Lambda resources from a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deployment package restoration fails.
+    pub async fn import_snapshot(
+        &self,
+        snapshot: LambdaSnapshot,
+    ) -> Result<(), LambdaServiceError> {
+        self.store.import_snapshot(snapshot.functions).await?;
+        self.layer_store.import_snapshot(snapshot.layers);
+        self.esm_store
+            .import_snapshot(snapshot.event_source_mappings);
+        Ok(())
     }
 
     /// Returns a reference to the underlying function store.
@@ -2671,8 +2711,7 @@ fn millis_to_f64(millis: i64) -> f64 {
 /// Parse an ISO 8601 timestamp string into epoch millis as `f64`.
 fn parse_epoch_millis(iso: &str) -> f64 {
     chrono::DateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S%.3f%z")
-        .map(|dt| millis_to_f64(dt.timestamp_millis()))
-        .unwrap_or(0.0)
+        .map_or(0.0, |dt| millis_to_f64(dt.timestamp_millis()))
 }
 
 /// Convert an `EventInvokeConfigRecord` to the output type.

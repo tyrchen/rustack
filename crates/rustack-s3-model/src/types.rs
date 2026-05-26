@@ -2018,7 +2018,7 @@ impl From<&str> for Type {
 }
 
 /// S3 AbortIncompleteMultipartUpload.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AbortIncompleteMultipartUpload {
     pub days_after_initiation: Option<i32>,
 }
@@ -2059,7 +2059,7 @@ pub struct BucketInfo {
 }
 
 /// S3 BucketLifecycleConfiguration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BucketLifecycleConfiguration {
     pub rules: Vec<LifecycleRule>,
 }
@@ -2213,11 +2213,11 @@ pub struct ErrorDocument {
 }
 
 /// S3 EventBridgeConfiguration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventBridgeConfiguration {}
 
 /// S3 FilterRule.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilterRule {
     pub name: Option<FilterRuleName>,
     pub value: Option<String>,
@@ -2265,7 +2265,7 @@ pub struct Initiator {
 }
 
 /// S3 LambdaFunctionConfiguration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LambdaFunctionConfiguration {
     pub events: Vec<Event>,
     pub filter: Option<NotificationConfigurationFilter>,
@@ -2274,7 +2274,7 @@ pub struct LambdaFunctionConfiguration {
 }
 
 /// S3 LifecycleExpiration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecycleExpiration {
     pub date: Option<chrono::DateTime<chrono::Utc>>,
     pub days: Option<i32>,
@@ -2282,7 +2282,7 @@ pub struct LifecycleExpiration {
 }
 
 /// S3 LifecycleRule.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecycleRule {
     pub abort_incomplete_multipart_upload: Option<AbortIncompleteMultipartUpload>,
     pub expiration: Option<LifecycleExpiration>,
@@ -2296,7 +2296,7 @@ pub struct LifecycleRule {
 }
 
 /// S3 LifecycleRuleAndOperator.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecycleRuleAndOperator {
     pub object_size_greater_than: Option<i64>,
     pub object_size_less_than: Option<i64>,
@@ -2305,7 +2305,7 @@ pub struct LifecycleRuleAndOperator {
 }
 
 /// S3 LifecycleRuleFilter.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecycleRuleFilter {
     pub and: Option<LifecycleRuleAndOperator>,
     pub object_size_greater_than: Option<i64>,
@@ -2344,14 +2344,14 @@ pub struct MultipartUpload {
 }
 
 /// S3 NoncurrentVersionExpiration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NoncurrentVersionExpiration {
     pub newer_noncurrent_versions: Option<i32>,
     pub noncurrent_days: Option<i32>,
 }
 
 /// S3 NoncurrentVersionTransition.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NoncurrentVersionTransition {
     pub newer_noncurrent_versions: Option<i32>,
     pub noncurrent_days: Option<i32>,
@@ -2359,7 +2359,7 @@ pub struct NoncurrentVersionTransition {
 }
 
 /// S3 NotificationConfiguration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotificationConfiguration {
     pub event_bridge_configuration: Option<EventBridgeConfiguration>,
     pub lambda_function_configurations: Vec<LambdaFunctionConfiguration>,
@@ -2368,7 +2368,7 @@ pub struct NotificationConfiguration {
 }
 
 /// S3 NotificationConfigurationFilter.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotificationConfigurationFilter {
     pub key: Option<S3KeyFilter>,
 }
@@ -2506,7 +2506,7 @@ pub struct PublicAccessBlockConfiguration {
 }
 
 /// S3 QueueConfiguration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueConfiguration {
     pub events: Vec<Event>,
     pub filter: Option<NotificationConfigurationFilter>,
@@ -2552,7 +2552,7 @@ pub struct RoutingRule {
 }
 
 /// S3 S3KeyFilter.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct S3KeyFilter {
     pub filter_rules: Vec<FilterRule>,
 }
@@ -2583,7 +2583,7 @@ pub struct ServerSideEncryptionRule {
 pub struct SimplePrefix {}
 
 /// S3 Tag.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Tag {
     pub key: String,
     pub value: String,
@@ -2610,7 +2610,7 @@ pub struct TargetObjectKeyFormat {
 }
 
 /// S3 TopicConfiguration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TopicConfiguration {
     pub events: Vec<Event>,
     pub filter: Option<NotificationConfigurationFilter>,
@@ -2619,7 +2619,7 @@ pub struct TopicConfiguration {
 }
 
 /// S3 Transition.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Transition {
     pub date: Option<chrono::DateTime<chrono::Utc>>,
     pub days: Option<i32>,

@@ -263,6 +263,51 @@ impl ObjectStore {
     pub fn is_versioned(&self) -> bool {
         matches!(self, Self::Versioned(_))
     }
+
+    /// Return all stored object versions in deterministic key/version order for snapshots.
+    #[must_use]
+    pub(crate) fn snapshot_versions(&self) -> (bool, Vec<ObjectVersion>) {
+        match self {
+            Self::Unversioned(ks) => (
+                false,
+                ks.objects
+                    .values()
+                    .cloned()
+                    .map(|object| ObjectVersion::Object(Box::new(object)))
+                    .collect(),
+            ),
+            Self::Versioned(vs) => (
+                true,
+                vs.objects
+                    .values()
+                    .flat_map(|versions| versions.iter().cloned())
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Replace the object store contents from a snapshot.
+    pub(crate) fn replace_from_snapshot(&mut self, versioned: bool, versions: Vec<ObjectVersion>) {
+        if versioned {
+            let mut objects: BTreeMap<String, Vec<ObjectVersion>> = BTreeMap::new();
+            for version in versions {
+                objects
+                    .entry(version.key().to_owned())
+                    .or_default()
+                    .push(version);
+            }
+            *self = Self::Versioned(VersionedKeyStore { objects });
+            return;
+        }
+
+        let mut objects = BTreeMap::new();
+        for version in versions {
+            if let ObjectVersion::Object(object) = version {
+                objects.insert(object.key.clone(), *object);
+            }
+        }
+        *self = Self::Unversioned(KeyStore { objects });
+    }
 }
 
 // ---------------------------------------------------------------------------

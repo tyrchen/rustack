@@ -17,10 +17,10 @@ cleanup() {
   local exit_code=$?
   set +e
 
-  if [[ "$STACK_READY" == "1" ]]; then
+  if [[ "$STACK_READY" == "1" && "${PULUMI_KEEP_STACK:-0}" != "1" ]]; then
     (
       cd "$EXAMPLE_DIR" || exit 0
-      if [[ "$UP_SUCCEEDED" == "1" ]]; then
+      if [[ "$UP_SUCCEEDED" == "1" && "${PULUMI_SKIP_DESTROY:-0}" != "1" ]]; then
         echo "Destroying Pulumi smoke resources (SQS delete confirmation can take around 2 minutes)"
         pulumi destroy --stack "$STACK_NAME" --yes --skip-preview >/dev/null 2>&1
       fi
@@ -31,8 +31,14 @@ cleanup() {
   fi
 
   if [[ -n "$SERVER_PID" ]]; then
-    kill "$SERVER_PID" >/dev/null 2>&1
-    wait "$SERVER_PID" >/dev/null 2>&1
+    if [[ "${RUSTACK_KEEP_RUNNING:-0}" == "1" ]]; then
+      if [[ -n "${RUSTACK_PID_FILE:-}" ]]; then
+        printf '%s\n' "$SERVER_PID" >"$RUSTACK_PID_FILE"
+      fi
+    else
+      kill -INT "$SERVER_PID" >/dev/null 2>&1
+      wait "$SERVER_PID" >/dev/null 2>&1
+    fi
   fi
 
   if [[ "$CREATED_STATE_DIR" == "1" && -n "$STATE_DIR" ]]; then
@@ -52,6 +58,15 @@ need_cmd() {
 
 health_url() {
   printf '%s/_localstack/health' "${ENDPOINT%/}"
+}
+
+rustack_binary_path() {
+  local target_dir
+  target_dir="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+  if [[ -z "$target_dir" ]]; then
+    target_dir="$ROOT_DIR/target"
+  fi
+  printf '%s/release/rustack' "$target_dir"
 }
 
 wait_for_rustack() {
@@ -93,10 +108,24 @@ start_rustack_if_needed() {
   cargo build --release -p rustack-cli
 
   echo "Starting Rustack for Pulumi smoke test"
+  local rustack_bin
+  rustack_bin="$(rustack_binary_path)"
+  if [[ ! -x "$rustack_bin" ]]; then
+    echo "Rustack binary was not built at $rustack_bin" >&2
+    exit 1
+  fi
+  local rustack_args=()
+  if [[ -n "${RUSTACK_EXTRA_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    rustack_args=(${RUSTACK_EXTRA_ARGS})
+  fi
   GATEWAY_LISTEN="$listen_addr" \
     LOG_LEVEL=warn \
-    cargo run --release -p rustack-cli >"$RUSTACK_LOG" 2>&1 &
+    "$rustack_bin" "${rustack_args[@]}" >"$RUSTACK_LOG" 2>&1 &
   SERVER_PID=$!
+  if [[ -n "${RUSTACK_PID_FILE:-}" ]]; then
+    printf '%s\n' "$SERVER_PID" >"$RUSTACK_PID_FILE"
+  fi
   wait_for_rustack
 }
 
@@ -135,7 +164,9 @@ fi
 npm run typecheck
 
 pulumi login "file://$STATE_DIR/state"
-pulumi stack init "$STACK_NAME"
+if ! pulumi stack select "$STACK_NAME" >/dev/null 2>&1; then
+  pulumi stack init "$STACK_NAME"
+fi
 STACK_READY="1"
 
 pulumi config set endpoint "$ENDPOINT" --stack "$STACK_NAME"
@@ -143,6 +174,18 @@ pulumi config set region "$AWS_DEFAULT_REGION" --stack "$STACK_NAME"
 pulumi config set accessKey "$AWS_ACCESS_KEY_ID" --stack "$STACK_NAME"
 pulumi config set secretKey "$AWS_SECRET_ACCESS_KEY" --secret --stack "$STACK_NAME"
 
-pulumi up --stack "$STACK_NAME" --yes --skip-preview
-UP_SUCCEEDED="1"
+case "${PULUMI_OPERATION:-up}" in
+  up)
+    pulumi up --stack "$STACK_NAME" --yes --skip-preview
+    UP_SUCCEEDED="1"
+    ;;
+  refresh)
+    pulumi refresh --stack "$STACK_NAME" --yes --skip-preview
+    UP_SUCCEEDED="1"
+    ;;
+  *)
+    echo "unsupported PULUMI_OPERATION: ${PULUMI_OPERATION:-up}" >&2
+    exit 1
+    ;;
+esac
 pulumi stack output --stack "$STACK_NAME" --json

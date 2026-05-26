@@ -235,6 +235,92 @@ pulumi-hackathon-smoke:
 		PULUMI_STACK="$${PULUMI_STACK:-rustack-hackathon}" \
 		bash scripts/pulumi-rustack-smoke.sh
 
+pulumi-hackathon-snapshot-smoke:
+	@bash -euo pipefail -c '\
+		ROOT="$(CURDIR)"; \
+		ENDPOINT="$${RUSTACK_SNAPSHOT_ENDPOINT:-http://127.0.0.1:4577}"; \
+		STACK="$${PULUMI_STACK:-rustack-hackathon-snapshot}"; \
+		SNAPSHOT_NAME="$${RUSTACK_SNAPSHOT_NAME:-hackathon-snapshot}"; \
+		TMP_DIR=$$(mktemp -d); \
+		STATE_DIR="$$TMP_DIR/pulumi"; \
+		SNAPSHOT_DIR="$$TMP_DIR/snapshots"; \
+		PID1="$$TMP_DIR/rustack-save.pid"; \
+		PID2="$$TMP_DIR/rustack-load.pid"; \
+		stop_pid_file() { \
+			local pid_file="$$1"; \
+			if [[ -f "$$pid_file" ]]; then \
+				local pid; \
+				pid=$$(cat "$$pid_file"); \
+				if kill -0 "$$pid" >/dev/null 2>&1; then \
+					kill -INT "$$pid" >/dev/null 2>&1 || true; \
+					for _ in $$(seq 1 60); do \
+						if ! kill -0 "$$pid" >/dev/null 2>&1; then return 0; fi; \
+						sleep 1; \
+					done; \
+					echo "Rustack process $$pid did not stop after SIGINT" >&2; \
+					return 1; \
+				fi; \
+			fi; \
+		}; \
+		cleanup() { \
+			stop_pid_file "$$PID1" >/dev/null 2>&1 || true; \
+			stop_pid_file "$$PID2" >/dev/null 2>&1 || true; \
+			rm -rf "$$TMP_DIR"; \
+		}; \
+		trap cleanup EXIT; \
+		echo "Creating hackathon snapshot $$SNAPSHOT_NAME at $$SNAPSHOT_DIR"; \
+		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/hackathon-app" \
+			PULUMI_STATE_DIR="$$STATE_DIR" \
+			PULUMI_STACK="$$STACK" \
+			RUSTACK_ENDPOINT="$$ENDPOINT" \
+			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
+			RUSTACK_KEEP_RUNNING=1 \
+			RUSTACK_PID_FILE="$$PID1" \
+			PULUMI_KEEP_STACK=1 \
+			PULUMI_SKIP_DESTROY=1 \
+			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
+		test -f "$$PID1"; \
+		export PULUMI_HOME="$$STATE_DIR/home"; \
+		export PULUMI_CONFIG_PASSPHRASE=""; \
+		export AWS_ACCESS_KEY_ID="$${AWS_ACCESS_KEY_ID:-AKIAIOSFODNN7EXAMPLE}"; \
+		export AWS_SECRET_ACCESS_KEY="$${AWS_SECRET_ACCESS_KEY:-wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY}"; \
+		export AWS_DEFAULT_REGION="$${AWS_DEFAULT_REGION:-us-east-1}"; \
+		cd "$$ROOT/examples/pulumi/hackathon-app"; \
+		pulumi login "file://$$STATE_DIR/state" >/dev/null; \
+		FRONTEND_BUCKET=$$(pulumi stack output frontendBucketName --stack "$$STACK"); \
+		PROJECTS_TABLE=$$(pulumi stack output projectsTableName --stack "$$STACK"); \
+		curl -sf "$${ENDPOINT%/}/$$FRONTEND_BUCKET/index.html" | grep -q "Hackathon app deployed by Rustack"; \
+		curl -sf -X POST "$${ENDPOINT%/}/" \
+			-H "x-amz-target: DynamoDB_20120810.PutItem" \
+			-H "content-type: application/x-amz-json-1.0" \
+			--data "{\"TableName\":\"$$PROJECTS_TABLE\",\"Item\":{\"pk\":{\"S\":\"PROJECT\"},\"sk\":{\"S\":\"snapshot-smoke\"},\"title\":{\"S\":\"Snapshot Smoke\"}}}" >/dev/null; \
+		stop_pid_file "$$PID1"; \
+		test -f "$$SNAPSHOT_DIR/$$SNAPSHOT_NAME/manifest.json"; \
+		echo "Reloading snapshot and refreshing Pulumi state"; \
+		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/hackathon-app" \
+			PULUMI_STATE_DIR="$$STATE_DIR" \
+			PULUMI_STACK="$$STACK" \
+			PULUMI_OPERATION=refresh \
+			RUSTACK_ENDPOINT="$$ENDPOINT" \
+			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
+			RUSTACK_KEEP_RUNNING=1 \
+			RUSTACK_PID_FILE="$$PID2" \
+			PULUMI_KEEP_STACK=1 \
+			PULUMI_SKIP_DESTROY=1 \
+			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
+		test -f "$$PID2"; \
+		curl -sf "$${ENDPOINT%/}/$$FRONTEND_BUCKET/index.html" | grep -q "Hackathon app deployed by Rustack"; \
+		DDB_ITEM=$$(curl -sf -X POST "$${ENDPOINT%/}/" \
+			-H "x-amz-target: DynamoDB_20120810.GetItem" \
+			-H "content-type: application/x-amz-json-1.0" \
+			--data "{\"TableName\":\"$$PROJECTS_TABLE\",\"Key\":{\"pk\":{\"S\":\"PROJECT\"},\"sk\":{\"S\":\"snapshot-smoke\"}}}"); \
+		printf "%s" "$$DDB_ITEM" | grep -q "Snapshot Smoke"; \
+		stop_pid_file "$$PID2"; \
+		echo "Hackathon snapshot smoke passed"; \
+	'
+
 test-events-unit:
 	@cargo test -p rustack-events-model -p rustack-events-core -p rustack-events-http
 
@@ -271,7 +357,7 @@ test-iam-integration:
 	mint mint-build mint-start mint-run mint-stop \
 	alternator alternator-setup alternator-run alternator-stop \
 	sqs-compat sqs-compat-setup sqs-compat-run \
-	pulumi-smoke pulumi-hackathon-smoke \
+	pulumi-smoke pulumi-hackathon-smoke pulumi-hackathon-snapshot-smoke \
 	test-events-unit test-events-patterns test-events-integration \
 	test-apigatewayv2-unit test-apigatewayv2-integration \
 	test-iam-unit test-iam-integration

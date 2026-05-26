@@ -29,7 +29,7 @@ impl Default for DataPlaneConfig {
             forward_user_metadata: false,
             max_upstream_body_bytes: 64 * 1024 * 1024,
             http_origin_timeout: Duration::from_secs(30),
-            divergence_log_interval: Duration::from_secs(60),
+            divergence_log_interval: Duration::from_mins(1),
         }
     }
 }

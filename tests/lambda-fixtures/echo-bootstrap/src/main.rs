@@ -17,7 +17,7 @@ fn main() {
     let api = std::env::var("AWS_LAMBDA_RUNTIME_API")
         .expect("AWS_LAMBDA_RUNTIME_API must be set by the runtime");
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_mins(2))
         .build();
     let fail_mode = std::env::var("FAIL_MODE").ok();
     let sleep_secs: u64 = std::env::var("SLEEP_SECS")

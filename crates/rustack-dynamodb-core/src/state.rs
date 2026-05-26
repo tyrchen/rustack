@@ -87,6 +87,18 @@ impl DynamoDBServiceState {
     pub fn reset(&self) {
         self.tables.clear();
     }
+
+    /// Return all table handles sorted by table name for deterministic snapshot export.
+    #[must_use]
+    pub(crate) fn snapshot_tables(&self) -> Vec<Arc<DynamoDBTable>> {
+        let mut tables: Vec<Arc<DynamoDBTable>> = self
+            .tables
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        tables
+    }
 }
 
 impl Default for DynamoDBServiceState {

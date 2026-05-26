@@ -660,7 +660,8 @@ impl QueueActor {
                     } else {
                         Err(SqsError::new(
                             rustack_sqs_model::error::SqsErrorCode::MessageNotInflight,
-                            "Message does not exist or is not available for visibility timeout change.",
+                            "Message does not exist or is not available for visibility timeout \
+                             change.",
                         ))
                     }
                 } else if let Some(ifm) = storage.in_flight.get_mut(receipt_handle) {

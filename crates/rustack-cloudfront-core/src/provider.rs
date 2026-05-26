@@ -14,7 +14,7 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::too_many_arguments)]
 
-use std::sync::Arc;
+use std::{cmp::Reverse, sync::Arc};
 
 use chrono::Utc;
 use rustack_cloudfront_model::{
@@ -43,7 +43,7 @@ use crate::{
     managed::{
         managed_cache_policies, managed_origin_request_policies, managed_response_headers_policies,
     },
-    store::CloudFrontStore,
+    store::{CloudFrontStore, CloudFrontStoreSnapshot},
 };
 
 /// Main provider.
@@ -83,6 +83,17 @@ impl RustackCloudFront {
     #[must_use]
     pub fn config(&self) -> &CloudFrontConfig {
         &self.config
+    }
+
+    /// Export a point-in-time snapshot of CloudFront management resources.
+    #[must_use]
+    pub fn export_snapshot(&self) -> CloudFrontStoreSnapshot {
+        self.store.export_snapshot()
+    }
+
+    /// Replace CloudFront management resources from a snapshot.
+    pub fn import_snapshot(&self, snapshot: CloudFrontStoreSnapshot) {
+        self.store.import_snapshot(snapshot);
     }
 
     // ---------------------------------------------------------------------
@@ -280,7 +291,7 @@ impl RustackCloudFront {
             .filter(|e| e.key().0 == distribution_id)
             .map(|e| e.value().clone())
             .collect();
-        v.sort_by(|a, b| b.create_time.cmp(&a.create_time));
+        v.sort_by_key(|invalidation| Reverse(invalidation.create_time));
         v
     }
 

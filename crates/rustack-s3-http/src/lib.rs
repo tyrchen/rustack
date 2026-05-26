@@ -12,13 +12,12 @@
 //!   responses with appropriate status codes, headers, and bodies.
 //!
 //! - **Dispatch** ([`dispatch`]): Routes identified S3 operations to the business logic handler via
-//!   the [`S3Handler`](dispatch::S3Handler) trait.
+//!   the [`S3Handler`] trait.
 //!
-//! - **Service** ([`service`]): The main [`S3HttpService`](service::S3HttpService) that implements
-//!   hyper's `Service` trait, tying routing, auth, dispatch, and middleware together.
+//! - **Service** ([`service`]): The main [`S3HttpService`] that implements hyper's `Service` trait,
+//!   tying routing, auth, dispatch, and middleware together.
 //!
-//! - **Body** ([`body`]): The [`S3ResponseBody`](body::S3ResponseBody) type supporting buffered and
-//!   empty response modes.
+//! - **Body** ([`body`]): The [`S3ResponseBody`] type supporting buffered and empty response modes.
 //!
 //! # Architecture
 //!

@@ -27,6 +27,7 @@ use std::{
 
 use dashmap::DashMap;
 use rustack_dynamodb_model::{AttributeValue, types::ScalarAttributeType};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
@@ -61,7 +62,8 @@ pub enum StorageError {
 
 /// Parsed key schema for a table, containing the partition key definition
 /// and an optional sort key definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeySchema {
     /// Partition (HASH) key name and type.
     pub partition_key: KeyAttribute,
@@ -70,7 +72,8 @@ pub struct KeySchema {
 }
 
 /// A single key attribute definition with its name and scalar type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeyAttribute {
     /// The attribute name.
     pub name: String,
@@ -485,6 +488,12 @@ impl TableStorage {
     #[must_use]
     pub fn total_size_bytes(&self) -> u64 {
         self.total_size.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Return all items in deterministic scan order for snapshot export.
+    #[must_use]
+    pub fn snapshot_items(&self) -> Vec<HashMap<String, AttributeValue>> {
+        self.scan(None, None, None, None).0
     }
 
     /// Inserts or replaces an item in the table.

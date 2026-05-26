@@ -21,9 +21,9 @@ use crate::{
     config::ApiGatewayV2Config,
     error::ApiGatewayV2ServiceError,
     storage::{
-        ApiMappingRecord, ApiRecord, ApiStore, AuthorizerRecord, DeploymentRecord,
-        DomainNameRecord, IntegrationRecord, ModelRecord, RouteRecord, RouteResponseRecord,
-        StageRecord, VpcLinkRecord, generate_id,
+        ApiMappingRecord, ApiRecord, ApiStore, ApiStoreSnapshot, AuthorizerRecord,
+        DeploymentRecord, DomainNameRecord, IntegrationRecord, ModelRecord, RouteRecord,
+        RouteResponseRecord, StageRecord, VpcLinkRecord, generate_id,
     },
 };
 
@@ -70,6 +70,17 @@ impl RustackApiGatewayV2 {
     #[must_use]
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http_client
+    }
+
+    /// Export a point-in-time snapshot of all API Gateway v2 resources.
+    #[must_use]
+    pub fn export_snapshot(&self) -> ApiStoreSnapshot {
+        self.store.export_snapshot()
+    }
+
+    /// Replace the current API Gateway v2 resources from a snapshot.
+    pub fn import_snapshot(&self, snapshot: ApiStoreSnapshot) {
+        self.store.import_snapshot(snapshot);
     }
 
     fn api_endpoint(&self, api_id: &str) -> String {
