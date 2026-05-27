@@ -13,6 +13,44 @@ CREATED_STATE_DIR="0"
 STACK_READY="0"
 UP_SUCCEEDED="0"
 
+is_running() {
+  kill -0 "$1" >/dev/null 2>&1
+}
+
+wait_for_exit() {
+  local pid="$1"
+  local attempts="$2"
+  for _ in $(seq 1 "$attempts"); do
+    if ! is_running "$pid"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+stop_rustack() {
+  local pid="$1"
+  if ! is_running "$pid"; then
+    return 0
+  fi
+
+  kill -INT "$pid" >/dev/null 2>&1
+  if wait_for_exit "$pid" 50; then
+    wait "$pid" >/dev/null 2>&1
+    return 0
+  fi
+
+  kill -TERM "$pid" >/dev/null 2>&1
+  if wait_for_exit "$pid" 20; then
+    wait "$pid" >/dev/null 2>&1
+    return 0
+  fi
+
+  kill -KILL "$pid" >/dev/null 2>&1
+  wait "$pid" >/dev/null 2>&1
+}
+
 cleanup() {
   local exit_code=$?
   set +e
@@ -36,8 +74,7 @@ cleanup() {
         printf '%s\n' "$SERVER_PID" >"$RUSTACK_PID_FILE"
       fi
     else
-      kill -INT "$SERVER_PID" >/dev/null 2>&1
-      wait "$SERVER_PID" >/dev/null 2>&1
+      stop_rustack "$SERVER_PID"
     fi
   fi
 
@@ -76,7 +113,7 @@ rustack_binary_path() {
 wait_for_rustack() {
   local started_ms="$1"
   for _ in $(seq 1 1200); do
-    if curl -sf "$(health_url)" >/dev/null 2>&1; then
+    if curl -sf --max-time 1 "$(health_url)" >/dev/null 2>&1; then
       if [[ -n "${RUSTACK_READY_MS_FILE:-}" ]]; then
         local ready_ms
         ready_ms="$(now_ms)"
@@ -95,7 +132,7 @@ wait_for_rustack() {
 }
 
 start_rustack_if_needed() {
-  if curl -sf "$(health_url)" >/dev/null 2>&1; then
+  if curl -sf --max-time 1 "$(health_url)" >/dev/null 2>&1; then
     echo "Using existing Rustack at $ENDPOINT"
     if [[ -n "${RUSTACK_READY_MS_FILE:-}" ]]; then
       printf '0\n' >"$RUSTACK_READY_MS_FILE"
@@ -134,9 +171,16 @@ start_rustack_if_needed() {
   fi
   local started_ms
   started_ms="$(now_ms)"
-  GATEWAY_LISTEN="$listen_addr" \
-    LOG_LEVEL=warn \
-    "$rustack_bin" "${rustack_args[@]}" >"$RUSTACK_LOG" 2>&1 &
+  : >"$RUSTACK_LOG"
+  if [[ "${#rustack_args[@]}" -eq 0 ]]; then
+    GATEWAY_LISTEN="$listen_addr" \
+      LOG_LEVEL=warn \
+      "$rustack_bin" >"$RUSTACK_LOG" 2>&1 &
+  else
+    GATEWAY_LISTEN="$listen_addr" \
+      LOG_LEVEL=warn \
+      "$rustack_bin" "${rustack_args[@]}" >"$RUSTACK_LOG" 2>&1 &
+  fi
   SERVER_PID=$!
   if [[ -n "${RUSTACK_PID_FILE:-}" ]]; then
     printf '%s\n' "$SERVER_PID" >"$RUSTACK_PID_FILE"
