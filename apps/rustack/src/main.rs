@@ -1195,6 +1195,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
             }
             match builder.build() {
                 Ok(plane) => {
+                    providers.register_cloudfront_cache(plane.clone());
                     services.push(Box::new(service::CloudFrontDataPlaneRouter::new(plane)));
                 }
                 Err(e) => warn!(error = %e, "failed to initialise CloudFront data plane"),

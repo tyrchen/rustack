@@ -19,6 +19,8 @@ use async_trait::async_trait;
 use rustack_apigatewayv2_core::{provider::RustackApiGatewayV2, storage::ApiStoreSnapshot};
 #[cfg(feature = "cloudfront")]
 use rustack_cloudfront_core::{RustackCloudFront, store::CloudFrontStoreSnapshot};
+#[cfg(feature = "cloudfront-dataplane")]
+use rustack_cloudfront_dataplane::{CloudFrontCacheSnapshot, DataPlane};
 #[cfg(feature = "dynamodb")]
 use rustack_dynamodb_core::{provider::RustackDynamoDB, snapshot::DynamoDBSnapshot};
 #[cfg(feature = "dynamodbstreams")]
@@ -101,6 +103,11 @@ impl RuntimeProviders {
     #[cfg(feature = "cloudfront")]
     pub(crate) fn register_cloudfront(&mut self, provider: Arc<RustackCloudFront>) {
         self.register(CloudFrontSnapshotService { provider });
+    }
+
+    #[cfg(feature = "cloudfront-dataplane")]
+    pub(crate) fn register_cloudfront_cache(&mut self, plane: DataPlane) {
+        self.register(CloudFrontCacheSnapshotService { plane });
     }
 
     fn register<T>(&mut self, service: T)
@@ -369,6 +376,41 @@ impl SnapshotService for CloudFrontSnapshotService {
     async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
         let snapshot: CloudFrontStoreSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cloudfront-dataplane")]
+struct CloudFrontCacheSnapshotService {
+    plane: DataPlane,
+}
+
+#[cfg(feature = "cloudfront-dataplane")]
+#[async_trait]
+impl SnapshotService for CloudFrontCacheSnapshotService {
+    fn service_name(&self) -> &'static str {
+        "cloudfront-cache"
+    }
+
+    fn snapshot_kind(&self) -> SnapshotKind {
+        SnapshotKind::Data
+    }
+
+    async fn save_meta(&self, data_staging_dir: &Path) -> Result<Vec<u8>> {
+        let snapshot = self
+            .plane
+            .export_cache_snapshot(data_staging_dir)
+            .await
+            .context("export CloudFront data-plane cache snapshot")?;
+        encode_state(&snapshot)
+    }
+
+    async fn load_meta(&self, state_cbor: &[u8], data_staging_dir: &Path) -> Result<()> {
+        let snapshot: CloudFrontCacheSnapshot = decode_state(state_cbor)?;
+        self.plane
+            .import_cache_snapshot(snapshot, data_staging_dir)
+            .await
+            .context("import CloudFront data-plane cache snapshot")?;
         Ok(())
     }
 }

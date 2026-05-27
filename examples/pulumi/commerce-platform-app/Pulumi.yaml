@@ -1,0 +1,3 @@
+name: rustack-commerce-platform-app
+runtime: nodejs
+description: Large AWS commerce platform fixture targeting Rustack snapshot benchmarks.

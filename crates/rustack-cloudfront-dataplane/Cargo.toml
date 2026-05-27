@@ -24,11 +24,15 @@ bytes = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
 
 reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 default = ["http-origin"]

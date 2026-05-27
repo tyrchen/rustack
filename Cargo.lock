@@ -2865,6 +2865,8 @@ dependencies = [
  "rustack-cloudfront-model",
  "rustack-s3-core",
  "rustack-s3-model",
+ "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

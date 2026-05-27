@@ -4,7 +4,7 @@
 //! HTTP requests in, and the data plane resolves the distribution, selects a
 //! cache behavior, dispatches to origin, and returns the response.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri};
@@ -15,6 +15,7 @@ use tracing::debug;
 
 use crate::{
     behavior::select_behavior,
+    cache::{CloudFrontCacheSnapshot, ResponseCache, cache_key, method_is_cacheable},
     config::DataPlaneConfig,
     dispatch::{OriginKind, classify_origin, dispatch_s3_origin, extract_s3_bucket},
     divergence::{
@@ -24,7 +25,7 @@ use crate::{
     error::DataPlaneError,
     host::match_host,
     transform::{
-        add_cloudfront_response_headers, apply_response_headers_policy,
+        CacheResult, add_cloudfront_response_headers, apply_response_headers_policy,
         rewrite_path_with_default_root,
     },
 };
@@ -36,6 +37,7 @@ pub struct DataPlane {
     s3: Option<Arc<RustackS3>>,
     config: Arc<DataPlaneConfig>,
     divergence: Arc<DivergenceTracker>,
+    cache: Arc<ResponseCache>,
     #[cfg(feature = "http-origin")]
     http_client: reqwest::Client,
 }
@@ -46,6 +48,7 @@ pub struct DataPlaneBuilder {
     cloudfront: Option<Arc<RustackCloudFront>>,
     s3: Option<Arc<RustackS3>>,
     config: DataPlaneConfig,
+    cache: Option<Arc<ResponseCache>>,
 }
 
 impl DataPlaneBuilder {
@@ -70,6 +73,13 @@ impl DataPlaneBuilder {
         self
     }
 
+    /// Supply a shared response cache.
+    #[must_use]
+    pub fn cache(mut self, cache: Arc<ResponseCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
     /// Construct the `DataPlane`.
     pub fn build(self) -> Result<DataPlane, &'static str> {
         let cf = self.cloudfront.ok_or("CloudFront provider is required")?;
@@ -84,6 +94,7 @@ impl DataPlaneBuilder {
             s3: self.s3,
             config: Arc::new(self.config),
             divergence,
+            cache: self.cache.unwrap_or_else(|| Arc::new(ResponseCache::new())),
             #[cfg(feature = "http-origin")]
             http_client,
         })
@@ -101,6 +112,37 @@ impl DataPlane {
     #[must_use]
     pub fn config(&self) -> &DataPlaneConfig {
         &self.config
+    }
+
+    /// Return the number of live cached responses.
+    #[must_use]
+    pub fn cached_response_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Export CloudFront data-plane cache state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when cached response bodies cannot be staged.
+    pub async fn export_cache_snapshot(
+        &self,
+        data_dir: &std::path::Path,
+    ) -> Result<CloudFrontCacheSnapshot, crate::CacheSnapshotError> {
+        self.cache.export_snapshot(data_dir).await
+    }
+
+    /// Import CloudFront data-plane cache state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when cached response bodies cannot be read.
+    pub async fn import_cache_snapshot(
+        &self,
+        snapshot: CloudFrontCacheSnapshot,
+        data_dir: &std::path::Path,
+    ) -> Result<(), crate::CacheSnapshotError> {
+        self.cache.import_snapshot(snapshot, data_dir).await
     }
 
     /// Check whether a host maps to a known distribution.
@@ -179,6 +221,15 @@ impl DataPlane {
         // Divergence checks (emit warn! or hard-fail).
         if let Err(e) = self.check_divergence(&id, &behavior) {
             return error_response(&e);
+        }
+
+        let cacheable = method_is_cacheable(&method, &behavior.cached_methods);
+        let cache_key = cache_key(&id, &method, &effective_path, uri.query());
+        if cacheable {
+            if let Some(mut response) = self.cache.get(&cache_key) {
+                add_cloudfront_response_headers(response.headers_mut(), CacheResult::Hit);
+                return response;
+            }
         }
 
         // Resolve origin.
@@ -281,7 +332,13 @@ impl DataPlane {
             }
         }
 
-        add_cloudfront_response_headers(response.headers_mut());
+        if cacheable {
+            if let Some(ttl) = self.cache_ttl(&behavior) {
+                self.cache.insert(cache_key, &response, ttl);
+            }
+        }
+
+        add_cloudfront_response_headers(response.headers_mut(), CacheResult::Miss);
         let _ = body; // body consumed above in HTTP dispatch path; placate compiler on other paths.
         response
     }
@@ -345,6 +402,22 @@ impl DataPlane {
         }
         Ok(())
     }
+
+    fn cache_ttl(&self, behavior: &CacheBehavior) -> Option<Duration> {
+        let ttl = if !behavior.cache_policy_id.is_empty() {
+            self.cloudfront
+                .get_cache_policy(&behavior.cache_policy_id)
+                .map_or(behavior.default_ttl, |policy| policy.config.default_ttl)
+        } else if behavior.default_ttl > 0 {
+            behavior.default_ttl
+        } else {
+            behavior.min_ttl
+        };
+        u64::try_from(ttl)
+            .ok()
+            .filter(|ttl| *ttl > 0)
+            .map(Duration::from_secs)
+    }
 }
 
 fn method_is_allowed(behavior: &CacheBehavior, method: &Method) -> bool {
@@ -376,7 +449,7 @@ pub fn error_response(err: &DataPlaneError) -> Response<Bytes> {
         resp.headers_mut()
             .insert(HeaderName::from_static("x-amzn-errortype"), hv);
     }
-    add_cloudfront_response_headers(resp.headers_mut());
+    add_cloudfront_response_headers(resp.headers_mut(), CacheResult::Miss);
     resp
 }
 
