@@ -235,6 +235,330 @@ pulumi-hackathon-smoke:
 		PULUMI_STACK="$${PULUMI_STACK:-rustack-hackathon}" \
 		bash scripts/pulumi-rustack-smoke.sh
 
+pulumi-commerce-smoke:
+	@PULUMI_EXAMPLE_DIR="$(CURDIR)/examples/pulumi/commerce-platform-app" \
+		PULUMI_STACK="$${PULUMI_STACK:-rustack-commerce}" \
+		bash scripts/pulumi-rustack-smoke.sh
+
+pulumi-hackathon-snapshot-smoke:
+	@bash -euo pipefail -c '\
+		ROOT="$(CURDIR)"; \
+		ENDPOINT="$${RUSTACK_SNAPSHOT_ENDPOINT:-http://127.0.0.1:4577}"; \
+		STACK="$${PULUMI_STACK:-rustack-hackathon-snapshot}"; \
+		SNAPSHOT_NAME="$${RUSTACK_SNAPSHOT_NAME:-hackathon-snapshot}"; \
+		TMP_DIR=$$(mktemp -d); \
+		STATE_DIR="$$TMP_DIR/pulumi"; \
+		SNAPSHOT_DIR="$$TMP_DIR/snapshots"; \
+		PID1="$$TMP_DIR/rustack-save.pid"; \
+		PID2="$$TMP_DIR/rustack-load.pid"; \
+		LOAD_MS_FILE="$$TMP_DIR/rustack-load.ms"; \
+		PERF_FILE="$$TMP_DIR/snapshot-perf.txt"; \
+		SAVE_BUDGET_MS="$${RUSTACK_SNAPSHOT_SAVE_BUDGET_MS:-500}"; \
+		LOAD_BUDGET_MS="$${RUSTACK_SNAPSHOT_LOAD_BUDGET_MS:-200}"; \
+		now_ms() { node -e "process.stdout.write(String(Date.now()))"; }; \
+		metric_value() { grep "^$$1=" "$$PERF_FILE" | tail -n 1 | cut -d= -f2; }; \
+		stop_pid_file() { \
+			local pid_file="$$1"; \
+			if [[ -f "$$pid_file" ]]; then \
+				local pid; \
+				pid=$$(cat "$$pid_file"); \
+				if kill -0 "$$pid" >/dev/null 2>&1; then \
+					kill -INT "$$pid" >/dev/null 2>&1 || true; \
+					for _ in $$(seq 1 1200); do \
+						if ! kill -0 "$$pid" >/dev/null 2>&1; then return 0; fi; \
+						sleep 0.05; \
+					done; \
+					echo "Rustack process $$pid did not stop after SIGINT" >&2; \
+					return 1; \
+				fi; \
+			fi; \
+		}; \
+		sum_named_files() { \
+			local root="$$1"; \
+			local name="$$2"; \
+			local total=0; \
+			local file; \
+			local size; \
+			while IFS= read -r -d "" file; do \
+				size=$$(wc -c <"$$file" | tr -d " "); \
+				total=$$((total + size)); \
+			done < <(find "$$root" -name "$$name" -type f -print0); \
+			printf "%s\n" "$$total"; \
+		}; \
+		cleanup() { \
+			stop_pid_file "$$PID1" >/dev/null 2>&1 || true; \
+			stop_pid_file "$$PID2" >/dev/null 2>&1 || true; \
+			rm -rf "$$TMP_DIR"; \
+		}; \
+		trap cleanup EXIT; \
+		echo "Creating hackathon snapshot $$SNAPSHOT_NAME at $$SNAPSHOT_DIR"; \
+		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/hackathon-app" \
+			PULUMI_STATE_DIR="$$STATE_DIR" \
+			PULUMI_STACK="$$STACK" \
+			RUSTACK_ENDPOINT="$$ENDPOINT" \
+			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_SNAPSHOT_PERF_FILE="$$PERF_FILE" \
+			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
+			RUSTACK_KEEP_RUNNING=1 \
+			RUSTACK_PID_FILE="$$PID1" \
+			PULUMI_KEEP_STACK=1 \
+			PULUMI_SKIP_DESTROY=1 \
+			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
+		test -f "$$PID1"; \
+		export PULUMI_HOME="$$STATE_DIR/home"; \
+		export PULUMI_CONFIG_PASSPHRASE=""; \
+		export AWS_ACCESS_KEY_ID="$${AWS_ACCESS_KEY_ID:-AKIAIOSFODNN7EXAMPLE}"; \
+		export AWS_SECRET_ACCESS_KEY="$${AWS_SECRET_ACCESS_KEY:-wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY}"; \
+		export AWS_DEFAULT_REGION="$${AWS_DEFAULT_REGION:-us-east-1}"; \
+		cd "$$ROOT/examples/pulumi/hackathon-app"; \
+		pulumi login "file://$$STATE_DIR/state" >/dev/null; \
+		FRONTEND_BUCKET=$$(pulumi stack output frontendBucketName --stack "$$STACK"); \
+		PROJECTS_TABLE=$$(pulumi stack output projectsTableName --stack "$$STACK"); \
+		curl -sf "$${ENDPOINT%/}/$$FRONTEND_BUCKET/index.html" | grep -q "Hackathon app deployed by Rustack"; \
+		curl -sf -X POST "$${ENDPOINT%/}/" \
+			-H "x-amz-target: DynamoDB_20120810.PutItem" \
+			-H "content-type: application/x-amz-json-1.0" \
+			--data "{\"TableName\":\"$$PROJECTS_TABLE\",\"Item\":{\"pk\":{\"S\":\"PROJECT\"},\"sk\":{\"S\":\"snapshot-smoke\"},\"title\":{\"S\":\"Snapshot Smoke\"}}}" >/dev/null; \
+		SAVE_STARTED_MS=$$(now_ms); \
+		stop_pid_file "$$PID1"; \
+		SAVE_WALL_MS=$$(( $$(now_ms) - SAVE_STARTED_MS )); \
+		SNAPSHOT_PATH="$$SNAPSHOT_DIR/$$SNAPSHOT_NAME"; \
+		test -f "$$SNAPSHOT_PATH/manifest.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/s3/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/s3/data.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/dynamodb/meta.ss.zst"; \
+		if find "$$SNAPSHOT_PATH" \( -path "*/objects/*.bin" -o -path "*/parts/*.bin" \) -type f | grep -q .; then \
+			echo "snapshot contains unpacked S3 payload files" >&2; \
+			exit 1; \
+		fi; \
+		echo "Reloading snapshot and refreshing Pulumi state"; \
+		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/hackathon-app" \
+			PULUMI_STATE_DIR="$$STATE_DIR" \
+			PULUMI_STACK="$$STACK" \
+			PULUMI_OPERATION=refresh \
+			RUSTACK_ENDPOINT="$$ENDPOINT" \
+			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_SNAPSHOT_PERF_FILE="$$PERF_FILE" \
+			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
+			RUSTACK_KEEP_RUNNING=1 \
+			RUSTACK_PID_FILE="$$PID2" \
+			RUSTACK_READY_MS_FILE="$$LOAD_MS_FILE" \
+			PULUMI_KEEP_STACK=1 \
+			PULUMI_SKIP_DESTROY=1 \
+			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
+		test -f "$$PID2"; \
+		curl -sf "$${ENDPOINT%/}/$$FRONTEND_BUCKET/index.html" | grep -q "Hackathon app deployed by Rustack"; \
+		DDB_ITEM=$$(curl -sf -X POST "$${ENDPOINT%/}/" \
+			-H "x-amz-target: DynamoDB_20120810.GetItem" \
+			-H "content-type: application/x-amz-json-1.0" \
+			--data "{\"TableName\":\"$$PROJECTS_TABLE\",\"Key\":{\"pk\":{\"S\":\"PROJECT\"},\"sk\":{\"S\":\"snapshot-smoke\"}}}"); \
+		printf "%s" "$$DDB_ITEM" | grep -q "Snapshot Smoke"; \
+		stop_pid_file "$$PID2"; \
+		SAVE_MS=$$(metric_value save_ms); \
+		LOAD_MS=$$(metric_value load_ms); \
+		LOAD_READY_MS=$$(cat "$$LOAD_MS_FILE"); \
+		MANIFEST_BYTES=$$(wc -c <"$$SNAPSHOT_PATH/manifest.ss.zst" | tr -d " "); \
+		META_BYTES=$$(sum_named_files "$$SNAPSHOT_PATH/services" "meta.ss.zst"); \
+		DATA_BYTES=$$(sum_named_files "$$SNAPSHOT_PATH/services" "data.ss.zst"); \
+		echo "Hackathon snapshot perf: save_ms=$$SAVE_MS save_wall_ms=$$SAVE_WALL_MS load_ms=$$LOAD_MS load_ready_ms=$$LOAD_READY_MS manifest_bytes=$$MANIFEST_BYTES meta_bytes=$$META_BYTES data_bytes=$$DATA_BYTES"; \
+		if (( SAVE_MS > SAVE_BUDGET_MS )); then \
+			echo "snapshot save exceeded budget: $${SAVE_MS}ms > $${SAVE_BUDGET_MS}ms" >&2; \
+			exit 1; \
+		fi; \
+		if (( LOAD_MS > LOAD_BUDGET_MS )); then \
+			echo "snapshot load exceeded budget: $${LOAD_MS}ms > $${LOAD_BUDGET_MS}ms" >&2; \
+			exit 1; \
+		fi; \
+		echo "Hackathon snapshot smoke passed"; \
+	'
+
+pulumi-commerce-snapshot-smoke:
+	@bash -euo pipefail -c '\
+		ROOT="$(CURDIR)"; \
+		ENDPOINT="$${RUSTACK_SNAPSHOT_ENDPOINT:-http://127.0.0.1:4578}"; \
+		STACK="$${PULUMI_STACK:-rustack-commerce-snapshot}"; \
+		SNAPSHOT_NAME="$${RUSTACK_SNAPSHOT_NAME:-commerce-snapshot}"; \
+		S3_RUNTIME_OBJECTS="$${RUSTACK_COMMERCE_S3_RUNTIME_OBJECTS:-320}"; \
+		DDB_RUNTIME_ITEMS="$${RUSTACK_COMMERCE_DDB_RUNTIME_ITEMS:-240}"; \
+		CDN_WARM_OBJECTS="$${RUSTACK_COMMERCE_CDN_WARM_OBJECTS:-80}"; \
+		TMP_DIR=$$(mktemp -d); \
+		STATE_DIR="$$TMP_DIR/pulumi"; \
+		SNAPSHOT_DIR="$$TMP_DIR/snapshots"; \
+		PID1="$$TMP_DIR/rustack-save.pid"; \
+		PID2="$$TMP_DIR/rustack-load.pid"; \
+		LOAD_MS_FILE="$$TMP_DIR/rustack-load.ms"; \
+		PERF_FILE="$$TMP_DIR/snapshot-perf.txt"; \
+		SAVE_BUDGET_MS="$${RUSTACK_COMMERCE_SNAPSHOT_SAVE_BUDGET_MS:-1000}"; \
+		LOAD_BUDGET_MS="$${RUSTACK_COMMERCE_SNAPSHOT_LOAD_BUDGET_MS:-500}"; \
+		now_ms() { node -e "process.stdout.write(String(Date.now()))"; }; \
+		metric_value() { grep "^$$1=" "$$PERF_FILE" | tail -n 1 | cut -d= -f2; }; \
+		stop_pid_file() { \
+			local pid_file="$$1"; \
+			if [[ -f "$$pid_file" ]]; then \
+				local pid; \
+				pid=$$(cat "$$pid_file"); \
+				if kill -0 "$$pid" >/dev/null 2>&1; then \
+					kill -INT "$$pid" >/dev/null 2>&1 || true; \
+					for _ in $$(seq 1 1200); do \
+						if ! kill -0 "$$pid" >/dev/null 2>&1; then return 0; fi; \
+						sleep 0.05; \
+					done; \
+					echo "Rustack process $$pid did not stop after SIGINT" >&2; \
+					return 1; \
+				fi; \
+			fi; \
+		}; \
+		sum_named_files() { \
+			local root="$$1"; \
+			local name="$$2"; \
+			local total=0; \
+			local file; \
+			local size; \
+			while IFS= read -r -d "" file; do \
+				size=$$(wc -c <"$$file" | tr -d " "); \
+				total=$$((total + size)); \
+			done < <(find "$$root" -name "$$name" -type f -print0); \
+			printf "%s\n" "$$total"; \
+		}; \
+		put_s3_runtime_data() { \
+			local bucket="$$1"; \
+			local count="$$2"; \
+			local idx; \
+			local padded; \
+			for idx in $$(seq 0 $$((count - 1))); do \
+				padded=$$(printf "%04d" "$$idx"); \
+				curl -sf -X PUT "$${ENDPOINT%/}/$$bucket/runtime/blob-$$padded.json" \
+					-H "content-type: application/json" \
+					--data "{\"id\":\"blob-$$padded\",\"payload\":\"commerce-runtime-payload-$$padded-$$(printf "%064d" "$$idx")\"}" >/dev/null; \
+			done; \
+		}; \
+		put_ddb_runtime_data() { \
+			local table="$$1"; \
+			local entity="$$2"; \
+			local count="$$3"; \
+			local idx; \
+			local padded; \
+			for idx in $$(seq 0 $$((count - 1))); do \
+				padded=$$(printf "%04d" "$$idx"); \
+				curl -sf -X POST "$${ENDPOINT%/}/" \
+					-H "x-amz-target: DynamoDB_20120810.PutItem" \
+					-H "content-type: application/x-amz-json-1.0" \
+					--data "{\"TableName\":\"$$table\",\"Item\":{\"pk\":{\"S\":\"$$entity\"},\"sk\":{\"S\":\"$$entity#$$padded\"},\"status\":{\"S\":\"ACTIVE\"},\"payload\":{\"S\":\"commerce-ddb-payload-$$padded-$$(printf "%064d" "$$idx")\"}}}" >/dev/null; \
+			done; \
+		}; \
+		warm_cdn_cache() { \
+			local distribution_id="$$1"; \
+			local count="$$2"; \
+			local idx; \
+			local page; \
+			for idx in $$(seq 0 $$((count - 1))); do \
+				page=$$(printf "%03d" $$((idx % 48))); \
+				curl -sf "$${ENDPOINT%/}/_aws/cloudfront/$$distribution_id/static/page-$$page.html" >/dev/null; \
+			done; \
+			curl -sD "$$TMP_DIR/cdn-hit.headers" -o "$$TMP_DIR/cdn-hit.body" \
+				"$${ENDPOINT%/}/_aws/cloudfront/$$distribution_id/static/page-000.html" >/dev/null; \
+			grep -qi "x-cache: Hit from rustack-cloudfront" "$$TMP_DIR/cdn-hit.headers"; \
+			grep -q "Commerce Platform Rustack fixture page 0" "$$TMP_DIR/cdn-hit.body"; \
+		}; \
+		cleanup() { \
+			stop_pid_file "$$PID1" >/dev/null 2>&1 || true; \
+			stop_pid_file "$$PID2" >/dev/null 2>&1 || true; \
+			rm -rf "$$TMP_DIR"; \
+		}; \
+		trap cleanup EXIT; \
+		echo "Creating commerce snapshot $$SNAPSHOT_NAME at $$SNAPSHOT_DIR"; \
+		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/commerce-platform-app" \
+			PULUMI_STATE_DIR="$$STATE_DIR" \
+			PULUMI_STACK="$$STACK" \
+			RUSTACK_ENDPOINT="$$ENDPOINT" \
+			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_SNAPSHOT_PERF_FILE="$$PERF_FILE" \
+			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
+			RUSTACK_KEEP_RUNNING=1 \
+			RUSTACK_PID_FILE="$$PID1" \
+			PULUMI_KEEP_STACK=1 \
+			PULUMI_SKIP_DESTROY=1 \
+			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
+		test -f "$$PID1"; \
+		export PULUMI_HOME="$$STATE_DIR/home"; \
+		export PULUMI_CONFIG_PASSPHRASE=""; \
+		export AWS_ACCESS_KEY_ID="$${AWS_ACCESS_KEY_ID:-AKIAIOSFODNN7EXAMPLE}"; \
+		export AWS_SECRET_ACCESS_KEY="$${AWS_SECRET_ACCESS_KEY:-wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY}"; \
+		export AWS_DEFAULT_REGION="$${AWS_DEFAULT_REGION:-us-east-1}"; \
+		cd "$$ROOT/examples/pulumi/commerce-platform-app"; \
+		pulumi login "file://$$STATE_DIR/state" >/dev/null; \
+		PUBLIC_BUCKET=$$(pulumi stack output publicBucketName --stack "$$STACK"); \
+		MEDIA_BUCKET=$$(pulumi stack output mediaBucketName --stack "$$STACK"); \
+		CATALOG_TABLE=$$(pulumi stack output catalogTableName --stack "$$STACK"); \
+		ORDERS_TABLE=$$(pulumi stack output ordersTableName --stack "$$STACK"); \
+		DISTRIBUTION_ID=$$(pulumi stack output cloudfrontDistributionId --stack "$$STACK"); \
+		curl -sf "$${ENDPOINT%/}/$$PUBLIC_BUCKET/static/page-000.html" | grep -q "Commerce Platform Rustack fixture page 0"; \
+		put_s3_runtime_data "$$MEDIA_BUCKET" "$$S3_RUNTIME_OBJECTS"; \
+		put_ddb_runtime_data "$$CATALOG_TABLE" "PRODUCT_RT" "$$DDB_RUNTIME_ITEMS"; \
+		put_ddb_runtime_data "$$ORDERS_TABLE" "ORDER_RT" "$$DDB_RUNTIME_ITEMS"; \
+		warm_cdn_cache "$$DISTRIBUTION_ID" "$$CDN_WARM_OBJECTS"; \
+		SAVE_STARTED_MS=$$(now_ms); \
+		stop_pid_file "$$PID1"; \
+		SAVE_WALL_MS=$$(( $$(now_ms) - SAVE_STARTED_MS )); \
+		SNAPSHOT_PATH="$$SNAPSHOT_DIR/$$SNAPSHOT_NAME"; \
+		test -f "$$SNAPSHOT_PATH/manifest.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/s3/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/s3/data.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/dynamodb/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/lambda/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/cloudfront/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/cloudfront-cache/meta.ss.zst"; \
+		test -f "$$SNAPSHOT_PATH/services/cloudfront-cache/data.ss.zst"; \
+		if find "$$SNAPSHOT_PATH" \( -path "*/objects/*.bin" -o -path "*/parts/*.bin" -o -path "*/bodies/*.bin" \) -type f | grep -q .; then \
+			echo "snapshot contains unpacked payload files" >&2; \
+			exit 1; \
+		fi; \
+		echo "Reloading commerce snapshot and refreshing Pulumi state"; \
+		PULUMI_EXAMPLE_DIR="$$ROOT/examples/pulumi/commerce-platform-app" \
+			PULUMI_STATE_DIR="$$STATE_DIR" \
+			PULUMI_STACK="$$STACK" \
+			PULUMI_OPERATION=refresh \
+			RUSTACK_ENDPOINT="$$ENDPOINT" \
+			RUSTACK_SNAPSHOT_DIR="$$SNAPSHOT_DIR" \
+			RUSTACK_SNAPSHOT_PERF_FILE="$$PERF_FILE" \
+			RUSTACK_EXTRA_ARGS="--snapshot $$SNAPSHOT_NAME" \
+			RUSTACK_KEEP_RUNNING=1 \
+			RUSTACK_PID_FILE="$$PID2" \
+			RUSTACK_READY_MS_FILE="$$LOAD_MS_FILE" \
+			PULUMI_KEEP_STACK=1 \
+			PULUMI_SKIP_DESTROY=1 \
+			bash "$$ROOT/scripts/pulumi-rustack-smoke.sh"; \
+		test -f "$$PID2"; \
+		curl -sf "$${ENDPOINT%/}/$$MEDIA_BUCKET/runtime/blob-0000.json" | grep -q "commerce-runtime-payload-0000"; \
+		DDB_ITEM=$$(curl -sf -X POST "$${ENDPOINT%/}/" \
+			-H "x-amz-target: DynamoDB_20120810.GetItem" \
+			-H "content-type: application/x-amz-json-1.0" \
+			--data "{\"TableName\":\"$$ORDERS_TABLE\",\"Key\":{\"pk\":{\"S\":\"ORDER_RT\"},\"sk\":{\"S\":\"ORDER_RT#0000\"}}}"); \
+		printf "%s" "$$DDB_ITEM" | grep -q "commerce-ddb-payload-0000"; \
+		curl -sD "$$TMP_DIR/cdn-load.headers" -o "$$TMP_DIR/cdn-load.body" \
+			"$${ENDPOINT%/}/_aws/cloudfront/$$DISTRIBUTION_ID/static/page-000.html" >/dev/null; \
+		grep -qi "x-cache: Hit from rustack-cloudfront" "$$TMP_DIR/cdn-load.headers"; \
+		grep -q "Commerce Platform Rustack fixture page 0" "$$TMP_DIR/cdn-load.body"; \
+		stop_pid_file "$$PID2"; \
+		SAVE_MS=$$(metric_value save_ms); \
+		LOAD_MS=$$(metric_value load_ms); \
+		LOAD_READY_MS=$$(cat "$$LOAD_MS_FILE"); \
+		MANIFEST_BYTES=$$(wc -c <"$$SNAPSHOT_PATH/manifest.ss.zst" | tr -d " "); \
+		META_BYTES=$$(sum_named_files "$$SNAPSHOT_PATH/services" "meta.ss.zst"); \
+		DATA_BYTES=$$(sum_named_files "$$SNAPSHOT_PATH/services" "data.ss.zst"); \
+		RESOURCE_COUNT=$$(pulumi stack --stack "$$STACK" --show-urns | grep -c "urn:pulumi:"); \
+		echo "Commerce snapshot perf: resources=$$RESOURCE_COUNT s3_runtime_objects=$$S3_RUNTIME_OBJECTS ddb_runtime_items=$$((DDB_RUNTIME_ITEMS * 2)) cdn_warm_requests=$$CDN_WARM_OBJECTS save_ms=$$SAVE_MS save_wall_ms=$$SAVE_WALL_MS load_ms=$$LOAD_MS load_ready_ms=$$LOAD_READY_MS manifest_bytes=$$MANIFEST_BYTES meta_bytes=$$META_BYTES data_bytes=$$DATA_BYTES"; \
+		if (( SAVE_MS > SAVE_BUDGET_MS )); then \
+			echo "commerce snapshot save exceeded budget: $${SAVE_MS}ms > $${SAVE_BUDGET_MS}ms" >&2; \
+			exit 1; \
+		fi; \
+		if (( LOAD_MS > LOAD_BUDGET_MS )); then \
+			echo "commerce snapshot load exceeded budget: $${LOAD_MS}ms > $${LOAD_BUDGET_MS}ms" >&2; \
+			exit 1; \
+		fi; \
+		echo "Commerce snapshot smoke passed"; \
+	'
+
 test-events-unit:
 	@cargo test -p rustack-events-model -p rustack-events-core -p rustack-events-http
 
@@ -271,7 +595,8 @@ test-iam-integration:
 	mint mint-build mint-start mint-run mint-stop \
 	alternator alternator-setup alternator-run alternator-stop \
 	sqs-compat sqs-compat-setup sqs-compat-run \
-	pulumi-smoke pulumi-hackathon-smoke \
+	pulumi-smoke pulumi-hackathon-smoke pulumi-hackathon-snapshot-smoke \
+	pulumi-commerce-smoke pulumi-commerce-snapshot-smoke \
 	test-events-unit test-events-patterns test-events-integration \
 	test-apigatewayv2-unit test-apigatewayv2-integration \
 	test-iam-unit test-iam-integration

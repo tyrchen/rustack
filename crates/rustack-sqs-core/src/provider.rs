@@ -30,6 +30,7 @@ use rustack_sqs_model::{
         StartMessageMoveTaskOutput, TagQueueOutput, UntagQueueOutput,
     },
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -49,6 +50,26 @@ pub struct RustackSqs {
     queues: DashMap<String, Arc<QueueHandle>>,
     /// Configuration.
     config: Arc<SqsConfig>,
+}
+
+/// Serializable SQS provider snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqsSnapshot {
+    /// Queues.
+    pub queues: Vec<SqsQueueSnapshot>,
+}
+
+/// Serializable SQS queue snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqsQueueSnapshot {
+    /// Queue name.
+    pub name: String,
+    /// Settable queue attributes.
+    pub attributes: HashMap<String, String>,
+    /// Queue tags.
+    pub tags: HashMap<String, String>,
 }
 
 impl RustackSqs {
@@ -84,6 +105,76 @@ impl RustackSqs {
                     "The specified queue does not exist for this wsdl version.",
                 )
             })
+    }
+
+    /// Export all SQS queue resources in deterministic order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a queue actor cannot provide attributes or tags.
+    pub async fn export_snapshot(&self) -> Result<SqsSnapshot, SqsError> {
+        let mut names: Vec<String> = self
+            .queues
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        names.sort();
+
+        let mut queues = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(handle) = self
+                .queues
+                .get(&name)
+                .map(|entry| Arc::clone(entry.value()))
+            else {
+                continue;
+            };
+            let attributes = handle
+                .get_attributes(settable_attribute_names())
+                .await?
+                .into_iter()
+                .filter(|(key, _)| is_settable_attribute(key))
+                .collect();
+            let tags = handle.get_tags().await?;
+            queues.push(SqsQueueSnapshot {
+                name,
+                attributes,
+                tags,
+            });
+        }
+
+        Ok(SqsSnapshot { queues })
+    }
+
+    /// Replace all SQS queues from a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a queue cannot be recreated.
+    pub async fn import_snapshot(&self, snapshot: SqsSnapshot) -> Result<(), SqsError> {
+        self.shutdown_all().await;
+        for queue in snapshot.queues {
+            self.create_queue(CreateQueueInput {
+                queue_name: queue.name,
+                attributes: queue.attributes,
+                tags: queue.tags,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Shut down all queue actors and clear the registry.
+    pub async fn shutdown_all(&self) {
+        let handles: Vec<Arc<QueueHandle>> = self
+            .queues
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect();
+        self.queues.clear();
+        for handle in handles {
+            handle.shutdown().await;
+        }
     }
 
     // ---- Queue Management Operations ----
@@ -620,6 +711,50 @@ fn validate_queue_name(name: &str) -> Result<(), SqsError> {
         ));
     }
     Ok(())
+}
+
+fn settable_attribute_names() -> Vec<String> {
+    [
+        "DelaySeconds",
+        "MaximumMessageSize",
+        "MessageRetentionPeriod",
+        "ReceiveMessageWaitTimeSeconds",
+        "VisibilityTimeout",
+        "RedrivePolicy",
+        "RedriveAllowPolicy",
+        "Policy",
+        "FifoQueue",
+        "ContentBasedDeduplication",
+        "DeduplicationScope",
+        "FifoThroughputLimit",
+        "SqsManagedSseEnabled",
+        "KmsMasterKeyId",
+        "KmsDataKeyReusePeriodSeconds",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn is_settable_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        "DelaySeconds"
+            | "MaximumMessageSize"
+            | "MessageRetentionPeriod"
+            | "ReceiveMessageWaitTimeSeconds"
+            | "VisibilityTimeout"
+            | "RedrivePolicy"
+            | "RedriveAllowPolicy"
+            | "Policy"
+            | "FifoQueue"
+            | "ContentBasedDeduplication"
+            | "DeduplicationScope"
+            | "FifoThroughputLimit"
+            | "SqsManagedSseEnabled"
+            | "KmsMasterKeyId"
+            | "KmsDataKeyReusePeriodSeconds"
+    )
 }
 
 /// Validate batch entry IDs.

@@ -6,6 +6,7 @@ pub mod error;
 pub mod expression;
 pub mod handler;
 pub mod provider;
+pub mod snapshot;
 pub mod state;
 pub mod storage;
 pub mod stream;

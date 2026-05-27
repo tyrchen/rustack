@@ -168,6 +168,26 @@ impl S3ServiceState {
         self.buckets.clear();
         self.global_bucket_owner.clear();
     }
+
+    /// Return all bucket names sorted for deterministic snapshot export.
+    #[must_use]
+    pub(crate) fn snapshot_bucket_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .buckets
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Insert a bucket while rebuilding the global owner index.
+    pub(crate) fn insert_snapshot_bucket(&self, bucket: S3Bucket) {
+        let name = bucket.name.clone();
+        let owner_id = bucket.owner.id.clone();
+        self.buckets.insert(name.clone(), bucket);
+        self.global_bucket_owner.insert(name, owner_id);
+    }
 }
 
 // ---------------------------------------------------------------------------

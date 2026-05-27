@@ -909,8 +909,8 @@ mod tests {
         assert_eq!(result.messages()[0].body().unwrap(), "wake up!");
         assert!(
             elapsed.as_secs() < 5,
-            "long-poll took {elapsed:?} — should have woken up immediately, \
-             not waited for the full WaitTimeSeconds"
+            "long-poll took {elapsed:?} — should have woken up immediately, not waited for the \
+             full WaitTimeSeconds"
         );
 
         delete_test_queue(&client, &url).await;
@@ -1101,9 +1101,8 @@ mod tests {
         assert_eq!(recv2.messages()[0].body().unwrap(), "retry me");
         assert!(
             elapsed.as_secs() < 5,
-            "long-poll took {elapsed:?} — should have returned within ~2s \
-             (1s visibility + 1s cleanup interval), not waited for the full \
-             WaitTimeSeconds"
+            "long-poll took {elapsed:?} — should have returned within ~2s (1s visibility + 1s \
+             cleanup interval), not waited for the full WaitTimeSeconds"
         );
 
         delete_test_queue(&client, &url).await;

@@ -22,7 +22,7 @@ use crate::{
         parse_origin_request_policy_config, parse_public_key_config, parse_realtime_log_config,
         parse_response_headers_policy_config, parse_root, parse_tag_keys, parse_tag_set,
     },
-    response::{empty_204, error_response, xml_response},
+    response::{bytes_response, empty_204, error_response, xml_response},
     router::{Operation, PathParams, RouteMatch},
     service::HttpBody,
     xml::ser,
@@ -542,11 +542,20 @@ async fn handle(
                 Some(&f.etag),
             ))
         }
-        Operation::DescribeFunction | Operation::GetFunction => {
+        Operation::DescribeFunction => {
             let f = provider.get_function(&route.path_params.name)?;
             Ok(xml_response(
                 StatusCode::OK,
                 ser::function_xml(&f),
+                Some(&f.etag),
+            ))
+        }
+        Operation::GetFunction => {
+            let f = provider.get_function(&route.path_params.name)?;
+            Ok(bytes_response(
+                StatusCode::OK,
+                Bytes::from(f.code),
+                "application/octet-stream",
                 Some(&f.etag),
             ))
         }

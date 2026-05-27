@@ -17,6 +17,7 @@
 //! | `-h`, `--help` | Print help and exit |
 //! | `-v`, `--version` | Print version and exit |
 //! | `--health-check` | Probe the gateway health endpoint (exit 0 if healthy) |
+//! | `--snapshot <name>` | Load/save a named runtime snapshot |
 //!
 //! # Environment Variables
 //!
@@ -28,6 +29,7 @@
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
 //! | `LOG_LEVEL` | `info` | Log level filter |
 //! | `RUST_LOG` | *(unset)* | Fine-grained tracing filter (overrides `LOG_LEVEL`) |
+//! | `RUSTACK_SNAPSHOT_DIR` | `.rustack/snapshots` | Snapshot storage root |
 
 #[cfg(feature = "events")]
 mod events_bridge;
@@ -35,6 +37,7 @@ mod gateway;
 #[cfg(feature = "s3")]
 mod handler;
 mod service;
+mod snapshot;
 #[cfg(feature = "sns")]
 mod sns_bridge;
 
@@ -203,7 +206,11 @@ use tracing_subscriber::EnvFilter;
 use crate::events_bridge::LocalTargetDelivery;
 #[cfg(feature = "sns")]
 use crate::sns_bridge::RustackSqsPublisher;
-use crate::{gateway::GatewayService, service::ServiceRouter};
+use crate::{
+    gateway::GatewayService,
+    service::ServiceRouter,
+    snapshot::{RuntimeProviders, SnapshotConfig},
+};
 
 /// Server version reported in health check responses.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -221,7 +228,10 @@ const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 #[derive(Debug, PartialEq, Eq)]
 enum CliAction {
     /// Start the gateway server (the default).
-    Run,
+    Run {
+        /// Optional named runtime snapshot to load/save.
+        snapshot: Option<String>,
+    },
     /// Print help text to stdout and exit 0.
     Help,
     /// Print version to stdout and exit 0.
@@ -230,6 +240,8 @@ enum CliAction {
     HealthCheck,
     /// An unrecognised flag was supplied.
     UnknownFlag(String),
+    /// A flag that requires a value was supplied without one.
+    MissingFlagValue(String),
 }
 
 /// Classify a sequence of CLI arguments (including argv\[0\]) into a [`CliAction`].
@@ -242,15 +254,48 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut action = CliAction::Run;
-    let mut iter = args.into_iter();
-    // Skip the program name (argv[0]).
-    iter.next();
-    for arg in iter {
-        match arg.as_ref() {
+    let tokens: Vec<String> = args
+        .into_iter()
+        .skip(1)
+        .map(|arg| arg.as_ref().to_owned())
+        .collect();
+
+    if tokens.iter().any(|arg| arg == "-h" || arg == "--help") {
+        return CliAction::Help;
+    }
+    if tokens.iter().any(|arg| arg == "-v" || arg == "--version") {
+        return CliAction::Version;
+    }
+
+    let mut action = CliAction::Run { snapshot: None };
+    let mut iter = tokens.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
             "-h" | "--help" => return CliAction::Help,
             "-v" | "--version" => return CliAction::Version,
             "--health-check" => action = CliAction::HealthCheck,
+            "--snapshot" => {
+                let Some(name) = iter.next() else {
+                    return CliAction::MissingFlagValue("--snapshot".to_owned());
+                };
+                if name.starts_with('-') {
+                    return CliAction::MissingFlagValue("--snapshot".to_owned());
+                }
+                if let CliAction::Run { snapshot } = &mut action {
+                    *snapshot = Some(name);
+                }
+            }
+            other if other.starts_with("--snapshot=") => {
+                let Some((_, name)) = other.split_once('=') else {
+                    return CliAction::MissingFlagValue("--snapshot".to_owned());
+                };
+                if name.is_empty() {
+                    return CliAction::MissingFlagValue("--snapshot".to_owned());
+                }
+                if let CliAction::Run { snapshot } = &mut action {
+                    *snapshot = Some(name.to_owned());
+                }
+            }
             other if other.starts_with('-') => {
                 return CliAction::UnknownFlag(other.to_string());
             }
@@ -273,13 +318,15 @@ fn help_text() -> String {
          FLAGS:\n    \
          -h, --help            Print this help message and exit\n    \
          -v, --version         Print version information and exit\n        \
-         --health-check    Probe the gateway health endpoint, exit 0 if healthy\n\
+         --health-check        Probe the gateway health endpoint, exit 0 if healthy\n        \
+         --snapshot <name>     Load snapshot before serving and save it on shutdown\n\
          \n\
          ENVIRONMENT:\n    \
          GATEWAY_LISTEN        Bind address (default: 0.0.0.0:4566)\n    \
          SERVICES              Comma-separated list of services to enable (default: all compiled-in)\n    \
          LOG_LEVEL             Log level filter (default: info)\n    \
          RUST_LOG              Fine-grained tracing filter (overrides LOG_LEVEL)\n    \
+         RUSTACK_SNAPSHOT_DIR  Snapshot storage root (default: .rustack/snapshots)\n    \
          ACCESS_KEY,SECRET_KEY Static credentials (also accepts AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)\n\
          \n\
          COMPILED-IN SERVICES:\n    \
@@ -770,10 +817,17 @@ fn log_level() -> String {
     std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string())
 }
 
+/// Built runtime services and provider handles.
+struct Runtime {
+    services: Vec<Box<dyn ServiceRouter>>,
+    providers: RuntimeProviders,
+}
+
 /// Build all enabled service routers based on environment configuration.
 #[allow(clippy::too_many_lines)]
-fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRouter>> {
+fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
+    let mut providers = RuntimeProviders::default();
 
     // ----- DynamoDB + DynamoDB Streams (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "dynamodb")]
@@ -806,7 +860,13 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             None
         };
 
-        let dynamodb_handler = RustackDynamoDBHandler::new(Arc::new(dynamodb_provider));
+        let dynamodb_provider = Arc::new(dynamodb_provider);
+        #[cfg(feature = "dynamodbstreams")]
+        if let Some((store, _)) = stream_store.as_ref() {
+            providers.register_dynamodb_streams(Arc::clone(store));
+        }
+        providers.register_dynamodb(Arc::clone(&dynamodb_provider));
+        let dynamodb_handler = RustackDynamoDBHandler::new(Arc::clone(&dynamodb_provider));
         let dynamodb_http_config = build_dynamodb_http_config(&dynamodb_config);
         let dynamodb_service =
             DynamoDBHttpService::new(Arc::new(dynamodb_handler), dynamodb_http_config);
@@ -838,6 +898,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             "initializing SQS service",
         );
         let sqs_provider = Arc::new(RustackSqs::new(sqs_config.clone()));
+        providers.register_sqs(Arc::clone(&sqs_provider));
         let sqs_handler = RustackSqsHandler::new(Arc::clone(&sqs_provider));
         let sqs_http_config = build_sqs_http_config(&sqs_config);
         let sqs_service = SqsHttpService::new(Arc::new(sqs_handler), sqs_http_config);
@@ -855,8 +916,9 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             ssm_skip_signature_validation = ssm_config.skip_signature_validation,
             "initializing SSM service",
         );
-        let ssm_provider = RustackSsm::new(ssm_config.clone());
-        let ssm_handler = RustackSsmHandler::new(Arc::new(ssm_provider));
+        let ssm_provider = Arc::new(RustackSsm::new(ssm_config.clone()));
+        providers.register_ssm(Arc::clone(&ssm_provider));
+        let ssm_handler = RustackSsmHandler::new(Arc::clone(&ssm_provider));
         let ssm_http_config = build_ssm_http_config(&ssm_config);
         let ssm_service = SsmHttpService::new(Arc::new(ssm_handler), ssm_http_config);
         services.push(Box::new(service::SsmServiceRouter::new(ssm_service)));
@@ -872,8 +934,9 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             "initializing IAM service",
         );
         let iam_store = Arc::new(IamStore::new());
-        let iam_provider = RustackIam::new(iam_store, Arc::new(iam_config.clone()));
-        let iam_handler = RustackIamHandler::new(Arc::new(iam_provider));
+        let iam_provider = Arc::new(RustackIam::new(iam_store, Arc::new(iam_config.clone())));
+        providers.register_iam(Arc::clone(&iam_provider));
+        let iam_handler = RustackIamHandler::new(Arc::clone(&iam_provider));
         let iam_http_config = build_iam_http_config(&iam_config);
         let iam_service = IamHttpService::new(Arc::new(iam_handler), iam_http_config);
         services.push(Box::new(service::IamServiceRouter::new(iam_service)));
@@ -1055,6 +1118,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             "initializing API Gateway v2 service",
         );
         let apigw_provider = Arc::new(RustackApiGatewayV2::new(apigw_config.clone()));
+        providers.register_apigatewayv2(Arc::clone(&apigw_provider));
         let apigw_handler = RustackApiGatewayV2Handler::new(Arc::clone(&apigw_provider));
         let apigw_http_config = build_apigatewayv2_http_config(&apigw_config);
         let apigw_service =
@@ -1077,8 +1141,9 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             lambda_executor = ?lambda_config.executor,
             "initializing Lambda service",
         );
-        let lambda_provider = RustackLambda::new(lambda_config.clone());
-        let lambda_handler = RustackLambdaHandler::new(Arc::new(lambda_provider));
+        let lambda_provider = Arc::new(RustackLambda::new(lambda_config.clone()));
+        providers.register_lambda(Arc::clone(&lambda_provider));
+        let lambda_handler = RustackLambdaHandler::new(Arc::clone(&lambda_provider));
         let lambda_http_config = build_lambda_http_config(&lambda_config);
         let lambda_service = LambdaHttpService::new(Arc::new(lambda_handler), lambda_http_config);
         services.push(Box::new(service::LambdaServiceRouter::new(lambda_service)));
@@ -1099,6 +1164,10 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
     } else {
         None
     };
+    #[cfg(feature = "s3")]
+    if let Some(s3_provider) = s3_provider_arc.as_ref() {
+        providers.register_s3(Arc::clone(s3_provider));
+    }
 
     // ----- CloudFront (management + data plane, register before S3 catch-all) -----
     #[cfg(feature = "cloudfront")]
@@ -1110,6 +1179,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             "initializing CloudFront service",
         );
         let cf_provider = Arc::new(RustackCloudFront::new(cf_config.clone()));
+        providers.register_cloudfront(Arc::clone(&cf_provider));
         let cf_http_config = build_cloudfront_http_config(&cf_config);
         let cf_service =
             CloudFrontHttpService::new(Arc::new(Arc::clone(&cf_provider)), cf_http_config);
@@ -1125,6 +1195,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
             }
             match builder.build() {
                 Ok(plane) => {
+                    providers.register_cloudfront_cache(plane.clone());
                     services.push(Box::new(service::CloudFrontDataPlaneRouter::new(plane)));
                 }
                 Err(e) => warn!(error = %e, "failed to initialise CloudFront data plane"),
@@ -1144,14 +1215,17 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Vec<Box<dyn ServiceRoute
         services.push(Box::new(service::S3ServiceRouter::new(s3_service)));
     }
 
-    services
+    Runtime {
+        services,
+        providers,
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI flags once and dispatch. Help / version are handled before
     // any tracing or config work so they're cheap and side-effect free.
-    match classify_args(std::env::args()) {
+    let snapshot_name = match classify_args(std::env::args()) {
         CliAction::Help => {
             print!("{}", help_text());
             return Ok(());
@@ -1165,18 +1239,24 @@ async fn main() -> Result<()> {
             eprint!("{}", help_text());
             std::process::exit(2);
         }
+        CliAction::MissingFlagValue(flag) => {
+            eprintln!("error: flag '{flag}' requires a value\n");
+            eprint!("{}", help_text());
+            std::process::exit(2);
+        }
         CliAction::HealthCheck => {
             let listen_addr = gateway_listen_addr();
             let addr = listen_addr.replace("0.0.0.0", "127.0.0.1");
             let healthy = run_health_check(&addr).await.is_ok();
             std::process::exit(i32::from(!healthy));
         }
-        CliAction::Run => {}
-    }
+        CliAction::Run { snapshot } => snapshot,
+    };
 
     let listen_addr = gateway_listen_addr();
     let log = log_level();
     init_tracing(&log)?;
+    let snapshot_config = snapshot_name.map(SnapshotConfig::from_name).transpose()?;
 
     let enabled = parse_enabled_services();
 
@@ -1187,15 +1267,23 @@ async fn main() -> Result<()> {
         }
     }
 
-    let services = build_services(|name| enabled.iter().any(|s| s == name) && is_compiled_in(name));
+    let runtime = build_services(|name| enabled.iter().any(|s| s == name) && is_compiled_in(name));
 
-    if services.is_empty() {
+    if runtime.services.is_empty() {
         anyhow::bail!(
             "no services enabled. Check the SERVICES environment variable and compiled feature \
              flags."
         );
     }
 
+    if let Some(config) = snapshot_config.as_ref() {
+        config.load(&runtime.providers).await?;
+    }
+
+    let Runtime {
+        services,
+        providers,
+    } = runtime;
     let gateway = GatewayService::new(services);
     let service_names = gateway.service_names();
 
@@ -1214,7 +1302,16 @@ async fn main() -> Result<()> {
         "starting Rustack Server",
     );
 
-    serve(listener, gateway).await
+    let serve_result = serve(listener, gateway).await;
+    let save_result = if let Some(config) = snapshot_config.as_ref() {
+        config.save(&providers, VERSION).await
+    } else {
+        Ok(())
+    };
+    providers.shutdown().await;
+
+    serve_result?;
+    save_result
 }
 
 #[cfg(test)]
@@ -1298,7 +1395,10 @@ mod tests {
 
     #[test]
     fn test_should_classify_no_args_as_run() {
-        assert_eq!(classify_args(["rustack"]), CliAction::Run);
+        assert_eq!(
+            classify_args(["rustack"]),
+            CliAction::Run { snapshot: None }
+        );
     }
 
     #[test]
@@ -1347,6 +1447,34 @@ mod tests {
     }
 
     #[test]
+    fn test_should_classify_snapshot_flag() {
+        assert_eq!(
+            classify_args(["rustack", "--snapshot", "dev"]),
+            CliAction::Run {
+                snapshot: Some("dev".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_classify_snapshot_equals_flag() {
+        assert_eq!(
+            classify_args(["rustack", "--snapshot=dev"]),
+            CliAction::Run {
+                snapshot: Some("dev".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_reject_missing_snapshot_value() {
+        assert_eq!(
+            classify_args(["rustack", "--snapshot"]),
+            CliAction::MissingFlagValue("--snapshot".to_owned())
+        );
+    }
+
+    #[test]
     fn test_help_text_includes_binary_name_and_version() {
         let text = help_text();
         assert!(text.contains(BIN_NAME));
@@ -1354,6 +1482,7 @@ mod tests {
         assert!(text.contains("--help"));
         assert!(text.contains("--version"));
         assert!(text.contains("--health-check"));
+        assert!(text.contains("--snapshot"));
         assert!(text.contains("GATEWAY_LISTEN"));
     }
 

@@ -8,10 +8,10 @@
 //!
 //! # Spillover to Disk
 //!
-//! When object data exceeds [`InMemoryStorage::max_memory_size`], the bytes
+//! When object data exceeds the configured `max_memory_size`, the bytes
 //! are written to a temporary file via the [`tempfile`] crate. On-disk data
 //! is automatically cleaned up when the entry is removed from the map (via
-//! the [`Drop`] implementation on [`StoredData`]).
+//! the internal stored data `Drop` implementation).
 
 use std::path::PathBuf;
 
@@ -147,7 +147,7 @@ impl StoredData {
 /// In-memory storage with automatic spillover to tempfiles for large objects.
 ///
 /// Thread-safe: uses [`DashMap`] for concurrent access. Objects larger than
-/// [`max_memory_size`](Self::max_memory_size) are transparently written to
+/// the configured `max_memory_size` are transparently written to
 /// temporary files and read back on demand.
 ///
 /// # Examples

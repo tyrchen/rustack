@@ -11,6 +11,7 @@ use rustack_dynamodb_model::AttributeValue;
 use rustack_dynamodbstreams_model::types::{
     KeySchemaElement, KeyType, StreamStatus, StreamViewType,
 };
+use serde::{Deserialize, Serialize};
 
 /// Top-level stream store managing all DynamoDB Streams.
 ///
@@ -108,7 +109,8 @@ impl ShardRecord {
 /// A single change record in a DynamoDB Stream.
 ///
 /// Matches the `Record` structure in the DynamoDB Streams API response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamChangeRecord {
     /// Unique identifier for this event.
     pub event_id: String,
@@ -127,7 +129,8 @@ pub struct StreamChangeRecord {
 /// The `dynamodb` field within a stream record.
 ///
 /// Contains the actual item data (keys, images) and metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamRecordData {
     /// The primary key attributes for the affected item.
     pub keys: HashMap<String, AttributeValue>,
@@ -146,7 +149,8 @@ pub struct StreamRecordData {
 }
 
 /// Summary information about a stream for ListStreams.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamSummary {
     /// Stream ARN.
     pub stream_arn: String,
@@ -289,12 +293,120 @@ impl StreamStore {
     pub fn get_stream_label(&self, table_name: &str) -> Option<String> {
         self.streams.get(table_name).map(|s| s.stream_label.clone())
     }
+
+    /// Export all stream state into a snapshot.
+    #[must_use]
+    pub fn export_snapshot(&self) -> StreamStoreSnapshot {
+        let mut streams: Vec<TableStreamSnapshot> = self
+            .streams
+            .iter()
+            .map(|entry| {
+                let stream = entry.value();
+                let shard = stream.shard.read();
+                TableStreamSnapshot {
+                    stream_arn: stream.stream_arn.clone(),
+                    table_name: stream.table_name.clone(),
+                    stream_label: stream.stream_label.clone(),
+                    stream_view_type: stream.stream_view_type.clone(),
+                    stream_status: stream.stream_status.clone(),
+                    key_schema: stream.key_schema.clone(),
+                    table_arn: stream.table_arn.clone(),
+                    shard: ShardRecordSnapshot {
+                        shard_id: shard.shard_id.clone(),
+                        parent_shard_id: shard.parent_shard_id.clone(),
+                        starting_sequence_number: shard.starting_sequence_number.clone(),
+                        ending_sequence_number: shard.ending_sequence_number.clone(),
+                        records: shard.records.iter().cloned().collect(),
+                        next_sequence_number: shard.next_sequence_number,
+                    },
+                }
+            })
+            .collect();
+        streams.sort_by(|a, b| a.table_name.cmp(&b.table_name));
+        StreamStoreSnapshot { streams }
+    }
+
+    /// Import stream state from a snapshot, replacing existing streams.
+    pub fn import_snapshot(&self, snapshot: StreamStoreSnapshot) {
+        self.streams.clear();
+        for stream in snapshot.streams {
+            let shard = ShardRecord {
+                shard_id: stream.shard.shard_id,
+                parent_shard_id: stream.shard.parent_shard_id,
+                starting_sequence_number: stream.shard.starting_sequence_number,
+                ending_sequence_number: stream.shard.ending_sequence_number,
+                records: VecDeque::from(stream.shard.records),
+                next_sequence_number: stream.shard.next_sequence_number,
+            };
+            self.streams.insert(
+                stream.table_name.clone(),
+                TableStream {
+                    stream_arn: stream.stream_arn,
+                    table_name: stream.table_name,
+                    stream_label: stream.stream_label,
+                    stream_view_type: stream.stream_view_type,
+                    stream_status: stream.stream_status,
+                    key_schema: stream.key_schema,
+                    table_arn: stream.table_arn,
+                    shard: RwLock::new(shard),
+                },
+            );
+        }
+    }
 }
 
 impl Default for StreamStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Serializable DynamoDB Streams snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamStoreSnapshot {
+    /// Table stream snapshots.
+    pub streams: Vec<TableStreamSnapshot>,
+}
+
+/// Serializable table stream snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStreamSnapshot {
+    /// Stream ARN.
+    pub stream_arn: String,
+    /// Table name.
+    pub table_name: String,
+    /// Stream label.
+    pub stream_label: String,
+    /// Stream view type.
+    pub stream_view_type: StreamViewType,
+    /// Stream status.
+    pub stream_status: StreamStatus,
+    /// Key schema.
+    pub key_schema: Vec<KeySchemaElement>,
+    /// Table ARN.
+    pub table_arn: String,
+    /// Shard snapshot.
+    pub shard: ShardRecordSnapshot,
+}
+
+/// Serializable stream shard snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardRecordSnapshot {
+    /// Shard ID.
+    pub shard_id: String,
+    /// Parent shard ID.
+    pub parent_shard_id: Option<String>,
+    /// Starting sequence number.
+    pub starting_sequence_number: Option<String>,
+    /// Ending sequence number.
+    pub ending_sequence_number: Option<String>,
+    /// Change records.
+    pub records: Vec<StreamChangeRecord>,
+    /// Next sequence number to assign.
+    pub next_sequence_number: u64,
 }
 
 /// Convert a `ChangeEvent` from DynamoDB core into a `StreamChangeRecord`,

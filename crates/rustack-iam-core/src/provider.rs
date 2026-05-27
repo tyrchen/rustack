@@ -32,7 +32,7 @@ use crate::{
     arn::iam_arn,
     config::IamConfig,
     id_gen::{generate_access_key_id, generate_iam_id, generate_secret_access_key},
-    store::IamStore,
+    store::{IamStore, IamStoreSnapshot},
     types::{
         AccessKeyRecord, GroupRecord, InstanceProfileRecord, ManagedPolicyRecord,
         OidcProviderRecord, PolicyVersionRecord, RoleRecord, UserRecord,
@@ -89,6 +89,17 @@ impl RustackIam {
     #[must_use]
     pub fn store(&self) -> &IamStore {
         &self.store
+    }
+
+    /// Export IAM state for runtime snapshots.
+    #[must_use]
+    pub fn export_snapshot(&self) -> IamStoreSnapshot {
+        self.store.export_snapshot()
+    }
+
+    /// Import IAM state from a runtime snapshot.
+    pub fn import_snapshot(&self, snapshot: IamStoreSnapshot) {
+        self.store.import_snapshot(snapshot);
     }
 
     /// Get a reference to the configuration.

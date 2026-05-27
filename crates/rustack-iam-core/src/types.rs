@@ -6,8 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 /// Internal record for an IAM user.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserRecord {
     /// The friendly name identifying the user.
     pub user_name: String,
@@ -32,7 +35,8 @@ pub struct UserRecord {
 }
 
 /// Internal record for an IAM role.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleRecord {
     /// The friendly name identifying the role.
     pub role_name: String,
@@ -63,7 +67,8 @@ pub struct RoleRecord {
 }
 
 /// Internal record for an IAM group.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupRecord {
     /// The friendly name identifying the group.
     pub group_name: String,
@@ -84,7 +89,8 @@ pub struct GroupRecord {
 }
 
 /// Internal record for a managed IAM policy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ManagedPolicyRecord {
     /// The friendly name identifying the policy.
     pub policy_name: String,
@@ -115,7 +121,8 @@ pub struct ManagedPolicyRecord {
 }
 
 /// A single version of a managed policy document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PolicyVersionRecord {
     /// The version identifier (e.g., `v1`, `v2`).
     pub version_id: String,
@@ -128,7 +135,8 @@ pub struct PolicyVersionRecord {
 }
 
 /// Internal record for an IAM instance profile.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstanceProfileRecord {
     /// The friendly name identifying the instance profile.
     pub instance_profile_name: String,
@@ -147,7 +155,8 @@ pub struct InstanceProfileRecord {
 }
 
 /// Internal record for an OIDC identity provider.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OidcProviderRecord {
     /// The Amazon Resource Name (ARN) that identifies the provider.
     pub arn: String,
@@ -164,7 +173,8 @@ pub struct OidcProviderRecord {
 }
 
 /// Internal record for an IAM access key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccessKeyRecord {
     /// The access key ID (begins with `AKIA`).
     pub access_key_id: String,

@@ -15,6 +15,7 @@ use rustack_apigatewayv2_model::types::{
     JWTConfiguration, MutualTlsAuthentication, ParameterConstraints, PassthroughBehavior,
     ProtocolType, RouteSettings, RoutingMode, TlsConfig,
 };
+use serde::{Deserialize, Serialize};
 
 /// Generate a random 10-character alphanumeric ID.
 ///
@@ -53,10 +54,57 @@ impl ApiStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Export API Gateway v2 state for runtime snapshots.
+    #[must_use]
+    pub fn export_snapshot(&self) -> ApiStoreSnapshot {
+        ApiStoreSnapshot {
+            apis: sorted_values(&self.apis, |record| record.api_id.clone()),
+            domain_names: sorted_values(&self.domain_names, |record| record.domain_name.clone()),
+            vpc_links: sorted_values(&self.vpc_links, |record| record.vpc_link_id.clone()),
+            tags: sorted_map_values(&self.tags),
+        }
+    }
+
+    /// Import API Gateway v2 state from a runtime snapshot.
+    pub fn import_snapshot(&self, snapshot: ApiStoreSnapshot) {
+        self.apis.clear();
+        self.domain_names.clear();
+        self.vpc_links.clear();
+        self.tags.clear();
+
+        for record in snapshot.apis {
+            self.apis.insert(record.api_id.clone(), record);
+        }
+        for record in snapshot.domain_names {
+            self.domain_names.insert(record.domain_name.clone(), record);
+        }
+        for record in snapshot.vpc_links {
+            self.vpc_links.insert(record.vpc_link_id.clone(), record);
+        }
+        for (arn, tags) in snapshot.tags {
+            self.tags.insert(arn, tags);
+        }
+    }
+}
+
+/// Serializable API Gateway v2 store snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiStoreSnapshot {
+    /// API records.
+    pub apis: Vec<ApiRecord>,
+    /// Custom domain records.
+    pub domain_names: Vec<DomainNameRecord>,
+    /// VPC link records.
+    pub vpc_links: Vec<VpcLinkRecord>,
+    /// Tags keyed by resource ARN.
+    pub tags: Vec<(String, HashMap<String, String>)>,
 }
 
 /// A single HTTP API record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiRecord {
     /// Unique API identifier (10-char alphanumeric).
     pub api_id: String,
@@ -101,7 +149,8 @@ pub struct ApiRecord {
 }
 
 /// A route within an API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RouteRecord {
     /// Unique route identifier.
     pub route_id: String,
@@ -134,7 +183,8 @@ pub struct RouteRecord {
 }
 
 /// A route response record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RouteResponseRecord {
     /// Unique route response identifier.
     pub route_response_id: String,
@@ -149,7 +199,8 @@ pub struct RouteResponseRecord {
 }
 
 /// An integration connecting a route to a backend.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IntegrationRecord {
     /// Unique integration identifier.
     pub integration_id: String,
@@ -194,7 +245,8 @@ pub struct IntegrationRecord {
 }
 
 /// A stage configuration for an API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StageRecord {
     /// Stage name.
     pub stage_name: String,
@@ -225,7 +277,8 @@ pub struct StageRecord {
 }
 
 /// A deployment snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeploymentRecord {
     /// Unique deployment identifier.
     pub deployment_id: String,
@@ -242,7 +295,8 @@ pub struct DeploymentRecord {
 }
 
 /// An authorizer for an API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthorizerRecord {
     /// Unique authorizer identifier.
     pub authorizer_id: String,
@@ -269,7 +323,8 @@ pub struct AuthorizerRecord {
 }
 
 /// A model schema for an API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelRecord {
     /// Unique model identifier.
     pub model_id: String,
@@ -284,7 +339,8 @@ pub struct ModelRecord {
 }
 
 /// A custom domain name record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DomainNameRecord {
     /// The domain name.
     pub domain_name: String,
@@ -301,7 +357,8 @@ pub struct DomainNameRecord {
 }
 
 /// An API mapping record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiMappingRecord {
     /// Unique API mapping identifier.
     pub api_mapping_id: String,
@@ -314,7 +371,8 @@ pub struct ApiMappingRecord {
 }
 
 /// A VPC link record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VpcLinkRecord {
     /// Unique VPC link identifier.
     pub vpc_link_id: String,
@@ -328,6 +386,27 @@ pub struct VpcLinkRecord {
     pub tags: HashMap<String, String>,
     /// Creation timestamp.
     pub created_date: DateTime<Utc>,
+}
+
+fn sorted_values<T, F>(map: &DashMap<String, T>, key_fn: F) -> Vec<T>
+where
+    T: Clone,
+    F: Fn(&T) -> String,
+{
+    let mut values: Vec<T> = map.iter().map(|entry| entry.value().clone()).collect();
+    values.sort_by_key(key_fn);
+    values
+}
+
+fn sorted_map_values(
+    map: &DashMap<String, HashMap<String, String>>,
+) -> Vec<(String, HashMap<String, String>)> {
+    let mut values: Vec<(String, HashMap<String, String>)> = map
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    values
 }
 
 #[cfg(test)]

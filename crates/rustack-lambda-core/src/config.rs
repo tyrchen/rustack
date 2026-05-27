@@ -39,12 +39,10 @@ impl LambdaConfig {
     /// - `DEFAULT_ACCOUNT_ID` (default: `000000000000`)
     /// - `GATEWAY_HOST` (default: `localhost`)
     /// - `GATEWAY_PORT` (default: `4566`)
-    /// - `LAMBDA_DOCKER_ENABLED` (default: `false` — legacy alias for
-    ///   `LAMBDA_EXECUTOR=docker`).
-    /// - `LAMBDA_EXECUTOR` (default: `native`; `docker` if
-    ///   `LAMBDA_DOCKER_ENABLED=true`). Accepts `disabled`, `auto`, `native`,
-    ///   `docker`. The native backend runs `provided.*` bootstraps (Rust /
-    ///   Go / C++) directly on the host with no Docker requirement.
+    /// - `LAMBDA_DOCKER_ENABLED` (default: `false` — legacy alias for `LAMBDA_EXECUTOR=docker`).
+    /// - `LAMBDA_EXECUTOR` (default: `native`; `docker` if `LAMBDA_DOCKER_ENABLED=true`). Accepts
+    ///   `disabled`, `auto`, `native`, `docker`. The native backend runs `provided.*` bootstraps
+    ///   (Rust / Go / C++) directly on the host with no Docker requirement.
     /// - `LAMBDA_MAX_WARM_INSTANCES` (default: `1`)
     /// - `LAMBDA_IDLE_TIMEOUT_SECS` (default: `600`)
     /// - `LAMBDA_INIT_TIMEOUT_SECS` (default: `5`)
@@ -106,7 +104,7 @@ impl Default for LambdaConfig {
             docker_enabled: false,
             executor: ExecutorBackend::Disabled,
             max_warm_instances: 1,
-            idle_timeout: Duration::from_secs(600),
+            idle_timeout: Duration::from_mins(10),
             init_timeout: Duration::from_secs(5),
         }
     }

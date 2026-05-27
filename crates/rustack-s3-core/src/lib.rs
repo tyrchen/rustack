@@ -27,6 +27,7 @@ pub mod cors;
 pub mod error;
 pub mod ops;
 pub mod provider;
+pub mod snapshot;
 pub mod state;
 pub mod storage;
 pub mod utils;

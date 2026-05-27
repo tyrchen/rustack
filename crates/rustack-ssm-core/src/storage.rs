@@ -14,6 +14,7 @@ use rustack_ssm_model::{
         ParameterType, Tag,
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     filter::matches_filters,
@@ -22,7 +23,8 @@ use crate::{
 };
 
 /// A snapshot of a single parameter version.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParameterVersion {
     /// The version number (1-indexed).
     pub version: u64,
@@ -47,7 +49,8 @@ pub struct ParameterVersion {
 }
 
 /// A parameter record containing all versions and metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParameterRecord {
     /// The fully-qualified parameter name.
     pub name: String,
@@ -70,12 +73,40 @@ pub struct ParameterStore {
     parameters: DashMap<String, ParameterRecord>,
 }
 
+/// Serializable SSM Parameter Store snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterStoreSnapshot {
+    /// Parameter records.
+    pub parameters: Vec<ParameterRecord>,
+}
+
 impl ParameterStore {
     /// Create a new empty parameter store.
     #[must_use]
     pub fn new() -> Self {
         Self {
             parameters: DashMap::new(),
+        }
+    }
+
+    /// Export all parameters for snapshot persistence.
+    #[must_use]
+    pub fn export_snapshot(&self) -> ParameterStoreSnapshot {
+        let mut parameters: Vec<ParameterRecord> = self
+            .parameters
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        parameters.sort_by(|a, b| a.name.cmp(&b.name));
+        ParameterStoreSnapshot { parameters }
+    }
+
+    /// Replace the parameter store from a snapshot.
+    pub fn import_snapshot(&self, snapshot: ParameterStoreSnapshot) {
+        self.parameters.clear();
+        for parameter in snapshot.parameters {
+            self.parameters.insert(parameter.name.clone(), parameter);
         }
     }
 

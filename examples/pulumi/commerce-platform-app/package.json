@@ -1,0 +1,19 @@
+{
+  "name": "rustack-pulumi-commerce-platform-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Large serverless commerce platform Pulumi stack for Rustack snapshot benchmarks.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "preview": "pulumi preview",
+    "up": "pulumi up",
+    "destroy": "pulumi destroy"
+  },
+  "dependencies": {
+    "@pulumi/aws": "7.30.0",
+    "@pulumi/pulumi": "3.243.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

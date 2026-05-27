@@ -116,7 +116,7 @@ mod tests {
         let mut config = LambdaConfig::default();
         config.executor = ExecutorBackend::Native;
         config.init_timeout = Duration::from_secs(5);
-        config.idle_timeout = Duration::from_secs(60);
+        config.idle_timeout = Duration::from_mins(1);
         config.max_warm_instances = 2;
 
         let tmp = tempfile::Builder::new()

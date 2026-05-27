@@ -72,16 +72,26 @@ pub fn apply_custom_headers(headers: &mut HeaderMap, custom: &[CustomHeader]) {
     }
 }
 
+/// CloudFront cache result for informational response headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheResult {
+    /// Response came from the in-memory CloudFront cache.
+    Hit,
+    /// Response was fetched from origin.
+    Miss,
+}
+
 /// Add informational CloudFront headers to the downstream response.
-pub fn add_cloudfront_response_headers(headers: &mut HeaderMap) {
+pub fn add_cloudfront_response_headers(headers: &mut HeaderMap, cache_result: CacheResult) {
     let id = uuid::Uuid::new_v4().simple().to_string();
     if let Ok(v) = HeaderValue::from_str(&id) {
         headers.insert(HeaderName::from_static("x-amz-cf-id"), v);
     }
-    headers.insert(
-        HeaderName::from_static("x-cache"),
-        HeaderValue::from_static("Miss from rustack-cloudfront"),
-    );
+    let cache_header = match cache_result {
+        CacheResult::Hit => HeaderValue::from_static("Hit from rustack-cloudfront"),
+        CacheResult::Miss => HeaderValue::from_static("Miss from rustack-cloudfront"),
+    };
+    headers.insert(HeaderName::from_static("x-cache"), cache_header);
     headers.insert(
         HeaderName::from_static("via"),
         HeaderValue::from_static("1.1 rustack.cloudfront.net (CloudFront)"),
