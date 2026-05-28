@@ -17,6 +17,8 @@ pub enum ExecutorBackend {
     Native,
     /// Always Docker.
     Docker,
+    /// Always Squib microVM execution.
+    Squib,
 }
 
 impl FromStr for ExecutorBackend {
@@ -28,6 +30,7 @@ impl FromStr for ExecutorBackend {
             "auto" => Ok(Self::Auto),
             "native" | "process" => Ok(Self::Native),
             "docker" | "container" => Ok(Self::Docker),
+            "squib" | "microvm" => Ok(Self::Squib),
             other => Err(format!("unknown LAMBDA_EXECUTOR value: {other}")),
         }
     }
@@ -138,6 +141,14 @@ mod tests {
         assert_eq!(
             "DOCKER".parse::<ExecutorBackend>().unwrap(),
             ExecutorBackend::Docker
+        );
+        assert_eq!(
+            "squib".parse::<ExecutorBackend>().unwrap(),
+            ExecutorBackend::Squib
+        );
+        assert_eq!(
+            "microvm".parse::<ExecutorBackend>().unwrap(),
+            ExecutorBackend::Squib
         );
         assert!("nope".parse::<ExecutorBackend>().is_err());
     }

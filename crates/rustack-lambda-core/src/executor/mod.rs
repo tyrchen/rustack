@@ -7,6 +7,7 @@
 //!   and when `LAMBDA_EXECUTOR=disabled`.
 //! - `NativeExecutor` (Phase 3) — spawns `provided.*` bootstraps directly on the host.
 //! - `DockerExecutor` (Phase 4) — runs any supported runtime in an AWS Lambda base image.
+//! - `SquibExecutor` — runs `arm64` Zip functions through a Squib microVM guest agent.
 //!
 //! All backends share a single in-process Lambda Runtime API server (Phase 2)
 //! so the bootstrap-side protocol is identical to AWS.
@@ -20,12 +21,14 @@ mod instance;
 mod native;
 mod noop;
 pub mod runtime_api;
+mod squib;
 mod types;
 
 use async_trait::async_trait;
 pub use error::ExecutorError;
 pub use native::NativeExecutor;
 pub use noop::NoopExecutor;
+pub use squib::{SquibExecutor, SquibExecutorConfig};
 pub use types::{ExecutorBackend, InvokeRequest, InvokeResponse, PackageType};
 
 /// Backend that turns an [`InvokeRequest`] into an [`InvokeResponse`].

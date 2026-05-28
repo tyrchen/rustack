@@ -2,7 +2,7 @@
 
 use std::{env, time::Duration};
 
-use crate::executor::ExecutorBackend;
+use crate::executor::{ExecutorBackend, SquibExecutorConfig};
 
 /// Lambda service configuration.
 #[derive(Debug, Clone)]
@@ -28,6 +28,8 @@ pub struct LambdaConfig {
     pub idle_timeout: Duration,
     /// Time the bootstrap has to call `/runtime/invocation/next` after spawn.
     pub init_timeout: Duration,
+    /// Squib microVM executor configuration.
+    pub squib: SquibExecutorConfig,
 }
 
 impl LambdaConfig {
@@ -41,8 +43,8 @@ impl LambdaConfig {
     /// - `GATEWAY_PORT` (default: `4566`)
     /// - `LAMBDA_DOCKER_ENABLED` (default: `false` — legacy alias for `LAMBDA_EXECUTOR=docker`).
     /// - `LAMBDA_EXECUTOR` (default: `native`; `docker` if `LAMBDA_DOCKER_ENABLED=true`). Accepts
-    ///   `disabled`, `auto`, `native`, `docker`. The native backend runs `provided.*` bootstraps
-    ///   (Rust / Go / C++) directly on the host with no Docker requirement.
+    ///   `disabled`, `auto`, `native`, `docker`, `squib`. The native backend runs `provided.*`
+    ///   bootstraps (Rust / Go / C++) directly on the host with no Docker requirement.
     /// - `LAMBDA_MAX_WARM_INSTANCES` (default: `1`)
     /// - `LAMBDA_IDLE_TIMEOUT_SECS` (default: `600`)
     /// - `LAMBDA_INIT_TIMEOUT_SECS` (default: `5`)
@@ -89,6 +91,7 @@ impl LambdaConfig {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(5),
             ),
+            squib: SquibExecutorConfig::from_env(),
         }
     }
 }
@@ -106,6 +109,7 @@ impl Default for LambdaConfig {
             max_warm_instances: 1,
             idle_timeout: Duration::from_mins(10),
             init_timeout: Duration::from_secs(5),
+            squib: SquibExecutorConfig::default(),
         }
     }
 }
@@ -129,5 +133,7 @@ mod tests {
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 4566);
         assert!(!config.docker_enabled);
+        assert!(config.squib.config_file.is_none());
+        assert!(config.squib.vsock_path.is_none());
     }
 }

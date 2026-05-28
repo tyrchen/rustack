@@ -15,6 +15,7 @@ rustack-core = { workspace = true }
 rustack-lambda-model = { workspace = true }
 rustack-lambda-http = { workspace = true }
 rustack-auth = { workspace = true }
+squib = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }

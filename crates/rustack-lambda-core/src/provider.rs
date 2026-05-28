@@ -47,6 +47,7 @@ use crate::{
     error::LambdaServiceError,
     executor::{
         Executor, ExecutorBackend, InvokeRequest, NativeExecutor, NoopExecutor, PackageType,
+        SquibExecutor,
     },
     resolver::{
         alias_arn, function_arn, function_version_arn, layer_arn, layer_version_arn,
@@ -85,6 +86,7 @@ fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
             config.idle_timeout,
             config.init_timeout,
         )),
+        ExecutorBackend::Squib => Arc::new(SquibExecutor::new(config.squib.clone())),
         ExecutorBackend::Docker => {
             tracing::warn!(
                 "LAMBDA_EXECUTOR=docker requested but the Docker backend is not wired in this \
