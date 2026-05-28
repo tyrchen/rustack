@@ -33,7 +33,7 @@ mod tests {
         path::PathBuf,
         process::Command,
         sync::{Arc, OnceLock},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use rustack_lambda_core::{
@@ -259,16 +259,32 @@ mod tests {
         if skip_unless_squib_e2e_enabled() {
             return;
         }
+        crate::init_tracing();
         eprintln!("squib e2e: creating provider");
+        let total_start = Instant::now();
         let provider = make_auto_squib_provider();
         let name = unique_name("cargo-lambda-squib");
+        eprintln!("squib e2e: building cargo-lambda arm64 zip for {name}");
+        let zip_start = Instant::now();
+        let create_input = create_cargo_lambda_input(&name);
+        eprintln!(
+            "squib e2e: cargo-lambda arm64 zip ready in {:?}",
+            zip_start.elapsed()
+        );
+
         eprintln!("squib e2e: creating function {name}");
+        let create_start = Instant::now();
         provider
-            .create_function(create_cargo_lambda_input(&name))
+            .create_function(create_input)
             .await
             .expect("create_function");
+        eprintln!(
+            "squib e2e: function {name} created in {:?}",
+            create_start.elapsed()
+        );
 
         eprintln!("squib e2e: invoking function {name}");
+        let invoke_start = Instant::now();
         let outcome_result = provider
             .invoke(
                 &name,
@@ -277,12 +293,22 @@ mod tests {
                 InvokeKind::RequestResponse,
             )
             .await;
+        let invoke_elapsed = invoke_start.elapsed();
+        eprintln!("squib e2e: invoke returned in {invoke_elapsed:?}");
         if let Err(error) = &outcome_result {
             eprintln!("squib e2e: invoke failed before shutdown: {error:?}");
         }
         eprintln!("squib e2e: shutting down provider");
+        let shutdown_start = Instant::now();
         provider.shutdown().await;
-        eprintln!("squib e2e: provider shutdown complete");
+        eprintln!(
+            "squib e2e: provider shutdown complete in {:?}",
+            shutdown_start.elapsed()
+        );
+        eprintln!(
+            "squib e2e: total test flow completed in {:?}",
+            total_start.elapsed()
+        );
 
         let outcome = outcome_result.expect("invoke");
         let resp = match outcome {
