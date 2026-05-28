@@ -49,7 +49,7 @@ rustack-sns-http = { version = "0.9.0", path = "crates/rustack-sns-http" }
 rustack-sns-core = { version = "0.9.0", path = "crates/rustack-sns-core" }
 rustack-lambda-model = { version = "0.9.0", path = "crates/rustack-lambda-model" }
 rustack-lambda-http = { version = "0.9.0", path = "crates/rustack-lambda-http" }
-rustack-lambda-core = { version = "0.9.0", path = "crates/rustack-lambda-core" }
+rustack-lambda-core = { version = "0.9.1", path = "crates/rustack-lambda-core" }
 rustack-events-model = { version = "0.9.0", path = "crates/rustack-events-model" }
 rustack-logs-model = { version = "0.9.0", path = "crates/rustack-logs-model" }
 rustack-logs-http = { version = "0.9.0", path = "crates/rustack-logs-http" }
