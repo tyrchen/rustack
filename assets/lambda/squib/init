@@ -1,0 +1,13 @@
+#!/bin/sh
+mount -t devtmpfs none /dev 2>/dev/null || true
+mount -t proc none /proc 2>/dev/null || true
+mount -t sysfs none /sys 2>/dev/null || true
+mount -t tmpfs none /tmp 2>/dev/null || true
+/usr/bin/busybox ip link set lo up 2>/dev/null || true
+
+exec >/dev/kmsg 2>&1
+set -e
+
+echo "[rustack-lambda-init] starting"
+mkdir -p /tmp/rustack-lambda
+exec /sbin/rustack-lambda-squib-agent

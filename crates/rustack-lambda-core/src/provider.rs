@@ -46,7 +46,8 @@ use crate::{
     config::LambdaConfig,
     error::LambdaServiceError,
     executor::{
-        Executor, ExecutorBackend, InvokeRequest, NativeExecutor, NoopExecutor, PackageType,
+        AutoExecutor, Executor, ExecutorBackend, InvokeRequest, NativeExecutor, NoopExecutor,
+        PackageType, SquibExecutor,
     },
     resolver::{
         alias_arn, function_arn, function_version_arn, layer_arn, layer_version_arn,
@@ -73,18 +74,24 @@ pub enum InvokeKind {
 
 /// Build the executor backend for the given configuration.
 ///
-/// `Disabled` and `Auto`-without-native-support fall back to [`NoopExecutor`]
-/// (echoes the payload). `Native` constructs a real process backend.
-/// `Docker` (Phase 4) is not yet wired and likewise falls back with a
+/// `Disabled` preserves legacy echo behavior. `Auto` chooses the concrete
+/// backend per invocation. `Docker` is not yet wired and falls back with a
 /// warning.
 fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
     match config.executor {
         ExecutorBackend::Disabled => Arc::new(NoopExecutor::new()),
-        ExecutorBackend::Native | ExecutorBackend::Auto => Arc::new(NativeExecutor::new(
+        ExecutorBackend::Auto => Arc::new(AutoExecutor::new(
+            config.max_warm_instances,
+            config.idle_timeout,
+            config.init_timeout,
+            config.squib.clone(),
+        )),
+        ExecutorBackend::Native => Arc::new(NativeExecutor::new(
             config.max_warm_instances,
             config.idle_timeout,
             config.init_timeout,
         )),
+        ExecutorBackend::Squib => Arc::new(SquibExecutor::new(config.squib.clone())),
         ExecutorBackend::Docker => {
             tracing::warn!(
                 "LAMBDA_EXECUTOR=docker requested but the Docker backend is not wired in this \
@@ -139,10 +146,7 @@ pub struct LambdaSnapshot {
 impl RustackLambda {
     /// Create a new Lambda provider with the given store and config.
     ///
-    /// The executor is selected from `config.executor`. Future phases (Native,
-    /// Docker) will branch here; today everything but `Disabled` falls back to
-    /// the no-op echo so the rest of the wiring can be exercised without a
-    /// runtime backend yet.
+    /// The executor is selected from `config.executor`.
     #[must_use]
     pub fn with_store(store: FunctionStore, config: LambdaConfig) -> Self {
         let executor = build_executor(&config);
@@ -872,6 +876,7 @@ impl RustackLambda {
             architectures: version.architectures.clone(),
             package_type: PackageType::from_wire(&version.package_type),
             code_root: version.code_path.clone(),
+            code_zip: version.zip_bytes.clone(),
             image_uri: version.image_uri.clone(),
             environment: env,
             timeout: Duration::from_secs(u64::from(version.timeout)),

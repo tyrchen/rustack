@@ -10,13 +10,15 @@ pub enum ExecutorBackend {
     /// Legacy echo behavior — no real process or container is started.
     #[default]
     Disabled,
-    /// Pick the most appropriate backend per invocation: native when the
-    /// runtime + arch + bootstrap allow it, Docker otherwise.
+    /// Pick the most appropriate backend per invocation: Squib for macOS Zip
+    /// functions and native execution otherwise.
     Auto,
     /// Always native; reject invocations that can't run on the host.
     Native,
     /// Always Docker.
     Docker,
+    /// Always Squib microVM execution.
+    Squib,
 }
 
 impl FromStr for ExecutorBackend {
@@ -28,6 +30,7 @@ impl FromStr for ExecutorBackend {
             "auto" => Ok(Self::Auto),
             "native" | "process" => Ok(Self::Native),
             "docker" | "container" => Ok(Self::Docker),
+            "squib" | "microvm" => Ok(Self::Squib),
             other => Err(format!("unknown LAMBDA_EXECUTOR value: {other}")),
         }
     }
@@ -73,6 +76,8 @@ pub struct InvokeRequest {
     pub package_type: PackageType,
     /// Filesystem path to the unzipped code root (for Zip packages).
     pub code_root: Option<PathBuf>,
+    /// Raw uploaded Zip bytes (for microVM staging).
+    pub code_zip: Option<Bytes>,
     /// Image URI (for Image packages).
     pub image_uri: Option<String>,
     /// User-supplied environment variables.
@@ -138,6 +143,14 @@ mod tests {
         assert_eq!(
             "DOCKER".parse::<ExecutorBackend>().unwrap(),
             ExecutorBackend::Docker
+        );
+        assert_eq!(
+            "squib".parse::<ExecutorBackend>().unwrap(),
+            ExecutorBackend::Squib
+        );
+        assert_eq!(
+            "microvm".parse::<ExecutorBackend>().unwrap(),
+            ExecutorBackend::Squib
         );
         assert!("nope".parse::<ExecutorBackend>().is_err());
     }
