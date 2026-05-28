@@ -26,7 +26,10 @@ const DEFAULT_STAGE_PORT: u32 = 5003;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(500);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-const DEFAULT_RESPONSE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES: usize = 6 * 1024 * 1024;
+const RESPONSE_PROTOCOL_OVERHEAD_BYTES: usize = 64 * 1024;
+const DEFAULT_RESPONSE_LIMIT_BYTES: usize =
+    base64_encoded_len(LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES) + RESPONSE_PROTOCOL_OVERHEAD_BYTES;
 const DEFAULT_RUN_BUDGET: Duration = Duration::from_hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RESPONSE_LIMIT_BYTES: usize = 128;
@@ -512,6 +515,13 @@ fn decode_response(line: &[u8], default_version: &str) -> Result<InvokeResponse,
         .map_err(|err| {
             ExecutorError::RuntimeExited(format!("decode Squib response payload: {err}"))
         })?;
+    if payload.len() > LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES {
+        let payload_len = payload.len();
+        return Err(ExecutorError::RuntimeExited(format!(
+            "Squib response payload exceeded {LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES} bytes: \
+             {payload_len}"
+        )));
+    }
     Ok(InvokeResponse {
         status: response.status,
         payload: Bytes::from(payload),
@@ -534,6 +544,10 @@ fn derive_port_socket_path(base: &Path, port: u32) -> PathBuf {
 
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+const fn base64_encoded_len(input_len: usize) -> usize {
+    input_len.div_ceil(3) * 4
 }
 
 fn default_config_file() -> PathBuf {
@@ -667,6 +681,51 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.payload, Bytes::from_static(br#"{"ok":true}"#));
         assert_eq!(response.executed_version, "$LATEST");
+    }
+
+    #[test]
+    fn test_should_allow_max_size_guest_response_with_json_overhead() {
+        let payload = vec![b'x'; LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES];
+        let wire = SquibInvokeResponseWireTest {
+            protocol_version: PROTOCOL_VERSION,
+            status: 200,
+            payload_base64: STANDARD.encode(&payload),
+        };
+        let line = serde_json::to_vec(&wire).unwrap();
+
+        assert!(line.len() > base64_encoded_len(LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES));
+        assert!(line.len() <= DEFAULT_RESPONSE_LIMIT_BYTES);
+        let response = decode_response(&line, "$LATEST").unwrap();
+
+        assert_eq!(
+            response.payload.len(),
+            LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn test_should_reject_oversized_guest_response_payload() {
+        let payload = vec![b'x'; LAMBDA_SYNC_RESPONSE_PAYLOAD_LIMIT_BYTES + 1];
+        let wire = SquibInvokeResponseWireTest {
+            protocol_version: PROTOCOL_VERSION,
+            status: 200,
+            payload_base64: STANDARD.encode(&payload),
+        };
+        let line = serde_json::to_vec(&wire).unwrap();
+
+        assert!(matches!(
+            decode_response(&line, "$LATEST"),
+            Err(ExecutorError::RuntimeExited(message))
+                if message.contains("response payload exceeded")
+        ));
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SquibInvokeResponseWireTest {
+        protocol_version: &'static str,
+        status: u16,
+        payload_base64: String,
     }
 
     #[test]
