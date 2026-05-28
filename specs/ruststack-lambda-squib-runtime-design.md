@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft implementation spec. The first implementation uses the local Squib `0.2.0` path crate from `../squib/crates/squib`; after Squib `0.2.0` is published, Rustack should switch this dependency to the registry version.
+Implemented behind PR #27. Rustack depends on the published `squib = "0.2.0"` crate from crates.io.
 
 ## Problem
 
@@ -13,7 +13,8 @@ Squib provides a Firecracker-shaped microVM runtime for Apple Silicon. Its embed
 ## Goals
 
 - Add `LAMBDA_EXECUTOR=squib` as an explicit Lambda executor backend.
-- Use the local Squib path crate while the `0.2.0` release is unpublished.
+- Use the published Squib `0.2.0` crate.
+- Default `LAMBDA_EXECUTOR=auto` to Squib for macOS Zip Lambdas, while keeping image packages off Squib.
 - Require `arm64` Lambda functions for this backend.
 - Keep Rustack's existing Lambda CRUD, storage, and API response behavior unchanged.
 - Define a small, versionable host-to-guest invocation protocol over Squib's vsock muxer.
@@ -25,7 +26,6 @@ Squib provides a Firecracker-shaped microVM runtime for Apple Silicon. Its embed
 - Building the Lambda guest image or guest agent in this change.
 - Emulating AWS's complete Lambda sandbox lifecycle.
 - Running image-package Lambdas inside Squib.
-- Auto-selecting Squib for `LAMBDA_EXECUTOR=auto`.
 - Replacing the native executor for host-runnable `provided.*` bootstraps.
 
 ## Squib Findings
@@ -93,7 +93,7 @@ The executor owns one Squib runtime handle. It starts the microVM lazily on the 
 
 | Environment Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LAMBDA_EXECUTOR` | yes | `native` | Set to `squib` to enable the backend. |
+| `LAMBDA_EXECUTOR` | no | `auto` | `auto` uses Squib for macOS Zip functions and native execution otherwise. Set to `squib` to force Squib. |
 | `LAMBDA_SQUIB_CONFIG_FILE` | for Squib | none | Static Squib VM configuration file. |
 | `LAMBDA_SQUIB_VSOCK_PATH` | for Squib | none | Base path from the Squib config `vsock.uds_path`. |
 | `LAMBDA_SQUIB_INSTANCE_ID` | no | `rustack-lambda` | Squib instance id. |
@@ -173,21 +173,20 @@ The initial implementation should include:
 - Unit tests for request/response JSON and base64 decoding.
 - Error tests for missing config and unsupported architecture.
 
-Full end-to-end invocation requires a Squib guest image with a matching `rustack.squib.lambda.v1` agent and should be added once that image is part of the repository or CI environment.
+End-to-end coverage is provided by a gated integration test that builds the demo `rustack-lambda-echo-bootstrap` app with `cargo lambda --arm64 --output-format zip` and invokes it through the Squib backend when `RUSTACK_LAMBDA_SQUIB_E2E=1`, `LAMBDA_SQUIB_CONFIG_FILE`, and `LAMBDA_SQUIB_VSOCK_PATH` point at a guest image running the `rustack.squib.lambda.v1` agent. The current Squib reference VM is useful for boot/MMDS validation but does not include that Lambda guest agent.
 
 ## Implementation Plan
 
-1. Add a workspace dependency on local Squib `0.2.0`.
+1. Add a workspace dependency on published Squib `0.2.0`.
 2. Add `ExecutorBackend::Squib` parsing.
 3. Add `SquibExecutorConfig` to Lambda configuration.
-4. Add `SquibExecutor` and select it from `build_executor`.
+4. Add `SquibExecutor` and select it explicitly or through the macOS Zip auto rule.
 5. Implement lazy Squib startup and bounded vsock stage-and-invoke.
 6. Add focused unit tests.
-7. Run Rust verification and open a PR.
+7. Add gated cargo-lambda/Squib e2e coverage, run Rust verification, and open a PR.
 
 ## Future Work
 
-- Switch dependency to `squib = "0.2.0"` when published.
 - Add guest agent and image build automation.
 - Add health checks on port `5001` before invoking.
 - Add warm execution on port `5000`.

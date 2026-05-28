@@ -1547,7 +1547,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2382,7 +2382,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4058,7 +4058,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4116,7 +4116,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4399,7 +4399,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4421,6 +4421,8 @@ dependencies = [
 [[package]]
 name = "squib"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bb0af16d8935172372e3cb3a034ca1054ebf1810d7c8a6aebf6465dba523b7b"
 dependencies = [
  "anyhow",
  "parking_lot",
@@ -4444,6 +4446,8 @@ dependencies = [
 [[package]]
 name = "squib-api"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "504cbe87306e4304fa3459ec01cafcedb246dcc12ca9402500342c5803dfe9de"
 dependencies = [
  "arc-swap",
  "axum",
@@ -4462,6 +4466,8 @@ dependencies = [
 [[package]]
 name = "squib-arch"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce96e27b170e50c0e5764e15368a4edc8db726bb39450f3e3588964ff8062ad"
 dependencies = [
  "squib-core",
  "thiserror 2.0.18",
@@ -4470,6 +4476,8 @@ dependencies = [
 [[package]]
 name = "squib-bus"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dba24d007c68f977094633692b21d4cfd1eba2a8b78cf060579d5351561ccef4"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.18",
@@ -4479,6 +4487,8 @@ dependencies = [
 [[package]]
 name = "squib-core"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee3ec8f8d44e5ea1893c4b6fd49686ae14f8790af818080105ec1ea683eebd7e"
 dependencies = [
  "parking_lot",
  "serde",
@@ -4489,6 +4499,8 @@ dependencies = [
 [[package]]
 name = "squib-fdt"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d528875580530988d8275780dc56fafec1db4fb698524fd4bfd710b22b98ce1c"
 dependencies = [
  "squib-arch",
  "squib-core",
@@ -4499,6 +4511,8 @@ dependencies = [
 [[package]]
 name = "squib-gic"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d4c07166141d8665ffb2f3470da157d14cf23d56f09591cfd6481056be99615"
 dependencies = [
  "applevisor",
  "squib-arch",
@@ -4510,6 +4524,8 @@ dependencies = [
 [[package]]
 name = "squib-hv"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03f8b4833991987ca6e6ad9115b9e495c7adb36b3f3c62d735abbbe7294d019f"
 dependencies = [
  "applevisor",
  "parking_lot",
@@ -4524,6 +4540,8 @@ dependencies = [
 [[package]]
 name = "squib-legacy"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a7bf5cf13f2f5a5e3fbd83a0c25ca20ca27188411f4120ed4e395263c32fd43"
 dependencies = [
  "parking_lot",
  "squib-arch",
@@ -4536,6 +4554,8 @@ dependencies = [
 [[package]]
 name = "squib-loader"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bd137eb148a011bc2debae200a3c428d5e6c0934c242c64e1c89c374af1a69c"
 dependencies = [
  "flate2",
  "squib-arch",
@@ -4547,6 +4567,8 @@ dependencies = [
 [[package]]
 name = "squib-mmds"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "312eb6febdc4336a85e5be8bd92e207e729651ce0ee7380225fcb9d8960d5069"
 dependencies = [
  "base64",
  "bytes",
@@ -4560,6 +4582,8 @@ dependencies = [
 [[package]]
 name = "squib-net"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47eae9b257bc7d5201333be584d9bf6e7718b0e6d367556136defd54a74cf6f4"
 dependencies = [
  "block2",
  "bytes",
@@ -4576,6 +4600,8 @@ dependencies = [
 [[package]]
 name = "squib-snapshot"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83c10a8ce36fd68632059ae3f3d8a19c42fd6a656b408db093ed7d4cc0a72901"
 dependencies = [
  "bitcode",
  "crc64",
@@ -4593,6 +4619,8 @@ dependencies = [
 [[package]]
 name = "squib-virtio"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf75774bc86aef4cd98abcc29cd6e94e1e2ffa512992d09a43fdacf0c84424a6"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -4611,6 +4639,8 @@ dependencies = [
 [[package]]
 name = "squib-vmm"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a55f27ddca8d0e7c1a76df7829efb495e9d45aa4e6187b7688ca96fcf065c408"
 dependencies = [
  "applevisor",
  "parking_lot",
@@ -4704,7 +4734,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5314,7 +5344,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

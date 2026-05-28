@@ -5,6 +5,7 @@
 //!
 //! - [`NoopExecutor`] — preserves the legacy "echo back the payload" behavior; used in unit tests
 //!   and when `LAMBDA_EXECUTOR=disabled`.
+//! - [`AutoExecutor`] — defaults macOS Zip Lambdas to Squib and otherwise uses native execution.
 //! - `NativeExecutor` (Phase 3) — spawns `provided.*` bootstraps directly on the host.
 //! - `DockerExecutor` (Phase 4) — runs any supported runtime in an AWS Lambda base image.
 //! - `SquibExecutor` — runs `arm64` Zip functions through a Squib microVM guest agent.
@@ -16,6 +17,7 @@
 //! `Arc<dyn Executor>` for backend swapping at startup; the trait must be
 //! object-safe.
 
+mod auto;
 mod error;
 mod instance;
 mod native;
@@ -25,6 +27,7 @@ mod squib;
 mod types;
 
 use async_trait::async_trait;
+pub use auto::AutoExecutor;
 pub use error::ExecutorError;
 pub use native::NativeExecutor;
 pub use noop::NoopExecutor;

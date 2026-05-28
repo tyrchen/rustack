@@ -2,9 +2,8 @@
 //!
 //! Spawns the function's `bootstrap` binary directly on the host. Suitable
 //! only for `provided.al2` / `provided.al2023` runtimes whose architectures
-//! match the host. The `Auto` selection rule in [`super::build_executor`]
-//! gates that — this backend itself only verifies, then either runs or
-//! reports an `Unsupported` error.
+//! match the host. The auto executor keeps macOS Zip functions on Squib and
+//! leaves unsupported image packages for the future Docker backend.
 
 use std::{io::Read as _, net::SocketAddr, path::Path, process::Stdio, sync::Arc, time::Duration};
 

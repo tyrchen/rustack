@@ -10,8 +10,8 @@ pub enum ExecutorBackend {
     /// Legacy echo behavior — no real process or container is started.
     #[default]
     Disabled,
-    /// Pick the most appropriate backend per invocation: native when the
-    /// runtime + arch + bootstrap allow it, Docker otherwise.
+    /// Pick the most appropriate backend per invocation: Squib for macOS Zip
+    /// functions and native execution otherwise.
     Auto,
     /// Always native; reject invocations that can't run on the host.
     Native,

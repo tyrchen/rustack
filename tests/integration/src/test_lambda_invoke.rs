@@ -38,22 +38,26 @@ mod tests {
 
     use rustack_lambda_core::{
         config::LambdaConfig,
-        executor::ExecutorBackend,
+        executor::{ExecutorBackend, SquibExecutorConfig},
         provider::{InvokeKind, InvokeOutcome, RustackLambda},
         storage::FunctionStore,
     };
     use rustack_lambda_model::{input::CreateFunctionInput, types::FunctionCode};
 
+    fn workspace_root() -> PathBuf {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        PathBuf::from(manifest)
+            .ancestors()
+            .nth(2)
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
     /// Build the fixture once per test process.
     fn bootstrap_path() -> PathBuf {
         static PATH: OnceLock<PathBuf> = OnceLock::new();
         PATH.get_or_init(|| {
-            let manifest = env!("CARGO_MANIFEST_DIR");
-            let workspace_root = PathBuf::from(manifest)
-                .ancestors()
-                .nth(2)
-                .expect("workspace root")
-                .to_path_buf();
+            let workspace_root = workspace_root();
             let status = Command::new(env!("CARGO"))
                 .args(["build", "--release", "-p", "rustack-lambda-echo-bootstrap"])
                 .current_dir(&workspace_root)
@@ -96,6 +100,40 @@ mod tests {
         buf
     }
 
+    /// Build an arm64 Lambda demo zip with `cargo lambda`.
+    fn cargo_lambda_zip() -> Vec<u8> {
+        static ZIP: OnceLock<Vec<u8>> = OnceLock::new();
+        ZIP.get_or_init(|| {
+            let workspace_root = workspace_root();
+            let status = Command::new(env!("CARGO"))
+                .args([
+                    "lambda",
+                    "build",
+                    "--release",
+                    "-p",
+                    "rustack-lambda-echo-bootstrap",
+                    "--arm64",
+                    "--output-format",
+                    "zip",
+                    "--lambda-dir",
+                    "target/lambda",
+                ])
+                .current_dir(&workspace_root)
+                .status()
+                .expect("cargo lambda build fixture");
+            assert!(status.success(), "cargo lambda build fixture failed");
+
+            let zip = workspace_root
+                .join("target")
+                .join("lambda")
+                .join("bootstrap")
+                .join("bootstrap.zip");
+            assert!(zip.exists(), "cargo lambda zip not at {}", zip.display());
+            std::fs::read(zip).expect("read cargo lambda zip")
+        })
+        .clone()
+    }
+
     fn host_arch_label() -> &'static str {
         match std::env::consts::ARCH {
             "x86_64" => "x86_64",
@@ -110,6 +148,24 @@ mod tests {
         }
         eprintln!("set RUSTACK_LAMBDA_NATIVE_TESTS=1 to run lambda invoke integration tests");
         true
+    }
+
+    fn skip_unless_squib_e2e_enabled() -> bool {
+        if !cfg!(target_os = "macos") {
+            eprintln!("Squib Lambda e2e requires macOS with HVF");
+            return true;
+        }
+        if std::env::var("RUSTACK_LAMBDA_SQUIB_E2E").as_deref() != Ok("1") {
+            eprintln!("set RUSTACK_LAMBDA_SQUIB_E2E=1 to run Squib Lambda e2e tests");
+            return true;
+        }
+        for key in ["LAMBDA_SQUIB_CONFIG_FILE", "LAMBDA_SQUIB_VSOCK_PATH"] {
+            if std::env::var_os(key).is_none() {
+                eprintln!("set {key} to run Squib Lambda e2e tests");
+                return true;
+            }
+        }
+        false
     }
 
     fn make_provider() -> Arc<RustackLambda> {
@@ -130,9 +186,31 @@ mod tests {
         Arc::new(RustackLambda::with_store(store, config))
     }
 
-    fn create_input(name: &str, env: &[(&str, &str)]) -> CreateFunctionInput {
+    fn make_auto_squib_provider() -> Arc<RustackLambda> {
+        let mut config = LambdaConfig::default();
+        config.executor = ExecutorBackend::Auto;
+        config.init_timeout = Duration::from_secs(10);
+        config.idle_timeout = Duration::from_mins(1);
+        config.max_warm_instances = 1;
+        config.squib = SquibExecutorConfig::from_env();
+
+        let tmp = tempfile::Builder::new()
+            .prefix("rustack-lambda-squib-it-")
+            .tempdir()
+            .expect("tempdir");
+        let dir = tmp.keep();
+        let store = FunctionStore::new(dir);
+        Arc::new(RustackLambda::with_store(store, config))
+    }
+
+    fn create_input_from_zip(
+        name: &str,
+        env: &[(&str, &str)],
+        zip: &[u8],
+        architecture: &str,
+    ) -> CreateFunctionInput {
         use base64::Engine as _;
-        let zip_b64 = base64::engine::general_purpose::STANDARD.encode(fixture_zip());
+        let zip_b64 = base64::engine::general_purpose::STANDARD.encode(zip);
         let mut variables = std::collections::HashMap::new();
         for (k, v) in env {
             variables.insert((*k).to_owned(), (*v).to_owned());
@@ -150,7 +228,7 @@ mod tests {
             role: "arn:aws:iam::000000000000:role/test-role".to_owned(),
             handler: Some("bootstrap".to_owned()),
             timeout: Some(5),
-            architectures: Some(vec![host_arch_label().to_owned()]),
+            architectures: Some(vec![architecture.to_owned()]),
             code: FunctionCode {
                 zip_file: Some(zip_b64),
                 ..Default::default()
@@ -160,8 +238,50 @@ mod tests {
         }
     }
 
+    fn create_input(name: &str, env: &[(&str, &str)]) -> CreateFunctionInput {
+        create_input_from_zip(name, env, &fixture_zip(), host_arch_label())
+    }
+
+    fn create_cargo_lambda_input(name: &str) -> CreateFunctionInput {
+        create_input_from_zip(name, &[], &cargo_lambda_zip(), "arm64")
+    }
+
     fn unique_name(prefix: &str) -> String {
         format!("{prefix}-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires Squib Lambda guest image; gate via RUSTACK_LAMBDA_SQUIB_E2E=1"]
+    async fn test_should_invoke_cargo_lambda_arm64_zip_through_auto_squib() {
+        if skip_unless_squib_e2e_enabled() {
+            return;
+        }
+        let provider = make_auto_squib_provider();
+        let name = unique_name("cargo-lambda-squib");
+        provider
+            .create_function(create_cargo_lambda_input(&name))
+            .await
+            .expect("create_function");
+
+        let outcome = provider
+            .invoke(
+                &name,
+                None,
+                br#"{"hello":"squib"}"#,
+                InvokeKind::RequestResponse,
+            )
+            .await
+            .expect("invoke");
+        let resp = match outcome {
+            InvokeOutcome::Sync(r) => r,
+            other => panic!("expected Sync, got {other:?}"),
+        };
+        assert_eq!(resp.status, 200);
+        assert!(resp.function_error.is_none());
+        let v: serde_json::Value = serde_json::from_slice(&resp.payload).expect("response is JSON");
+        assert_eq!(v["echo"]["hello"], "squib");
+
+        provider.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

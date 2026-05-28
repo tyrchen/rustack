@@ -42,9 +42,10 @@ impl LambdaConfig {
     /// - `GATEWAY_HOST` (default: `localhost`)
     /// - `GATEWAY_PORT` (default: `4566`)
     /// - `LAMBDA_DOCKER_ENABLED` (default: `false` — legacy alias for `LAMBDA_EXECUTOR=docker`).
-    /// - `LAMBDA_EXECUTOR` (default: `native`; `docker` if `LAMBDA_DOCKER_ENABLED=true`). Accepts
-    ///   `disabled`, `auto`, `native`, `docker`, `squib`. The native backend runs `provided.*`
-    ///   bootstraps (Rust / Go / C++) directly on the host with no Docker requirement.
+    /// - `LAMBDA_EXECUTOR` (default: `auto`; `docker` if `LAMBDA_DOCKER_ENABLED=true`). Accepts
+    ///   `disabled`, `auto`, `native`, `docker`, `squib`. Auto uses Squib for Zip functions on
+    ///   macOS and native execution otherwise. The native backend runs `provided.*` bootstraps
+    ///   (Rust / Go / C++) directly on the host with no Docker requirement.
     /// - `LAMBDA_MAX_WARM_INSTANCES` (default: `1`)
     /// - `LAMBDA_IDLE_TIMEOUT_SECS` (default: `600`)
     /// - `LAMBDA_INIT_TIMEOUT_SECS` (default: `5`)
@@ -57,11 +58,7 @@ impl LambdaConfig {
             .unwrap_or(if docker_enabled {
                 ExecutorBackend::Docker
             } else {
-                // Default to the native backend — zero-setup for Rust / Go /
-                // C++ `provided.*` lambdas. Users can opt into docker with
-                // `LAMBDA_EXECUTOR=docker` or disable execution entirely with
-                // `LAMBDA_EXECUTOR=disabled`.
-                ExecutorBackend::Native
+                ExecutorBackend::Auto
             });
         Self {
             skip_signature_validation: env_bool("LAMBDA_SKIP_SIGNATURE_VALIDATION", true),
