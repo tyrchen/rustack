@@ -15,19 +15,24 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::Instant};
 use tracing::warn;
 use uuid::Uuid;
 
 use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse, PackageType};
 
-const DEFAULT_INSTANCE_ID: &str = "rustack-lambda";
+const DEFAULT_INSTANCE_ID: &str = "rustack_lambda";
 const DEFAULT_STAGE_PORT: u32 = 5003;
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(500);
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_RESPONSE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_RUN_BUDGET: Duration = Duration::from_hours(24);
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RESPONSE_LIMIT_BYTES: usize = 128;
+const CONTROL_RESPONSE_LIMIT_BYTES: usize = 1024;
 const PROTOCOL_VERSION: &str = "rustack.squib.lambda.v1";
+const SHUTDOWN_REQUEST_KIND: &str = "shutdown";
 
 /// Configuration for [`SquibExecutor`].
 #[derive(Debug, Clone)]
@@ -46,6 +51,8 @@ pub struct SquibExecutorConfig {
     pub response_limit_bytes: usize,
     /// Maximum wall-clock runtime budget for the Squib microVM.
     pub run_budget: Duration,
+    /// Maximum time to wait for Squib shutdown.
+    pub shutdown_timeout: Duration,
 }
 
 impl SquibExecutorConfig {
@@ -64,11 +71,13 @@ impl SquibExecutorConfig {
             config_file: read("LAMBDA_SQUIB_CONFIG_FILE")
                 .as_deref()
                 .and_then(non_empty_string)
-                .map(PathBuf::from),
+                .map(PathBuf::from)
+                .or_else(|| Some(default_config_file())),
             vsock_path: read("LAMBDA_SQUIB_VSOCK_PATH")
                 .as_deref()
                 .and_then(non_empty_string)
-                .map(PathBuf::from),
+                .map(PathBuf::from)
+                .or_else(|| Some(default_vsock_path())),
             instance_id,
             stage_port: read("LAMBDA_SQUIB_STAGE_PORT")
                 .and_then(|v| v.parse().ok())
@@ -82,6 +91,9 @@ impl SquibExecutorConfig {
             run_budget: read("LAMBDA_SQUIB_RUN_BUDGET_SECS")
                 .and_then(|v| v.parse::<u64>().ok())
                 .map_or(DEFAULT_RUN_BUDGET, Duration::from_secs),
+            shutdown_timeout: read("LAMBDA_SQUIB_SHUTDOWN_TIMEOUT_MS")
+                .and_then(|v| v.parse::<u64>().ok())
+                .map_or(DEFAULT_SHUTDOWN_TIMEOUT, Duration::from_millis),
         }
     }
 
@@ -105,13 +117,14 @@ impl SquibExecutorConfig {
 impl Default for SquibExecutorConfig {
     fn default() -> Self {
         Self {
-            config_file: None,
-            vsock_path: None,
+            config_file: Some(default_config_file()),
+            vsock_path: Some(default_vsock_path()),
             instance_id: DEFAULT_INSTANCE_ID.to_owned(),
             stage_port: DEFAULT_STAGE_PORT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             response_limit_bytes: DEFAULT_RESPONSE_LIMIT_BYTES,
             run_budget: DEFAULT_RUN_BUDGET,
+            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
     }
 }
@@ -160,12 +173,7 @@ impl SquibExecutor {
     async fn invoke_guest(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
         #[cfg(unix)]
         {
-            let mut stream = tokio::time::timeout(
-                self.config.connect_timeout,
-                connect_stage_socket(&self.config),
-            )
-            .await
-            .map_err(|_| ExecutorError::Timeout(self.config.connect_timeout))??;
+            let mut stream = connect_stage_socket_with_retry(&self.config).await?;
             let request = SquibInvokeRequestWire::from_request(&req)?;
             let request_bytes = serde_json::to_vec(&request)
                 .map_err(|err| ExecutorError::Io(format!("encode Squib request: {err}")))?;
@@ -212,10 +220,37 @@ impl Executor for SquibExecutor {
 
     async fn shutdown(&self) {
         let mut runtime = self.runtime.lock().await.take();
-        if let Some(squib) = runtime.as_mut()
-            && let Err(err) = squib.shutdown().await
-        {
-            warn!(error = %err, "failed to shut down Squib Lambda runtime");
+        if let Some(squib) = runtime.as_mut() {
+            #[cfg(unix)]
+            match tokio::time::timeout(
+                self.config.shutdown_timeout,
+                request_guest_shutdown(&self.config),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    warn!(error = %err, "failed to request Squib Lambda guest shutdown");
+                }
+                Err(_) => {
+                    warn!(
+                        timeout_ms = self.config.shutdown_timeout.as_millis(),
+                        "timed out requesting Squib Lambda guest shutdown"
+                    );
+                }
+            }
+            match tokio::time::timeout(self.config.shutdown_timeout, squib.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    warn!(error = %err, "failed to shut down Squib Lambda runtime");
+                }
+                Err(_) => {
+                    warn!(
+                        timeout_ms = self.config.shutdown_timeout.as_millis(),
+                        "timed out shutting down Squib Lambda runtime"
+                    );
+                }
+            }
         }
     }
 }
@@ -231,7 +266,9 @@ struct SquibInvokeRequestWire {
     runtime: Option<String>,
     handler: Option<String>,
     architectures: Vec<String>,
-    code_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_root: Option<String>,
+    code_zip_base64: String,
     environment: HashMap<String, String>,
     timeout_ms: u64,
     memory_mb: u32,
@@ -239,12 +276,19 @@ struct SquibInvokeRequestWire {
     payload_base64: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SquibControlRequestWire {
+    protocol_version: &'static str,
+    kind: &'static str,
+}
+
 impl SquibInvokeRequestWire {
     fn from_request(req: &InvokeRequest) -> Result<Self, ExecutorError> {
-        let code_root = req
-            .code_root
+        let code_zip = req
+            .code_zip
             .as_ref()
-            .ok_or_else(|| ExecutorError::InvalidCode("missing code root".to_owned()))?;
+            .ok_or_else(|| ExecutorError::InvalidCode("missing code zip".to_owned()))?;
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4().to_string(),
@@ -254,7 +298,11 @@ impl SquibInvokeRequestWire {
             runtime: req.runtime.clone(),
             handler: req.handler.clone(),
             architectures: req.architectures.clone(),
-            code_root: code_root.display().to_string(),
+            code_root: req
+                .code_root
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            code_zip_base64: STANDARD.encode(code_zip.as_ref()),
             environment: req.environment.clone(),
             timeout_ms: duration_millis(req.timeout),
             memory_mb: req.memory_mb,
@@ -289,8 +337,8 @@ fn validate_request(req: &InvokeRequest) -> Result<(), ExecutorError> {
             "Squib backend requires an arm64 Lambda function".to_owned(),
         ));
     }
-    if req.code_root.is_none() {
-        return Err(ExecutorError::InvalidCode("missing code root".to_owned()));
+    if req.code_zip.is_none() {
+        return Err(ExecutorError::InvalidCode("missing code zip".to_owned()));
     }
     Ok(())
 }
@@ -299,7 +347,9 @@ async fn ensure_config_file_exists(path: &Path) -> Result<(), ExecutorError> {
     let metadata = tokio::fs::metadata(path).await.map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             ExecutorError::Unsupported(format!(
-                "LAMBDA_SQUIB_CONFIG_FILE does not exist: {}",
+                "LAMBDA_SQUIB_CONFIG_FILE does not exist: {}. Run `make lambda-squib-image` or \
+                 set LAMBDA_SQUIB_CONFIG_FILE and LAMBDA_SQUIB_VSOCK_PATH to a Lambda-capable \
+                 Squib guest image.",
                 path.display()
             ))
         } else {
@@ -313,6 +363,78 @@ async fn ensure_config_file_exists(path: &Path) -> Result<(), ExecutorError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn request_guest_shutdown(config: &SquibExecutorConfig) -> Result<(), ExecutorError> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut stream = connect_stage_socket_with_retry(config).await?;
+    let request = SquibControlRequestWire {
+        protocol_version: PROTOCOL_VERSION,
+        kind: SHUTDOWN_REQUEST_KIND,
+    };
+    let request_bytes = serde_json::to_vec(&request)
+        .map_err(|err| ExecutorError::Io(format!("encode Squib shutdown request: {err}")))?;
+    stream
+        .write_all(&request_bytes)
+        .await
+        .map_err(|err| ExecutorError::Io(format!("write Squib shutdown request: {err}")))?;
+    stream
+        .write_all(b"\n")
+        .await
+        .map_err(|err| ExecutorError::Io(format!("write Squib shutdown newline: {err}")))?;
+    let _line =
+        read_bounded_line(&mut stream, CONTROL_RESPONSE_LIMIT_BYTES, "Squib shutdown").await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn connect_stage_socket_with_retry(
+    config: &SquibExecutorConfig,
+) -> Result<tokio::net::UnixStream, ExecutorError> {
+    let deadline = Instant::now() + config.connect_timeout;
+    let mut last_error = None;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(last_error.unwrap_or(ExecutorError::Timeout(config.connect_timeout)));
+        }
+        let attempt_timeout = deadline
+            .saturating_duration_since(now)
+            .min(CONNECT_ATTEMPT_TIMEOUT);
+        match tokio::time::timeout(attempt_timeout, connect_stage_socket(config)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) if is_retryable_connect_error(&error) => {
+                last_error = Some(error);
+                sleep_before_retry(deadline).await;
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                last_error = Some(ExecutorError::Timeout(attempt_timeout));
+                sleep_before_retry(deadline).await;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn sleep_before_retry(deadline: Instant) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        tokio::time::sleep(remaining.min(CONNECT_RETRY_INTERVAL)).await;
+    }
+}
+
+#[cfg(unix)]
+fn is_retryable_connect_error(error: &ExecutorError) -> bool {
+    match error {
+        ExecutorError::Io(message) => message.contains("connect "),
+        ExecutorError::InitFailed(message) => message.contains("RST "),
+        ExecutorError::RuntimeExited(message) => message.contains("closed before newline"),
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -414,6 +536,27 @@ fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn default_config_file() -> PathBuf {
+    default_artifact_dir().join("config.json")
+}
+
+fn default_vsock_path() -> PathBuf {
+    default_artifact_dir().join("vsock.sock")
+}
+
+fn default_artifact_dir() -> PathBuf {
+    if let Ok(root) = env::var("RUSTACK_WORKSPACE_ROOT") {
+        return PathBuf::from(root).join("target/rustack-lambda-squib");
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map_or_else(
+            || PathBuf::from("target/rustack-lambda-squib"),
+            |root| root.join("target/rustack-lambda-squib"),
+        )
+}
+
 fn non_empty_string(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -439,6 +582,7 @@ mod tests {
             "LAMBDA_SQUIB_CONNECT_TIMEOUT_MS" => Some("3500".to_owned()),
             "LAMBDA_SQUIB_RESPONSE_LIMIT_BYTES" => Some("4096".to_owned()),
             "LAMBDA_SQUIB_RUN_BUDGET_SECS" => Some("60".to_owned()),
+            "LAMBDA_SQUIB_SHUTDOWN_TIMEOUT_MS" => Some("2500".to_owned()),
             _ => None,
         });
 
@@ -449,6 +593,7 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_millis(3500));
         assert_eq!(config.response_limit_bytes, 4096);
         assert_eq!(config.run_budget, Duration::from_mins(1));
+        assert_eq!(config.shutdown_timeout, Duration::from_millis(2500));
     }
 
     #[test]
@@ -459,7 +604,10 @@ mod tests {
 
     #[test]
     fn test_should_require_config_file_for_runtime_start() {
-        let config = SquibExecutorConfig::default();
+        let config = SquibExecutorConfig {
+            config_file: None,
+            ..SquibExecutorConfig::default()
+        };
 
         assert!(matches!(
             config.required_config_file(),
@@ -470,7 +618,10 @@ mod tests {
 
     #[test]
     fn test_should_require_vsock_path_for_invocation() {
-        let config = SquibExecutorConfig::default();
+        let config = SquibExecutorConfig {
+            vsock_path: None,
+            ..SquibExecutorConfig::default()
+        };
 
         assert!(matches!(
             config.required_vsock_path(),
@@ -489,6 +640,7 @@ mod tests {
             architectures: vec!["arm64".to_owned()],
             package_type: PackageType::Zip,
             code_root: Some(PathBuf::from("/tmp/code")),
+            code_zip: Some(Bytes::from_static(b"PK\x03\x04zip")),
             image_uri: None,
             environment: HashMap::from([("KEY".to_owned(), "VALUE".to_owned())]),
             timeout: Duration::from_secs(3),
@@ -500,7 +652,8 @@ mod tests {
         let wire = SquibInvokeRequestWire::from_request(&req).unwrap();
 
         assert_eq!(wire.protocol_version, PROTOCOL_VERSION);
-        assert_eq!(wire.code_root, "/tmp/code");
+        assert_eq!(wire.code_root.as_deref(), Some("/tmp/code"));
+        assert_eq!(wire.code_zip_base64, "UEsDBHppcA==");
         assert_eq!(wire.timeout_ms, 3000);
         assert_eq!(wire.payload_base64, "e30=");
     }
@@ -527,6 +680,7 @@ mod tests {
             architectures: vec!["x86_64".to_owned()],
             package_type: PackageType::Zip,
             code_root: Some(PathBuf::from("/tmp/code")),
+            code_zip: Some(Bytes::from_static(b"PK\x03\x04zip")),
             image_uri: None,
             environment: HashMap::new(),
             timeout: Duration::from_secs(1),

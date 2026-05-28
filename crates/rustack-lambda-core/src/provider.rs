@@ -876,6 +876,7 @@ impl RustackLambda {
             architectures: version.architectures.clone(),
             package_type: PackageType::from_wire(&version.package_type),
             code_root: version.code_path.clone(),
+            code_zip: version.zip_bytes.clone(),
             image_uri: version.image_uri.clone(),
             environment: env,
             timeout: Duration::from_secs(u64::from(version.timeout)),

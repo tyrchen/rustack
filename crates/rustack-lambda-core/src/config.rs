@@ -49,6 +49,7 @@ impl LambdaConfig {
     /// - `LAMBDA_MAX_WARM_INSTANCES` (default: `1`)
     /// - `LAMBDA_IDLE_TIMEOUT_SECS` (default: `600`)
     /// - `LAMBDA_INIT_TIMEOUT_SECS` (default: `5`)
+    /// - `LAMBDA_SQUIB_*` variables documented by [`SquibExecutorConfig`].
     #[must_use]
     pub fn from_env() -> Self {
         let docker_enabled = env_bool("LAMBDA_DOCKER_ENABLED", false);
@@ -130,7 +131,7 @@ mod tests {
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 4566);
         assert!(!config.docker_enabled);
-        assert!(config.squib.config_file.is_none());
-        assert!(config.squib.vsock_path.is_none());
+        assert!(config.squib.config_file.is_some());
+        assert!(config.squib.vsock_path.is_some());
     }
 }

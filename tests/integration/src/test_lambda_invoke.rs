@@ -159,11 +159,13 @@ mod tests {
             eprintln!("set RUSTACK_LAMBDA_SQUIB_E2E=1 to run Squib Lambda e2e tests");
             return true;
         }
-        for key in ["LAMBDA_SQUIB_CONFIG_FILE", "LAMBDA_SQUIB_VSOCK_PATH"] {
-            if std::env::var_os(key).is_none() {
-                eprintln!("set {key} to run Squib Lambda e2e tests");
-                return true;
-            }
+        let default_config = workspace_root()
+            .join("target")
+            .join("rustack-lambda-squib")
+            .join("config.json");
+        if std::env::var_os("LAMBDA_SQUIB_CONFIG_FILE").is_none() && !default_config.exists() {
+            eprintln!("run `make lambda-squib-image` to build the default Squib Lambda guest");
+            return true;
         }
         false
     }
@@ -193,6 +195,7 @@ mod tests {
         config.idle_timeout = Duration::from_mins(1);
         config.max_warm_instances = 1;
         config.squib = SquibExecutorConfig::from_env();
+        config.squib.connect_timeout = Duration::from_secs(30);
 
         let tmp = tempfile::Builder::new()
             .prefix("rustack-lambda-squib-it-")
@@ -256,32 +259,46 @@ mod tests {
         if skip_unless_squib_e2e_enabled() {
             return;
         }
+        eprintln!("squib e2e: creating provider");
         let provider = make_auto_squib_provider();
         let name = unique_name("cargo-lambda-squib");
+        eprintln!("squib e2e: creating function {name}");
         provider
             .create_function(create_cargo_lambda_input(&name))
             .await
             .expect("create_function");
 
-        let outcome = provider
+        eprintln!("squib e2e: invoking function {name}");
+        let outcome_result = provider
             .invoke(
                 &name,
                 None,
                 br#"{"hello":"squib"}"#,
                 InvokeKind::RequestResponse,
             )
-            .await
-            .expect("invoke");
+            .await;
+        if let Err(error) = &outcome_result {
+            eprintln!("squib e2e: invoke failed before shutdown: {error:?}");
+        }
+        eprintln!("squib e2e: shutting down provider");
+        provider.shutdown().await;
+        eprintln!("squib e2e: provider shutdown complete");
+
+        let outcome = outcome_result.expect("invoke");
         let resp = match outcome {
             InvokeOutcome::Sync(r) => r,
             other => panic!("expected Sync, got {other:?}"),
         };
+        eprintln!(
+            "squib e2e: response status={} function_error={:?} payload={}",
+            resp.status,
+            resp.function_error,
+            String::from_utf8_lossy(&resp.payload)
+        );
         assert_eq!(resp.status, 200);
         assert!(resp.function_error.is_none());
         let v: serde_json::Value = serde_json::from_slice(&resp.payload).expect("response is JSON");
         assert_eq!(v["echo"]["hello"], "squib");
-
-        provider.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

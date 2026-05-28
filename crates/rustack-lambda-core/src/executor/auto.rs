@@ -76,6 +76,7 @@ mod tests {
             architectures: vec!["arm64".to_owned()],
             package_type,
             code_root: Some(PathBuf::from("/tmp/code")),
+            code_zip: Some(Bytes::from_static(b"PK\x03\x04")),
             image_uri: None,
             environment: HashMap::new(),
             timeout: Duration::from_secs(1),

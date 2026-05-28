@@ -76,6 +76,8 @@ pub struct InvokeRequest {
     pub package_type: PackageType,
     /// Filesystem path to the unzipped code root (for Zip packages).
     pub code_root: Option<PathBuf>,
+    /// Raw uploaded Zip bytes (for microVM staging).
+    pub code_zip: Option<Bytes>,
     /// Image URI (for Image packages).
     pub image_uri: Option<String>,
     /// User-supplied environment variables.

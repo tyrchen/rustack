@@ -128,6 +128,86 @@ integration:
 test-lambda-invoke-native:
 	@RUSTACK_LAMBDA_NATIVE_TESTS=1 cargo test -p rustack-integration test_lambda_invoke -- --ignored --test-threads=1
 
+SQUIB_LAMBDA_BUILD := $(CURDIR)/target/rustack-lambda-squib
+SQUIB_LAMBDA_KERNEL_VERSION ?= 6.1.141
+SQUIB_LAMBDA_KERNEL_URL ?= https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.13/aarch64/vmlinux-$(SQUIB_LAMBDA_KERNEL_VERSION)
+SQUIB_LAMBDA_AL2023_INDEX ?= https://cdn.amazonlinux.com/al2023/os-images/latest/container-minimal-arm64
+SQUIB_LAMBDA_BUSYBOX_ALPINE_VERSION ?= 3.20.5
+SQUIB_LAMBDA_BUSYBOX_ALPINE_MAJOR := $(shell echo $(SQUIB_LAMBDA_BUSYBOX_ALPINE_VERSION) | cut -d. -f1,2)
+SQUIB_LAMBDA_BUSYBOX_ALPINE_URL ?= https://dl-cdn.alpinelinux.org/alpine/v$(SQUIB_LAMBDA_BUSYBOX_ALPINE_MAJOR)/releases/aarch64/alpine-minirootfs-$(SQUIB_LAMBDA_BUSYBOX_ALPINE_VERSION)-aarch64.tar.gz
+SQUIB_LAMBDA_ENTITLEMENTS := assets/lambda/squib/hypervisor.entitlements
+
+lambda-squib-agent:
+	@rustup target add aarch64-unknown-linux-musl
+	@cargo zigbuild --manifest-path tools/lambda-squib-agent/Cargo.toml --target-dir target --release --target aarch64-unknown-linux-musl
+
+lambda-squib-image: lambda-squib-agent
+	@mkdir -p $(SQUIB_LAMBDA_BUILD)
+	@if [ ! -f "$(SQUIB_LAMBDA_BUILD)/Image" ]; then \
+		echo "Downloading Squib Lambda kernel: $(SQUIB_LAMBDA_KERNEL_URL)"; \
+		curl -fsSL -o "$(SQUIB_LAMBDA_BUILD)/Image" "$(SQUIB_LAMBDA_KERNEL_URL)"; \
+	else \
+		echo "Reusing $(SQUIB_LAMBDA_BUILD)/Image"; \
+	fi
+	@if [ ! -f "$(SQUIB_LAMBDA_BUILD)/al2023-minimal-rootfs.tar.xz" ]; then \
+		echo "Resolving AL2023 minimal arm64 rootfs from $(SQUIB_LAMBDA_AL2023_INDEX)"; \
+		curl -fsSL -o "$(SQUIB_LAMBDA_BUILD)/al2023-index.html" "$(SQUIB_LAMBDA_AL2023_INDEX)/"; \
+		rootfs_file=$$(sed -nE 's/.*(al2023-container-minimal-[^"< ]+-arm64\.tar\.xz).*/\1/p' "$(SQUIB_LAMBDA_BUILD)/al2023-index.html" | head -n 1); \
+		test -n "$$rootfs_file"; \
+		echo "Downloading AL2023 minimal arm64 rootfs: $$rootfs_file"; \
+		curl -fsSL -o "$(SQUIB_LAMBDA_BUILD)/$$rootfs_file" "$(SQUIB_LAMBDA_AL2023_INDEX)/$$rootfs_file"; \
+		curl -fsSL -o "$(SQUIB_LAMBDA_BUILD)/SHA256SUMS" "$(SQUIB_LAMBDA_AL2023_INDEX)/SHA256SUMS"; \
+		(cd "$(SQUIB_LAMBDA_BUILD)" && shasum -a 256 -c SHA256SUMS); \
+		cp "$(SQUIB_LAMBDA_BUILD)/$$rootfs_file" "$(SQUIB_LAMBDA_BUILD)/al2023-minimal-rootfs.tar.xz"; \
+	fi
+	@if [ ! -f "$(SQUIB_LAMBDA_BUILD)/alpine-busybox-rootfs.tar.gz" ]; then \
+		echo "Downloading Alpine busybox helper rootfs: $(SQUIB_LAMBDA_BUSYBOX_ALPINE_URL)"; \
+		curl -fsSL -o "$(SQUIB_LAMBDA_BUILD)/alpine-busybox-rootfs.tar.gz" "$(SQUIB_LAMBDA_BUSYBOX_ALPINE_URL)"; \
+	fi
+	@chmod -R u+w "$(SQUIB_LAMBDA_BUILD)/busybox-root" "$(SQUIB_LAMBDA_BUILD)/initramfs-root" 2>/dev/null || true
+	@rm -rf "$(SQUIB_LAMBDA_BUILD)/busybox-root" "$(SQUIB_LAMBDA_BUILD)/initramfs-root"
+	@mkdir -p "$(SQUIB_LAMBDA_BUILD)/initramfs-root"
+	@tar -xJf "$(SQUIB_LAMBDA_BUILD)/al2023-minimal-rootfs.tar.xz" \
+		-C "$(SQUIB_LAMBDA_BUILD)/initramfs-root" \
+		--exclude './dev/*' \
+		--exclude 'dev/*' \
+		--exclude './etc/shadow*' \
+		--exclude 'etc/shadow*' \
+		--exclude './etc/gshadow*' \
+		--exclude 'etc/gshadow*'
+	@chmod -R u+w "$(SQUIB_LAMBDA_BUILD)/initramfs-root"
+	@mkdir -p "$(SQUIB_LAMBDA_BUILD)/initramfs-root/proc" \
+		"$(SQUIB_LAMBDA_BUILD)/initramfs-root/sys" \
+		"$(SQUIB_LAMBDA_BUILD)/initramfs-root/dev" \
+		"$(SQUIB_LAMBDA_BUILD)/initramfs-root/tmp"
+	@mkdir -p "$(SQUIB_LAMBDA_BUILD)/busybox-root"
+	@tar -xzf "$(SQUIB_LAMBDA_BUILD)/alpine-busybox-rootfs.tar.gz" \
+		-C "$(SQUIB_LAMBDA_BUILD)/busybox-root" \
+		./bin/busybox \
+		./lib/ld-musl-aarch64.so.1 \
+		./lib/libc.musl-aarch64.so.1
+	@cp "$(SQUIB_LAMBDA_BUILD)/busybox-root/bin/busybox" "$(SQUIB_LAMBDA_BUILD)/initramfs-root/usr/bin/busybox"
+	@chmod +x "$(SQUIB_LAMBDA_BUILD)/initramfs-root/usr/bin/busybox"
+	@cp "$(SQUIB_LAMBDA_BUILD)/busybox-root/lib/ld-musl-aarch64.so.1" "$(SQUIB_LAMBDA_BUILD)/initramfs-root/lib/"
+	@cp "$(SQUIB_LAMBDA_BUILD)/busybox-root/lib/libc.musl-aarch64.so.1" "$(SQUIB_LAMBDA_BUILD)/initramfs-root/lib/"
+	@cp assets/lambda/squib/init "$(SQUIB_LAMBDA_BUILD)/initramfs-root/init"
+	@chmod +x "$(SQUIB_LAMBDA_BUILD)/initramfs-root/init"
+	@cp target/aarch64-unknown-linux-musl/release/rustack-lambda-squib-agent "$(SQUIB_LAMBDA_BUILD)/initramfs-root/sbin/rustack-lambda-squib-agent"
+	@chmod +x "$(SQUIB_LAMBDA_BUILD)/initramfs-root/sbin/rustack-lambda-squib-agent"
+	@(cd "$(SQUIB_LAMBDA_BUILD)/initramfs-root" && find . -print0 | cpio --null -o -H newc 2>/dev/null) | gzip -9n > "$(SQUIB_LAMBDA_BUILD)/initramfs.cpio.gz"
+	@printf '%s\n' '{"boot-source":{"kernel_image_path":"$(SQUIB_LAMBDA_BUILD)/Image","initrd_path":"$(SQUIB_LAMBDA_BUILD)/initramfs.cpio.gz","boot_args":"console=ttyAMA0 earlycon=pl011,mmio32,0x0e0a0000 panic=1 reboot=k root=/dev/ram0 rdinit=/init"},"machine-config":{"vcpu_count":1,"mem_size_mib":512,"smt":false},"vsock":{"guest_cid":3,"uds_path":"$(SQUIB_LAMBDA_BUILD)/vsock.sock"}}' > "$(SQUIB_LAMBDA_BUILD)/config.json"
+	@echo "Squib Lambda image ready:"
+	@echo "  $(SQUIB_LAMBDA_BUILD)/config.json"
+
+test-lambda-invoke-squib: lambda-squib-image
+	@cargo test -p rustack-integration test_should_invoke_cargo_lambda_arm64_zip_through_auto_squib --no-run --quiet
+	@for bin in $$(cargo test -p rustack-integration test_should_invoke_cargo_lambda_arm64_zip_through_auto_squib --no-run --message-format=json 2>/dev/null \
+		| jq -r 'select(.profile.test == true) | .filenames[]'); do \
+		echo "signing $$bin"; \
+		codesign --sign - --entitlements $(SQUIB_LAMBDA_ENTITLEMENTS) --deep --force $$bin; \
+	done
+	@RUSTACK_LAMBDA_SQUIB_E2E=1 cargo test -p rustack-integration test_should_invoke_cargo_lambda_arm64_zip_through_auto_squib -- --ignored --nocapture
+
 mint: mint-start mint-run
 
 mint-build:

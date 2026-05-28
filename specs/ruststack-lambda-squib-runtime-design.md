@@ -23,7 +23,6 @@ Squib provides a Firecracker-shaped microVM runtime for Apple Silicon. Its embed
 
 ## Non-Goals
 
-- Building the Lambda guest image or guest agent in this change.
 - Emulating AWS's complete Lambda sandbox lifecycle.
 - Running image-package Lambdas inside Squib.
 - Replacing the native executor for host-runnable `provided.*` bootstraps.
@@ -69,7 +68,7 @@ ExecutorBackend::Squib
         |
         v
 SquibExecutor
-  - validate Zip + arm64 + code root
+  - validate Zip + arm64 + code zip
   - lazily start Squib microVM
   - connect to {vsock_path}_{stage_port}
   - send staged invocation JSON
@@ -94,15 +93,16 @@ The executor owns one Squib runtime handle. It starts the microVM lazily on the 
 | Environment Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `LAMBDA_EXECUTOR` | no | `auto` | `auto` uses Squib for macOS Zip functions and native execution otherwise. Set to `squib` to force Squib. |
-| `LAMBDA_SQUIB_CONFIG_FILE` | for Squib | none | Static Squib VM configuration file. |
-| `LAMBDA_SQUIB_VSOCK_PATH` | for Squib | none | Base path from the Squib config `vsock.uds_path`. |
-| `LAMBDA_SQUIB_INSTANCE_ID` | no | `rustack-lambda` | Squib instance id. |
+| `LAMBDA_SQUIB_CONFIG_FILE` | no | `target/rustack-lambda-squib/config.json` | Static Squib VM configuration file. Build the default image with `make lambda-squib-image`. |
+| `LAMBDA_SQUIB_VSOCK_PATH` | no | `target/rustack-lambda-squib/vsock.sock` | Base path from the Squib config `vsock.uds_path`. |
+| `LAMBDA_SQUIB_INSTANCE_ID` | no | `rustack_lambda` | Squib instance id. |
 | `LAMBDA_SQUIB_STAGE_PORT` | no | `5003` | Guest agent stage-and-invoke port. |
-| `LAMBDA_SQUIB_CONNECT_TIMEOUT_MS` | no | `2000` | Timeout for Squib startup socket connection and handshake. |
+| `LAMBDA_SQUIB_CONNECT_TIMEOUT_MS` | no | `15000` | Timeout for Squib startup socket connection and handshake. |
 | `LAMBDA_SQUIB_RESPONSE_LIMIT_BYTES` | no | `8388608` | Maximum single-line response size from the guest agent. |
 | `LAMBDA_SQUIB_RUN_BUDGET_SECS` | no | `86400` | Maximum wall-clock budget for the long-lived Squib microVM. |
+| `LAMBDA_SQUIB_SHUTDOWN_TIMEOUT_MS` | no | `10000` | Maximum time to wait for guest poweroff plus Squib shutdown. |
 
-The config file and vsock path stay explicit instead of being inferred. Squib's static config owns kernel/initrd/rootfs/device setup; Rustack only needs the values required to start Squib and dial the guest agent.
+The default VM image is generated under `target/rustack-lambda-squib`. The image target downloads the Firecracker arm64 kernel, resolves the latest Amazon Linux 2023 minimal arm64 container rootfs, verifies its SHA256SUMS, injects a static Rustack guest agent, and packages an initramfs. A small Alpine busybox helper is also injected only to bring loopback up and power the guest off from `/init`; Lambda user code runs against the AL2023 userland so normal `cargo lambda build --arm64 --output-format zip` artifacts have the expected glibc loader and libraries.
 
 ## Invocation Protocol
 
@@ -119,6 +119,7 @@ The host sends one UTF-8 JSON object followed by `\n` over the bridged stream:
   "handler": "bootstrap",
   "architectures": ["arm64"],
   "codeRoot": "/tmp/rustack-lambda-code/echo/current",
+  "codeZipBase64": "UEsDBAoAAAA...",
   "environment": {
     "KEY": "VALUE"
   },
@@ -142,14 +143,27 @@ The guest replies with one JSON object followed by `\n`:
 }
 ```
 
-The guest agent is responsible for making the `codeRoot` visible inside the guest, setting Lambda runtime environment variables, running the function bootstrap, applying function timeout, and mapping runtime errors to `functionError`.
+The host sends the original stored Zip bytes over vsock. `codeRoot` is optional metadata only. The guest agent validates the protocol, decodes the Zip into `/tmp/rustack-lambda/{request_id}/code`, rejects unsafe archive paths through `zip::read::ZipFile::enclosed_name`, preserves Unix permissions, and runs the archive-root `bootstrap`.
+
+The same stage port also accepts a bounded control message used during Rustack shutdown:
+
+```json
+{
+  "protocolVersion": "rustack.squib.lambda.v1",
+  "kind": "shutdown"
+}
+```
+
+The guest responds and then powers off. This is required because Squib 0.2.0 can request VMM shutdown, but the HVF vCPU driver does not observe the shutdown flag directly; a guest poweroff gives the VMM thread a real exit path.
+
+The guest agent sets Lambda runtime environment variables, serves the Lambda Runtime API on guest loopback, applies the function timeout, captures bounded bootstrap stdout/stderr for agent-side errors, and maps runtime errors to `functionError`.
 
 ## Error Handling
 
 The Squib executor maps failures into existing `ExecutorError` variants:
 
 - Missing Squib config, missing vsock path, unsupported OS, non-Zip package, non-`arm64` function: `Unsupported`.
-- Missing code root: `InvalidCode`.
+- Missing code zip: `InvalidCode`.
 - Squib startup failure or bad muxer handshake: `InitFailed`.
 - Guest EOF, malformed response, invalid base64 payload: `RuntimeExited`.
 - Invocation deadline exceeded: `Timeout`.
@@ -159,7 +173,7 @@ All socket reads are bounded. The response limit defaults to the synchronous Lam
 
 ## Security And Isolation
 
-This backend improves process isolation relative to the native executor, but it is only as strong as Squib's VMM, the guest image, and the host file sharing model. The initial protocol deliberately passes a host `codeRoot` path; that assumes the guest agent has a controlled staging mechanism. A production guest should avoid broad host mounts and instead copy function code through a bounded staging channel or a narrow shared directory.
+This backend improves process isolation relative to the native executor, but it is only as strong as Squib's VMM and the guest image. The protocol copies function code bytes through a bounded vsock staging channel rather than mounting arbitrary host directories into the guest.
 
 The host rejects image packages and non-`arm64` functions before contacting the guest. User environment variables are sent as structured JSON, not shell-expanded strings.
 
@@ -173,7 +187,7 @@ The initial implementation should include:
 - Unit tests for request/response JSON and base64 decoding.
 - Error tests for missing config and unsupported architecture.
 
-End-to-end coverage is provided by a gated integration test that builds the demo `rustack-lambda-echo-bootstrap` app with `cargo lambda --arm64 --output-format zip` and invokes it through the Squib backend when `RUSTACK_LAMBDA_SQUIB_E2E=1`, `LAMBDA_SQUIB_CONFIG_FILE`, and `LAMBDA_SQUIB_VSOCK_PATH` point at a guest image running the `rustack.squib.lambda.v1` agent. The current Squib reference VM is useful for boot/MMDS validation but does not include that Lambda guest agent.
+End-to-end coverage is provided by `make test-lambda-invoke-squib`. The target builds the default guest image, codesigns the integration test binary with the macOS hypervisor entitlement, builds the demo `rustack-lambda-echo-bootstrap` app with `cargo lambda --arm64 --output-format zip`, uploads the resulting Zip through Rustack's normal `CreateFunction` path, invokes it through `ExecutorBackend::Auto`, and asserts the Squib/AL2023 guest returns the echoed payload.
 
 ## Implementation Plan
 
@@ -183,11 +197,10 @@ End-to-end coverage is provided by a gated integration test that builds the demo
 4. Add `SquibExecutor` and select it explicitly or through the macOS Zip auto rule.
 5. Implement lazy Squib startup and bounded vsock stage-and-invoke.
 6. Add focused unit tests.
-7. Add gated cargo-lambda/Squib e2e coverage, run Rust verification, and open a PR.
+7. Add `tools/lambda-squib-agent`, default AL2023 initramfs assembly, gated cargo-lambda/Squib e2e coverage, Rust verification, and PR updates.
 
 ## Future Work
 
-- Add guest agent and image build automation.
 - Add health checks on port `5001` before invoking.
 - Add warm execution on port `5000`.
 - Add per-function microVM pools and teardown policies.

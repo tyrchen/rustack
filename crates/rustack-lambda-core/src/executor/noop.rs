@@ -56,6 +56,7 @@ mod tests {
             architectures: vec!["x86_64".into()],
             package_type: PackageType::Zip,
             code_root: None,
+            code_zip: None,
             image_uri: None,
             environment: HashMap::new(),
             timeout: Duration::from_secs(3),
