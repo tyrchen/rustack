@@ -43,11 +43,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
+async-trait = { workspace = true }
 rand = { workspace = true }
 urlencoding = "2.1"
 
 # Native lambda invoke tests
 rustack-lambda-core = { workspace = true }
+rustack-s3-core = { workspace = true }
+rustack-s3-model = { workspace = true }
 rustack-lambda-model = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }

@@ -36,6 +36,8 @@ mod events_bridge;
 mod gateway;
 #[cfg(feature = "s3")]
 mod handler;
+#[cfg(all(feature = "lambda", feature = "s3"))]
+mod lambda_s3_bridge;
 mod service;
 mod snapshot;
 #[cfg(feature = "sns")]
@@ -128,6 +130,8 @@ use rustack_kms_core::handler::RustackKmsHandler;
 use rustack_kms_core::provider::RustackKms;
 #[cfg(feature = "kms")]
 use rustack_kms_http::service::{KmsHttpConfig, KmsHttpService};
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::code::{S3CodeFetcher, UnavailableS3CodeFetcher};
 #[cfg(feature = "lambda")]
 use rustack_lambda_core::config::LambdaConfig;
 #[cfg(feature = "lambda")]
@@ -1131,26 +1135,8 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
         )));
     }
 
-    // ----- Lambda (register before S3: S3 is the catch-all) -----
-    #[cfg(feature = "lambda")]
-    if is_enabled("lambda") {
-        let lambda_config = LambdaConfig::from_env();
-        info!(
-            lambda_skip_signature_validation = lambda_config.skip_signature_validation,
-            lambda_docker_enabled = lambda_config.docker_enabled,
-            lambda_executor = ?lambda_config.executor,
-            "initializing Lambda service",
-        );
-        let lambda_provider = Arc::new(RustackLambda::new(lambda_config.clone()));
-        providers.register_lambda(Arc::clone(&lambda_provider));
-        let lambda_handler = RustackLambdaHandler::new(Arc::clone(&lambda_provider));
-        let lambda_http_config = build_lambda_http_config(&lambda_config);
-        let lambda_service = LambdaHttpService::new(Arc::new(lambda_handler), lambda_http_config);
-        services.push(Box::new(service::LambdaServiceRouter::new(lambda_service)));
-    }
-
-    // ----- S3 (catch-all, must be last) -----
-    // Build the S3 provider early so that the CloudFront data plane can share it.
+    // ----- S3 provider (built early so Lambda code fetches and the
+    // CloudFront data plane can share it; S3 registration stays last) -----
     #[cfg(feature = "s3")]
     let s3_provider_arc: Option<Arc<RustackS3>> = if is_enabled("s3") {
         let s3_config = S3Config::from_env();
@@ -1167,6 +1153,37 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
     #[cfg(feature = "s3")]
     if let Some(s3_provider) = s3_provider_arc.as_ref() {
         providers.register_s3(Arc::clone(s3_provider));
+    }
+
+    // ----- Lambda (register before S3: S3 is the catch-all) -----
+    #[cfg(feature = "lambda")]
+    if is_enabled("lambda") {
+        let lambda_config = LambdaConfig::from_env();
+        info!(
+            lambda_skip_signature_validation = lambda_config.skip_signature_validation,
+            lambda_docker_enabled = lambda_config.docker_enabled,
+            lambda_executor = ?lambda_config.executor,
+            "initializing Lambda service",
+        );
+        // Wire the in-process S3 code fetcher when S3 is available. When it is
+        // not, S3 code packages are rejected at creation time with a clear
+        // error instead of failing later at invoke.
+        #[cfg(feature = "s3")]
+        let code_fetcher: Arc<dyn S3CodeFetcher> = match s3_provider_arc.as_ref() {
+            Some(s3) => Arc::new(crate::lambda_s3_bridge::LambdaS3CodeFetcher::new(
+                Arc::clone(s3),
+            )),
+            None => Arc::new(UnavailableS3CodeFetcher),
+        };
+        #[cfg(not(feature = "s3"))]
+        let code_fetcher: Arc<dyn S3CodeFetcher> = Arc::new(UnavailableS3CodeFetcher);
+        let lambda_provider =
+            Arc::new(RustackLambda::new(lambda_config.clone()).with_code_fetcher(code_fetcher));
+        providers.register_lambda(Arc::clone(&lambda_provider));
+        let lambda_handler = RustackLambdaHandler::new(Arc::clone(&lambda_provider));
+        let lambda_http_config = build_lambda_http_config(&lambda_config);
+        let lambda_service = LambdaHttpService::new(Arc::new(lambda_handler), lambda_http_config);
+        services.push(Box::new(service::LambdaServiceRouter::new(lambda_service)));
     }
 
     // ----- CloudFront (management + data plane, register before S3 catch-all) -----

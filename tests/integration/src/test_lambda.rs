@@ -152,6 +152,114 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // S3 code packages (issue #34)
+    // ---------------------------------------------------------------------------
+
+    /// Helper: upload a zip blob to S3 and return (bucket, key).
+    async fn upload_code_to_s3(prefix: &str) -> (String, String) {
+        let s3 = crate::s3_client();
+        let bucket = format!("lambda-code-{}-{}", prefix, uuid::Uuid::new_v4().simple());
+        s3.create_bucket()
+            .bucket(&bucket)
+            .send()
+            .await
+            .expect("create code bucket");
+        let key = "demo.zip".to_owned();
+        s3.put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(
+                b"PK\x03\x04fake-s3-lambda-code",
+            ))
+            .send()
+            .await
+            .expect("upload code object");
+        (bucket, key)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_create_function_with_s3_code() {
+        let client = lambda_client();
+        let name = func_name("s3-code");
+        let (bucket, key) = upload_code_to_s3("create").await;
+
+        let resp = client
+            .create_function()
+            .function_name(&name)
+            .runtime(Runtime::Python312)
+            .role("arn:aws:iam::000000000000:role/test-role")
+            .handler("index.handler")
+            .code(
+                FunctionCode::builder()
+                    .s3_bucket(&bucket)
+                    .s3_key(&key)
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("create with s3 code should succeed");
+
+        assert_eq!(resp.function_name(), Some(name.as_str()));
+        assert_eq!(resp.state(), Some(&aws_sdk_lambda::types::State::Active));
+        // The S3 object must have been downloaded: code metadata is populated.
+        assert!(resp.code_size() > 0, "code_size must be populated from S3");
+        assert!(
+            resp.code_sha256().is_some(),
+            "code_sha256 must be populated from S3"
+        );
+
+        // GetFunction reports the stored code.
+        let get = client
+            .get_function()
+            .function_name(&name)
+            .send()
+            .await
+            .unwrap();
+        assert!(get.code().is_some());
+
+        cleanup_function(&client, &name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_fail_create_function_with_missing_s3_bucket() {
+        let client = lambda_client();
+        let name = func_name("s3-missing");
+
+        let err = client
+            .create_function()
+            .function_name(&name)
+            .runtime(Runtime::Python312)
+            .role("arn:aws:iam::000000000000:role/test-role")
+            .handler("index.handler")
+            .code(
+                FunctionCode::builder()
+                    .s3_bucket("no-such-code-bucket")
+                    .s3_key("demo.zip")
+                    .build(),
+            )
+            .send()
+            .await
+            .expect_err("missing bucket must fail");
+
+        let service_err = err.into_service_error();
+        assert_eq!(
+            service_err.meta().code(),
+            Some("InvalidParameterValueException")
+        );
+        let msg = format!("{service_err:?}");
+        assert!(
+            msg.contains("NoSuchBucket"),
+            "message should mention S3 error: {msg}"
+        );
+
+        // No function record should exist.
+        let get = client.get_function().function_name(&name).send().await;
+        assert!(get.is_err(), "function must not exist");
+    }
+
+    // ---------------------------------------------------------------------------
     // DeleteFunction
     // ---------------------------------------------------------------------------
 

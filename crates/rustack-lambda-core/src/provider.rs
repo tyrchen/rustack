@@ -17,6 +17,15 @@ const MAX_ZIP_SIZE: u64 = 50 * 1024 * 1024;
 /// Maximum synchronous invoke payload size (6 MB, per Appendix C).
 const MAX_SYNC_PAYLOAD: usize = 6 * 1024 * 1024;
 
+/// Maximum S3 bucket name length (per S3 naming rules).
+const MAX_S3_BUCKET_LEN: usize = 63;
+
+/// Maximum S3 object key length (per S3 limits).
+const MAX_S3_KEY_LEN: usize = 1024;
+
+/// Maximum S3 object version id length.
+const MAX_S3_VERSION_LEN: usize = 256;
+
 use rustack_lambda_model::{
     input::{
         AddLayerVersionPermissionInput, AddPermissionInput, CreateAliasInput,
@@ -43,6 +52,7 @@ use rustack_lambda_model::{
 };
 
 use crate::{
+    code::{S3CodeFetchError, S3CodeFetcher, UnavailableS3CodeFetcher},
     config::LambdaConfig,
     error::LambdaServiceError,
     executor::{
@@ -129,6 +139,7 @@ pub struct RustackLambda {
     esm_store: EventSourceMappingStore,
     config: LambdaConfig,
     executor: Arc<dyn Executor>,
+    code_fetcher: Arc<dyn S3CodeFetcher>,
 }
 
 /// Serializable Lambda provider snapshot.
@@ -141,6 +152,24 @@ pub struct LambdaSnapshot {
     pub layers: LayerStoreSnapshot,
     /// Event source mappings.
     pub event_source_mappings: EventSourceMappingStoreSnapshot,
+}
+
+/// Deployment package source for `CreateFunction` / `UpdateFunctionCode`.
+///
+/// Bundles the mutually-exclusive code inputs so `process_code` stays within
+/// the argument-count limit and both call sites share one field mapping.
+#[derive(Debug, Clone, Copy, Default)]
+struct CodeSource<'a> {
+    /// Base64-encoded inline zip.
+    zip_file_b64: Option<&'a str>,
+    /// S3 bucket for the deployment package.
+    s3_bucket: Option<&'a str>,
+    /// S3 key for the deployment package.
+    s3_key: Option<&'a str>,
+    /// S3 object version for the deployment package.
+    s3_object_version: Option<&'a str>,
+    /// Container image URI.
+    image_uri: Option<&'a str>,
 }
 
 impl RustackLambda {
@@ -156,6 +185,7 @@ impl RustackLambda {
             esm_store: EventSourceMappingStore::new(),
             config,
             executor,
+            code_fetcher: Arc::new(UnavailableS3CodeFetcher),
         }
     }
 
@@ -171,6 +201,7 @@ impl RustackLambda {
             esm_store: EventSourceMappingStore::new(),
             config,
             executor,
+            code_fetcher: Arc::new(UnavailableS3CodeFetcher),
         }
     }
 
@@ -188,7 +219,18 @@ impl RustackLambda {
             esm_store: EventSourceMappingStore::new(),
             config,
             executor,
+            code_fetcher: Arc::new(UnavailableS3CodeFetcher),
         }
+    }
+
+    /// Attach an S3 code fetcher for `S3Bucket`/`S3Key` deployment packages.
+    ///
+    /// Without a fetcher (or with the default), S3 code packages are rejected
+    /// at creation time with a clear error instead of failing at invoke.
+    #[must_use]
+    pub fn with_code_fetcher(mut self, fetcher: Arc<dyn S3CodeFetcher>) -> Self {
+        self.code_fetcher = fetcher;
+        self
     }
 
     /// Borrow the executor (e.g. for tests asserting backend behavior).
@@ -349,20 +391,33 @@ impl RustackLambda {
         let revision_id = uuid::Uuid::new_v4().to_string();
         let arn = function_arn(&self.config.default_region, &self.config.account_id, name);
 
-        // Validate code is provided.
+        // Validate the code source (mutual exclusion, completeness, bounds)
+        // before any business logic touches it.
+        let code_source = CodeSource {
+            zip_file_b64: input.code.zip_file.as_deref(),
+            s3_bucket: input.code.s3_bucket.as_deref(),
+            s3_key: input.code.s3_key.as_deref(),
+            s3_object_version: input.code.s3_object_version.as_deref(),
+            image_uri: input.code.image_uri.as_deref(),
+        };
+        validate_code_source(&code_source)?;
+
+        // Validate code is provided for the package type.
         let package_type = input
             .package_type
             .clone()
             .unwrap_or_else(|| "Zip".to_owned());
 
-        if package_type == "Zip" && input.code.zip_file.is_none() && input.code.s3_bucket.is_none()
+        if package_type == "Zip"
+            && code_source.zip_file_b64.is_none()
+            && code_source.s3_bucket.is_none()
         {
             return Err(LambdaServiceError::InvalidParameter {
                 message: "Code is required for Zip package type. Provide ZipFile or S3Bucket."
                     .to_owned(),
             });
         }
-        if package_type == "Image" && input.code.image_uri.is_none() {
+        if package_type == "Image" && code_source.image_uri.is_none() {
             return Err(LambdaServiceError::InvalidParameter {
                 message: "ImageUri is required for Image package type.".to_owned(),
             });
@@ -383,14 +438,8 @@ impl RustackLambda {
         }
 
         // Process code.
-        let (code_sha256, code_size, zip_bytes, code_path, image_uri) = self
-            .process_code(
-                name,
-                "$LATEST",
-                input.code.zip_file.as_deref(),
-                input.code.image_uri.as_deref(),
-            )
-            .await?;
+        let (code_sha256, code_size, zip_bytes, code_path, image_uri) =
+            self.process_code(name, "$LATEST", code_source).await?;
 
         // Validate deployment package size (Appendix C: 50 MB zipped).
         if code_size > MAX_ZIP_SIZE {
@@ -544,8 +593,20 @@ impl RustackLambda {
         function_ref: &str,
         input: UpdateFunctionCodeInput,
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
+        let code_source = CodeSource {
+            zip_file_b64: input.zip_file.as_deref(),
+            s3_bucket: input.s3_bucket.as_deref(),
+            s3_key: input.s3_key.as_deref(),
+            s3_object_version: input.s3_object_version.as_deref(),
+            image_uri: input.image_uri.as_deref(),
+        };
+        validate_code_source(&code_source)?;
+
         // Validate that some code source is provided.
-        if input.zip_file.is_none() && input.image_uri.is_none() && input.s3_bucket.is_none() {
+        if code_source.zip_file_b64.is_none()
+            && code_source.image_uri.is_none()
+            && code_source.s3_bucket.is_none()
+        {
             return Err(LambdaServiceError::InvalidParameter {
                 message: "Provide at least one of ZipFile, S3Bucket, or ImageUri.".to_owned(),
             });
@@ -554,14 +615,8 @@ impl RustackLambda {
         let (name, _) = resolve_function_ref(function_ref)?;
         let should_publish = input.publish.unwrap_or(false);
 
-        let (code_sha256, code_size, zip_bytes, code_path, image_uri) = self
-            .process_code(
-                &name,
-                "$LATEST",
-                input.zip_file.as_deref(),
-                input.image_uri.as_deref(),
-            )
-            .await?;
+        let (code_sha256, code_size, zip_bytes, code_path, image_uri) =
+            self.process_code(&name, "$LATEST", code_source).await?;
 
         self.store.update(&name, |record| {
             let now = now_iso8601();
@@ -2530,13 +2585,17 @@ impl RustackLambda {
             })
     }
 
-    /// Process code input (zip or image URI), returning code metadata.
+    /// Process code input (inline zip, S3 package, or image URI), returning
+    /// code metadata.
+    ///
+    /// S3 packages are downloaded through the configured [`S3CodeFetcher`] and
+    /// stored via the same path as inline `ZipFile`, so downstream validation,
+    /// checksum computation, and executor behavior are identical.
     async fn process_code(
         &self,
         function_name: &str,
         version: &str,
-        zip_file_b64: Option<&str>,
-        image_uri: Option<&str>,
+        source: CodeSource<'_>,
     ) -> Result<
         (
             String,
@@ -2547,7 +2606,7 @@ impl RustackLambda {
         ),
         LambdaServiceError,
     > {
-        if let Some(b64) = zip_file_b64 {
+        if let Some(b64) = source.zip_file_b64 {
             use base64::Engine;
             let zip_bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64)
@@ -2567,7 +2626,25 @@ impl RustackLambda {
                 Some(code_path),
                 None,
             ))
-        } else if let Some(uri) = image_uri {
+        } else if let Some(bucket) = source.s3_bucket {
+            let key = source
+                .s3_key
+                .ok_or_else(|| LambdaServiceError::InvalidParameter {
+                    message: "Code.S3Key is required when Code.S3Bucket is provided".to_owned(),
+                })?;
+            let zip_bytes = self
+                .code_fetcher
+                .fetch_code(bucket, key, source.s3_object_version)
+                .await
+                .map_err(map_s3_code_fetch_error)?;
+
+            let (code_path, sha256, size) = self
+                .store
+                .store_zip_code(function_name, version, &zip_bytes)
+                .await?;
+
+            Ok((sha256, size, Some(zip_bytes), Some(code_path), None))
+        } else if let Some(uri) = source.image_uri {
             let sha256 = compute_sha256(uri.as_bytes());
             Ok((sha256, 0, None, None, Some(uri.to_owned())))
         } else {
@@ -2733,6 +2810,98 @@ fn build_event_invoke_config(
     }
 }
 
+/// Validate the mutually-exclusive code inputs for a deployment package.
+///
+/// Enforces that at most one code source is provided, that S3 locations are
+/// complete, and that S3 fields are non-empty and within byte bounds, so
+/// invalid combinations fail fast at create/update time instead of
+/// surfacing later at invoke.
+///
+/// # Errors
+///
+/// Returns [`LambdaServiceError::InvalidParameter`] for empty or oversize S3
+/// fields, conflicting code sources, or an S3 key/bucket provided without
+/// its counterpart.
+fn validate_code_source(source: &CodeSource<'_>) -> Result<(), LambdaServiceError> {
+    let has_s3 = source.s3_bucket.is_some() || source.s3_key.is_some();
+
+    if source.zip_file_b64.is_some() && source.s3_bucket.is_some() {
+        return Err(invalid_parameter(
+            "ZipFile and S3Bucket are mutually exclusive; provide one code source.",
+        ));
+    }
+    if source.image_uri.is_some() && (source.zip_file_b64.is_some() || has_s3) {
+        return Err(invalid_parameter(
+            "ImageUri cannot be combined with ZipFile or S3Bucket; provide one code source.",
+        ));
+    }
+    if let Some(bucket) = source.s3_bucket {
+        if source.s3_key.is_none() {
+            return Err(invalid_parameter(
+                "Code.S3Key is required when Code.S3Bucket is provided",
+            ));
+        }
+        validate_s3_field("Code.S3Bucket", bucket, MAX_S3_BUCKET_LEN)?;
+    }
+    if let Some(key) = source.s3_key {
+        if source.s3_bucket.is_none() {
+            return Err(invalid_parameter(
+                "Code.S3Bucket is required when Code.S3Key is provided",
+            ));
+        }
+        validate_s3_field("Code.S3Key", key, MAX_S3_KEY_LEN)?;
+    }
+    if let Some(version) = source.s3_object_version {
+        validate_s3_field("Code.S3ObjectVersion", version, MAX_S3_VERSION_LEN)?;
+    }
+    Ok(())
+}
+
+/// Reject empty or oversize S3 fields (length caps per AGENTS.md).
+fn validate_s3_field(name: &str, value: &str, max_bytes: usize) -> Result<(), LambdaServiceError> {
+    if value.is_empty() {
+        return Err(invalid_parameter(&format!("{name} must not be empty")));
+    }
+    if value.len() > max_bytes {
+        return Err(invalid_parameter(&format!(
+            "{name} must be at most {max_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Build an `InvalidParameter` service error.
+fn invalid_parameter(message: &str) -> LambdaServiceError {
+    LambdaServiceError::InvalidParameter {
+        message: message.to_owned(),
+    }
+}
+
+/// Map an [`S3CodeFetchError`] to an AWS-compatible Lambda error.
+///
+/// Mirrors the messages real AWS Lambda returns when it cannot fetch the
+/// deployment package from S3.
+fn map_s3_code_fetch_error(err: S3CodeFetchError) -> LambdaServiceError {
+    let message = match err {
+        S3CodeFetchError::BucketNotFound { .. } => "Error occurred while GetObject. S3 Error \
+                                                    Code: NoSuchBucket. S3 Error Message: The \
+                                                    specified bucket does not exist."
+            .to_owned(),
+        S3CodeFetchError::ObjectNotFound { .. } => "Error occurred while GetObject. S3 Error \
+                                                    Code: NoSuchKey. S3 Error Message: The \
+                                                    specified key does not exist."
+            .to_owned(),
+        S3CodeFetchError::VersionNotFound { .. } => "Error occurred while GetObject. S3 Error \
+                                                     Code: NoSuchVersion. S3 Error Message: The \
+                                                     specified version does not exist."
+            .to_owned(),
+        S3CodeFetchError::Internal(source) => {
+            format!("Error occurred while GetObject. {source}")
+        }
+    };
+    LambdaServiceError::InvalidParameter { message }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2776,6 +2945,283 @@ mod tests {
         assert_eq!(
             output.configuration.as_ref().unwrap().function_name,
             Some("my-func".to_owned()),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // S3 code packages (issue #34)
+    // ------------------------------------------------------------------
+
+    /// Test double for the S3 code fetcher seam.
+    #[derive(Debug)]
+    enum FakeFetchResult {
+        Ok(Bytes),
+        BucketNotFound,
+        ObjectNotFound,
+        VersionNotFound,
+    }
+
+    #[derive(Debug)]
+    struct FakeCodeFetcher(FakeFetchResult);
+
+    #[async_trait::async_trait]
+    impl S3CodeFetcher for FakeCodeFetcher {
+        async fn fetch_code(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _version: Option<&str>,
+        ) -> Result<Bytes, S3CodeFetchError> {
+            match &self.0 {
+                FakeFetchResult::Ok(bytes) => Ok(bytes.clone()),
+                FakeFetchResult::BucketNotFound => Err(S3CodeFetchError::BucketNotFound {
+                    bucket: "b".to_owned(),
+                }),
+                FakeFetchResult::ObjectNotFound => Err(S3CodeFetchError::ObjectNotFound {
+                    bucket: "b".to_owned(),
+                    key: "k".to_owned(),
+                }),
+                FakeFetchResult::VersionNotFound => Err(S3CodeFetchError::VersionNotFound {
+                    bucket: "b".to_owned(),
+                    key: "k".to_owned(),
+                    version: "v".to_owned(),
+                }),
+            }
+        }
+    }
+
+    fn s3_code_input(name: &str) -> CreateFunctionInput {
+        CreateFunctionInput {
+            function_name: name.to_owned(),
+            runtime: Some("python3.12".to_owned()),
+            role: "arn:aws:iam::000000000000:role/test-role".to_owned(),
+            handler: Some("index.handler".to_owned()),
+            code: rustack_lambda_model::types::FunctionCode {
+                s3_bucket: Some("code-bucket".to_owned()),
+                s3_key: Some("demo.zip".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn provider_with_fetcher(fetcher: FakeCodeFetcher) -> RustackLambda {
+        test_provider().with_code_fetcher(Arc::new(fetcher))
+    }
+
+    #[tokio::test]
+    async fn test_should_create_function_with_s3_code() {
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(
+            Bytes::from_static(b"PK\x03\x04fake-s3-code"),
+        )));
+
+        let config = provider
+            .create_function(s3_code_input("s3-func"))
+            .await
+            .unwrap();
+        assert_eq!(config.function_name, Some("s3-func".to_owned()));
+        assert_eq!(config.state, Some("Active".to_owned()));
+        // The downloaded package must populate the code metadata exactly like
+        // an inline ZipFile package.
+        assert!(config.code_sha256.is_some());
+        let sha = config.code_sha256.as_ref().unwrap();
+        assert!(!sha.is_empty(), "code_sha256 must be populated");
+        assert!(
+            config.code_size.unwrap_or(0) > 0,
+            "code_size must be populated"
+        );
+
+        // The function is invokable: the record carries the zip bytes.
+        let record = provider.get_record("s3-func").unwrap();
+        assert!(record.latest.code_path.is_some(), "code_path must be set");
+        assert_eq!(
+            record.latest.zip_bytes.as_deref(),
+            Some(b"PK\x03\x04fake-s3-code".as_slice()),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_create_function_when_s3_bucket_missing() {
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::BucketNotFound));
+        let err = provider
+            .create_function(s3_code_input("s3-func"))
+            .await
+            .expect_err("missing bucket must fail");
+        let message = err.to_string();
+        assert!(message.contains("NoSuchBucket"), "got: {message}");
+        assert!(
+            provider.get_record("s3-func").is_err(),
+            "no record should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_create_function_when_s3_object_missing() {
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::ObjectNotFound));
+        let err = provider
+            .create_function(s3_code_input("s3-func"))
+            .await
+            .expect_err("missing object must fail");
+        let message = err.to_string();
+        assert!(message.contains("NoSuchKey"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_create_function_when_s3_version_missing() {
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::VersionNotFound));
+        let mut input = s3_code_input("s3-func");
+        input.code.s3_object_version = Some("nope".to_owned());
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("missing version must fail");
+        let message = err.to_string();
+        assert!(message.contains("NoSuchVersion"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_empty_s3_bucket() {
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.s3_bucket = Some(String::new());
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("empty bucket must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("must not be empty"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_oversize_s3_key() {
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.s3_key = Some("x".repeat(1025));
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("oversize key must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("at most 1024 bytes"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_image_uri_combined_with_s3_code() {
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.image_uri = Some("dkr.ecr.us-east-1.amazonaws.com/fn:latest".to_owned());
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("image + s3 must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("ImageUri cannot be combined"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_image_uri_combined_with_zip_file() {
+        let provider = test_provider();
+        let mut input = sample_create_input("img-func");
+        input.code.image_uri = Some("dkr.ecr.us-east-1.amazonaws.com/fn:latest".to_owned());
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("image + zip must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("ImageUri cannot be combined"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_zip_file_and_s3_bucket_together() {
+        use base64::Engine;
+
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.zip_file =
+            Some(base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04fake"));
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("zip + s3 must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("mutually exclusive"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_require_s3_key_when_bucket_provided() {
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.s3_key = None;
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("missing s3 key must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("S3Key is required"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_require_s3_bucket_when_key_provided() {
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.s3_bucket = None;
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("s3 key without bucket must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("S3Bucket is required"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_s3_code_when_no_fetcher_configured() {
+        // test_provider() uses the default unavailable fetcher.
+        let provider = test_provider();
+        let err = provider
+            .create_function(s3_code_input("s3-func"))
+            .await
+            .expect_err("S3 code without a fetcher must fail fast");
+        let message = err.to_string();
+        assert!(
+            message.contains("S3 service is not enabled"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_update_function_code_from_s3() {
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(
+            Bytes::from_static(b"PK\x03\x04fake-s3-update"),
+        )));
+        // Start from an inline zip, then switch to an S3 package.
+        provider
+            .create_function(sample_create_input("s3-func"))
+            .await
+            .unwrap();
+
+        let config = provider
+            .update_function_code(
+                "s3-func",
+                rustack_lambda_model::input::UpdateFunctionCodeInput {
+                    s3_bucket: Some("code-bucket".to_owned()),
+                    s3_key: Some("demo.zip".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(config.code_sha256.is_some());
+        let sha = config.code_sha256.as_ref().unwrap();
+        assert_eq!(sha, &compute_sha256(b"PK\x03\x04fake-s3-update"),);
+        assert_eq!(
+            config.code_size,
+            Some(i64::try_from(b"PK\x03\x04fake-s3-update".len()).unwrap())
         );
     }
 

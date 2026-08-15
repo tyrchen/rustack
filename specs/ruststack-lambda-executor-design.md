@@ -74,7 +74,7 @@ Rust `provided.*` lambdas working **without Docker** on a developer's host.
 3. VPC / IAM / KMS-encrypted env / SnapStart / Layers / EFS — all no-op.
 4. Cold-start budget enforcement, concurrent execution limits, throttling.
 5. Function URL invocation path (orthogonal — covered in the parent spec).
-6. S3 code source (still rejected; only `ZipFile` and `ImageUri`).
+6. External S3 endpoints as code source (rustack's own S3 is supported via the in-process bridge — see [ruststack-lambda-s3-code-design](./ruststack-lambda-s3-code-design.md)).
 
 ## 3. Architecture
 
