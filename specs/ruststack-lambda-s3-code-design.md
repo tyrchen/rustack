@@ -175,11 +175,15 @@ New branch, ordered after zip_file_b64 and before image_uri:
 ```text
 s3_bucket is Some
     │ 1. validate s3_key present          (else InvalidParameterValue)
-    │ 2. code_fetcher.fetch_code(bucket, key, version).await
-    │       │ error ──▶ map S3CodeFetchError ──▶ InvalidParameterValue (section 4)
-    │       ▼ ok
-    │ 3. store_zip_code(function_name, version, &bytes)   ← same path as ZipFile
+    │ 2. code_fetcher.fetch_code(bucket, key, version).await   (bounded by
+    │    │    a per-read timeout; error ──▶ map to InvalidParameterValue)
+    │    ▼ ok
+    │ 3. check_code_size(len)             (> 50 MB ──▶ InvalidParameterValue,
+    │    │                                  BEFORE any storage/extraction)
+    │    ▼ ok
+    │ 4. store_zip_code(function_name, version, &bytes)   ← same path as ZipFile
     │       (validates zip structure, rejects path traversal,
+    │        caps extracted bytes at 250 MB to defeat zip bombs,
     │        computes sha256 + size, extracts bootstrap)
     │       ▼
     └─▶ (sha256, size, Some(bytes), Some(code_path), None)
@@ -195,6 +199,10 @@ downstream: same validation, same storage, same executor path.
 | S3Bucket set, S3Key missing | InvalidParameterValue: "Code.S3Key is required when Code.S3Bucket is provided" |
 | S3Key set, S3Bucket missing | InvalidParameterValue: "Code.S3Bucket is required when Code.S3Key is provided" |
 | ZipFile and S3Bucket both set | InvalidParameterValue: "ZipFile and S3Bucket are mutually exclusive; provide one code source" |
+| ZipFile or S3Bucket combined with ImageUri | InvalidParameterValue: "ImageUri cannot be combined with ZipFile or S3Bucket" |
+| S3ObjectVersion without S3Bucket/S3Key | InvalidParameterValue: "Code.S3ObjectVersion requires Code.S3Bucket and Code.S3Key" |
+| Empty S3 fields | InvalidParameterValue: "<field> must not be empty" |
+| Oversize S3 fields | InvalidParameterValue: "<field> must be at most <N> bytes" (63/1024/256) |
 | ZipFile only | unchanged (inline path) |
 | S3Bucket only | new: fetch + store (section 3.3) |
 | ImageUri only | unchanged |
@@ -231,6 +239,7 @@ events_bridge.rs pattern:
 #[derive(Debug)]
 pub struct LambdaS3CodeFetcher {
     s3: Arc<RustackS3>,
+    read_timeout: Duration, // DEFAULT_READ_TIMEOUT (30s)
 }
 
 #[async_trait]
@@ -242,6 +251,9 @@ impl S3CodeFetcher for LambdaS3CodeFetcher {
         //    - version: None     ──▶ get(key)            (latest non-delete-marker)
         //    resolve the concrete storage version_id ("null" for unversioned)
         // 3. drop the lock, then storage().read_object(bucket, key, version_id, None)
+        //    wrapped in tokio::time::timeout(read_timeout) so a stalled disk
+        //    I/O cannot hold the request open indefinitely (gateway has no
+        //    enclosing request timeout)
         //    (parking_lot guards are !Send — never held across .await,
         //     mirroring ops/object.rs handle_get_object)
     }
@@ -299,6 +311,10 @@ fetcher produces the clear error in section 4.5.
 | unit (rustack-lambda-core) | create_function with ZipFile and S3Bucket | rejected, mutually exclusive |
 | unit (rustack-lambda-core) | create_function S3Bucket without S3Key | rejected, S3Key required |
 | unit (rustack-lambda-core) | update_function_code with S3 code | code_sha256/code_size updated on $LATEST |
+| unit (rustack-lambda-core) | oversize S3 package (> 50 MB) on create and update | rejected with "Unzipped size must be smaller" before any storage |
+| unit (rustack-lambda-core) | S3ObjectVersion without S3Bucket/S3Key | rejected, version requires a full S3 location |
+| unit (rustack-lambda-core) | storage: zip expanding beyond 250 MB extraction budget | InvalidZipFile (zip-bomb guard) |
+| unit (apps/rustack bridge) | delete-marker version id pinned | ObjectNotFound; original version still retrievable; latest gone |
 | unit (rustack-lambda-core) | unavailable fetcher (default new()) with S3 code | clear "S3 service is not enabled" error |
 | unit (apps/rustack bridge) | real RustackS3: put object → fetch | bytes match round-trip |
 | unit (apps/rustack bridge) | missing bucket / key / explicit version | correct error variant |
@@ -320,9 +336,13 @@ trait method.
 3. UpdateFunctionCode with S3 code updates code_sha256/code_size.
 4. No core->core dependency: rustack-lambda-core has no rustack-s3-core
    dependency; the bridge lives in apps/rustack.
-5. Quality gates green: cargo build, cargo test, cargo +nightly fmt --check,
+5. Hardening: S3 packages over the 50 MB zipped limit fail before any
+   storage/extraction on both create and update; extraction is capped at
+   250 MB unzipped; the S3 read is bounded by a 30s timeout; S3ObjectVersion
+   requires a full S3 location.
+6. Quality gates green: cargo build, cargo test, cargo +nightly fmt --check,
    cargo clippy -- -D warnings, doc build with RUSTDOCFLAGS="-D warnings".
-6. Spec set updated: this design, specs/README.md index, and the stale
+7. Spec set updated: this design, specs/README.md index, and the stale
    "does not fetch from S3" notes in rustack-lambda-design.md /
    rustack-lambda-executor-design.md all reflect the new behavior.
 

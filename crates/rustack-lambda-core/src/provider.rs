@@ -441,13 +441,6 @@ impl RustackLambda {
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) =
             self.process_code(name, "$LATEST", code_source).await?;
 
-        // Validate deployment package size (Appendix C: 50 MB zipped).
-        if code_size > MAX_ZIP_SIZE {
-            return Err(LambdaServiceError::InvalidParameter {
-                message: format!("Unzipped size must be smaller than {MAX_ZIP_SIZE} bytes"),
-            });
-        }
-
         let timeout = input.timeout.unwrap_or(3);
         let memory_size = input.memory_size.unwrap_or(128);
         let architectures = input
@@ -2613,6 +2606,9 @@ impl RustackLambda {
                 .map_err(|e| LambdaServiceError::InvalidZipFile {
                     message: format!("Invalid base64 encoding: {e}"),
                 })?;
+            // Fail fast on oversized packages before any storage or
+            // extraction happens.
+            check_code_size(zip_bytes.len())?;
 
             let (code_path, sha256, size) = self
                 .store
@@ -2637,6 +2633,9 @@ impl RustackLambda {
                 .fetch_code(bucket, key, source.s3_object_version)
                 .await
                 .map_err(map_s3_code_fetch_error)?;
+            // Fail fast on oversized packages before any storage or
+            // extraction happens.
+            check_code_size(zip_bytes.len())?;
 
             let (code_path, sha256, size) = self
                 .store
@@ -2853,6 +2852,25 @@ fn validate_code_source(source: &CodeSource<'_>) -> Result<(), LambdaServiceErro
     }
     if let Some(version) = source.s3_object_version {
         validate_s3_field("Code.S3ObjectVersion", version, MAX_S3_VERSION_LEN)?;
+        // A version only makes sense as part of an S3 location; reject it
+        // when it would otherwise be silently ignored.
+        if source.s3_bucket.is_none() || source.s3_key.is_none() {
+            return Err(invalid_parameter(
+                "Code.S3ObjectVersion requires Code.S3Bucket and Code.S3Key",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject deployment packages above the zipped size limit before any
+/// storage or extraction happens, so oversized packages fail fast instead
+/// of materializing onto disk.
+fn check_code_size(size_bytes: usize) -> Result<(), LambdaServiceError> {
+    if size_bytes as u64 > MAX_ZIP_SIZE {
+        return Err(LambdaServiceError::InvalidParameter {
+            message: format!("Unzipped size must be smaller than {MAX_ZIP_SIZE} bytes"),
+        });
     }
     Ok(())
 }
@@ -3177,6 +3195,73 @@ mod tests {
             .expect_err("s3 key without bucket must be rejected");
         let message = err.to_string();
         assert!(message.contains("S3Bucket is required"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_oversize_s3_code_before_storage() {
+        // 50 MB zipped limit (Appendix C) — one byte over must fail fast,
+        // before any storage or extraction happens.
+        let oversized = vec![0u8; 50 * 1024 * 1024 + 1];
+        let provider =
+            provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(Bytes::from(oversized))));
+        let err = provider
+            .create_function(s3_code_input("s3-func"))
+            .await
+            .expect_err("oversize S3 package must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("Unzipped size must be smaller"),
+            "got: {message}"
+        );
+        assert!(
+            provider.get_record("s3-func").is_err(),
+            "no record should exist for an oversized package",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_oversize_s3_code_on_update() {
+        let oversized = vec![0u8; 50 * 1024 * 1024 + 1];
+        let provider =
+            provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(Bytes::from(oversized))));
+        provider
+            .create_function(sample_create_input("s3-func"))
+            .await
+            .unwrap();
+        let err = provider
+            .update_function_code(
+                "s3-func",
+                rustack_lambda_model::input::UpdateFunctionCodeInput {
+                    s3_bucket: Some("code-bucket".to_owned()),
+                    s3_key: Some("demo.zip".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("oversize update must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("Unzipped size must be smaller"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_s3_version_without_location() {
+        let provider = test_provider();
+        let mut input = s3_code_input("s3-func");
+        input.code.s3_bucket = None;
+        input.code.s3_key = None;
+        input.code.s3_object_version = Some("v1".to_owned());
+        let err = provider
+            .create_function(input)
+            .await
+            .expect_err("version without location must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("Code.S3ObjectVersion requires"),
+            "got: {message}"
+        );
     }
 
     #[tokio::test]

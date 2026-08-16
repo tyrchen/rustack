@@ -6,7 +6,7 @@
 //! `rustack-s3-core` (same pattern as `sns_bridge.rs` and
 //! `events_bridge.rs`).
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -14,17 +14,24 @@ use bytes::Bytes;
 use rustack_lambda_core::code::{S3CodeFetchError, S3CodeFetcher};
 use rustack_s3_core::{RustackS3, error::S3ServiceError};
 
+/// Default per-read timeout for S3 code downloads.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Fetches Lambda deployment packages from rustack's own S3 service.
 #[derive(Debug)]
 pub struct LambdaS3CodeFetcher {
     s3: Arc<RustackS3>,
+    read_timeout: Duration,
 }
 
 impl LambdaS3CodeFetcher {
     /// Create a new fetcher wrapping the given S3 provider.
     #[must_use]
     pub fn new(s3: Arc<RustackS3>) -> Self {
-        Self { s3 }
+        Self {
+            s3,
+            read_timeout: DEFAULT_READ_TIMEOUT,
+        }
     }
 }
 
@@ -76,11 +83,18 @@ impl S3CodeFetcher for LambdaS3CodeFetcher {
             obj.version_id.clone()
         };
 
-        // Read the object data (outside the lock).
-        self.s3
-            .storage()
-            .read_object(bucket, key, &storage_version_id, None)
+        // Read the object data (outside the lock), bounded by a timeout so a
+        // stalled disk I/O cannot hold the request open indefinitely.
+        let timeout = self.read_timeout;
+        let storage = self.s3.storage();
+        let read = storage.read_object(bucket, key, &storage_version_id, None);
+        tokio::time::timeout(timeout, read)
             .await
+            .map_err(|_| {
+                S3CodeFetchError::Internal(anyhow!(
+                    "timed out reading S3 object {bucket}/{key} after {timeout:?}"
+                ))
+            })?
             .map_err(|e| match e {
                 S3ServiceError::NoSuchKey { .. } => S3CodeFetchError::ObjectNotFound {
                     bucket: bucket.to_owned(),
