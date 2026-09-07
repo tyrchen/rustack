@@ -510,6 +510,15 @@ impl TableStorage {
         item: HashMap<String, AttributeValue>,
     ) -> Result<Option<HashMap<String, AttributeValue>>, StorageError> {
         let primary_key = extract_primary_key(&self.key_schema, &item)?;
+        Ok(self.put_prepared(primary_key, item))
+    }
+
+    /// Commit an item whose key and value were validated during prepare.
+    pub(crate) fn put_prepared(
+        &self,
+        primary_key: PrimaryKey,
+        item: HashMap<String, AttributeValue>,
+    ) -> Option<HashMap<String, AttributeValue>> {
         let sort_key = primary_key
             .sort_key
             .unwrap_or(SortableAttributeValue::Sentinel);
@@ -528,12 +537,12 @@ impl TableStorage {
             self.total_size.fetch_add(new_size, AtomicOrdering::Relaxed);
             self.total_size.fetch_sub(old_size, AtomicOrdering::Relaxed);
             debug!(old_size, new_size, "replaced existing item");
-            Ok(Some(old.attributes))
+            Some(old.attributes)
         } else {
             self.item_count.fetch_add(1, AtomicOrdering::Relaxed);
             self.total_size.fetch_add(new_size, AtomicOrdering::Relaxed);
             debug!(new_size, "inserted new item");
-            Ok(None)
+            None
         }
     }
 

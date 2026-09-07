@@ -7,7 +7,7 @@ use bytes::Bytes;
 /// Selects which execution backend the provider should construct at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutorBackend {
-    /// Legacy echo behavior — no real process or container is started.
+    /// Metadata-only operation: execution fails explicitly and starts no process.
     #[default]
     Disabled,
     /// Pick the most appropriate backend per invocation: Squib for macOS Zip

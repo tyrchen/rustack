@@ -39,7 +39,11 @@ pub enum ExecutorError {
 impl From<ExecutorError> for LambdaServiceError {
     fn from(e: ExecutorError) -> Self {
         match e {
-            ExecutorError::Disabled => Self::DockerNotAvailable,
+            ExecutorError::Disabled => Self::ResourceNotReady {
+                message: "Lambda execution is disabled; explicitly select a trusted execution \
+                          backend"
+                    .into(),
+            },
             ExecutorError::Unsupported(m)
             | ExecutorError::InvalidCode(m)
             | ExecutorError::InitFailed(m)

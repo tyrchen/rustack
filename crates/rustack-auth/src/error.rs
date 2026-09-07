@@ -6,6 +6,13 @@
 /// Errors that can occur during AWS Signature Version 4 authentication.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    /// Strict authentication requires a credential provider.
+    #[error("Strict authentication requires a credential provider")]
+    MissingCredentialProvider,
+
+    /// The payload declaration is malformed or does not match the actual body.
+    #[error("Invalid or mismatching payload SHA256")]
+    InvalidPayloadHash,
     /// The `Authorization` header is missing from the request.
     #[error("Missing Authorization header")]
     MissingAuthHeader,

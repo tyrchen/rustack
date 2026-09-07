@@ -5,7 +5,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use dashmap::DashMap;
@@ -31,7 +34,7 @@ use rustack_sqs_model::{
     },
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     config::SqsConfig,
@@ -43,13 +46,18 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+#[path = "redrive_tests.rs"]
+mod redrive_tests;
+
 /// Main SQS provider. Acts as the queue manager that owns all queue actors.
 #[derive(Debug)]
 pub struct RustackSqs {
     /// Queue registry: queue_name -> QueueHandle.
-    queues: DashMap<String, Arc<QueueHandle>>,
+    queues: Arc<DashMap<String, Arc<QueueHandle>>>,
     /// Configuration.
     config: Arc<SqsConfig>,
+    quiescing: AtomicBool,
 }
 
 /// Serializable SQS provider snapshot.
@@ -77,9 +85,47 @@ impl RustackSqs {
     #[must_use]
     pub fn new(config: SqsConfig) -> Self {
         Self {
-            queues: DashMap::new(),
+            queues: Arc::new(DashMap::new()),
             config: Arc::new(config),
+            quiescing: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the provider and every currently registered queue actor are healthy.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        !self.quiescing.load(Ordering::Acquire)
+            && self.queues.iter().all(|queue| {
+                !queue.shutdown.load(Ordering::Acquire)
+                    && !queue.sender.is_closed()
+                    && queue.completion.borrow().is_none()
+                    && queue.completion.has_changed().is_ok()
+            })
+    }
+
+    /// Resolve an exact local-account/region SQS ARN to its configured queue URL.
+    ///
+    /// # Errors
+    /// Rejects malformed, foreign-account, foreign-region and unsupported ARNs.
+    pub fn queue_url_for_arn(&self, arn: &str) -> Result<String, SqsError> {
+        let parts: Vec<_> = arn.split(':').collect();
+        let ["arn", "aws", "sqs", region, account, name] = parts.as_slice() else {
+            return Err(SqsError::invalid_parameter_value(
+                "Expected an SQS queue ARN",
+            ));
+        };
+        if *region != self.config.default_region || *account != self.config.account_id {
+            return Err(SqsError::invalid_parameter_value(
+                "SQS queue ARN must use the local account and region",
+            ));
+        }
+        validate_queue_name(name)?;
+        let host = if self.config.host.contains(':') && !self.config.host.starts_with('[') {
+            format!("[{}]", self.config.host)
+        } else {
+            self.config.host.clone()
+        };
+        Ok(queue_url(&host, self.config.port, account, name))
     }
 
     /// Resolve a queue name from a queue URL.
@@ -161,11 +207,30 @@ impl RustackSqs {
             })
             .await?;
         }
+        self.quiescing.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Quiesce DLQ handoffs without deleting queues or messages.
+    ///
+    /// # Errors
+    /// Returns an error if an actor cannot acknowledge its consistency barrier.
+    pub async fn quiesce(&self) -> Result<(), SqsError> {
+        self.quiescing.store(true, Ordering::Release);
+        let handles: Vec<_> = self
+            .queues
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect();
+        for handle in handles {
+            handle.quiesce().await?;
+        }
         Ok(())
     }
 
     /// Shut down all queue actors and clear the registry.
     pub async fn shutdown_all(&self) {
+        self.quiescing.store(true, Ordering::Release);
         let handles: Vec<Arc<QueueHandle>> = self
             .queues
             .iter()
@@ -267,8 +332,17 @@ impl RustackSqs {
             input.tags,
             self.config.account_id.clone(),
             now,
-        );
-        let task = tokio::spawn(actor.run());
+        )
+        .with_routes(Arc::downgrade(&self.queues));
+        let (finished, completion) = watch::channel(None);
+        // One supervisor per queue observes actor panics and makes shutdown joinable.
+        tokio::spawn(async move {
+            let result = tokio::spawn(actor.run()).await;
+            if let Err(error) = &result {
+                tracing::error!(error = %error, "SQS queue actor failed");
+            }
+            let _ = finished.send(Some(result.is_ok()));
+        });
 
         let handle = Arc::new(QueueHandle {
             sender,
@@ -279,7 +353,7 @@ impl RustackSqs {
                 is_fifo,
                 created_at: now,
             },
-            task,
+            completion,
             shutdown: Arc::new(AtomicBool::new(false)),
         });
 
@@ -306,7 +380,11 @@ impl RustackSqs {
     }
 
     /// Handle `GetQueueUrl`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn get_queue_url(
         &self,
         input: GetQueueUrlInput,
@@ -322,7 +400,11 @@ impl RustackSqs {
     }
 
     /// Handle `ListQueues`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     // max_results clamped to 1..=1000, always positive and fits in usize.
     pub async fn list_queues(&self, input: ListQueuesInput) -> Result<ListQueuesOutput, SqsError> {
@@ -648,7 +730,11 @@ impl RustackSqs {
     }
 
     /// Handle `RemovePermission`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn remove_permission(
         &self,
         input: RemovePermissionInput,
@@ -660,7 +746,11 @@ impl RustackSqs {
     // ---- Message Move Task Operations (stubs) ----
 
     /// Handle `StartMessageMoveTask`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn start_message_move_task(
         &self,
         _input: StartMessageMoveTaskInput,
@@ -672,7 +762,11 @@ impl RustackSqs {
     }
 
     /// Handle `CancelMessageMoveTask`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn cancel_message_move_task(
         &self,
         _input: CancelMessageMoveTaskInput,
@@ -684,7 +778,11 @@ impl RustackSqs {
     }
 
     /// Handle `ListMessageMoveTasks`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn list_message_move_tasks(
         &self,
         _input: ListMessageMoveTasksInput,

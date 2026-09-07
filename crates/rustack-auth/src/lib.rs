@@ -39,6 +39,8 @@
 pub mod canonical;
 pub mod credentials;
 pub mod error;
+pub mod mode;
+pub use mode::AuthMode;
 pub mod presigned;
 pub mod sigv2;
 pub mod sigv4;

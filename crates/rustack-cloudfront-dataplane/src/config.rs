@@ -39,32 +39,32 @@ impl DataPlaneConfig {
     #[must_use]
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
-        if let Ok(v) = std::env::var("CLOUDFRONT_DOMAIN_SUFFIX") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_DOMAIN_SUFFIX") {
             cfg.domain_suffix = v;
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_FAIL_ON_FUNCTION") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_FAIL_ON_FUNCTION") {
             cfg.fail_on_function = matches!(
                 v.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
             );
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_FORWARD_USER_METADATA") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_FORWARD_USER_METADATA") {
             cfg.forward_user_metadata = matches!(
                 v.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
             );
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_MAX_UPSTREAM_BODY_BYTES") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_MAX_UPSTREAM_BODY_BYTES") {
             if let Ok(n) = v.parse() {
                 cfg.max_upstream_body_bytes = n;
             }
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_HTTP_ORIGIN_TIMEOUT_MS") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_HTTP_ORIGIN_TIMEOUT_MS") {
             if let Ok(ms) = v.parse() {
                 cfg.http_origin_timeout = Duration::from_millis(ms);
             }
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_DIVERGENCE_LOG_INTERVAL_MS") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_DIVERGENCE_LOG_INTERVAL_MS") {
             if let Ok(ms) = v.parse() {
                 cfg.divergence_log_interval = Duration::from_millis(ms);
             }

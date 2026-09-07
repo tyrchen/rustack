@@ -83,10 +83,26 @@ impl DataPlaneBuilder {
     /// Construct the `DataPlane`.
     pub fn build(self) -> Result<DataPlane, &'static str> {
         let cf = self.cloudfront.ok_or("CloudFront provider is required")?;
+        if self.config.max_upstream_body_bytes == 0
+            || self.config.max_upstream_body_bytes > 64 * 1024 * 1024
+            || self.config.http_origin_timeout.is_zero()
+            || self.config.http_origin_timeout > std::time::Duration::from_secs(30)
+        {
+            return Err("invalid CloudFront upstream byte or time budget");
+        }
         let divergence = DivergenceTracker::new(self.config.divergence_log_interval);
         #[cfg(feature = "http-origin")]
         let http_client = reqwest::Client::builder()
-            .timeout(self.config.http_origin_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(
+                self.config
+                    .http_origin_timeout
+                    .min(std::time::Duration::from_secs(
+                        rustack_core::settings::budgets().body_total_seconds,
+                    )),
+            )
             .build()
             .map_err(|_| "failed to build reqwest client")?;
         Ok(DataPlane {
@@ -279,11 +295,12 @@ impl DataPlane {
                     &headers,
                     &origin.custom_headers,
                     self.config.forward_user_metadata,
+                    self.config.max_upstream_body_bytes,
                 )
                 .await
                 {
                     Ok(r) => r,
-                    Err(e) => return self.handle_origin_error(&dist.config, e).await,
+                    Err(e) => return Self::handle_origin_error(&dist.config, &e),
                 }
             }
             #[cfg(feature = "http-origin")]
@@ -300,7 +317,7 @@ impl DataPlane {
                 .await
                 {
                     Ok(r) => r,
-                    Err(e) => return self.handle_origin_error(&dist.config, e).await,
+                    Err(e) => return Self::handle_origin_error(&dist.config, &e),
                 }
             }
             #[cfg(not(feature = "http-origin"))]
@@ -343,11 +360,7 @@ impl DataPlane {
         response
     }
 
-    async fn handle_origin_error(
-        &self,
-        config: &DistributionConfig,
-        err: DataPlaneError,
-    ) -> Response<Bytes> {
+    fn handle_origin_error(config: &DistributionConfig, err: &DataPlaneError) -> Response<Bytes> {
         let status = err.http_status();
         // Check CustomErrorResponses.
         for cer in &config.custom_error_responses {
@@ -369,10 +382,10 @@ impl DataPlane {
                 }
                 return builder
                     .body(Bytes::from_static(b""))
-                    .unwrap_or_else(|_| error_response(&err));
+                    .unwrap_or_else(|_| error_response(err));
             }
         }
-        error_response(&err)
+        error_response(err)
     }
 
     fn check_divergence(
@@ -462,6 +475,101 @@ fn xml_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "http-origin")]
+    #[tokio::test]
+    async fn test_should_ignore_environment_proxy_in_isolated_process() {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "plane::tests::test_should_preserve_redirects_and_bound_upstream_chunks",
+            ])
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("http_proxy", "http://127.0.0.1:9")
+            .env("https_proxy", "http://127.0.0.1:9")
+            .env("all_proxy", "http://127.0.0.1:9")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(10), child.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[cfg(feature = "http-origin")]
+    #[tokio::test]
+    async fn test_should_preserve_redirects_and_bound_upstream_chunks() {
+        use rustack_cloudfront_model::types::{CustomOriginConfig, Origin};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let cf = Arc::new(RustackCloudFront::new(
+            rustack_cloudfront_core::config::CloudFrontConfig::default(),
+        ));
+        let plane = DataPlane::builder().cloudfront(cf).build().unwrap();
+        for status in [301, 302, 303, 307, 308, 200] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let forbidden = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let location = format!("http://{}/secret", forbidden.local_addr().unwrap());
+            let origin = Origin {
+                domain_name: "127.0.0.1".to_owned(),
+                custom_origin_config: Some(CustomOriginConfig {
+                    http_port: i32::from(listener.local_addr().unwrap().port()),
+                    origin_protocol_policy: "http-only".to_owned(),
+                    ..CustomOriginConfig::default()
+                }),
+                ..Origin::default()
+            };
+            let wire = format!(
+                "HTTP/1.1 {status} Fixture\r\nLocation: {location}\r\nTransfer-Encoding: \
+                 chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n1\r\nd\r\n0\r\n\r\n"
+            );
+            let server = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                assert!(socket.read(&mut buffer).await.unwrap() > 0);
+                socket.write_all(wire.as_bytes()).await.unwrap();
+            };
+            let headers = HeaderMap::new();
+            let limit = if status == 200 { 3 } else { 4 };
+            let request = crate::dispatch::dispatch_http_origin(
+                &plane.http_client,
+                &origin,
+                "/",
+                &Method::GET,
+                &headers,
+                Bytes::new(),
+                limit,
+            );
+            let ((), result) = tokio::join!(server, request);
+            if status == 200 {
+                assert!(matches!(result, Err(DataPlaneError::PayloadTooLarge(_))));
+            } else {
+                let response = result.unwrap();
+                assert_eq!(response.status().as_u16(), status);
+                assert_eq!(
+                    response.headers().get("location").unwrap(),
+                    location.as_str()
+                );
+                assert_eq!(response.body().as_ref(), b"abcd");
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(2), forbidden.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_parse_path_based() {

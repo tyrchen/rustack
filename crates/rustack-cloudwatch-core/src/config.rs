@@ -1,6 +1,6 @@
 //! CloudWatch service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// CloudWatch service configuration.
 #[derive(Debug, Clone)]

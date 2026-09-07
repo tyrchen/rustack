@@ -3,11 +3,15 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
+use dashmap::DashMap;
+use parking_lot::Mutex;
+use rustack_auth::hash_payload;
 use rustack_dynamodb_model::{
     AttributeValue,
-    error::DynamoDBError,
+    error::{DynamoDBError, DynamoDBErrorCode},
     input::{
         BatchGetItemInput, BatchWriteItemInput, CreateTableInput, DeleteItemInput,
         DeleteTableInput, DescribeContinuousBackupsInput, DescribeEndpointsInput,
@@ -31,12 +35,14 @@ use rustack_dynamodb_model::{
         ContinuousBackupsDescription, ContinuousBackupsStatus, ExpectedAttributeValue,
         ItemResponse, KeyType, PointInTimeRecoveryDescription, PointInTimeRecoverySpecification,
         PointInTimeRecoveryStatus, ReturnValue, ScalarAttributeType, Select, TableStatus,
-        TimeToLiveDescription,
+        TimeToLiveDescription, TransactWriteItem,
     },
 };
+use tokio::task::spawn_blocking;
 
 use crate::{
     config::DynamoDBConfig,
+    coordination::{OperationGuard, RequestTracker},
     error::{expression_error_to_dynamodb, storage_error_to_dynamodb},
     expression::{
         AttributePath, EvalContext, PathElement, UpdateExpr, collect_names_from_expr,
@@ -48,6 +54,10 @@ use crate::{
     storage::{
         KeyAttribute, KeySchema, PrimaryKey, SortKeyCondition, SortableAttributeValue,
         TableStorage, calculate_item_size, extract_primary_key, partition_key_segment,
+    },
+    stream::{
+        ChangeEvent, ChangeEventName, NoopStreamEmitter, NoopStreamLifecycle, StreamEmitter,
+        StreamLifecycle,
     },
 };
 
@@ -167,7 +177,11 @@ fn validate_number_string(s: &str) -> Result<(), DynamoDBError> {
     let leading_zeros = (all_digits.len() - trimmed_leading.len()) as i64;
     // Actual magnitude = explicit_exp - frac_digits + all_digits.len() - leading_zeros - 1
     #[allow(clippy::cast_possible_wrap)]
-    let magnitude = explicit_exp - frac_digits + all_digits.len() as i64 - leading_zeros - 1;
+    let magnitude = explicit_exp
+        .saturating_sub(frac_digits)
+        .saturating_add(all_digits.len() as i64)
+        .saturating_sub(leading_zeros)
+        .saturating_sub(1);
 
     if magnitude > 125 {
         return Err(DynamoDBError::validation(
@@ -250,6 +264,19 @@ fn validate_key_not_empty(
 ) -> Result<(), DynamoDBError> {
     for ka in std::iter::once(&key_schema.partition_key).chain(key_schema.sort_key.iter()) {
         if let Some(val) = item.get(&ka.name) {
+            let limit = if ka.name == key_schema.partition_key.name {
+                2048
+            } else {
+                1024
+            };
+            let length = match val {
+                AttributeValue::S(value) => value.len(),
+                AttributeValue::B(value) => value.len(),
+                _ => 0,
+            };
+            if length > limit {
+                return Err(DynamoDBError::validation("Key exceeds maximum byte length"));
+            }
             match val {
                 AttributeValue::S(s) if s.is_empty() => {
                     return Err(DynamoDBError::validation(format!(
@@ -457,16 +484,30 @@ fn validate_parallel_scan(
     }
 }
 
+/// A successful transaction retained for the full idempotency window.
+#[derive(Debug)]
+pub(crate) struct CompletedTransaction {
+    fingerprint: String,
+    completed_at: Instant,
+    output: TransactWriteItemsOutput,
+}
+
 /// Main DynamoDB provider implementing all operations.
 pub struct RustackDynamoDB {
     /// Service state owning all tables.
-    pub state: Arc<DynamoDBServiceState>,
+    pub(crate) state: Arc<DynamoDBServiceState>,
+    /// Serializes complete provider operations, never held across await.
+    pub(crate) operation_gate: Arc<Mutex<()>>,
+    pub(crate) requests: RequestTracker,
+    /// Completed tokens; admission and mutation are protected by operation_gate.
+    pub(crate) tokens: DashMap<String, CompletedTransaction>,
+    token_capacity: usize,
     /// Configuration.
     pub config: Arc<DynamoDBConfig>,
     /// Stream emitter for change data capture.
-    emitter: Arc<dyn crate::stream::StreamEmitter>,
+    emitter: Arc<dyn StreamEmitter>,
     /// Stream lifecycle manager.
-    lifecycle: Arc<dyn crate::stream::StreamLifecycle>,
+    lifecycle: Arc<dyn StreamLifecycle>,
 }
 
 impl std::fmt::Debug for RustackDynamoDB {
@@ -484,9 +525,13 @@ impl RustackDynamoDB {
     pub fn new(config: DynamoDBConfig) -> Self {
         Self {
             state: Arc::new(DynamoDBServiceState::new()),
+            operation_gate: Arc::new(Mutex::new(())),
+            requests: RequestTracker::default(),
+            tokens: DashMap::new(),
+            token_capacity: 1024,
             config: Arc::new(config),
-            emitter: Arc::new(crate::stream::NoopStreamEmitter),
-            lifecycle: Arc::new(crate::stream::NoopStreamLifecycle),
+            emitter: Arc::new(NoopStreamEmitter),
+            lifecycle: Arc::new(NoopStreamLifecycle),
         }
     }
 
@@ -494,19 +539,52 @@ impl RustackDynamoDB {
     ///
     /// Called by the server binary to wire in the DynamoDB Streams
     /// implementation.
-    pub fn set_emitter(&mut self, emitter: Arc<dyn crate::stream::StreamEmitter>) {
+    pub fn set_emitter(&mut self, emitter: Arc<dyn StreamEmitter>) {
         self.emitter = emitter;
     }
 
     /// Set the stream lifecycle manager.
     ///
     /// Called by the server binary to wire in stream creation/deletion.
-    pub fn set_lifecycle(&mut self, lifecycle: Arc<dyn crate::stream::StreamLifecycle>) {
+    pub fn set_lifecycle(&mut self, lifecycle: Arc<dyn StreamLifecycle>) {
         self.lifecycle = lifecycle;
     }
 
-    /// Reset all state (for testing).
+    /// Whether request admission is open and no provider operation has panicked.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.requests.is_ready()
+    }
+
+    fn begin_operation(&self) -> Result<OperationGuard<'_>, DynamoDBError> {
+        self.requests.guard(self.operation_gate.lock())
+    }
+
+    /// Close request admission and drain blocking work, including cancelled HTTP requests.
+    ///
+    /// Snapshot export remains available after this terminal consistency barrier.
+    /// The runtime must apply its remaining overall shutdown deadline.
+    ///
+    /// # Errors
+    /// Returns an error if the blocking consistency barrier cannot be joined.
+    pub async fn quiesce(&self) -> Result<(), DynamoDBError> {
+        self.requests.quiesce().await;
+        self.requests.ensure_healthy()?;
+        let gate = Arc::clone(&self.operation_gate);
+        spawn_blocking(move || {
+            let _operation = gate.lock();
+        })
+        .await
+        .map_err(|error| {
+            DynamoDBError::internal_error(format!("DynamoDB quiesce failed: {error}"))
+        })?;
+        self.requests.ensure_healthy()
+    }
+
+    /// Reset all state (administrative operation).
     pub fn reset(&self) {
+        let _operation = self.operation_gate.lock();
+        self.tokens.clear();
         self.state.reset();
     }
 }
@@ -522,6 +600,7 @@ impl RustackDynamoDB {
         &self,
         input: CreateTableInput,
     ) -> Result<CreateTableOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         // Validate table name.
         validate_table_name(&input.table_name)?;
 
@@ -625,6 +704,7 @@ impl RustackDynamoDB {
         &self,
         input: DeleteTableInput,
     ) -> Result<DeleteTableOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table = self.state.delete_table(&input.table_name)?;
         self.lifecycle.on_table_deleted(&table.name);
         Ok(DeleteTableOutput {
@@ -638,6 +718,7 @@ impl RustackDynamoDB {
         &self,
         input: DescribeTableInput,
     ) -> Result<DescribeTableOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table = self.state.require_table(&input.table_name)?;
         let mut desc = table.to_description();
 
@@ -658,6 +739,7 @@ impl RustackDynamoDB {
         &self,
         input: ListTablesInput,
     ) -> Result<ListTablesOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         // Validate limit: must be 1-100 if specified.
         if let Some(limit) = input.limit {
             if !(1..=100).contains(&limit) {
@@ -705,6 +787,7 @@ impl RustackDynamoDB {
         &self,
         input: UpdateTableInput,
     ) -> Result<UpdateTableOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table = self.state.require_table(&input.table_name)?;
 
         // For our in-memory emulator, UpdateTable is accepted but most changes
@@ -727,6 +810,7 @@ impl RustackDynamoDB {
     /// Handle `PutItem`.
     #[allow(clippy::too_many_lines)]
     pub fn handle_put_item(&self, mut input: PutItemInput) -> Result<PutItemOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -837,13 +921,13 @@ impl RustackDynamoDB {
             .is_some_and(|s| s.stream_enabled)
         {
             let event_name = if old.is_some() {
-                crate::stream::ChangeEventName::Modify
+                ChangeEventName::Modify
             } else {
-                crate::stream::ChangeEventName::Insert
+                ChangeEventName::Insert
             };
             let keys = extract_key_attributes(&new_item, &table.key_schema_elements);
             let size = calculate_item_size(&new_item);
-            self.emitter.emit(crate::stream::ChangeEvent {
+            self.emitter.emit(ChangeEvent {
                 table_name: table.name.clone(),
                 event_name,
                 keys,
@@ -869,6 +953,7 @@ impl RustackDynamoDB {
     /// Handle `GetItem`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn handle_get_item(&self, mut input: GetItemInput) -> Result<GetItemOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -943,6 +1028,7 @@ impl RustackDynamoDB {
         &self,
         mut input: DeleteItemInput,
     ) -> Result<DeleteItemOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -1039,9 +1125,9 @@ impl RustackDynamoDB {
             {
                 let keys = extract_key_attributes(old_item, &table.key_schema_elements);
                 let size = calculate_item_size(old_item);
-                self.emitter.emit(crate::stream::ChangeEvent {
+                self.emitter.emit(ChangeEvent {
                     table_name: table.name.clone(),
-                    event_name: crate::stream::ChangeEventName::Remove,
+                    event_name: ChangeEventName::Remove,
                     keys,
                     old_image: Some(old_item.clone()),
                     new_image: None,
@@ -1069,6 +1155,7 @@ impl RustackDynamoDB {
         &self,
         mut input: UpdateItemInput,
     ) -> Result<UpdateItemOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -1300,6 +1387,8 @@ impl RustackDynamoDB {
             });
         }
 
+        validate_numbers_in_item(&item)?;
+        validate_item_no_empty_sets(&item)?;
         // Validate updated item size.
         let size = calculate_item_size(&item);
         if size > MAX_ITEM_SIZE_BYTES {
@@ -1321,12 +1410,12 @@ impl RustackDynamoDB {
             .is_some_and(|s| s.stream_enabled)
         {
             let event_name = if existing.is_some() || old_item.is_some() {
-                crate::stream::ChangeEventName::Modify
+                ChangeEventName::Modify
             } else {
-                crate::stream::ChangeEventName::Insert
+                ChangeEventName::Insert
             };
             let keys = extract_key_attributes(&item, &table.key_schema_elements);
-            self.emitter.emit(crate::stream::ChangeEvent {
+            self.emitter.emit(ChangeEvent {
                 table_name: table.name.clone(),
                 event_name,
                 keys,
@@ -1363,6 +1452,7 @@ impl RustackDynamoDB {
     /// Handle `Query`.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn handle_query(&self, mut input: QueryInput) -> Result<QueryOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table = self.state.require_table(&input.table_name)?;
 
         // Validate Select parameter.
@@ -1659,6 +1749,7 @@ impl RustackDynamoDB {
     /// Handle `Scan`.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn handle_scan(&self, mut input: ScanInput) -> Result<ScanOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table = self.state.require_table(&input.table_name)?;
 
         let has_atg = input
@@ -1831,6 +1922,7 @@ impl RustackDynamoDB {
         &self,
         input: BatchGetItemInput,
     ) -> Result<BatchGetItemOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         // Enforce 100-item limit across all tables.
         let total_keys: usize = input.request_items.values().map(|ka| ka.keys.len()).sum();
         if total_keys > 100 {
@@ -1912,6 +2004,7 @@ impl RustackDynamoDB {
         &self,
         input: BatchWriteItemInput,
     ) -> Result<BatchWriteItemOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         // Enforce 25-item limit across all tables.
         let total_writes: usize = input.request_items.values().map(Vec::len).sum();
         if total_writes > 25 {
@@ -1938,7 +2031,14 @@ impl RustackDynamoDB {
             detect_duplicate_keys(&table.key_schema, key_items.into_iter())?;
 
             for wr in write_requests {
+                if wr.put_request.is_some() == wr.delete_request.is_some() {
+                    return Err(DynamoDBError::validation(
+                        "Each batch write must contain exactly one action",
+                    ));
+                }
                 if let Some(ref put) = wr.put_request {
+                    validate_numbers_in_item(&put.item)?;
+                    validate_item_no_empty_sets(&put.item)?;
                     validate_key_not_empty(&table.key_schema, &put.item)?;
                     let size = calculate_item_size(&put.item);
                     if size > MAX_ITEM_SIZE_BYTES {
@@ -1951,66 +2051,39 @@ impl RustackDynamoDB {
                     extract_primary_key(&table.key_schema, &put.item)
                         .map_err(storage_error_to_dynamodb)?;
                 } else if let Some(ref del) = wr.delete_request {
+                    validate_key_only_has_key_attrs(&table.key_schema, &del.key)?;
+                    validate_key_not_empty(&table.key_schema, &del.key)?;
+                    validate_numbers_in_item(&del.key)?;
                     extract_primary_key(&table.key_schema, &del.key)
                         .map_err(storage_error_to_dynamodb)?;
                 }
             }
         }
 
-        // Execution pass: all validations passed, now execute writes.
+        let mut prepared = Vec::with_capacity(total_writes);
         for (table_name, write_requests) in &input.request_items {
             let table = self.state.require_table(table_name)?;
-            let stream_enabled = table
-                .stream_specification
-                .as_ref()
-                .is_some_and(|s| s.stream_enabled);
-
-            for wr in write_requests {
-                if let Some(ref put) = wr.put_request {
-                    let old = table
-                        .storage
-                        .put_item(put.item.clone())
-                        .map_err(storage_error_to_dynamodb)?;
-
-                    if stream_enabled {
-                        let event_name = if old.is_some() {
-                            crate::stream::ChangeEventName::Modify
-                        } else {
-                            crate::stream::ChangeEventName::Insert
-                        };
-                        let keys = extract_key_attributes(&put.item, &table.key_schema_elements);
-                        let size = calculate_item_size(&put.item);
-                        self.emitter.emit(crate::stream::ChangeEvent {
-                            table_name: table.name.clone(),
-                            event_name,
-                            keys,
-                            old_image: old,
-                            new_image: Some(put.item.clone()),
-                            size_bytes: size,
-                        });
-                    }
-                } else if let Some(ref del) = wr.delete_request {
-                    let pk = extract_primary_key(&table.key_schema, &del.key)
-                        .map_err(storage_error_to_dynamodb)?;
-                    let old = table.storage.delete_item(&pk);
-
-                    if stream_enabled {
-                        if let Some(ref old_item) = old {
-                            let keys = extract_key_attributes(old_item, &table.key_schema_elements);
-                            let size = calculate_item_size(old_item);
-                            self.emitter.emit(crate::stream::ChangeEvent {
-                                table_name: table.name.clone(),
-                                event_name: crate::stream::ChangeEventName::Remove,
-                                keys,
-                                old_image: Some(old_item.clone()),
-                                new_image: None,
-                                size_bytes: size,
-                            });
-                        }
-                    }
-                }
+            for request in write_requests {
+                let (item, new_image) = if let Some(put) = &request.put_request {
+                    (&put.item, Some(put.item.clone()))
+                } else if let Some(delete) = &request.delete_request {
+                    (&delete.key, None)
+                } else {
+                    return Err(DynamoDBError::validation("Batch write action is missing"));
+                };
+                let key = extract_primary_key(&table.key_schema, item)
+                    .map_err(storage_error_to_dynamodb)?;
+                let old_image = table.storage.get_item(&key);
+                prepared.push(PreparedChange {
+                    table: Arc::clone(&table),
+                    key,
+                    old_image,
+                    new_image,
+                    mutate: true,
+                });
             }
         }
+        self.commit_prepared(prepared);
 
         Ok(BatchWriteItemOutput {
             unprocessed_items: HashMap::new(),
@@ -2048,6 +2121,7 @@ impl RustackDynamoDB {
         &self,
         input: TagResourceInput,
     ) -> Result<TagResourceOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table_name = Self::resolve_table_from_arn(&input.resource_arn)?;
         let table = self.state.require_table(table_name)?;
 
@@ -2100,6 +2174,7 @@ impl RustackDynamoDB {
         &self,
         input: UntagResourceInput,
     ) -> Result<UntagResourceOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table_name = Self::resolve_table_from_arn(&input.resource_arn)?;
         let table = self.state.require_table(table_name)?;
 
@@ -2116,6 +2191,7 @@ impl RustackDynamoDB {
         &self,
         input: ListTagsOfResourceInput,
     ) -> Result<ListTagsOfResourceOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let table_name = Self::resolve_table_from_arn(&input.resource_arn)?;
         let table = self.state.require_table(table_name)?;
 
@@ -2138,6 +2214,7 @@ impl RustackDynamoDB {
         &self,
         input: UpdateTimeToLiveInput,
     ) -> Result<UpdateTimeToLiveOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -2161,6 +2238,7 @@ impl RustackDynamoDB {
         &self,
         input: DescribeTimeToLiveInput,
     ) -> Result<DescribeTimeToLiveOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -2191,6 +2269,7 @@ impl RustackDynamoDB {
         &self,
         input: DescribeContinuousBackupsInput,
     ) -> Result<DescribeContinuousBackupsOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
         let pitr = table.point_in_time_recovery.read().clone();
@@ -2206,6 +2285,7 @@ impl RustackDynamoDB {
         &self,
         input: UpdateContinuousBackupsInput,
     ) -> Result<UpdateContinuousBackupsOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         validate_table_name(&input.table_name)?;
         let table = self.state.require_table(&input.table_name)?;
 
@@ -2281,6 +2361,7 @@ impl RustackDynamoDB {
         &self,
         _input: DescribeLimitsInput,
     ) -> Result<DescribeLimitsOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         Ok(DescribeLimitsOutput {
             account_max_read_capacity_units: Some(80_000),
             account_max_write_capacity_units: Some(80_000),
@@ -2297,6 +2378,7 @@ impl RustackDynamoDB {
         &self,
         _input: DescribeEndpointsInput,
     ) -> Result<DescribeEndpointsOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         let address = format!("dynamodb.{}.amazonaws.com", self.config.default_region);
         Ok(DescribeEndpointsOutput {
             endpoints: vec![Endpoint {
@@ -2314,6 +2396,105 @@ impl RustackDynamoDB {
 /// Maximum number of items in a transaction.
 const MAX_TRANSACT_ITEMS: usize = 100;
 
+struct TransactionParts<'a> {
+    table_name: &'a str,
+    key_map: &'a HashMap<String, AttributeValue>,
+    condition: Option<&'a str>,
+    names: &'a Option<HashMap<String, String>>,
+    values: &'a Option<HashMap<String, AttributeValue>>,
+    failure_return: Option<&'a str>,
+}
+
+impl<'a> TryFrom<&'a TransactWriteItem> for TransactionParts<'a> {
+    type Error = DynamoDBError;
+    fn try_from(action: &'a TransactWriteItem) -> Result<Self, Self::Error> {
+        if let Some(put) = &action.put {
+            Ok(Self {
+                table_name: &put.table_name,
+                key_map: &put.item,
+                condition: put.condition_expression.as_deref(),
+                names: &put.expression_attribute_names,
+                values: &put.expression_attribute_values,
+                failure_return: put.return_values_on_condition_check_failure.as_deref(),
+            })
+        } else if let Some(update) = &action.update {
+            Ok(Self {
+                table_name: &update.table_name,
+                key_map: &update.key,
+                condition: update.condition_expression.as_deref(),
+                names: &update.expression_attribute_names,
+                values: &update.expression_attribute_values,
+                failure_return: update.return_values_on_condition_check_failure.as_deref(),
+            })
+        } else if let Some(delete) = &action.delete {
+            Ok(Self {
+                table_name: &delete.table_name,
+                key_map: &delete.key,
+                condition: delete.condition_expression.as_deref(),
+                names: &delete.expression_attribute_names,
+                values: &delete.expression_attribute_values,
+                failure_return: delete.return_values_on_condition_check_failure.as_deref(),
+            })
+        } else if let Some(check) = &action.condition_check {
+            Ok(Self {
+                table_name: &check.table_name,
+                key_map: &check.key,
+                condition: Some(&check.condition_expression),
+                names: &check.expression_attribute_names,
+                values: &check.expression_attribute_values,
+                failure_return: check.return_values_on_condition_check_failure.as_deref(),
+            })
+        } else {
+            Err(DynamoDBError::validation("Transaction action is missing"))
+        }
+    }
+}
+
+struct PreparedChange {
+    table: Arc<DynamoDBTable>,
+    key: PrimaryKey,
+    old_image: Option<HashMap<String, AttributeValue>>,
+    new_image: Option<HashMap<String, AttributeValue>>,
+    mutate: bool,
+}
+
+impl PreparedChange {
+    fn size_bytes(&self) -> u64 {
+        self.new_image
+            .as_ref()
+            .or(self.old_image.as_ref())
+            .map_or(0, calculate_item_size)
+    }
+
+    fn emit(self, emitter: &dyn StreamEmitter) {
+        if !self.mutate
+            || !self
+                .table
+                .stream_specification
+                .as_ref()
+                .is_some_and(|spec| spec.stream_enabled)
+        {
+            return;
+        }
+        let Some(image) = self.new_image.as_ref().or(self.old_image.as_ref()) else {
+            return;
+        };
+        let event_name = match (&self.old_image, &self.new_image) {
+            (_, None) => ChangeEventName::Remove,
+            (None, Some(_)) => ChangeEventName::Insert,
+            (Some(_), Some(_)) => ChangeEventName::Modify,
+        };
+        emitter.emit(ChangeEvent {
+            table_name: self.table.name.clone(),
+            event_name,
+            keys: extract_key_attributes(image, &self.table.key_schema_elements),
+            size_bytes: calculate_item_size(image),
+            old_image: self.old_image,
+            new_image: self.new_image,
+        });
+    }
+}
+
 impl RustackDynamoDB {
     /// Handle `TransactGetItems`.
     #[allow(clippy::needless_pass_by_value)]
@@ -2321,6 +2502,7 @@ impl RustackDynamoDB {
         &self,
         input: TransactGetItemsInput,
     ) -> Result<TransactGetItemsOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
         if input.transact_items.is_empty() {
             return Err(DynamoDBError::validation(
                 "1 validation error detected: Value null at 'transactItems' failed to satisfy \
@@ -2339,7 +2521,11 @@ impl RustackDynamoDB {
 
         for transact_item in &input.transact_items {
             let get = &transact_item.get;
+            validate_table_name(&get.table_name)?;
             let table = self.state.require_table(&get.table_name)?;
+            validate_key_only_has_key_attrs(&table.key_schema, &get.key)?;
+            validate_key_types(&table.key_schema, &get.key)?;
+            validate_key_not_empty(&table.key_schema, &get.key)?;
             let pk = extract_primary_key(&table.key_schema, &get.key)
                 .map_err(storage_error_to_dynamodb)?;
 
@@ -2385,6 +2571,13 @@ impl RustackDynamoDB {
         &self,
         input: TransactWriteItemsInput,
     ) -> Result<TransactWriteItemsOutput, DynamoDBError> {
+        let _operation = self.begin_operation()?;
+        let fingerprint = self.admit_transaction_token(&input)?;
+        if let Some(token) = input.client_request_token.as_ref() {
+            if let Some(completed) = self.tokens.get(token) {
+                return Ok(completed.output.clone());
+            }
+        }
         if input.transact_items.is_empty() {
             return Err(DynamoDBError::validation(
                 "1 validation error detected: Value null at 'transactItems' failed to satisfy \
@@ -2478,118 +2671,182 @@ impl RustackDynamoDB {
             return Err(DynamoDBError::transaction_cancelled(cancellation_reasons));
         }
 
-        // Phase 3: Apply all writes.
+        // Prepare computes every final value without touching visible storage.
+        let mut prepared = Vec::with_capacity(input.transact_items.len());
+        let mut total_size = 0u64;
         for item in &input.transact_items {
-            if let Some(ref put) = item.put {
-                let table = self.state.require_table(&put.table_name)?;
-                let old = table
-                    .storage
-                    .put_item(put.item.clone())
-                    .map_err(storage_error_to_dynamodb)?;
-
-                if table
-                    .stream_specification
-                    .as_ref()
-                    .is_some_and(|s| s.stream_enabled)
-                {
-                    let event_name = if old.is_some() {
-                        crate::stream::ChangeEventName::Modify
-                    } else {
-                        crate::stream::ChangeEventName::Insert
-                    };
-                    let keys = extract_key_attributes(&put.item, &table.key_schema_elements);
-                    let size = calculate_item_size(&put.item);
-                    self.emitter.emit(crate::stream::ChangeEvent {
-                        table_name: table.name.clone(),
-                        event_name,
-                        keys,
-                        old_image: old,
-                        new_image: Some(put.item.clone()),
-                        size_bytes: size,
-                    });
-                }
-            } else if let Some(ref del) = item.delete {
-                let table = self.state.require_table(&del.table_name)?;
-                let pk = extract_primary_key(&table.key_schema, &del.key)
-                    .map_err(storage_error_to_dynamodb)?;
-                let old = table.storage.delete_item(&pk);
-
-                if table
-                    .stream_specification
-                    .as_ref()
-                    .is_some_and(|s| s.stream_enabled)
-                {
-                    if let Some(ref old_item) = old {
-                        let keys = extract_key_attributes(old_item, &table.key_schema_elements);
-                        let size = calculate_item_size(old_item);
-                        self.emitter.emit(crate::stream::ChangeEvent {
-                            table_name: table.name.clone(),
-                            event_name: crate::stream::ChangeEventName::Remove,
-                            keys,
-                            old_image: Some(old_item.clone()),
-                            new_image: None,
-                            size_bytes: size,
-                        });
-                    }
-                }
-            } else if let Some(ref upd) = item.update {
-                let table = self.state.require_table(&upd.table_name)?;
-                let pk = extract_primary_key(&table.key_schema, &upd.key)
-                    .map_err(storage_error_to_dynamodb)?;
-                let existing = table.storage.get_item(&pk);
-                let current = existing.clone().unwrap_or_else(|| upd.key.clone());
-
-                let names = upd.expression_attribute_names.as_ref();
-                let values = upd.expression_attribute_values.as_ref();
-                let empty_names = HashMap::new();
-                let empty_values = HashMap::new();
-                let names_ref = names.unwrap_or(&empty_names);
-                let values_ref = values.unwrap_or(&empty_values);
-
-                let parsed =
-                    parse_update(&upd.update_expression).map_err(expression_error_to_dynamodb)?;
-                let ctx = EvalContext {
-                    item: &current,
-                    names: names_ref,
-                    values: values_ref,
-                };
-                let updated = ctx
-                    .apply_update(&parsed)
-                    .map_err(expression_error_to_dynamodb)?;
-
-                let old = table
-                    .storage
-                    .put_item(updated.clone())
-                    .map_err(storage_error_to_dynamodb)?;
-
-                if table
-                    .stream_specification
-                    .as_ref()
-                    .is_some_and(|s| s.stream_enabled)
-                {
-                    let event_name = if existing.is_some() {
-                        crate::stream::ChangeEventName::Modify
-                    } else {
-                        crate::stream::ChangeEventName::Insert
-                    };
-                    let keys = extract_key_attributes(&updated, &table.key_schema_elements);
-                    let size = calculate_item_size(&updated);
-                    self.emitter.emit(crate::stream::ChangeEvent {
-                        table_name: table.name.clone(),
-                        event_name,
-                        keys,
-                        old_image: old,
-                        new_image: Some(updated),
-                        size_bytes: size,
-                    });
-                }
+            let change = self.prepare_transaction_change(item)?;
+            total_size = total_size.saturating_add(change.size_bytes());
+            if total_size > 4 * 1024 * 1024 {
+                return Err(DynamoDBError::validation("Transaction exceeds 4 MiB"));
             }
-            // ConditionCheck: no mutation needed.
+            prepared.push(change);
         }
 
-        Ok(TransactWriteItemsOutput {
+        self.commit_prepared(prepared);
+        let output = TransactWriteItemsOutput {
             consumed_capacity: Vec::new(),
             item_collection_metrics: HashMap::new(),
+        };
+        if let (Some(token), Some(fingerprint)) = (input.client_request_token, fingerprint) {
+            self.tokens.insert(
+                token,
+                CompletedTransaction {
+                    fingerprint,
+                    completed_at: Instant::now(),
+                    output: output.clone(),
+                },
+            );
+        }
+        Ok(output)
+    }
+
+    /// Commit fully prepared data before publishing any stream notifications.
+    fn commit_prepared(&self, prepared: Vec<PreparedChange>) {
+        for change in &prepared {
+            if !change.mutate {
+                continue;
+            }
+            if let Some(item) = &change.new_image {
+                change
+                    .table
+                    .storage
+                    .put_prepared(change.key.clone(), item.clone());
+            } else {
+                change.table.storage.delete_item(&change.key);
+            }
+        }
+        for change in prepared {
+            change.emit(self.emitter.as_ref());
+        }
+    }
+
+    fn admit_transaction_token(
+        &self,
+        input: &TransactWriteItemsInput,
+    ) -> Result<Option<String>, DynamoDBError> {
+        let Some(token) = &input.client_request_token else {
+            return Ok(None);
+        };
+        if token.is_empty() || token.len() > 36 {
+            return Err(DynamoDBError::validation(
+                "ClientRequestToken must contain 1..36 bytes",
+            ));
+        }
+        let mut fingerprint = serde_json::to_value(input)
+            .map_err(|error| DynamoDBError::internal_error(error.to_string()))?;
+        if let Some(object) = fingerprint.as_object_mut() {
+            object.remove("ClientRequestToken");
+        }
+        fingerprint.sort_all_objects();
+        let canonical = serde_json::to_vec(&fingerprint)
+            .map_err(|error| DynamoDBError::internal_error(error.to_string()))?;
+        if canonical.len() > 8 * 1024 * 1024 {
+            return Err(DynamoDBError::validation(
+                "Transaction request exceeds 8 MiB",
+            ));
+        }
+        let fingerprint = hash_payload(&canonical);
+        self.tokens
+            .retain(|_, entry| entry.completed_at.elapsed() < Duration::from_mins(10));
+        if let Some(entry) = self.tokens.get(token) {
+            if entry.fingerprint != fingerprint {
+                return Err(DynamoDBError::with_message(
+                    DynamoDBErrorCode::IdempotentParameterMismatchException,
+                    "ClientRequestToken was already used with different parameters",
+                ));
+            }
+        } else if self.tokens.len() >= self.token_capacity {
+            return Err(DynamoDBError::with_message(
+                DynamoDBErrorCode::RequestLimitExceeded,
+                "Transaction token capacity is full; retry after the idempotency window expires",
+            ));
+        }
+        Ok(Some(fingerprint))
+    }
+
+    fn prepare_transaction_change(
+        &self,
+        action: &TransactWriteItem,
+    ) -> Result<PreparedChange, DynamoDBError> {
+        let TransactionParts {
+            table_name,
+            key_map,
+            condition,
+            names,
+            values,
+            failure_return,
+        } = TransactionParts::try_from(action)?;
+        validate_table_name(table_name)?;
+        let table = self.state.require_table(table_name)?;
+        validate_key_types(&table.key_schema, key_map)?;
+        validate_key_not_empty(&table.key_schema, key_map)?;
+        if action.put.is_none() {
+            validate_key_only_has_key_attrs(&table.key_schema, key_map)?;
+        }
+        validate_return_values_on_condition_check_failure(failure_return)?;
+        validate_condition_not_empty(condition)?;
+        let empty_names = HashMap::new();
+        let empty_values = HashMap::new();
+        let names = names.as_ref().unwrap_or(&empty_names);
+        let values = values.as_ref().unwrap_or(&empty_values);
+        validate_numbers_in_item(values)?;
+        validate_no_empty_sets(values)?;
+        let mut used_names = HashSet::new();
+        let mut used_values = HashSet::new();
+        if let Some(condition) = condition {
+            let parsed = parse_condition(condition).map_err(expression_error_to_dynamodb)?;
+            collect_names_from_expr(&parsed, &mut used_names);
+            collect_values_from_expr(&parsed, &mut used_values);
+        }
+        let key =
+            extract_primary_key(&table.key_schema, key_map).map_err(storage_error_to_dynamodb)?;
+        let old_image = table.storage.get_item(&key);
+        let new_image = if let Some(put) = &action.put {
+            Some(put.item.clone())
+        } else if let Some(update) = &action.update {
+            let parsed =
+                parse_update(&update.update_expression).map_err(expression_error_to_dynamodb)?;
+            validate_update_paths(&parsed, &table.key_schema, names)?;
+            collect_names_from_update(&parsed, &mut used_names);
+            collect_values_from_update(&parsed, &mut used_values);
+            let current = old_image.as_ref().unwrap_or(key_map);
+            let updated = EvalContext {
+                item: current,
+                names,
+                values,
+            }
+            .apply_update(&parsed)
+            .map_err(expression_error_to_dynamodb)?;
+            Some(updated)
+        } else {
+            None
+        };
+        validate_no_unused_names(names, &used_names)?;
+        validate_no_unused_values(values, &used_values)?;
+        if let Some(item) = &new_image {
+            validate_numbers_in_item(item)?;
+            validate_item_no_empty_sets(item)?;
+            validate_key_types(&table.key_schema, item)?;
+            validate_key_not_empty(&table.key_schema, item)?;
+            if extract_primary_key(&table.key_schema, item).map_err(storage_error_to_dynamodb)?
+                != key
+            {
+                return Err(DynamoDBError::validation(
+                    "Transaction update cannot modify primary key",
+                ));
+            }
+            if calculate_item_size(item) > MAX_ITEM_SIZE_BYTES {
+                return Err(DynamoDBError::validation("Item exceeds 400 KiB"));
+            }
+        }
+        let mutate = action.condition_check.is_none();
+        Ok(PreparedChange {
+            table,
+            key,
+            old_image,
+            new_image,
+            mutate,
         })
     }
 
@@ -2599,7 +2856,7 @@ impl RustackDynamoDB {
     /// or a `CancellationReason` if the condition fails.
     fn evaluate_transact_write_condition(
         &self,
-        item: &rustack_dynamodb_model::types::TransactWriteItem,
+        item: &TransactWriteItem,
     ) -> Result<(), CancellationReason> {
         if let Some(ref cc) = item.condition_check {
             self.evaluate_condition_for_key(
@@ -4816,6 +5073,10 @@ fn gsi_build_last_key(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "transaction_tests.rs"]
+mod transaction_tests;
 
 #[cfg(test)]
 mod tests {

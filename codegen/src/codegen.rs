@@ -1255,6 +1255,12 @@ fn generate_error_s3(config: &ServiceConfig) -> Result<String> {
 
     // Error struct
     writeln!(out, "/// An {prefix} error response.")?;
+    writeln!(out, "///")?;
+    writeln!(
+        out,
+        "/// Immutable resource and request-ID strings omit spare capacity to keep errors"
+    )?;
+    writeln!(out, "/// compact when returned by value.")?;
     writeln!(out, "#[derive(Debug)]")?;
     writeln!(out, "pub struct {prefix}Error {{")?;
     writeln!(out, "    /// The error code.")?;
@@ -1262,9 +1268,9 @@ fn generate_error_s3(config: &ServiceConfig) -> Result<String> {
     writeln!(out, "    /// A human-readable error message.")?;
     writeln!(out, "    pub message: String,")?;
     writeln!(out, "    /// The resource that caused the error.")?;
-    writeln!(out, "    pub resource: Option<String>,")?;
+    writeln!(out, "    pub resource: Option<Box<str>>,")?;
     writeln!(out, "    /// The request ID.")?;
-    writeln!(out, "    pub request_id: Option<String>,")?;
+    writeln!(out, "    pub request_id: Option<Box<str>>,")?;
     writeln!(out, "    /// The HTTP status code.")?;
     writeln!(out, "    pub status_code: http::StatusCode,")?;
     writeln!(out, "    /// The underlying source error, if any.")?;
@@ -1353,7 +1359,10 @@ fn generate_error_s3(config: &ServiceConfig) -> Result<String> {
         out,
         "    pub fn with_resource(mut self, resource: impl Into<String>) -> Self {{"
     )?;
-    writeln!(out, "        self.resource = Some(resource.into());")?;
+    writeln!(
+        out,
+        "        self.resource = Some(resource.into().into_boxed_str());"
+    )?;
     writeln!(out, "        self")?;
     writeln!(out, "    }}")?;
     writeln!(out)?;
@@ -1364,7 +1373,10 @@ fn generate_error_s3(config: &ServiceConfig) -> Result<String> {
         out,
         "    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {{"
     )?;
-    writeln!(out, "        self.request_id = Some(request_id.into());")?;
+    writeln!(
+        out,
+        "        self.request_id = Some(request_id.into().into_boxed_str());"
+    )?;
     writeln!(out, "        self")?;
     writeln!(out, "    }}")?;
     writeln!(out)?;

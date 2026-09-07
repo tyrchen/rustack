@@ -13,6 +13,7 @@
 
 use std::{io::Read as _, time::Duration};
 
+#[allow(clippy::disallowed_methods)] // This standalone bootstrap deliberately uses synchronous IO, not an async runtime.
 fn main() {
     let api = std::env::var("AWS_LAMBDA_RUNTIME_API")
         .expect("AWS_LAMBDA_RUNTIME_API must be set by the runtime");
@@ -25,6 +26,21 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    let code_marker = match std::fs::read_to_string("revision.txt") {
+        Ok(marker) => Some(marker),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!("Read revision marker: {error}");
+            return;
+        }
+    };
+    let config_marker = std::env::var("CONFIG_MARKER").ok();
+    if let Ok(path) = std::env::var("STARTED_FILE") {
+        if let Err(error) = std::fs::write(path, std::process::id().to_string()) {
+            eprintln!("Write start marker: {error}");
+            return;
+        }
+    }
     loop {
         let next = agent
             .get(&format!("http://{api}/2018-06-01/runtime/invocation/next"))
@@ -65,6 +81,9 @@ fn main() {
         let echo = serde_json::json!({
             "echo": parsed,
             "request_id": request_id,
+            "codeMarker": code_marker,
+            "configMarker": config_marker,
+            "pid": std::process::id(),
         });
         let _ = agent
             .post(&format!(

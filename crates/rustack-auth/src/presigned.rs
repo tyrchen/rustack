@@ -173,7 +173,7 @@ pub fn verify_presigned(
         "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n\n{signed_headers_str}\n{UNSIGNED_PAYLOAD}"
     );
 
-    debug!(canonical_request, "Built presigned canonical request");
+    debug!("Built presigned canonical request");
 
     // Hash the canonical request.
     let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
@@ -206,11 +206,7 @@ pub fn verify_presigned(
             signed_headers: parsed.signed_headers,
         })
     } else {
-        debug!(
-            expected = %expected_signature,
-            provided = %parsed.signature,
-            "Presigned URL signature mismatch"
-        );
+        debug!("Presigned URL signature mismatch");
         Err(AuthError::SignatureDoesNotMatch)
     }
 }

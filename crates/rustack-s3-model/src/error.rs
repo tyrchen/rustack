@@ -312,6 +312,9 @@ impl fmt::Display for S3ErrorCode {
 }
 
 /// An S3 error response.
+///
+/// Immutable resource and request-ID strings omit spare capacity to keep errors
+/// compact when returned by value.
 #[derive(Debug)]
 pub struct S3Error {
     /// The error code.
@@ -319,9 +322,9 @@ pub struct S3Error {
     /// A human-readable error message.
     pub message: String,
     /// The resource that caused the error.
-    pub resource: Option<String>,
+    pub resource: Option<Box<str>>,
     /// The request ID.
-    pub request_id: Option<String>,
+    pub request_id: Option<Box<str>>,
     /// The HTTP status code.
     pub status_code: http::StatusCode,
     /// The underlying source error, if any.
@@ -380,14 +383,14 @@ impl S3Error {
     /// Set the resource that caused this error.
     #[must_use]
     pub fn with_resource(mut self, resource: impl Into<String>) -> Self {
-        self.resource = Some(resource.into());
+        self.resource = Some(resource.into().into_boxed_str());
         self
     }
 
     /// Set the request ID.
     #[must_use]
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
-        self.request_id = Some(request_id.into());
+        self.request_id = Some(request_id.into().into_boxed_str());
         self
     }
 

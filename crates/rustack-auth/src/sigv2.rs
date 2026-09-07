@@ -61,7 +61,7 @@ pub fn verify_sigv2(
 
     let string_to_sign = build_string_to_sign(parts);
 
-    debug!(string_to_sign = ?string_to_sign, "Built SigV2 string to sign");
+    debug!("Built SigV2 string to sign");
 
     let expected_signature = compute_sigv2_signature(&secret_key, &string_to_sign);
 
@@ -78,11 +78,7 @@ pub fn verify_sigv2(
             signed_headers: Vec::new(),
         })
     } else {
-        debug!(
-            expected = %expected_signature,
-            provided = %provided_signature,
-            "SigV2 signature mismatch"
-        );
+        debug!("SigV2 signature mismatch");
         Err(AuthError::SignatureDoesNotMatch)
     }
 }

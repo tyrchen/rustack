@@ -2,9 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use aws_sdk_s3::{primitives::ByteStream, types::BucketVersioningStatus};
+    use std::time::Duration;
 
-    use crate::{cleanup_bucket, create_test_bucket, s3_client};
+    use aws_sdk_s3::{primitives::ByteStream, types::BucketVersioningStatus};
+    use reqwest::{Client, Method, Url};
+
+    use crate::{cleanup_bucket, create_test_bucket, endpoint_url, s3_client};
 
     async fn enable_versioning(client: &aws_sdk_s3::Client, bucket: &str) {
         client
@@ -168,6 +171,40 @@ mod tests {
             .send()
             .await;
         assert!(result.is_err(), "get after delete marker should fail");
+
+        // GET and HEAD must distinguish a current delete marker from a missing key.
+        // An explicitly selected marker is 405 and also includes Last-Modified.
+        let http = Client::new();
+        let marker_id = del.version_id().expect("delete marker version");
+        let url = format!("{}/{bucket}/to-delete.txt", endpoint_url());
+        for method in [Method::GET, Method::HEAD] {
+            for explicit_version in [false, true] {
+                let mut request_url = Url::parse(&url).expect("object URL");
+                if explicit_version {
+                    request_url
+                        .query_pairs_mut()
+                        .append_pair("versionId", marker_id);
+                }
+                let response = http
+                    .request(method.clone(), request_url)
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+                    .expect("delete marker response");
+                assert_eq!(
+                    response.status().as_u16(),
+                    if explicit_version { 405 } else { 404 }
+                );
+                assert_eq!(response.headers()["x-amz-delete-marker"], "true");
+                assert_eq!(response.headers()["x-amz-version-id"], marker_id);
+                if explicit_version {
+                    assert!(response.headers().contains_key("last-modified"));
+                }
+                if method == Method::HEAD {
+                    assert!(response.bytes().await.expect("HEAD body").is_empty());
+                }
+            }
+        }
 
         // But versions should show both the object and the delete marker.
         let versions = client

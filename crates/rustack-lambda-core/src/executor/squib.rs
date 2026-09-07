@@ -60,44 +60,73 @@ pub struct SquibExecutorConfig {
 
 impl SquibExecutorConfig {
     /// Read Squib executor configuration from environment variables.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self::from_env_reader(|key| env::var(key).ok())
+    pub fn from_env() -> Result<Self, ExecutorError> {
+        Self::from_env_reader(|key| match rustack_core::settings::var(key) {
+            Ok(value) => Some(value),
+            Err(env::VarError::NotPresent) => None,
+            Err(_) => Some(String::new()),
+        })
     }
 
-    pub(crate) fn from_env_reader(mut read: impl FnMut(&str) -> Option<String>) -> Self {
-        let instance_id = read("LAMBDA_SQUIB_INSTANCE_ID")
-            .as_deref()
-            .and_then(non_empty_string)
-            .unwrap_or_else(|| DEFAULT_INSTANCE_ID.to_owned());
-        Self {
-            config_file: read("LAMBDA_SQUIB_CONFIG_FILE")
-                .as_deref()
-                .and_then(non_empty_string)
-                .map(PathBuf::from)
-                .or_else(|| Some(default_config_file())),
-            vsock_path: read("LAMBDA_SQUIB_VSOCK_PATH")
-                .as_deref()
-                .and_then(non_empty_string)
-                .map(PathBuf::from)
-                .or_else(|| Some(default_vsock_path())),
-            instance_id,
-            stage_port: read("LAMBDA_SQUIB_STAGE_PORT")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_STAGE_PORT),
-            connect_timeout: read("LAMBDA_SQUIB_CONNECT_TIMEOUT_MS")
-                .and_then(|v| v.parse::<u64>().ok())
-                .map_or(DEFAULT_CONNECT_TIMEOUT, Duration::from_millis),
-            response_limit_bytes: read("LAMBDA_SQUIB_RESPONSE_LIMIT_BYTES")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_RESPONSE_LIMIT_BYTES),
-            run_budget: read("LAMBDA_SQUIB_RUN_BUDGET_SECS")
-                .and_then(|v| v.parse::<u64>().ok())
-                .map_or(DEFAULT_RUN_BUDGET, Duration::from_secs),
-            shutdown_timeout: read("LAMBDA_SQUIB_SHUTDOWN_TIMEOUT_MS")
-                .and_then(|v| v.parse::<u64>().ok())
-                .map_or(DEFAULT_SHUTDOWN_TIMEOUT, Duration::from_millis),
+    pub(crate) fn from_env_reader(
+        mut read: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, ExecutorError> {
+        let mut config = Self::default();
+        for (key, target) in [
+            ("LAMBDA_SQUIB_CONFIG_FILE", &mut config.config_file),
+            ("LAMBDA_SQUIB_VSOCK_PATH", &mut config.vsock_path),
+        ] {
+            if let Some(value) = read(key) {
+                if value.is_empty() || value.len() > 4096 || value.contains('\0') {
+                    return Err(ExecutorError::Unsupported(format!("Invalid {key}")));
+                }
+                *target = Some(PathBuf::from(value));
+            }
         }
+        if let Some(value) = read("LAMBDA_SQUIB_INSTANCE_ID") {
+            if value.is_empty()
+                || value.len() > 64
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Err(ExecutorError::Unsupported(
+                    "Invalid LAMBDA_SQUIB_INSTANCE_ID".into(),
+                ));
+            }
+            config.instance_id = value;
+        }
+        let mut number = |key: &str, default: u64, max: u64| -> Result<u64, ExecutorError> {
+            let value = match read(key) {
+                Some(raw) => raw
+                    .parse()
+                    .map_err(|_| ExecutorError::Unsupported(format!("Invalid {key}")))?,
+                None => default,
+            };
+            if value == 0 || value > max {
+                return Err(ExecutorError::Unsupported(format!("Invalid {key}")));
+            }
+            Ok(value)
+        };
+        config.stage_port = u32::try_from(number(
+            "LAMBDA_SQUIB_STAGE_PORT",
+            5003,
+            u64::from(u32::MAX),
+        )?)
+        .map_err(|error| ExecutorError::Unsupported(error.to_string()))?;
+        config.connect_timeout =
+            Duration::from_millis(number("LAMBDA_SQUIB_CONNECT_TIMEOUT_MS", 15_000, 900_000)?);
+        config.response_limit_bytes = usize::try_from(number(
+            "LAMBDA_SQUIB_RESPONSE_LIMIT_BYTES",
+            DEFAULT_RESPONSE_LIMIT_BYTES as u64,
+            DEFAULT_RESPONSE_LIMIT_BYTES as u64,
+        )?)
+        .map_err(|error| ExecutorError::Unsupported(error.to_string()))?;
+        config.run_budget =
+            Duration::from_secs(number("LAMBDA_SQUIB_RUN_BUDGET_SECS", 86_400, 604_800)?);
+        config.shutdown_timeout =
+            Duration::from_millis(number("LAMBDA_SQUIB_SHUTDOWN_TIMEOUT_MS", 10000, 30000)?);
+        Ok(config)
     }
 
     fn required_config_file(&self) -> Result<&Path, ExecutorError> {
@@ -137,6 +166,22 @@ impl Default for SquibExecutorConfig {
 pub struct SquibExecutor {
     config: SquibExecutorConfig,
     runtime: Mutex<Option<squib::Squib>>,
+    poisoned: std::sync::atomic::AtomicBool,
+}
+
+struct RuntimeLease<'a> {
+    runtime: Option<squib::Squib>,
+    poisoned: &'a std::sync::atomic::AtomicBool,
+}
+impl Drop for RuntimeLease<'_> {
+    fn drop(&mut self) {
+        if self.runtime.is_some() {
+            self.poisoned
+                .store(true, std::sync::atomic::Ordering::Release);
+            // Squib's RAII handle requests VM shutdown. Never admit another guest after
+            // cancellation.
+        }
+    }
 }
 
 impl SquibExecutor {
@@ -146,15 +191,11 @@ impl SquibExecutor {
         Self {
             config,
             runtime: Mutex::new(None),
+            poisoned: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    async fn ensure_runtime(&self) -> Result<(), ExecutorError> {
-        let mut runtime = self.runtime.lock().await;
-        if runtime.is_some() {
-            return Ok(());
-        }
-
+    async fn start_runtime(&self) -> Result<squib::Squib, ExecutorError> {
         let config_file = self.config.required_config_file()?;
         ensure_config_file_exists(config_file).await?;
 
@@ -169,8 +210,7 @@ impl SquibExecutor {
             .spawn()
             .await
             .map_err(|err| ExecutorError::InitFailed(format!("start Squib runtime: {err}")))?;
-        *runtime = Some(squib);
-        Ok(())
+        Ok(squib)
     }
 
     async fn invoke_guest(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
@@ -214,11 +254,34 @@ impl SquibExecutor {
 
 #[async_trait]
 impl Executor for SquibExecutor {
+    fn available(&self) -> Result<(), ExecutorError> {
+        if self.poisoned.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ExecutorError::Unsupported(
+                "Squib guest execution was cancelled; restart the runtime before invoking again"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
         validate_request(&req)?;
         self.config.required_vsock_path()?;
-        self.ensure_runtime().await?;
-        self.invoke_guest(req).await
+        let mut runtime = self.runtime.lock().await;
+        self.available()?;
+        let vm = match runtime.take() {
+            Some(vm) => vm,
+            None => self.start_runtime().await?,
+        };
+        let mut lease = RuntimeLease {
+            runtime: Some(vm),
+            poisoned: &self.poisoned,
+        };
+        let result = self.invoke_guest(req).await;
+        if result.is_ok() {
+            *runtime = lease.runtime.take();
+        }
+        result
     }
 
     async fn shutdown(&self) {
@@ -571,15 +634,6 @@ fn default_artifact_dir() -> PathBuf {
         )
 }
 
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -598,7 +652,8 @@ mod tests {
             "LAMBDA_SQUIB_RUN_BUDGET_SECS" => Some("60".to_owned()),
             "LAMBDA_SQUIB_SHUTDOWN_TIMEOUT_MS" => Some("2500".to_owned()),
             _ => None,
-        });
+        })
+        .unwrap();
 
         assert_eq!(config.config_file, Some(PathBuf::from("/tmp/vm.json")));
         assert_eq!(config.vsock_path, Some(PathBuf::from("/tmp/vsock.sock")));

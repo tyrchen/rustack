@@ -2,6 +2,8 @@
 
 All specs that for AI to generate code.
 
+> Canonical navigation: [specs/index.md](./index.md). Start with the [system review](./rustack-system-review.md) for the current security, correctness, architecture, and developer-experience findings. The catalogue below is historical; use the canonical index for current file links.
+
 ## Index
 
 | Spec | Type | Status | Description |

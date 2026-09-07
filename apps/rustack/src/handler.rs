@@ -25,6 +25,16 @@ use rustack_s3_model::{
 pub struct RustackHandler(pub RustackS3);
 
 impl S3Handler for RustackHandler {
+    fn handle_staged_upload(
+        &self,
+        mut parts: http::request::Parts,
+        upload: std::sync::Arc<rustack_s3_core::storage::StagedUpload>,
+        ctx: RoutingContext,
+    ) -> Pin<Box<dyn Future<Output = Result<http::Response<S3ResponseBody>, S3Error>> + Send>> {
+        parts.extensions.insert(upload);
+        self.handle_operation(ctx.operation, parts, Bytes::new(), ctx)
+    }
+
     // This function dispatches all S3 operations via a match expression. Each arm
     // is a single-line delegation, so the overall line count is proportional to
     // the number of S3 operations rather than logic complexity.
@@ -319,16 +329,43 @@ impl S3Handler for RustackHandler {
                 // Object CRUD
                 // ---------------------------------------------------------------
                 S3Operation::PutObject => {
-                    dispatch_output(&parts, bucket, key, query_params, body, |input| {
-                        provider.handle_put_object(input)
-                    })
+                    let upload = parts
+                        .extensions
+                        .get::<std::sync::Arc<rustack_s3_core::storage::StagedUpload>>()
+                        .cloned();
+                    dispatch_output(
+                        &parts,
+                        bucket,
+                        key,
+                        query_params,
+                        body,
+                        |input| async move {
+                            match upload {
+                                Some(upload) => {
+                                    provider.handle_put_object_staged(input, upload).await
+                                }
+                                None => provider.handle_put_object(input).await,
+                            }
+                        },
+                    )
                     .await
                 }
                 S3Operation::GetObject => {
-                    dispatch_output(&parts, bucket, key, query_params, body, |input| {
-                        provider.handle_get_object(input)
-                    })
-                    .await
+                    let input = rustack_s3_model::input::GetObjectInput::from_s3_request(
+                        &parts,
+                        bucket,
+                        key,
+                        query_params,
+                        body,
+                    )?;
+                    let (output, staged) = provider.handle_get_object_streaming(input).await?;
+                    let mut response = output.into_s3_response()?;
+                    if let Some(staged) = staged {
+                        *response.body_mut() = S3ResponseBody::from_staged(staged)
+                            .await
+                            .map_err(|error| S3Error::internal_error(error.to_string()))?;
+                    }
+                    Ok(response)
                 }
                 S3Operation::HeadObject => {
                     dispatch_output(&parts, bucket, key, query_params, body, |input| {
@@ -454,9 +491,25 @@ impl S3Handler for RustackHandler {
                     .await
                 }
                 S3Operation::UploadPart => {
-                    dispatch_output(&parts, bucket, key, query_params, body, |input| {
-                        provider.handle_upload_part(input)
-                    })
+                    let upload = parts
+                        .extensions
+                        .get::<std::sync::Arc<rustack_s3_core::storage::StagedUpload>>()
+                        .cloned();
+                    dispatch_output(
+                        &parts,
+                        bucket,
+                        key,
+                        query_params,
+                        body,
+                        |input| async move {
+                            match upload {
+                                Some(upload) => {
+                                    provider.handle_upload_part_staged(input, upload).await
+                                }
+                                None => provider.handle_upload_part(input).await,
+                            }
+                        },
+                    )
                     .await
                 }
                 S3Operation::UploadPartCopy => {

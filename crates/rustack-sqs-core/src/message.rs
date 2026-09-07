@@ -32,6 +32,8 @@ pub struct QueueMessage {
     pub message_group_id: Option<String>,
     /// FIFO-only: message deduplication ID.
     pub message_deduplication_id: Option<String>,
+    /// ARN of the queue from which this message was dead-lettered.
+    pub dead_letter_queue_source_arn: Option<String>,
     /// When this message becomes available (for delayed messages).
     pub available_at: tokio::time::Instant,
     /// Per-message delay in seconds (0 = no delay).

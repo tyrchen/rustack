@@ -8,6 +8,16 @@ use rustack_lambda_model::error::{LambdaError, LambdaErrorCode};
 /// Internal service error type for Lambda operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LambdaServiceError {
+    /// Invocation or accepted Event capacity is exhausted.
+    #[error("Lambda concurrency or accepted-work capacity exhausted")]
+    TooManyRequests,
+    /// Artifact filesystem operation failed.
+    #[error("Lambda artifact IO failed: {source}")]
+    ArtifactIo {
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// Function does not exist.
     #[error("Function not found: {name}")]
     FunctionNotFound {
@@ -113,6 +123,13 @@ pub enum LambdaServiceError {
 impl From<LambdaServiceError> for LambdaError {
     fn from(err: LambdaServiceError) -> Self {
         match err {
+            LambdaServiceError::TooManyRequests => LambdaError::new(
+                LambdaErrorCode::TooManyRequestsException,
+                "Lambda concurrency or accepted-work capacity exhausted",
+            ),
+            LambdaServiceError::ArtifactIo { .. } => {
+                LambdaError::service_error("Lambda artifact IO failed")
+            }
             LambdaServiceError::FunctionNotFound { ref name } => {
                 LambdaError::resource_not_found(format!(
                     "Function not found: arn:aws:lambda:us-east-1:000000000000:function:{name}"

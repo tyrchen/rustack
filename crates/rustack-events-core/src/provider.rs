@@ -25,10 +25,14 @@ use rustack_events_model::{
         PutRuleOutput, PutTargetsOutput, RemovePermissionOutput, RemoveTargetsOutput,
         TagResourceOutput, TestEventPatternOutput, UntagResourceOutput, UpdateEventBusOutput,
     },
-    types::{EventBus, InputTransformer, PutEventsResultEntry, Rule, Tag, Target},
+    types::{EventBus, PutEventsResultEntry, Rule, Tag, Target},
 };
 
-use crate::{config::EventsConfig, delivery::TargetDelivery, pattern::EventPattern};
+use crate::{
+    config::EventsConfig,
+    delivery::{DeliveryError, DeliveryJob, DeliveryQueue, DeliveryStats, TargetDelivery},
+    pattern::EventPattern,
+};
 
 /// Maximum number of entries per `PutEvents` call.
 const MAX_PUT_EVENTS_ENTRIES: usize = 10;
@@ -77,21 +81,7 @@ struct RuleState {
     created_at: String,
 }
 
-#[derive(Clone)]
-struct TargetState {
-    id: String,
-    arn: String,
-    role_arn: Option<String>,
-    input_path: Option<String>,
-    input: Option<String>,
-    input_transformer: Option<InputTransformerState>,
-}
-
-#[derive(Clone)]
-struct InputTransformerState {
-    input_paths_map: HashMap<String, String>,
-    input_template: String,
-}
+type TargetState = Target;
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -103,6 +93,7 @@ pub struct RustackEvents {
     config: EventsConfig,
     buses: DashMap<String, EventBusState>,
     delivery: Arc<dyn TargetDelivery>,
+    delivery_queue: DeliveryQueue,
     /// Phase 3: Archive metadata storage (key = archive name).
     archives: DashMap<String, serde_json::Value>,
     /// Phase 3: Connection metadata storage (key = connection name).
@@ -137,6 +128,7 @@ impl RustackEvents {
         let provider = Self {
             config,
             buses: DashMap::new(),
+            delivery_queue: DeliveryQueue::new(Arc::clone(&delivery)),
             delivery,
             archives: DashMap::new(),
             connections: DashMap::new(),
@@ -146,6 +138,34 @@ impl RustackEvents {
         };
         provider.create_default_bus();
         provider
+    }
+
+    /// Whether admission is open and the lazily started delivery worker is healthy.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.delivery_queue.is_ready()
+    }
+
+    /// Return cumulative delivery outcomes; API acceptance is not delivery success.
+    #[must_use]
+    pub fn delivery_stats(&self) -> DeliveryStats {
+        self.delivery_queue.stats()
+    }
+
+    /// Stop new events and drain accepted delivery batches.
+    ///
+    /// # Errors
+    /// Reports a failed worker/supervisor. The runtime supplies the total shutdown deadline.
+    pub async fn quiesce(&self) -> Result<(), DeliveryError> {
+        self.delivery_queue.quiesce().await
+    }
+
+    /// Shut down delivery, idempotently, without altering event bus resources.
+    ///
+    /// # Errors
+    /// Reports the same worker failure as `quiesce`.
+    pub async fn shutdown(&self) -> Result<(), DeliveryError> {
+        self.quiesce().await
     }
 
     fn create_default_bus(&self) {
@@ -684,22 +704,19 @@ impl RustackEvents {
                 continue;
             }
 
-            let transformer = target.input_transformer.map(|it| InputTransformerState {
-                input_paths_map: it.input_paths_map,
-                input_template: it.input_template,
-            });
-
-            rule.targets.insert(
-                target.id.clone(),
-                TargetState {
-                    id: target.id,
-                    arn: target.arn,
-                    role_arn: target.role_arn,
-                    input_path: target.input_path,
-                    input: target.input,
-                    input_transformer: transformer,
-                },
-            );
+            // Metadata configuration is allowed for any structurally valid target
+            // ARN (AWS stores rules for many target services). Runtime support is
+            // the delivery bridge's job: unsupported/unavailable targets fail
+            // explicitly and observably when an event is actually dispatched.
+            if let Err(error) = validate_target(&target) {
+                failed_entries.push(rustack_events_model::types::PutTargetsResultEntry {
+                    target_id: Some(target.id.clone()),
+                    error_code: Some("ValidationException".to_owned()),
+                    error_message: Some(error.to_string()),
+                });
+                continue;
+            }
+            rule.targets.insert(target.id.clone(), target);
         }
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -760,7 +777,7 @@ impl RustackEvents {
 
         let page_size = resolve_page_size(input.limit);
 
-        let mut targets: Vec<Target> = rule.targets.values().map(target_state_to_model).collect();
+        let mut targets: Vec<Target> = rule.targets.values().cloned().collect();
 
         targets.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -789,6 +806,8 @@ impl RustackEvents {
 
     /// Handle `PutEvents`. Routes events through pattern matching to targets
     /// and delivers them asynchronously via spawned tasks.
+    // The per-event routing loop is intentionally explicit about its entry outcomes.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_put_events(
         &self,
         input: &PutEventsInput,
@@ -803,6 +822,19 @@ impl RustackEvents {
         let mut failed_count = 0i32;
 
         for entry in &input.entries {
+            if entry
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.len() > 256 * 1024)
+            {
+                failed_count += 1;
+                result_entries.push(PutEventsResultEntry {
+                    event_id: None,
+                    error_code: Some("ValidationException".into()),
+                    error_message: Some("Detail exceeds 256 KiB".into()),
+                });
+                continue;
+            }
             let source = entry.source.as_deref().unwrap_or("");
             let detail_type = entry.detail_type.as_deref().unwrap_or("");
             let detail = entry.detail.as_deref().unwrap_or("{}");
@@ -827,9 +859,10 @@ impl RustackEvents {
 
             let event_id = envelope["id"].as_str().unwrap_or_default().to_owned();
 
+            let mut jobs = Vec::new();
             // Route through matching rules in the bus.
             if let Some(bus) = self.buses.get(&bus_name) {
-                for rule in bus.rules.values() {
+                'rules: for rule in bus.rules.values() {
                     if rule.state != "ENABLED" {
                         continue;
                     }
@@ -844,22 +877,51 @@ impl RustackEvents {
                     if matched {
                         for target in rule.targets.values() {
                             let event_json = Self::apply_input_transform(target, &envelope);
-                            let delivery = Arc::clone(&self.delivery);
-                            let target_arn = target.arn.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = delivery.deliver(&target_arn, &event_json).await {
-                                    tracing::warn!(
-                                        target_arn = %target_arn,
-                                        error = %e,
-                                        "Failed to deliver event to target",
-                                    );
-                                }
+                            jobs.push(DeliveryJob {
+                                target: target.clone(),
+                                body: event_json,
                             });
+                            if jobs.len() > 128
+                                || jobs.iter().map(|job| job.body.len()).sum::<usize>()
+                                    > 1024 * 1024
+                            {
+                                break 'rules;
+                            }
                         }
                     }
                 }
             }
 
+            jobs.sort_by(|a, b| {
+                a.target
+                    .arn
+                    .cmp(&b.target.arn)
+                    .then(a.target.id.cmp(&b.target.id))
+            });
+            // Targets are configurable as metadata for any service ARN; execution
+            // support is enforced at dispatch time so an unsupported target yields
+            // an explicit event failure instead of a silent drop.
+            if let Some(error) = jobs
+                .iter()
+                .find_map(|job| self.delivery.validate(&job.target).err())
+            {
+                failed_count += 1;
+                result_entries.push(PutEventsResultEntry {
+                    event_id: None,
+                    error_code: Some("InvalidTarget".to_owned()),
+                    error_message: Some(error.to_string()),
+                });
+                continue;
+            }
+            if let Err(error) = self.delivery_queue.submit(jobs) {
+                failed_count += 1;
+                result_entries.push(PutEventsResultEntry {
+                    event_id: None,
+                    error_code: Some("InternalFailure".to_owned()),
+                    error_message: Some(error.to_string()),
+                });
+                continue;
+            }
             result_entries.push(PutEventsResultEntry {
                 event_id: Some(event_id),
                 error_code: None,
@@ -1953,27 +2015,83 @@ fn apply_json_path(value: &serde_json::Value, path: &str) -> serde_json::Value {
     current.clone()
 }
 
-/// Convert internal `TargetState` to the model `Target` type.
-fn target_state_to_model(t: &TargetState) -> Target {
-    Target {
-        id: t.id.clone(),
-        arn: t.arn.clone(),
-        role_arn: t.role_arn.clone(),
-        input: t.input.clone(),
-        input_path: t.input_path.clone(),
-        input_transformer: t.input_transformer.as_ref().map(|it| InputTransformer {
-            input_paths_map: it.input_paths_map.clone(),
-            input_template: it.input_template.clone(),
-        }),
-        run_command_parameters: None,
-        ecs_parameters: None,
-        batch_parameters: None,
-        sqs_parameters: None,
-        http_parameters: None,
-        redshift_data_parameters: None,
-        sage_maker_pipeline_parameters: None,
-        dead_letter_config: None,
-        retry_policy: None,
-        app_sync_parameters: None,
+fn validate_target(target: &Target) -> Result<(), DeliveryError> {
+    if target.id.is_empty()
+        || target.id.len() > 64
+        || !target
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+        || target.arn.len() > 1600
+    {
+        return Err(DeliveryError::InvalidArn(
+            "Invalid target ID or ARN length".into(),
+        ));
     }
+    if target.role_arn.is_some()
+        || target.retry_policy.is_some()
+        || target.dead_letter_config.is_some()
+        || target.run_command_parameters.is_some()
+        || target.ecs_parameters.is_some()
+        || target.batch_parameters.is_some()
+        || target.kinesis_parameters.is_some()
+        || target.http_parameters.is_some()
+        || target.redshift_data_parameters.is_some()
+        || target.sage_maker_pipeline_parameters.is_some()
+        || target.app_sync_parameters.is_some()
+    {
+        return Err(DeliveryError::Unsupported(
+            "Only SQS target and input transformation parameters are executable".into(),
+        ));
+    }
+    if let Some(parameters) = &target.sqs_parameters {
+        let group = &parameters.message_group_id;
+        if group.is_empty() || group.len() > 128 || !group.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(DeliveryError::Unsupported(
+                "MessageGroupId must contain 1..128 printable ASCII bytes".into(),
+            ));
+        }
+    }
+    if [
+        target.input.is_some(),
+        target.input_path.is_some(),
+        target.input_transformer.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count()
+        > 1
+    {
+        return Err(DeliveryError::Unsupported(
+            "Input, InputPath and InputTransformer are mutually exclusive".into(),
+        ));
+    }
+    if let Some(input) = &target.input {
+        if input.len() > 8192 || serde_json::from_str::<serde_json::Value>(input).is_err() {
+            return Err(DeliveryError::Unsupported(
+                "Input must be JSON of at most 8192 bytes".into(),
+            ));
+        }
+    }
+    if target
+        .input_path
+        .as_ref()
+        .is_some_and(|path| path.len() > 256 || !path.starts_with('$'))
+    {
+        return Err(DeliveryError::Unsupported("Invalid InputPath".into()));
+    }
+    if let Some(transformer) = &target.input_transformer {
+        if transformer.input_template.len() > 8192
+            || transformer.input_paths_map.len() > 100
+            || transformer
+                .input_paths_map
+                .iter()
+                .any(|(key, path)| key.len() > 256 || path.len() > 256 || !path.starts_with('$'))
+        {
+            return Err(DeliveryError::Unsupported(
+                "InputTransformer exceeds supported bounds".into(),
+            ));
+        }
+    }
+    Ok(())
 }

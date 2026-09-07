@@ -211,6 +211,39 @@ pub fn verify_sigv4(
     body_hash: &str,
     credential_provider: &dyn CredentialProvider,
 ) -> Result<AuthResult, AuthError> {
+    verify_sigv4_with_policy(parts, body_hash, credential_provider, false)
+}
+
+/// Verify S3 SigV4, allowing the explicit unsigned-payload protocol exception.
+///
+/// This verifies the seed signature only for streaming markers. Callers MUST additionally
+/// verify every chunk and signed trailer with [`StreamingVerifier`] before publishing data.
+/// # Errors
+/// Returns an authentication error for invalid signatures or payload declarations.
+pub fn verify_s3_sigv4(
+    parts: &http::request::Parts,
+    body_hash: &str,
+    credential_provider: &dyn CredentialProvider,
+) -> Result<AuthResult, AuthError> {
+    verify_sigv4_with_policy(parts, body_hash, credential_provider, true)
+}
+
+fn verify_sigv4_with_policy(
+    parts: &http::request::Parts,
+    body_hash: &str,
+    credential_provider: &dyn CredentialProvider,
+    allow_unsigned: bool,
+) -> Result<AuthResult, AuthError> {
+    let payload_hash = validated_payload_hash(parts, body_hash, allow_unsigned)?;
+    if parts
+        .headers
+        .get_all(http::header::AUTHORIZATION)
+        .iter()
+        .count()
+        > 1
+    {
+        return Err(AuthError::InvalidAuthHeader);
+    }
     // Extract and parse the Authorization header.
     let auth_header = parts
         .headers
@@ -219,7 +252,7 @@ pub fn verify_sigv4(
         .to_str()
         .map_err(|_| AuthError::InvalidAuthHeader)?;
 
-    debug!(auth_header, "Parsing SigV4 authorization header");
+    debug!("Parsing SigV4 authorization header");
 
     let parsed = parse_authorization_header(auth_header)?;
 
@@ -245,15 +278,6 @@ pub fn verify_sigv4(
     // Collect headers that are in the signed headers list.
     let signed_header_refs: Vec<&str> = parsed.signed_headers.iter().map(String::as_str).collect();
     let header_pairs: Vec<(&str, &str)> = collect_signed_headers(parts, &signed_header_refs)?;
-
-    // Use the x-amz-content-sha256 header value (what the client signed with)
-    // rather than the recomputed body hash. This is critical because the client
-    // may use STREAMING-* placeholders or compute the hash before encoding.
-    let payload_hash = parts
-        .headers
-        .get("x-amz-content-sha256")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(body_hash);
 
     let canonical_request = build_canonical_request(
         method,
@@ -292,13 +316,120 @@ pub fn verify_sigv4(
             signed_headers: parsed.signed_headers,
         })
     } else {
-        debug!(
-            expected = %expected_signature,
-            provided = %parsed.signature,
-            "Signature mismatch"
-        );
+        debug!("Signature mismatch");
         Err(AuthError::SignatureDoesNotMatch)
     }
+}
+
+/// SigV4 streaming HMAC chain, including terminal chunks and signed trailers.
+pub struct StreamingVerifier {
+    key: Vec<u8>,
+    timestamp: String,
+    scope: String,
+    previous: String,
+}
+
+impl std::fmt::Debug for StreamingVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamingVerifier([REDACTED])")
+    }
+}
+
+impl StreamingVerifier {
+    /// Authenticate the seed and initialize the chunk chain.
+    /// # Errors
+    /// Returns seed signature or header validation failures.
+    pub fn new(
+        parts: &http::request::Parts,
+        provider: &dyn CredentialProvider,
+    ) -> Result<Self, AuthError> {
+        verify_s3_sigv4(parts, &hash_payload(b""), provider)?;
+        let header = extract_header_value(parts, "authorization")?;
+        let parsed = parse_authorization_header(&header)?;
+        let secret = provider.get_secret_key(&parsed.access_key_id)?;
+        Ok(Self {
+            key: derive_signing_key(&secret, &parsed.date, &parsed.region, &parsed.service),
+            timestamp: extract_header_value(parts, "x-amz-date")?,
+            scope: format!(
+                "{}/{}/{}/aws4_request",
+                parsed.date, parsed.region, parsed.service
+            ),
+            previous: parsed.signature,
+        })
+    }
+
+    /// Verify a data chunk, including the final zero-size chunk.
+    /// # Errors
+    /// Rejects a missing, malformed or mismatching chunk signature.
+    pub fn verify_chunk(&mut self, actual_sha256: &str, signature: &str) -> Result<(), AuthError> {
+        let text = format!(
+            "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+            self.timestamp,
+            self.scope,
+            self.previous,
+            hash_payload(b""),
+            actual_sha256
+        );
+        self.verify_next(&text, signature)
+    }
+
+    /// Verify the canonical declared trailer block after the terminal chunk.
+    /// # Errors
+    /// Returns an error if the trailer signature does not match.
+    pub fn verify_trailer(&mut self, canonical: &str, signature: &str) -> Result<(), AuthError> {
+        let text = format!(
+            "AWS4-HMAC-SHA256-TRAILER\n{}\n{}\n{}\n{}",
+            self.timestamp,
+            self.scope,
+            self.previous,
+            hash_payload(canonical.as_bytes())
+        );
+        self.verify_next(&text, signature)
+    }
+
+    fn verify_next(&mut self, text: &str, signature: &str) -> Result<(), AuthError> {
+        let expected = compute_signature(&self.key, text);
+        if !bool::from(expected.as_bytes().ct_eq(signature.as_bytes())) {
+            return Err(AuthError::SignatureDoesNotMatch);
+        }
+        self.previous = expected;
+        Ok(())
+    }
+}
+
+fn validated_payload_hash<'a>(
+    parts: &'a http::request::Parts,
+    actual: &'a str,
+    allow_unsigned: bool,
+) -> Result<&'a str, AuthError> {
+    let mut values = parts.headers.get_all("x-amz-content-sha256").iter();
+    let Some(value) = values.next() else {
+        return Ok(actual);
+    };
+    if values.next().is_some() {
+        return Err(AuthError::InvalidPayloadHash);
+    }
+    let declared = value.to_str().map_err(|_| AuthError::InvalidPayloadHash)?;
+    if allow_unsigned
+        && matches!(
+            declared,
+            "UNSIGNED-PAYLOAD"
+                | "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+                | "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+                | "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+        )
+    {
+        return Ok(declared);
+    }
+    if declared.len() != 64
+        || !declared
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !bool::from(declared.as_bytes().ct_eq(actual.as_bytes()))
+    {
+        return Err(AuthError::InvalidPayloadHash);
+    }
+    Ok(actual)
 }
 
 /// Extract a header value as a string from the request parts.
@@ -457,6 +588,120 @@ mod tests {
             signature,
             "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
         );
+    }
+
+    fn signed_request(payload_hash: &str, declared: bool) -> http::request::Parts {
+        let (mut parts, ()) = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", "localhost")
+            .header("x-amz-date", "20130524T000000Z")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let headers = [("host", "localhost"), ("x-amz-date", "20130524T000000Z")];
+        let signed = ["host", "x-amz-date"];
+        let canonical = build_canonical_request("POST", "/", "", &headers, &signed, payload_hash);
+        let text = build_string_to_sign(
+            "20130524T000000Z",
+            "20130524/us-east-1/s3/aws4_request",
+            &hash_payload(canonical.as_bytes()),
+        );
+        let signature = compute_signature(
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &text,
+        );
+        parts.headers.insert(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 \
+                 Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,\
+                 SignedHeaders=host;x-amz-date,Signature={signature}"
+            )
+            .parse()
+            .unwrap(),
+        );
+        if declared {
+            parts
+                .headers
+                .insert("x-amz-content-sha256", payload_hash.parse().unwrap());
+        }
+        parts
+    }
+
+    #[test]
+    fn test_should_bind_actual_payload_even_with_unsigned_hash_header() {
+        let provider = test_credential_provider();
+        let original = hash_payload(b"original");
+        for declared in [false, true] {
+            let mut parts = signed_request(&original, declared);
+            assert!(verify_sigv4(&parts, &original, &provider).is_ok());
+            assert!(verify_sigv4(&parts, &hash_payload(b"modified"), &provider).is_err());
+            parts
+                .headers
+                .insert("x-amz-content-sha256", original.parse().unwrap());
+            assert!(matches!(
+                verify_sigv4(&parts, &hash_payload(b"modified"), &provider),
+                Err(AuthError::InvalidPayloadHash)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_should_reject_duplicate_malformed_and_protocol_hashes() {
+        let provider = test_credential_provider();
+        let actual = hash_payload(b"original");
+        let mut parts = signed_request(&actual, true);
+        parts
+            .headers
+            .append("x-amz-content-sha256", actual.parse().unwrap());
+        assert!(matches!(
+            verify_sigv4(&parts, &actual, &provider),
+            Err(AuthError::InvalidPayloadHash)
+        ));
+        for value in [
+            "invalid",
+            "UNSIGNED-PAYLOAD",
+            "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+            "UNSIGNED-PAYLOAD-UNKNOWN",
+        ] {
+            let parts = signed_request(value, true);
+            assert!(matches!(
+                verify_sigv4(&parts, &actual, &provider),
+                Err(AuthError::InvalidPayloadHash)
+            ));
+        }
+        let parts = signed_request("UNSIGNED-PAYLOAD", true);
+        assert!(verify_s3_sigv4(&parts, &actual, &provider).is_ok());
+    }
+
+    #[test]
+    fn test_should_verify_streaming_chunk_chain_and_reject_tampering() {
+        let provider = test_credential_provider();
+        let parts = signed_request("STREAMING-AWS4-HMAC-SHA256-PAYLOAD", true);
+        let mut verifier = StreamingVerifier::new(&parts, &provider).unwrap();
+        let digest = hash_payload(b"chunk");
+        let text = format!(
+            "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+            verifier.timestamp,
+            verifier.scope,
+            verifier.previous,
+            hash_payload(b""),
+            digest
+        );
+        let signature = compute_signature(&verifier.key, &text);
+        assert!(
+            verifier
+                .verify_chunk(&hash_payload(b"wrong"), &signature)
+                .is_err()
+        );
+        assert!(verifier.verify_chunk(&digest, &signature).is_ok());
+        assert!(
+            verifier.verify_chunk(&digest, &signature).is_err(),
+            "a chunk cannot be replayed at the next chain position"
+        );
+        assert!(!format!("{verifier:?}").contains(&signature));
     }
 
     #[test]

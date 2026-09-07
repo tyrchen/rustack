@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "applevisor"
@@ -64,6 +64,12 @@ checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
 dependencies = [
  "rustversion",
 ]
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "arrayvec"
@@ -461,9 +467,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-s3"
-version = "1.131.0"
+version = "1.132.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe1b8c5282bf859170836045296b3cd710b7573aceb909498366bb508a41058e"
+checksum = "5575840a3a6b11f6011463ebe359320dfe5b67babb5e9b06fed6ddf809a9ab40"
 dependencies = [
  "aws-credential-types",
  "aws-runtime",
@@ -1161,9 +1167,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -1234,6 +1240,18 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "config"
+version = "0.15.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b85f248a4de22d204ceabc6299d89d2c70fbd7f09fea53c06c852369652d8139"
+dependencies = [
+ "pathdiff",
+ "serde_core",
+ "winnow",
+ "yaml-rust2",
 ]
 
 [[package]]
@@ -1547,7 +1565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1734,11 +1752,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1748,11 +1764,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1774,9 +1792,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.13"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f44da3a8150a6703ed5d34e164b875fd14c2cdab9af1252a9a1020bde2bdc54"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1833,6 +1851,15 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+
+[[package]]
+name = "hashlink"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
+dependencies = [
+ "hashbrown 0.16.1",
+]
 
 [[package]]
 name = "heck"
@@ -2477,6 +2504,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pathdiff"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2526,15 +2559,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
-name = "ppv-lite86"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
-dependencies = [
- "zerocopy",
-]
-
-[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2555,9 +2579,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.39.2"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
 ]
@@ -2584,15 +2608,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
 dependencies = [
  "aws-lc-rs",
  "bytes",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "lru-slab",
- "rand 0.9.4",
+ "rand",
+ "rand_pcg",
  "ring",
  "rustc-hash",
  "rustls",
@@ -2641,16 +2666,6 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
-dependencies = [
- "rand_chacha",
- "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
@@ -2658,16 +2673,6 @@ dependencies = [
  "chacha20",
  "getrandom 0.4.2",
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2681,18 +2686,18 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-dependencies = [
- "getrandom 0.3.4",
-]
-
-[[package]]
-name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -2843,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-apigatewayv2-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2851,7 +2856,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "http 1.4.0",
- "rand 0.10.1",
+ "rand",
  "reqwest 0.12.28",
  "rustack-apigatewayv2-http",
  "rustack-apigatewayv2-model",
@@ -2866,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-apigatewayv2-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "http 1.4.0",
@@ -2876,6 +2881,7 @@ dependencies = [
  "hyper-util",
  "rustack-apigatewayv2-model",
  "rustack-auth",
+ "rustack-core",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2897,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-auth"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2916,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cli"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2987,12 +2993,12 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudfront-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "dashmap",
  "parking_lot",
- "rand 0.10.1",
+ "rand",
  "rustack-cloudfront-model",
  "rustack-core",
  "serde",
@@ -3004,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudfront-dataplane"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3016,6 +3022,7 @@ dependencies = [
  "reqwest 0.13.2",
  "rustack-cloudfront-core",
  "rustack-cloudfront-model",
+ "rustack-core",
  "rustack-s3-core",
  "rustack-s3-model",
  "serde",
@@ -3028,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudfront-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64",
  "bytes",
@@ -3043,6 +3050,7 @@ dependencies = [
  "rustack-auth",
  "rustack-cloudfront-core",
  "rustack-cloudfront-model",
+ "rustack-core",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3061,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudwatch-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3085,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudwatch-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "ciborium",
@@ -3097,6 +3105,7 @@ dependencies = [
  "hyper-util",
  "rustack-auth",
  "rustack-cloudwatch-model",
+ "rustack-core",
  "serde",
  "serde_json",
  "tokio",
@@ -3117,22 +3126,29 @@ dependencies = [
 
 [[package]]
 name = "rustack-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
+ "config",
  "dashmap",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "typed-builder",
+ "url",
  "uuid",
 ]
 
 [[package]]
 name = "rustack-dynamodb-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3147,13 +3163,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "rustack-dynamodb-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3164,6 +3181,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-dynamodb-model",
  "serde",
  "serde_json",
@@ -3187,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-dynamodbstreams-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3210,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-dynamodbstreams-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3220,6 +3238,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-dynamodbstreams-model",
  "serde",
  "serde_json",
@@ -3243,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-events-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3267,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-events-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3277,6 +3296,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-events-model",
  "serde",
  "serde_json",
@@ -3288,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-events-model"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "http 1.4.0",
  "serde",
@@ -3297,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-iam-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3305,7 +3325,7 @@ dependencies = [
  "dashmap",
  "http 1.4.0",
  "percent-encoding",
- "rand 0.10.1",
+ "rand",
  "rustack-auth",
  "rustack-core",
  "rustack-iam-http",
@@ -3319,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-iam-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -3329,6 +3349,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-iam-model",
  "serde",
  "tokio",
@@ -3377,7 +3398,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures",
- "rand 0.10.1",
+ "rand",
  "reqwest 0.13.2",
  "rustack-lambda-core",
  "rustack-lambda-model",
@@ -3395,7 +3416,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kinesis-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3404,7 +3425,7 @@ dependencies = [
  "dashmap",
  "http 1.4.0",
  "md-5",
- "rand 0.10.1",
+ "rand",
  "rustack-auth",
  "rustack-core",
  "rustack-kinesis-http",
@@ -3420,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kinesis-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3430,6 +3451,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-kinesis-model",
  "serde",
  "serde_json",
@@ -3453,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kms-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -3462,7 +3484,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "http 1.4.0",
- "rand 0.10.1",
+ "rand",
  "rustack-auth",
  "rustack-core",
  "rustack-kms-http",
@@ -3476,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kms-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3486,6 +3508,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-kms-model",
  "serde",
  "serde_json",
@@ -3509,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-lambda-core"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3542,13 +3565,19 @@ dependencies = [
 name = "rustack-lambda-echo-bootstrap"
 version = "0.9.0"
 dependencies = [
+ "base64",
+ "rustack-lambda-core",
+ "rustack-lambda-model",
  "serde_json",
+ "tempfile",
+ "tokio",
  "ureq",
+ "zip",
 ]
 
 [[package]]
 name = "rustack-lambda-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "http 1.4.0",
@@ -3557,6 +3586,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-lambda-model",
  "serde",
  "serde_json",
@@ -3578,7 +3608,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-logs-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3600,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-logs-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3610,6 +3640,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-logs-model",
  "serde",
  "serde_json",
@@ -3630,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3648,7 +3679,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml",
- "rand 0.10.1",
+ "rand",
  "rustack-auth",
  "rustack-core",
  "rustack-s3-model",
@@ -3667,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3682,6 +3713,8 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustack-auth",
+ "rustack-core",
+ "rustack-s3-core",
  "rustack-s3-model",
  "rustack-s3-xml",
  "sha2 0.11.0",
@@ -3694,7 +3727,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-model"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3704,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-xml"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3716,14 +3749,14 @@ dependencies = [
 
 [[package]]
 name = "rustack-secretsmanager-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64",
  "bytes",
  "chrono",
  "dashmap",
  "http 1.4.0",
- "rand 0.10.1",
+ "rand",
  "rustack-auth",
  "rustack-core",
  "rustack-secretsmanager-http",
@@ -3736,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-secretsmanager-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3746,6 +3779,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-secretsmanager-model",
  "serde",
  "serde_json",
@@ -3769,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ses-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3793,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ses-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -3803,6 +3837,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-ses-model",
  "serde",
  "serde_json",
@@ -3824,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sns-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3850,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sns-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -3860,6 +3895,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-sns-model",
  "serde",
  "tokio",
@@ -3879,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sqs-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3905,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sqs-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3915,6 +3951,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-sqs-model",
  "serde",
  "serde_json",
@@ -3937,7 +3974,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ssm-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3959,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ssm-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3969,6 +4006,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-ssm-model",
  "serde",
  "serde_json",
@@ -3989,14 +4027,14 @@ dependencies = [
 
 [[package]]
 name = "rustack-sts-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64",
  "bytes",
  "chrono",
  "dashmap",
  "http 1.4.0",
- "rand 0.10.1",
+ "rand",
  "rustack-core",
  "rustack-sts-http",
  "rustack-sts-model",
@@ -4008,7 +4046,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sts-http"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -4018,6 +4056,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustack-auth",
+ "rustack-core",
  "rustack-sts-model",
  "serde",
  "tokio",
@@ -4061,7 +4100,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4119,7 +4158,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4407,9 +4446,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spki"
@@ -4737,7 +4776,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5347,7 +5386,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5643,6 +5682,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
+name = "winnow"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5747,6 +5795,17 @@ name = "xmlparser"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
+
+[[package]]
+name = "yaml-rust2"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b36710ce3a279cfce8465dbab826f161675a262950b922cb2c3663852dfe9eb0"
+dependencies = [
+ "arraydeque",
+ "encoding_rs",
+ "hashlink",
+]
 
 [[package]]
 name = "yoke"

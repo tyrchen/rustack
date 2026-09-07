@@ -3,7 +3,7 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::{Body, Frame, Incoming};
 
 use crate::{
@@ -50,9 +50,7 @@ impl Body for HttpBody {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        // SAFETY: we never move `inner` out.
-        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
-        inner.poll_frame(cx)
+        Pin::new(&mut self.get_mut().inner).poll_frame(cx)
     }
 }
 
@@ -134,19 +132,36 @@ impl<H: CloudFrontHandler> hyper::service::Service<http::Request<Incoming>>
 async fn serve<H: CloudFrontHandler>(
     req: http::Request<Incoming>,
     handler: &H,
-    _config: &CloudFrontHttpConfig,
+    config: &CloudFrontHttpConfig,
     request_id: String,
 ) -> http::Response<HttpBody> {
     let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(e) => {
-            let err = rustack_cloudfront_model::CloudFrontError::Internal(format!(
-                "failed to read body: {e}"
-            ));
-            return error_response(&err, &request_id);
-        }
-    };
+    let body_bytes =
+        match rustack_core::http::collect_body(body, rustack_core::http::BodyBudget::control())
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let err = rustack_cloudfront_model::CloudFrontError::Internal(format!(
+                    "failed to read body: {e}"
+                ));
+                let mut response = error_response(&err, &request_id);
+                *response.status_mut() = e.status_code();
+                return response;
+            }
+        };
+
+    if let Err(err) = rustack_auth::AuthMode::resolve(
+        config.skip_signature_validation,
+        config.credential_provider.as_deref(),
+    )
+    .and_then(|mode| mode.verify(&parts, &rustack_auth::hash_payload(&body_bytes)))
+    {
+        return error_response(
+            &rustack_cloudfront_model::CloudFrontError::AccessDenied(err.to_string()),
+            &request_id,
+        );
+    }
 
     let route = match resolve(&parts.method, &parts.uri) {
         Ok(r) => r,

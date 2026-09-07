@@ -1,6 +1,6 @@
 //! SSM service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// SSM service configuration.
 #[derive(Debug, Clone)]

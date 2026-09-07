@@ -1,6 +1,6 @@
 //! SQS service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// SQS service configuration.
 #[derive(Debug, Clone)]

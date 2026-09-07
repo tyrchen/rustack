@@ -37,6 +37,51 @@ use crate::{
     validation::{validate_content_md5, validate_metadata, validate_object_key},
 };
 
+/// Look up an object while preserving delete-marker metadata on GET and HEAD errors.
+fn lookup_object<'a>(
+    store: &'a ObjectStore,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<&'a S3Object, S3Error> {
+    let object = match version_id {
+        Some(id) => store.get_version(key, id),
+        None => store.get(key),
+    };
+    object.ok_or_else(|| {
+        if let Some(marker) = store.delete_marker(key, version_id) {
+            let code = if version_id.is_some() {
+                S3ErrorCode::MethodNotAllowed
+            } else {
+                S3ErrorCode::NoSuchKey
+            };
+            let mut error = S3Error::new(code)
+                .with_header("x-amz-delete-marker", "true")
+                .with_header("x-amz-version-id", marker.version_id.clone());
+            if version_id.is_some() {
+                error = error.with_header(
+                    "Last-Modified",
+                    marker
+                        .last_modified
+                        .format("%a, %d %b %Y %H:%M:%S GMT")
+                        .to_string(),
+                );
+            }
+            error
+        } else if let Some(id) = version_id {
+            S3ServiceError::NoSuchVersion {
+                key: key.to_owned(),
+                version_id: id.to_owned(),
+            }
+            .into_s3_error()
+        } else {
+            S3ServiceError::NoSuchKey {
+                key: key.to_owned(),
+            }
+            .into_s3_error()
+        }
+    })
+}
+
 /// Check whether Object Lock (legal hold or retention) prevents deletion of a
 /// specific object version.
 ///
@@ -53,7 +98,6 @@ use crate::{
 ///   COMPLIANCE-mode or legal holds.
 ///
 /// Returns `Ok(())` when the deletion is allowed.
-#[allow(clippy::result_large_err)]
 fn check_object_lock_for_delete(
     store: &ObjectStore,
     key: &str,
@@ -93,17 +137,37 @@ fn check_object_lock_for_delete(
 // (sizes, part counts). Casting from u64/u32/usize is safe in practice.
 // These handler methods must remain async because some operations involve
 // storage I/O.
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
 )]
 impl RustackS3 {
     /// Put (upload) a new object.
     pub async fn handle_put_object(
         &self,
+        input: PutObjectInput,
+    ) -> Result<PutObjectOutput, S3Error> {
+        self.put_object_body(input, None).await
+    }
+
+    /// Publish an upload whose bytes were incrementally staged and authenticated by HTTP.
+    pub async fn handle_put_object_staged(
+        &self,
+        input: PutObjectInput,
+        upload: std::sync::Arc<crate::storage::StagedUpload>,
+    ) -> Result<PutObjectOutput, S3Error> {
+        self.put_object_body(input, Some(upload)).await
+    }
+
+    async fn put_object_body(
+        &self,
         mut input: PutObjectInput,
+        upload: Option<std::sync::Arc<crate::storage::StagedUpload>>,
     ) -> Result<PutObjectOutput, S3Error> {
         let bucket_name = input.bucket.clone();
         let key = input.key.clone();
@@ -120,8 +184,14 @@ impl RustackS3 {
         let body_data = input.body.take().map_or_else(Bytes::new, |b| b.data);
 
         // Validate Content-MD5 if provided.
-        validate_content_md5(input.content_md5.as_deref(), &body_data)
-            .map_err(S3ServiceError::into_s3_error)?;
+        if let Some(ref upload) = upload {
+            upload
+                .validate_md5(input.content_md5.as_deref())
+                .map_err(S3ServiceError::into_s3_error)?;
+        } else {
+            validate_content_md5(input.content_md5.as_deref(), &body_data)
+                .map_err(S3ServiceError::into_s3_error)?;
+        }
 
         // Extract metadata from the request.
         let metadata = build_metadata(&input);
@@ -134,33 +204,43 @@ impl RustackS3 {
             "null".to_owned()
         };
 
-        // Write to storage.
-        let write_result = self
-            .storage
-            .write_object(&bucket_name, &key, &version_id, body_data.clone())
-            .await
-            .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
-
         // Extract checksum from the request, or compute CRC32 by default.
         let client_checksum =
             extract_checksum_from_put(&input).map_err(S3ServiceError::into_s3_error)?;
         let is_client_provided = client_checksum.is_some();
 
-        let checksum = client_checksum.unwrap_or_else(|| ChecksumData {
-            algorithm: "CRC32".to_owned(),
-            value: compute_checksum(ChecksumAlgorithm::Crc32, &body_data),
-            checksum_type: "FULL_OBJECT".to_owned(),
-        });
-
-        // Validate client-provided checksum against server-computed value.
+        let compute = |algorithm| -> Result<String, S3ServiceError> {
+            match &upload {
+                Some(upload) => upload.checksum(algorithm).map(str::to_owned),
+                None => Ok(compute_checksum(algorithm, &body_data)),
+            }
+        };
+        let checksum = match client_checksum {
+            Some(checksum) => checksum,
+            None => ChecksumData {
+                algorithm: "CRC32".to_owned(),
+                value: compute(ChecksumAlgorithm::Crc32).map_err(S3ServiceError::into_s3_error)?,
+                checksum_type: "FULL_OBJECT".to_owned(),
+            },
+        };
         if is_client_provided {
-            if let Ok(algo) = ChecksumAlgorithm::from_str(&checksum.algorithm) {
-                let computed = compute_checksum(algo, &body_data);
-                if checksum.value != computed {
-                    return Err(S3ServiceError::BadDigest.into_s3_error());
-                }
+            let algo = ChecksumAlgorithm::from_str(&checksum.algorithm)
+                .map_err(|_| S3ServiceError::BadDigest.into_s3_error())?;
+            if checksum.value != compute(algo).map_err(S3ServiceError::into_s3_error)? {
+                return Err(S3ServiceError::BadDigest.into_s3_error());
             }
         }
+
+        // Publish only after every checksum has passed. Failed uploads preserve old data.
+        let write_result = if let Some(upload) = upload {
+            self.storage
+                .write_staged_object(&bucket_name, &key, &version_id, upload)
+        } else {
+            self.storage
+                .write_object(&bucket_name, &key, &version_id, body_data)
+                .await
+                .map_err(S3ServiceError::into_s3_error)?
+        };
 
         // Build the S3Object.
         let owner = InternalOwner::default();
@@ -210,11 +290,30 @@ impl RustackS3 {
     }
 
     /// Get (download) an object.
-    #[allow(clippy::too_many_lines)]
     pub async fn handle_get_object(
         &self,
         input: GetObjectInput,
     ) -> Result<GetObjectOutput, S3Error> {
+        self.get_object_body(input, false)
+            .await
+            .map(|(output, _)| output)
+    }
+
+    /// Get validated response metadata plus a bounded streaming file when available.
+    pub async fn handle_get_object_streaming(
+        &self,
+        input: GetObjectInput,
+    ) -> Result<(GetObjectOutput, Option<crate::storage::StagedRead>), S3Error> {
+        self.get_object_body(input, true).await
+    }
+
+    // Metadata projection retains the existing GetObject operation's field-by-field mapping.
+    #[allow(clippy::too_many_lines)]
+    async fn get_object_body(
+        &self,
+        input: GetObjectInput,
+        streaming: bool,
+    ) -> Result<(GetObjectOutput, Option<crate::storage::StagedRead>), S3Error> {
         let bucket_name = input.bucket;
         let key = input.key;
         let version_id_param = input.version_id;
@@ -251,27 +350,7 @@ impl RustackS3 {
                 .map_err(S3ServiceError::into_s3_error)?;
 
             let store = bucket.objects.read();
-            let obj = if let Some(ref version_id) = version_id_param {
-                store.get_version(&key, version_id).ok_or_else(|| {
-                    // Check if the version is a delete marker.
-                    if store.is_delete_marker(&key, version_id) {
-                        S3ServiceError::MethodNotAllowed
-                            .into_s3_error()
-                            .with_header("x-amz-delete-marker", "true")
-                            .with_header("x-amz-version-id", version_id.clone())
-                    } else {
-                        S3ServiceError::NoSuchVersion {
-                            key: key.clone(),
-                            version_id: version_id.clone(),
-                        }
-                        .into_s3_error()
-                    }
-                })?
-            } else {
-                store
-                    .get(&key)
-                    .ok_or_else(|| S3ServiceError::NoSuchKey { key: key.clone() }.into_s3_error())?
-            };
+            let obj = lookup_object(&store, &key, version_id_param.as_deref())?;
 
             // Conditional request checks.
             if let Some(ref if_match) = if_match_param {
@@ -313,17 +392,37 @@ impl RustackS3 {
             None
         };
 
-        // Read data from storage.
-        let data = self
-            .storage
-            .read_object(&bucket_name, &key, &version_for_storage, range)
-            .await
-            .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
-
-        let content_length = data.len() as i64;
-
-        // Build the streaming body from the data bytes.
-        let body = StreamingBlob::new(data);
+        let staged = if streaming {
+            self.storage
+                .staged_object(&bucket_name, &key, &version_for_storage)
+                .map(|upload| {
+                    let (offset, length) = range.map_or((0, obj_size), |(start, end)| {
+                        (start, end.saturating_sub(start).saturating_add(1))
+                    });
+                    crate::storage::StagedRead {
+                        upload,
+                        offset,
+                        length,
+                    }
+                })
+        } else {
+            None
+        };
+        let (body, content_length) = if let Some(ref staged) = staged {
+            (
+                None,
+                i64::try_from(staged.length)
+                    .map_err(|_| S3ServiceError::InvalidRange.into_s3_error())?,
+            )
+        } else {
+            let data = self
+                .storage
+                .read_object(&bucket_name, &key, &version_for_storage, range)
+                .await
+                .map_err(S3ServiceError::into_s3_error)?;
+            let length = data.len() as i64;
+            (Some(StreamingBlob::new(data)), length)
+        };
 
         let content_range = range.map(|(start, end)| format!("bytes {start}-{end}/{obj_size}"));
 
@@ -354,7 +453,7 @@ impl RustackS3 {
         };
         let output = GetObjectOutput {
             accept_ranges: Some("bytes".to_owned()),
-            body: Some(body),
+            body,
             cache_control: override_cache_control.or(obj_meta.cache_control),
             checksum_crc32: cksum.as_ref().and_then(|c| c.crc32.clone()),
             checksum_crc32c: cksum.as_ref().and_then(|c| c.crc32c.clone()),
@@ -393,7 +492,7 @@ impl RustackS3 {
             version_id: obj_version_id,
             ..GetObjectOutput::default()
         };
-        Ok(output)
+        Ok((output, staged))
     }
 
     /// Head object (get metadata without body).
@@ -421,26 +520,7 @@ impl RustackS3 {
             .map_err(S3ServiceError::into_s3_error)?;
 
         let store = bucket.objects.read();
-        let obj = if let Some(ref version_id) = version_id_param {
-            store.get_version(&key, version_id).ok_or_else(|| {
-                if store.is_delete_marker(&key, version_id) {
-                    S3ServiceError::MethodNotAllowed
-                        .into_s3_error()
-                        .with_header("x-amz-delete-marker", "true")
-                        .with_header("x-amz-version-id", version_id.clone())
-                } else {
-                    S3ServiceError::NoSuchVersion {
-                        key: key.clone(),
-                        version_id: version_id.clone(),
-                    }
-                    .into_s3_error()
-                }
-            })?
-        } else {
-            store
-                .get(&key)
-                .ok_or_else(|| S3ServiceError::NoSuchKey { key: key.clone() }.into_s3_error())?
-        };
+        let obj = lookup_object(&store, &key, version_id_param.as_deref())?;
 
         let obj_version_id = if obj.version_id == "null" {
             None
@@ -991,6 +1071,52 @@ fn extract_checksum_from_put(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_should_preserve_existing_object_after_bad_staged_checksum() {
+        use std::sync::Arc;
+
+        use crate::{config::S3Config, storage::UploadWriter};
+        let provider = RustackS3::new(S3Config::default());
+        provider
+            .handle_create_bucket(rustack_s3_model::input::CreateBucketInput {
+                bucket: "stream-test".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let input = PutObjectInput {
+            bucket: "stream-test".to_owned(),
+            key: "key".to_owned(),
+            body: Some(StreamingBlob::new(Bytes::from_static(b"original"))),
+            ..Default::default()
+        };
+        provider.handle_put_object(input).await.unwrap();
+        let mut writer = UploadWriter::new().await.unwrap();
+        writer.write(b"modified").await.unwrap();
+        let upload = Arc::new(writer.finish().await.unwrap());
+        let input = PutObjectInput {
+            bucket: "stream-test".to_owned(),
+            key: "key".to_owned(),
+            checksum_crc32: Some("AAAAAA==".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            provider
+                .handle_put_object_staged(input, upload)
+                .await
+                .is_err()
+        );
+        let output = provider
+            .handle_get_object(GetObjectInput {
+                bucket: "stream-test".to_owned(),
+                key: "key".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.body.unwrap().data.as_ref(), b"original");
+    }
 
     #[test]
     fn test_should_parse_copy_source_simple() {

@@ -97,6 +97,7 @@ pub async fn dispatch_s3_origin(
     inbound_headers: &HeaderMap,
     origin_custom_headers: &[CustomHeader],
     forward_user_metadata: bool,
+    max_body: usize,
 ) -> Result<Response<Bytes>, DataPlaneError> {
     let joined = concat_origin_path(origin_path, request_path);
     let key = joined.trim_start_matches('/').to_owned();
@@ -116,8 +117,31 @@ pub async fn dispatch_s3_origin(
                     .map(str::to_owned),
                 ..GetObjectInput::default()
             };
-            let out = s3.handle_get_object(input).await.map_err(to_dp_error)?;
-            let body = out.body.map(|b| b.data).unwrap_or_default();
+            let (out, staged) = s3
+                .handle_get_object_streaming(input)
+                .await
+                .map_err(to_dp_error)?;
+            let limit =
+                (max_body as u64).min(rustack_core::settings::budgets().upstream_body_bytes);
+            let body = if let Some(staged) = staged {
+                if staged.length > limit {
+                    return Err(DataPlaneError::PayloadTooLarge(
+                        "S3 origin body exceeds proxy byte budget".to_owned(),
+                    ));
+                }
+                staged
+                    .collect_bounded(limit)
+                    .await
+                    .map_err(|error| DataPlaneError::Internal(error.to_string()))?
+            } else {
+                let body = out.body.map(|body| body.data).unwrap_or_default();
+                if body.len() as u64 > limit {
+                    return Err(DataPlaneError::PayloadTooLarge(
+                        "S3 origin body exceeds proxy byte budget".to_owned(),
+                    ));
+                }
+                body
+            };
             let mut builder = Response::builder().status(StatusCode::OK);
             if let Some(ct) = out.content_type {
                 builder = builder.header(http::header::CONTENT_TYPE, ct);
@@ -254,6 +278,18 @@ pub async fn dispatch_http_origin(
         format!("{scheme}://{}:{effective_port}{joined}", origin.domain_name)
     };
 
+    let url = reqwest::Url::parse(&url)
+        .map_err(|_| DataPlaneError::Internal("invalid configured origin URL".to_owned()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(DataPlaneError::Internal(
+            "origin URL requires an HTTP(S) authority without credentials or fragments".to_owned(),
+        ));
+    }
     let mut upstream = filter_inbound_headers(inbound_headers);
     apply_custom_headers(&mut upstream, &origin.custom_headers);
 
@@ -261,13 +297,13 @@ pub async fn dispatch_http_origin(
         .map_err(|e| DataPlaneError::Internal(format!("invalid method: {e}")))?;
 
     let req = client
-        .request(reqwest_method, &url)
+        .request(reqwest_method, url)
         .headers(translate_headers_to_reqwest(&upstream))
         .body(body.to_vec())
         .build()
         .map_err(|e| DataPlaneError::Internal(format!("build reqwest: {e}")))?;
 
-    let resp = client.execute(req).await.map_err(|e| {
+    let mut resp = client.execute(req).await.map_err(|e| {
         if e.is_timeout() {
             DataPlaneError::OriginServerError {
                 status: 504,
@@ -284,17 +320,39 @@ pub async fn dispatch_http_origin(
     let status =
         StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let upstream_headers = translate_headers_from_reqwest(resp.headers());
-    let body_bytes = resp
-        .bytes()
+    let budgets = rustack_core::settings::budgets();
+    let max_body =
+        max_body
+            .min(usize::try_from(budgets.upstream_body_bytes).map_err(|_| {
+                DataPlaneError::Internal("invalid upstream byte budget".to_owned())
+            })?);
+    let mut body_bytes = Vec::new();
+    let idle = std::time::Duration::from_secs(budgets.body_idle_seconds);
+    let mut idle_deadline = tokio::time::Instant::now() + idle;
+    while let Some(chunk) = tokio::time::timeout_at(idle_deadline, resp.chunk())
         .await
-        .map_err(|e| DataPlaneError::Internal(format!("read body: {e}")))?;
-    if body_bytes.len() > max_body {
-        return Err(DataPlaneError::PayloadTooLarge(format!(
-            "upstream body {} bytes exceeds cap {}",
-            body_bytes.len(),
-            max_body
-        )));
+        .map_err(|_| DataPlaneError::OriginServerError {
+            status: 504,
+            message: "origin body idle deadline exceeded".to_owned(),
+        })?
+        .map_err(|e| DataPlaneError::OriginServerError {
+            status: 502,
+            message: format!("read origin body: {e}"),
+        })?
+    {
+        if !chunk.is_empty() {
+            idle_deadline = tokio::time::Instant::now() + idle;
+        }
+        rustack_core::http::append_bounded(&mut body_bytes, &chunk, max_body as u64).map_err(
+            |error| match error {
+                rustack_core::http::BodyReadError::TooLarge => {
+                    DataPlaneError::PayloadTooLarge("upstream body exceeds byte budget".to_owned())
+                }
+                error => DataPlaneError::Internal(error.to_string()),
+            },
+        )?;
     }
+    let body_bytes = Bytes::from(body_bytes);
 
     let mut builder = Response::builder().status(status);
     for (k, v) in upstream_headers.iter() {

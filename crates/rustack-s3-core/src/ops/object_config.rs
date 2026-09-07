@@ -31,11 +31,14 @@ use crate::{error::S3ServiceError, provider::RustackS3, state::object::CannedAcl
 
 // AWS S3 DTOs use signed integers (i32/i64) for inherently non-negative values.
 // These handler methods must remain async for consistency.
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
 )]
 impl RustackS3 {
     // -----------------------------------------------------------------------

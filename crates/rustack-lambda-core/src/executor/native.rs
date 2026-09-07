@@ -5,11 +5,16 @@
 //! match the host. The auto executor keeps macOS Zip functions on Squib and
 //! leaves unsupported image packages for the future Docker backend.
 
-use std::{io::Read as _, net::SocketAddr, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use parking_lot::Mutex as PMutex;
-use tokio::{io::AsyncReadExt, process::Command, sync::watch};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    sync::{Semaphore, oneshot, watch},
+    task::JoinSet,
+};
 use tracing::{debug, warn};
 
 use super::{
@@ -23,13 +28,28 @@ pub struct NativeExecutor {
     pool: Arc<InstancePool>,
     cancel_tx: watch::Sender<bool>,
     reaper: PMutex<Option<tokio::task::JoinHandle<()>>>,
+    processes: Arc<PMutex<JoinSet<()>>>,
+}
+
+impl Drop for NativeExecutor {
+    fn drop(&mut self) {
+        self.pool.shutdown();
+        if let Some(reaper) = self.reaper.lock().take() {
+            reaper.abort();
+        }
+        self.processes.lock().abort_all();
+    }
 }
 
 impl NativeExecutor {
     /// Build a new native executor.
     #[must_use]
     pub fn new(max_warm: usize, idle_timeout: Duration, init_timeout: Duration) -> Self {
-        let backend = Arc::new(NativeBackend);
+        let processes = Arc::new(PMutex::new(JoinSet::new()));
+        let backend = Arc::new(NativeBackend {
+            processes: Arc::clone(&processes),
+            capacity: Arc::new(Semaphore::new(32)),
+        });
         let pool = Arc::new(InstancePool::new(
             backend,
             max_warm,
@@ -42,6 +62,7 @@ impl NativeExecutor {
             pool,
             cancel_tx,
             reaper: PMutex::new(Some(reaper)),
+            processes,
         }
     }
 }
@@ -59,13 +80,8 @@ impl Executor for NativeExecutor {
             .as_ref()
             .ok_or_else(|| ExecutorError::InvalidCode("missing code root".to_owned()))?;
         let bootstrap = code_root.join("bootstrap");
-        if !bootstrap.exists() {
-            return Err(ExecutorError::InvalidCode(format!(
-                "no bootstrap at {}",
-                bootstrap.display()
-            )));
-        }
-        if !bootstrap_runs_on_host(&bootstrap, &req.architectures) {
+        ensure_executable(&bootstrap).await?;
+        if !bootstrap_runs_on_host(&bootstrap, &req.architectures).await? {
             return Err(ExecutorError::Unsupported(format!(
                 "bootstrap {} cannot run on host {}/{}; use docker backend",
                 bootstrap.display(),
@@ -73,7 +89,6 @@ impl Executor for NativeExecutor {
                 std::env::consts::ARCH,
             )));
         }
-        ensure_executable(&bootstrap)?;
         self.pool.invoke(req).await
     }
 
@@ -81,17 +96,31 @@ impl Executor for NativeExecutor {
         let _ = self.cancel_tx.send(true);
         let reaper = self.reaper.lock().take();
         if let Some(r) = reaper {
-            let _ = r.await;
+            if let Err(error) = r.await {
+                warn!(%error, "Lambda idle reaper failed");
+            }
         }
         self.pool.shutdown();
+        let mut processes = std::mem::take(&mut *self.processes.lock());
+        while let Some(result) = processes.join_next().await {
+            if let Err(error) = result {
+                warn!(%error, "Lambda process supervisor failed");
+            }
+        }
     }
 }
 
 #[derive(Debug)]
-struct NativeBackend;
+struct NativeBackend {
+    processes: Arc<PMutex<JoinSet<()>>>,
+    capacity: Arc<Semaphore>,
+}
 
 #[async_trait]
 impl InstanceBackend for NativeBackend {
+    fn has_capacity(&self) -> bool {
+        self.capacity.available_permits() != 0
+    }
     async fn spawn(
         &self,
         req: &InvokeRequest,
@@ -120,35 +149,45 @@ impl InstanceBackend for NativeBackend {
 
         // Drain stdout/stderr into a small ring so we don't fill pipe buffers.
         let log_buf = Arc::new(PMutex::new(LogTail::with_capacity(4 * 1024)));
+        let mut logs = JoinSet::new();
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(drain_to_buf(stdout, Arc::clone(&log_buf), "stdout"));
+            logs.spawn(drain_to_buf(stdout, Arc::clone(&log_buf), "stdout"));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(drain_to_buf(stderr, Arc::clone(&log_buf), "stderr"));
+            logs.spawn(drain_to_buf(stderr, log_buf, "stderr"));
         }
-
+        let (cancel, cancelled) = oneshot::channel();
+        let mut processes = self.processes.lock();
+        while let Some(result) = processes.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "Lambda process supervisor failed");
+            }
+        }
+        processes.spawn(async move {
+            tokio::select! {
+                _ = cancelled => { if let Err(error) = child.kill().await { warn!(%error, "Lambda process cancellation failed"); } },
+                result = child.wait() => { if let Err(error) = result { warn!(%error, "Lambda process wait failed"); } },
+            }
+            logs.abort_all();
+            while let Some(result) = logs.join_next().await { if let Err(error) = result { if !error.is_cancelled() { warn!(%error, "Lambda log task failed"); } } }
+        });
         Ok(BackendHandle::new(NativeHandle {
-            child: Some(child),
-            log: log_buf,
+            cancel: Some(cancel),
         }))
     }
 }
 
 #[derive(Debug)]
 struct NativeHandle {
-    child: Option<tokio::process::Child>,
-    #[allow(dead_code)]
-    log: Arc<PMutex<LogTail>>,
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 impl BackendHandleObj for NativeHandle {
     fn kill(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            // start_kill is sync and non-blocking; reaper task does final wait.
-            let _: Result<(), std::io::Error> = child.start_kill();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
+        if let Some(cancel) = self.cancel.take() {
+            if cancel.send(()).is_err() {
+                debug!("Lambda process already exited");
+            }
         }
     }
 }
@@ -159,13 +198,11 @@ impl Drop for NativeHandle {
     }
 }
 
-/// Best-effort bootstrap-arch check.
-///
-/// Synchronous std::fs is intentional — the file is tiny (4 bytes read) and
-/// we'd otherwise need to await inside a hot path. The disallowed-types lint
-/// is allowed locally for the same reason.
-#[allow(clippy::disallowed_types)]
-fn bootstrap_runs_on_host(path: &Path, declared_archs: &[String]) -> bool {
+/// Check declared architecture and executable format with fallible asynchronous IO.
+async fn bootstrap_runs_on_host(
+    path: &Path,
+    declared_archs: &[String],
+) -> Result<bool, ExecutorError> {
     // Architecture check first — declared `architectures` must include the
     // host arch.
     let host_arch = match std::env::consts::ARCH {
@@ -174,16 +211,15 @@ fn bootstrap_runs_on_host(path: &Path, declared_archs: &[String]) -> bool {
         other => other,
     };
     if !declared_archs.iter().any(|a| a == host_arch) {
-        return false;
+        return Ok(false);
     }
-    // Magic-byte check matches the OS.
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| ExecutorError::Io(format!("Open bootstrap: {error}")))?;
     let mut hdr = [0u8; 4];
-    if f.read_exact(&mut hdr).is_err() {
-        return false;
-    }
+    file.read_exact(&mut hdr)
+        .await
+        .map_err(|error| ExecutorError::InvalidCode(format!("Read bootstrap header: {error}")))?;
     let elf = hdr == [0x7f, b'E', b'L', b'F'];
     let macho = hdr == [0xCF, 0xFA, 0xED, 0xFE]
         || hdr == [0xFE, 0xED, 0xFA, 0xCE]
@@ -191,36 +227,26 @@ fn bootstrap_runs_on_host(path: &Path, declared_archs: &[String]) -> bool {
         || hdr == [0xCA, 0xFE, 0xBA, 0xBE];
     let host_is_macos = std::env::consts::OS == "macos";
     let host_is_linux = std::env::consts::OS == "linux";
-    if elf && host_is_linux {
-        return true;
-    }
-    if macho && host_is_macos {
-        return true;
-    }
-    false
+    Ok((elf && host_is_linux) || (macho && host_is_macos))
 }
 
-/// Mark the file +x if it isn't already. No-op on non-unix.
-///
-/// std::fs is intentional: a single sync stat + chmod is cheaper than the
-/// async runtime overhead and runs once per cold start.
+/// Require a regular executable bootstrap without modifying immutable artifacts.
 #[cfg(unix)]
-#[allow(clippy::disallowed_methods)]
-fn ensure_executable(path: &Path) -> Result<(), ExecutorError> {
+async fn ensure_executable(path: &Path) -> Result<(), ExecutorError> {
     use std::os::unix::fs::PermissionsExt as _;
-    let meta = std::fs::metadata(path)
-        .map_err(|e| ExecutorError::Io(format!("stat {}: {e}", path.display())))?;
-    let mut perms = meta.permissions();
-    if perms.mode() & 0o111 == 0 {
-        perms.set_mode(perms.mode() | 0o755);
-        std::fs::set_permissions(path, perms)
-            .map_err(|e| ExecutorError::Io(format!("chmod {}: {e}", path.display())))?;
+    let meta = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|error| ExecutorError::Io(format!("Inspect bootstrap: {error}")))?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(ExecutorError::InvalidCode(
+            "bootstrap must be a regular executable file".into(),
+        ));
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn ensure_executable(_path: &Path) -> Result<(), ExecutorError> {
+async fn ensure_executable(_path: &Path) -> Result<(), ExecutorError> {
     Ok(())
 }
 

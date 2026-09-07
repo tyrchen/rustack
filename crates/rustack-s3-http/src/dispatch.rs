@@ -30,6 +30,19 @@ use crate::{body::S3ResponseBody, router::RoutingContext};
 /// This trait uses `async-trait`-style boxing because it needs to be used
 /// with `Arc<dyn S3Handler>` for dynamic dispatch in the service layer.
 pub trait S3Handler: Send + Sync + 'static {
+    /// Handle an authenticated immutable upload without buffering its bytes.
+    ///
+    /// Custom handlers must implement this method for PutObject/UploadPart. The default
+    /// rejects the operation rather than handing an empty body to a buffered handler.
+    fn handle_staged_upload(
+        &self,
+        _parts: http::request::Parts,
+        _upload: std::sync::Arc<rustack_s3_core::storage::StagedUpload>,
+        ctx: RoutingContext,
+    ) -> Pin<Box<dyn Future<Output = Result<http::Response<S3ResponseBody>, S3Error>> + Send>> {
+        Box::pin(async move { Err(S3Error::not_implemented(ctx.operation.as_str())) })
+    }
+
     /// Handle an S3 operation and produce an HTTP response.
     ///
     /// The implementor receives the identified operation, raw HTTP parts, and body,

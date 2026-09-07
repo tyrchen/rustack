@@ -1,6 +1,6 @@
 //! DynamoDB Streams configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// DynamoDB Streams service configuration.
 #[derive(Debug, Clone)]

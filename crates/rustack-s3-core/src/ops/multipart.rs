@@ -46,11 +46,14 @@ use super::bucket::to_model_owner;
 
 // AWS S3 DTOs use signed integers (i32/i64) for inherently non-negative values.
 // These handler methods must remain async for consistency.
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
 )]
 impl RustackS3 {
     /// Create a new multipart upload.
@@ -180,10 +183,28 @@ impl RustackS3 {
     }
 
     /// Upload a single part of a multipart upload.
-    #[allow(clippy::too_many_lines)]
     pub async fn handle_upload_part(
         &self,
+        input: UploadPartInput,
+    ) -> Result<UploadPartOutput, S3Error> {
+        self.upload_part_body(input, None).await
+    }
+
+    /// Publish an incrementally staged multipart part after checksum validation.
+    pub async fn handle_upload_part_staged(
+        &self,
+        input: UploadPartInput,
+        upload: std::sync::Arc<crate::storage::StagedUpload>,
+    ) -> Result<UploadPartOutput, S3Error> {
+        self.upload_part_body(input, Some(upload)).await
+    }
+
+    // Preserve the existing multipart validation/publication operation as one sequence.
+    #[allow(clippy::too_many_lines)]
+    async fn upload_part_body(
+        &self,
         mut input: UploadPartInput,
+        staged: Option<std::sync::Arc<crate::storage::StagedUpload>>,
     ) -> Result<UploadPartOutput, S3Error> {
         // Extract checksum before moving fields out of input.
         let part_checksum = extract_checksum_from_part(&input)?;
@@ -219,14 +240,33 @@ impl RustackS3 {
         let body_data = input.body.take().map(|b| b.data).unwrap_or_default();
 
         // Validate Content-MD5 if provided.
-        validate_content_md5(input.content_md5.as_deref(), &body_data)
-            .map_err(S3ServiceError::into_s3_error)?;
+        if let Some(ref staged) = staged {
+            staged
+                .validate_md5(input.content_md5.as_deref())
+                .map_err(S3ServiceError::into_s3_error)?;
+        } else {
+            validate_content_md5(input.content_md5.as_deref(), &body_data)
+                .map_err(S3ServiceError::into_s3_error)?;
+        }
+        let compute = |algorithm| -> Result<String, S3ServiceError> {
+            match &staged {
+                Some(upload) => upload.checksum(algorithm).map(str::to_owned),
+                None => Ok(compute_checksum(algorithm, &body_data)),
+            }
+        };
+        if let Some(ref checksum) = part_checksum {
+            let algorithm = CoreChecksumAlgorithm::from_str(&checksum.algorithm)
+                .map_err(|_| S3ServiceError::BadDigest.into_s3_error())?;
+            if checksum.value != compute(algorithm).map_err(S3ServiceError::into_s3_error)? {
+                return Err(S3ServiceError::BadDigest.into_s3_error());
+            }
+        }
 
         // If the multipart upload has a checksum algorithm, validate the part
         // checksum and compute server-side if not provided.
         let checksum = if let Some(ref algo_str) = upload_checksum_algorithm {
             if let Ok(algo) = CoreChecksumAlgorithm::from_str(algo_str) {
-                let computed = compute_checksum(algo, &body_data);
+                let computed = compute(algo).map_err(S3ServiceError::into_s3_error)?;
                 if let Some(ref client_cksum) = part_checksum {
                     // Validate algorithm matches.
                     if !client_cksum.algorithm.eq_ignore_ascii_case(algo_str) {
@@ -256,11 +296,15 @@ impl RustackS3 {
         };
 
         // Write part to storage.
-        let write_result = self
-            .storage
-            .write_part(&bucket_name, &upload_id, part_number as u32, body_data)
-            .await
-            .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
+        let write_result = if let Some(staged) = staged {
+            self.storage
+                .write_staged_part(&bucket_name, &upload_id, part_number as u32, staged)
+        } else {
+            self.storage
+                .write_part(&bucket_name, &upload_id, part_number as u32, body_data)
+                .await
+                .map_err(S3ServiceError::into_s3_error)?
+        };
 
         // Build checksum output fields.
         let (out_crc32, out_crc32c, out_crc64nvme, out_sha1, out_sha256) =
@@ -317,18 +361,21 @@ impl RustackS3 {
 
         // Read source object data.
         let src_vid = src_version_id.as_deref().unwrap_or("null");
-        let data = self
-            .storage
-            .read_object(&src_bucket, &src_key, src_vid, None)
-            .await
-            .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
-
-        // Write as part.
-        let write_result = self
-            .storage
-            .write_part(&bucket_name, &upload_id, part_number as u32, data)
-            .await
-            .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
+        let write_result =
+            if let Some(staged) = self.storage.staged_object(&src_bucket, &src_key, src_vid) {
+                self.storage
+                    .write_staged_part(&bucket_name, &upload_id, part_number as u32, staged)
+            } else {
+                let data = self
+                    .storage
+                    .read_object(&src_bucket, &src_key, src_vid, None)
+                    .await
+                    .map_err(S3ServiceError::into_s3_error)?;
+                self.storage
+                    .write_part(&bucket_name, &upload_id, part_number as u32, data)
+                    .await
+                    .map_err(S3ServiceError::into_s3_error)?
+            };
 
         // Record the part metadata.
         let bucket = self
@@ -478,12 +525,14 @@ impl RustackS3 {
                 let value = if checksum_type_str == "FULL_OBJECT" {
                     let assembled = self
                         .storage
-                        .read_object(&bucket_name, &key, &version_id, None)
-                        .await
-                        .map_err(|e| {
-                            S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error()
+                        .staged_object(&bucket_name, &key, &version_id)
+                        .ok_or_else(|| {
+                            S3Error::internal_error("missing assembled multipart artifact")
                         })?;
-                    compute_checksum(algo, &assembled)
+                    assembled
+                        .checksum(algo)
+                        .map_err(S3ServiceError::into_s3_error)?
+                        .to_owned()
                 } else {
                     // Collect part checksums in order for composite calculation.
                     let part_checksums: Vec<String> = part_numbers
@@ -793,7 +842,6 @@ type ChecksumOutputFields = (
 ///
 /// Returns at most one checksum. If multiple checksum fields are set, returns
 /// an error.
-#[allow(clippy::result_large_err)]
 fn extract_checksum_from_part(input: &UploadPartInput) -> Result<Option<ChecksumData>, S3Error> {
     let candidates: [(&str, &Option<String>); 5] = [
         ("CRC32", &input.checksum_crc32),

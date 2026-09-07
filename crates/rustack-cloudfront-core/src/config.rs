@@ -49,31 +49,31 @@ impl CloudFrontConfig {
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
-        if let Ok(v) = std::env::var("CLOUDFRONT_SKIP_SIGNATURE_VALIDATION") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_SKIP_SIGNATURE_VALIDATION") {
             cfg.skip_signature_validation = parse_bool(&v).unwrap_or(cfg.skip_signature_validation);
         }
-        if let Ok(v) = std::env::var("AWS_DEFAULT_REGION") {
+        if let Ok(v) = rustack_core::settings::var("AWS_DEFAULT_REGION") {
             cfg.default_region = v;
         }
-        if let Ok(v) =
-            std::env::var("ACCOUNT_ID").or_else(|_| std::env::var("CLOUDFRONT_ACCOUNT_ID"))
+        if let Ok(v) = rustack_core::settings::var("ACCOUNT_ID")
+            .or_else(|_| rustack_core::settings::var("CLOUDFRONT_ACCOUNT_ID"))
         {
             cfg.account_id = v;
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_DOMAIN_SUFFIX") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_DOMAIN_SUFFIX") {
             cfg.domain_suffix = v;
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_DISTRIBUTION_PROPAGATION_MS") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_DISTRIBUTION_PROPAGATION_MS") {
             if let Ok(ms) = v.parse::<u64>() {
                 cfg.distribution_propagation = Duration::from_millis(ms);
             }
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_INVALIDATION_PROPAGATION_MS") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_INVALIDATION_PROPAGATION_MS") {
             if let Ok(ms) = v.parse::<u64>() {
                 cfg.invalidation_propagation = Duration::from_millis(ms);
             }
         }
-        if let Ok(v) = std::env::var("CLOUDFRONT_DETERMINISTIC_IDS") {
+        if let Ok(v) = rustack_core::settings::var("CLOUDFRONT_DETERMINISTIC_IDS") {
             cfg.deterministic_ids = parse_bool(&v).unwrap_or(false);
         }
 

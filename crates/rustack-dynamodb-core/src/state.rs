@@ -83,6 +83,14 @@ impl DynamoDBServiceState {
         names
     }
 
+    /// Publish a validated replacement while the provider operation gate is held.
+    pub(crate) fn replace_from(&self, replacement: Self) {
+        self.tables.clear();
+        for (name, table) in replacement.tables {
+            self.tables.insert(name, table);
+        }
+    }
+
     /// Reset all state (remove all tables).
     pub fn reset(&self) {
         self.tables.clear();

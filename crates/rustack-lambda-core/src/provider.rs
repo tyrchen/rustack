@@ -84,12 +84,12 @@ pub enum InvokeKind {
 
 /// Build the executor backend for the given configuration.
 ///
-/// `Disabled` preserves legacy echo behavior. `Auto` chooses the concrete
-/// backend per invocation. `Docker` is not yet wired and falls back with a
-/// warning.
+/// `Disabled` and unsupported Docker selections fail execution explicitly.
+/// `Auto` is an explicit operator opt-in and chooses the concrete backend per invocation.
 fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
     match config.executor {
         ExecutorBackend::Disabled => Arc::new(NoopExecutor::new()),
+        ExecutorBackend::Docker => Arc::new(NoopExecutor::docker_unavailable()),
         ExecutorBackend::Auto => Arc::new(AutoExecutor::new(
             config.max_warm_instances,
             config.idle_timeout,
@@ -102,14 +102,6 @@ fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
             config.init_timeout,
         )),
         ExecutorBackend::Squib => Arc::new(SquibExecutor::new(config.squib.clone())),
-        ExecutorBackend::Docker => {
-            tracing::warn!(
-                "LAMBDA_EXECUTOR=docker requested but the Docker backend is not wired in this \
-                 build yet; falling back to no-op executor (echoes payload). Use \
-                 LAMBDA_EXECUTOR=native for real execution of Rust/Go provided.* lambdas."
-            );
-            Arc::new(NoopExecutor::new())
-        }
     }
 }
 
@@ -140,6 +132,7 @@ pub struct RustackLambda {
     config: LambdaConfig,
     executor: Arc<dyn Executor>,
     code_fetcher: Arc<dyn S3CodeFetcher>,
+    work: crate::work::WorkManager,
 }
 
 /// Serializable Lambda provider snapshot.
@@ -186,6 +179,7 @@ impl RustackLambda {
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
+            work: crate::work::WorkManager::new(),
         }
     }
 
@@ -202,6 +196,7 @@ impl RustackLambda {
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
+            work: crate::work::WorkManager::new(),
         }
     }
 
@@ -220,6 +215,7 @@ impl RustackLambda {
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
+            work: crate::work::WorkManager::new(),
         }
     }
 
@@ -242,7 +238,31 @@ impl RustackLambda {
     /// Stop all warm executor instances. Wired into the rustack server's
     /// graceful shutdown path.
     pub async fn shutdown(&self) {
+        if let Err(error) = self.work.quiesce(Duration::ZERO).await {
+            tracing::error!(%error, "Lambda shutdown cancelled unfinished work");
+        }
         self.executor.shutdown().await;
+    }
+
+    /// Stop accepting invocation work and drain it before snapshot export.
+    ///
+    /// # Errors
+    /// Returns an error after cancelling remaining tasks when the deadline expires.
+    pub async fn quiesce(&self, timeout: Duration) -> Result<(), LambdaServiceError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let cleanup_budget = (timeout / 10).min(Duration::from_secs(1));
+        let result = self
+            .work
+            .quiesce(timeout.saturating_sub(cleanup_budget))
+            .await;
+        if result.is_err()
+            && tokio::time::timeout_at(deadline, self.executor.shutdown())
+                .await
+                .is_err()
+        {
+            tracing::error!("Lambda executor cancellation deadline exceeded");
+        }
+        result
     }
 
     /// Export a point-in-time snapshot of Lambda resources.
@@ -309,6 +329,7 @@ impl RustackLambda {
         input: CreateFunctionInput,
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
         let name = &input.function_name;
+        crate::resolver::FunctionName::parse(name)?;
         if name.is_empty() || name.len() > 140 {
             return Err(LambdaServiceError::InvalidParameter {
                 message: "Function name must be between 1 and 140 characters".to_owned(),
@@ -381,7 +402,7 @@ impl RustackLambda {
             }
         }
 
-        if self.store.contains(name) {
+        if self.store.contains(name)? {
             return Err(LambdaServiceError::ResourceConflict {
                 message: format!("Function already exist: {name}"),
             });
@@ -523,6 +544,9 @@ impl RustackLambda {
     ) -> Result<GetFunctionOutput, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(q) = qualifier {
+            crate::resolver::Qualifier::parse(q)?;
+        }
 
         let record = self.get_record(&name)?;
         let version = resolve_version(&record, qualifier)?;
@@ -560,6 +584,9 @@ impl RustackLambda {
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(q) = qualifier {
+            crate::resolver::Qualifier::parse(q)?;
+        }
 
         let record = self.get_record(&name)?;
         let version = resolve_version(&record, qualifier)?;
@@ -607,33 +634,48 @@ impl RustackLambda {
 
         let (name, _) = resolve_function_ref(function_ref)?;
         let should_publish = input.publish.unwrap_or(false);
+        let before = self.get_record(&name)?;
+        if input.architectures.as_ref().is_some_and(|architectures| {
+            architectures.len() != 1
+                || architectures
+                    .iter()
+                    .any(|architecture| architecture != "arm64" && architecture != "x86_64")
+        }) {
+            return Err(invalid_parameter(
+                "Exactly one supported architecture is required",
+            ));
+        }
 
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) =
             self.process_code(&name, "$LATEST", code_source).await?;
 
-        self.store.update(&name, |record| {
-            let now = now_iso8601();
-            record.latest.code_sha256 = code_sha256;
-            record.latest.code_size = code_size;
-            record.latest.zip_bytes = zip_bytes;
-            record.latest.code_path = code_path;
-            record.latest.image_uri = image_uri;
-            record.latest.last_modified = now;
-            record.latest.revision_id = uuid::Uuid::new_v4().to_string();
+        let config =
+            self.store
+                .update_if_revision(&name, Some(&before.latest.revision_id), |record| {
+                    let now = now_iso8601();
+                    record.latest.code_sha256 = code_sha256;
+                    record.latest.code_size = code_size;
+                    record.latest.zip_bytes = zip_bytes;
+                    record.latest.code_path = code_path;
+                    record.latest.image_uri = image_uri;
+                    record.latest.last_modified = now;
+                    record.latest.revision_id = uuid::Uuid::new_v4().to_string();
 
-            if let Some(archs) = input.architectures.clone() {
-                record.latest.architectures = archs;
-            }
-        })?;
-
-        // If publish=true, publish a new version.
-        let config = if should_publish {
-            let publish_input = PublishVersionInput::default();
-            self.publish_version(&name, &publish_input)?
-        } else {
-            let record = self.get_record(&name)?;
-            self.build_function_configuration(&record, &record.latest)
-        };
+                    if let Some(archs) = input.architectures.clone() {
+                        record.latest.architectures = archs;
+                    }
+                    if should_publish {
+                        let number = record.next_version;
+                        record.next_version = number.saturating_add(1);
+                        let mut published = record.latest.clone();
+                        published.version = number.to_string();
+                        let configuration = self.build_function_configuration(record, &published);
+                        record.versions.insert(number, published);
+                        configuration
+                    } else {
+                        self.build_function_configuration(record, &record.latest)
+                    }
+                })?;
 
         info!(function_name = %name, "updated Lambda function code");
         Ok(config)
@@ -766,29 +808,36 @@ impl RustackLambda {
     ) -> Result<(), LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref());
-
-        // If qualifier is specified, delete that specific version/alias.
         if let Some(q) = qualifier {
-            if q != "$LATEST" {
-                // Try to delete a published version.
-                if let Ok(version_num) = q.parse::<u64>() {
-                    self.store.update(&name, |record| {
-                        record.versions.remove(&version_num);
-                    })?;
-                    return Ok(());
-                }
-                // Otherwise it might be an alias -- but DeleteFunction with
-                // alias qualifier is not a standard API operation; ignore.
-            }
+            crate::resolver::Qualifier::parse(q)?;
         }
 
+        self.store.validate_root().await?;
+        if let Some(q) = qualifier {
+            let version_num = q.parse::<u64>().map_err(|_| {
+                invalid_parameter("DeleteFunction qualifier must be a published numeric version")
+            })?;
+            let removed = self
+                .store
+                .update(&name, |record| record.versions.remove(&version_num))?;
+            if removed.is_none() {
+                return Err(LambdaServiceError::VersionNotFound {
+                    function_name: name,
+                    version: q.into(),
+                });
+            }
+            return Ok(());
+        }
+
+        // Validate storage before changing metadata.
+        self.store.validate_root().await?;
         // Delete the entire function.
-        if self.store.remove(&name).is_none() {
+        if self.store.remove(&name)?.is_none() {
             return Err(LambdaServiceError::FunctionNotFound { name: name.clone() });
         }
 
         // Clean up code directory.
-        self.store.cleanup_code(&name).await;
+        self.store.cleanup_code(&name).await?;
 
         info!(function_name = %name, "deleted Lambda function");
         Ok(())
@@ -837,7 +886,7 @@ impl RustackLambda {
     /// Resolves the target version, validates the payload size, then routes
     /// to the configured [`Executor`]. `DryRun` short-circuits before the
     /// executor is touched. `Event` returns immediately with a synthetic
-    /// request id; the actual run happens on a detached `tokio::spawn`.
+    /// request id only after a slot in the bounded, supervised work set is acquired.
     pub async fn invoke(
         &self,
         function_ref: &str,
@@ -846,18 +895,26 @@ impl RustackLambda {
         invocation_type: InvokeKind,
     ) -> Result<InvokeOutcome, LambdaServiceError> {
         // Validate synchronous payload size (Appendix C: 6 MB).
-        if payload.len() > MAX_SYNC_PAYLOAD {
+        let payload_limit = if invocation_type == InvokeKind::Event {
+            1024 * 1024
+        } else {
+            MAX_SYNC_PAYLOAD
+        };
+        if payload.len() > payload_limit {
             let payload_len = payload.len();
             return Err(LambdaServiceError::RequestTooLarge {
                 message: format!(
-                    "Request payload size {payload_len} exceeds the synchronous invoke limit of \
-                     {MAX_SYNC_PAYLOAD} bytes",
+                    "Request payload size {payload_len} exceeds the invoke limit of \
+                     {payload_limit} bytes",
                 ),
             });
         }
 
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(q) = qualifier {
+            crate::resolver::Qualifier::parse(q)?;
+        }
 
         // Validate function exists and qualifier resolves.
         let record = self.get_record(&name)?;
@@ -867,27 +924,37 @@ impl RustackLambda {
             return Ok(InvokeOutcome::DryRun);
         }
 
+        if self.config.executor == ExecutorBackend::Docker {
+            return Err(LambdaServiceError::Internal {
+                message: "Docker execution is not implemented in this build".into(),
+            });
+        }
+        self.store.validate_root().await?;
+        if let Some(path) = &version.code_path {
+            self.store.validate_artifact(path).await?;
+        }
         let req = self.build_invoke_request(&record, version, payload);
 
+        let (response, handle) = self
+            .work
+            .submit(
+                Arc::clone(&self.executor),
+                req,
+                record.reserved_concurrent_executions,
+                invocation_type == InvokeKind::Event,
+            )
+            .await?;
         if invocation_type == InvokeKind::Event {
-            let executor = Arc::clone(&self.executor);
-            let request_id = uuid::Uuid::new_v4().to_string();
-            let function_name = req.function_name.clone();
-            let rid = request_id.clone();
-            tokio::spawn(async move {
-                if let Err(err) = executor.invoke(req).await {
-                    tracing::warn!(
-                        function = %function_name,
-                        request_id = %rid,
-                        error = %err,
-                        "async lambda invocation failed"
-                    );
-                }
+            return Ok(InvokeOutcome::Async {
+                request_id: uuid::Uuid::new_v4().to_string(),
             });
-            return Ok(InvokeOutcome::Async { request_id });
         }
-
-        let response = self.executor.invoke(req).await?;
+        let _cancel = crate::work::CancelOnDrop(handle);
+        let response = response
+            .await
+            .map_err(|error| LambdaServiceError::Internal {
+                message: format!("Lambda worker cancelled: {error}"),
+            })??;
         Ok(InvokeOutcome::Sync(response))
     }
 
@@ -1288,7 +1355,10 @@ impl RustackLambda {
         input: &AddPermissionInput,
     ) -> Result<AddPermissionOutput, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         // Validate required fields per AWS API.
         let sid = match &input.statement_id {
@@ -1361,7 +1431,10 @@ impl RustackLambda {
         qualifier: Option<&str>,
     ) -> Result<(), LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         self.store.update(&name, |record| {
             let initial_len = record.policy.statements.len();
@@ -1384,7 +1457,10 @@ impl RustackLambda {
         qualifier: Option<&str>,
     ) -> Result<GetPolicyOutput, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         let record = self.get_record(&name)?;
 
@@ -1511,14 +1587,25 @@ impl RustackLambda {
         input: CreateFunctionUrlConfigInput,
     ) -> Result<FunctionUrlConfig, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         let now = now_iso8601();
         // Use local URL format for development: http://{host}:{port}/lambda-url/{name}/
-        let function_url = format!(
-            "http://{}:{}/lambda-url/{name}/",
-            self.config.host, self.config.port,
+        let endpoint = rustack_core::settings::advertised_endpoint().map_or_else(
+            || {
+                let host = if self.config.host.contains(':') && !self.config.host.starts_with('[') {
+                    format!("[{}]", self.config.host)
+                } else {
+                    self.config.host.clone()
+                };
+                format!("http://{host}:{}", self.config.port)
+            },
+            str::to_owned,
         );
+        let function_url = format!("{}/lambda-url/{name}/", endpoint.trim_end_matches('/'));
 
         let function_arn_str =
             function_arn(&self.config.default_region, &self.config.account_id, &name);
@@ -1566,7 +1653,10 @@ impl RustackLambda {
         qualifier: Option<&str>,
     ) -> Result<FunctionUrlConfig, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         let record = self.get_record(&name)?;
         let url_config =
@@ -1599,7 +1689,10 @@ impl RustackLambda {
         input: &UpdateFunctionUrlConfigInput,
     ) -> Result<FunctionUrlConfig, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         let function_arn_str =
             function_arn(&self.config.default_region, &self.config.account_id, &name);
@@ -1648,7 +1741,10 @@ impl RustackLambda {
         qualifier: Option<&str>,
     ) -> Result<(), LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let _qualifier = qualifier.or(ref_qualifier.as_deref());
+        let selected_qualifier = qualifier.or(ref_qualifier.as_deref());
+        if let Some(value) = selected_qualifier {
+            crate::resolver::Qualifier::parse(value)?;
+        }
 
         self.store
             .update(&name, |record| -> Result<(), LambdaServiceError> {
@@ -2433,6 +2529,7 @@ impl RustackLambda {
     ) -> Result<FunctionEventInvokeConfig, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        crate::resolver::Qualifier::parse(qualifier)?;
         let record = self.get_record(&name)?;
         let fn_arn = self.build_qualified_arn(&name, qualifier);
         let now = chrono::Utc::now();
@@ -2465,6 +2562,7 @@ impl RustackLambda {
     ) -> Result<FunctionEventInvokeConfig, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        crate::resolver::Qualifier::parse(qualifier)?;
         let record = self.get_record(&name)?;
 
         let config_record = record.event_invoke_configs.get(qualifier).ok_or_else(|| {
@@ -2488,6 +2586,7 @@ impl RustackLambda {
     ) -> Result<FunctionEventInvokeConfig, LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        crate::resolver::Qualifier::parse(qualifier)?;
         let _ = self.get_record(&name)?;
         let fn_arn = self.build_qualified_arn(&name, qualifier);
         let now = chrono::Utc::now();
@@ -2531,6 +2630,7 @@ impl RustackLambda {
     ) -> Result<(), LambdaServiceError> {
         let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
         let qualifier = qualifier.or(ref_qualifier.as_deref()).unwrap_or("$LATEST");
+        crate::resolver::Qualifier::parse(qualifier)?;
         let _ = self.get_record(&name)?;
 
         self.store.update(&name, |rec| {
@@ -2572,7 +2672,7 @@ impl RustackLambda {
     /// Get a function record by name, returning `FunctionNotFound` if absent.
     fn get_record(&self, name: &str) -> Result<FunctionRecord, LambdaServiceError> {
         self.store
-            .get(name)
+            .get(name)?
             .ok_or(LambdaServiceError::FunctionNotFound {
                 name: name.to_owned(),
             })
@@ -2933,7 +3033,8 @@ mod tests {
 
     fn sample_create_input(name: &str) -> CreateFunctionInput {
         use base64::Engine;
-        let zip_data = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04fake");
+        let zip_data = base64::engine::general_purpose::STANDARD
+            .encode(crate::test_zip::minimal_zip(b"fixture"));
         CreateFunctionInput {
             function_name: name.to_owned(),
             runtime: Some("python3.12".to_owned()),
@@ -3029,9 +3130,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_create_function_with_s3_code() {
-        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(
-            Bytes::from_static(b"PK\x03\x04fake-s3-code"),
-        )));
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(Bytes::from(
+            crate::test_zip::minimal_zip(b"s3-code"),
+        ))));
 
         let config = provider
             .create_function(s3_code_input("s3-func"))
@@ -3054,7 +3155,7 @@ mod tests {
         assert!(record.latest.code_path.is_some(), "code_path must be set");
         assert_eq!(
             record.latest.zip_bytes.as_deref(),
-            Some(b"PK\x03\x04fake-s3-code".as_slice()),
+            Some(crate::test_zip::minimal_zip(b"s3-code").as_slice()),
         );
     }
 
@@ -3161,8 +3262,10 @@ mod tests {
 
         let provider = test_provider();
         let mut input = s3_code_input("s3-func");
-        input.code.zip_file =
-            Some(base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04fake"));
+        input.code.zip_file = Some(
+            base64::engine::general_purpose::STANDARD
+                .encode(crate::test_zip::minimal_zip(b"fixture")),
+        );
         let err = provider
             .create_function(input)
             .await
@@ -3281,9 +3384,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_update_function_code_from_s3() {
-        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(
-            Bytes::from_static(b"PK\x03\x04fake-s3-update"),
-        )));
+        let provider = provider_with_fetcher(FakeCodeFetcher(FakeFetchResult::Ok(Bytes::from(
+            crate::test_zip::minimal_zip(b"s3-update"),
+        ))));
         // Start from an inline zip, then switch to an S3 package.
         provider
             .create_function(sample_create_input("s3-func"))
@@ -3303,10 +3406,13 @@ mod tests {
             .unwrap();
         assert!(config.code_sha256.is_some());
         let sha = config.code_sha256.as_ref().unwrap();
-        assert_eq!(sha, &compute_sha256(b"PK\x03\x04fake-s3-update"),);
+        assert_eq!(
+            sha,
+            &compute_sha256(&crate::test_zip::minimal_zip(b"s3-update")),
+        );
         assert_eq!(
             config.code_size,
-            Some(i64::try_from(b"PK\x03\x04fake-s3-update".len()).unwrap())
+            Some(i64::try_from(crate::test_zip::minimal_zip(b"s3-update").len()).unwrap())
         );
     }
 
@@ -3408,7 +3514,8 @@ mod tests {
             .await
             .unwrap();
 
-        let new_zip = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04new-code");
+        let new_zip = base64::engine::general_purpose::STANDARD
+            .encode(crate::test_zip::minimal_zip(b"new-code"));
         let input = UpdateFunctionCodeInput {
             zip_file: Some(new_zip),
             ..Default::default()
@@ -3473,46 +3580,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_invoke_sync_via_noop_executor() {
-        // Default test provider uses ExecutorBackend::Disabled => NoopExecutor,
-        // which echoes the request body back wrapped in a fake API GW shape.
+    async fn test_should_reject_sync_execution_when_disabled() {
         let provider = test_provider();
         provider
             .create_function(sample_create_input("my-func"))
             .await
             .unwrap();
 
-        let outcome = provider
-            .invoke("my-func", None, b"{\"hi\":1}", InvokeKind::RequestResponse)
+        let error = provider
+            .invoke("my-func", None, b"{}", InvokeKind::RequestResponse)
             .await
-            .unwrap();
-        let resp = match outcome {
-            InvokeOutcome::Sync(r) => r,
-            other => panic!("expected Sync, got {other:?}"),
-        };
-        assert_eq!(resp.status, 200);
-        assert_eq!(resp.executed_version, "$LATEST");
-        let body: serde_json::Value = serde_json::from_slice(&resp.payload).unwrap();
-        assert_eq!(body["statusCode"], 200);
-        assert_eq!(body["body"], "{\"hi\":1}");
+            .unwrap_err();
+        assert!(matches!(error, LambdaServiceError::ResourceNotReady { .. }));
     }
 
     #[tokio::test]
-    async fn test_should_invoke_event_returns_async_outcome() {
+    async fn test_should_reject_event_before_acceptance_when_disabled() {
         let provider = test_provider();
         provider
             .create_function(sample_create_input("my-func"))
             .await
             .unwrap();
 
-        let outcome = provider
+        let error = provider
             .invoke("my-func", None, b"{}", InvokeKind::Event)
             .await
-            .unwrap();
-        assert!(
-            matches!(outcome, InvokeOutcome::Async { .. }),
-            "expected Async, got {outcome:?}"
-        );
+            .unwrap_err();
+        assert!(matches!(error, LambdaServiceError::ResourceNotReady { .. }));
     }
 
     #[tokio::test]
@@ -3541,7 +3635,8 @@ mod tests {
     async fn test_should_reject_create_without_runtime_for_zip() {
         use base64::Engine;
         let provider = test_provider();
-        let zip_data = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04fake");
+        let zip_data = base64::engine::general_purpose::STANDARD
+            .encode(crate::test_zip::minimal_zip(b"fixture"));
         let input = CreateFunctionInput {
             function_name: "my-func".to_owned(),
             runtime: None,
@@ -3636,7 +3731,8 @@ mod tests {
     fn test_should_publish_and_get_layer_version() {
         use base64::Engine;
         let provider = test_provider();
-        let zip_data = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04layer");
+        let zip_data = base64::engine::general_purpose::STANDARD
+            .encode(crate::test_zip::minimal_zip(b"layer"));
         let input = PublishLayerVersionInput {
             description: Some("Test layer".to_owned()),
             content: Some(rustack_lambda_model::types::LayerVersionContentInput {

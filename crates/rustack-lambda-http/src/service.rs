@@ -3,7 +3,6 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use rustack_lambda_model::error::LambdaError;
 
@@ -116,25 +115,60 @@ async fn process_request<H: LambdaHandler>(
     let query = parts.uri.query().unwrap_or("").to_owned();
 
     // 3. Collect body.
-    let body = match collect_body(incoming).await {
+    let budget = match op {
+        rustack_lambda_model::operations::LambdaOperation::CreateFunction
+        | rustack_lambda_model::operations::LambdaOperation::UpdateFunctionCode => {
+            rustack_core::http::BodyBudget::lambda_code()
+        }
+        rustack_lambda_model::operations::LambdaOperation::Invoke => {
+            let limit = if parts
+                .headers
+                .get("x-amz-invocation-type")
+                .is_some_and(|value| value == "Event")
+            {
+                1024 * 1024
+            } else {
+                6 * 1024 * 1024
+            };
+            match std::num::NonZeroU64::new(limit) {
+                Some(limit) => rustack_core::http::BodyBudget::control().capped(limit),
+                None => {
+                    return wrap_error_response(
+                        &LambdaError::service_error("invalid invocation byte budget"),
+                        request_id,
+                    );
+                }
+            }
+        }
+        _ => rustack_core::http::BodyBudget::control(),
+    };
+    let body = match collect_body(incoming, budget).await {
         Ok(body) => body,
-        Err(err) => return wrap_error_response(&err, request_id),
+        Err(err) => {
+            let code = if matches!(err, rustack_core::http::BodyReadError::TooLarge) {
+                rustack_lambda_model::error::LambdaErrorCode::RequestTooLargeException
+            } else {
+                rustack_lambda_model::error::LambdaErrorCode::InvalidRequestContentException
+            };
+            let error = LambdaError::new(code, err.to_string());
+            let mut response = wrap_error_response(&error, request_id);
+            *response.status_mut() = err.status_code();
+            return response;
+        }
     };
 
     // 4. Authenticate (if enabled).
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let body_hash = rustack_auth::hash_payload(&body);
-            if let Err(auth_err) =
-                rustack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-            {
-                let err = LambdaError::new(
-                    rustack_lambda_model::error::LambdaErrorCode::InvalidRequestContentException,
-                    auth_err.to_string(),
-                );
-                return wrap_error_response(&err, request_id);
-            }
-        }
+    if let Err(auth_err) = rustack_auth::AuthMode::resolve(
+        config.skip_signature_validation,
+        config.credential_provider.as_deref(),
+    )
+    .and_then(|mode| mode.verify(&parts, &rustack_auth::hash_payload(&body)))
+    {
+        let err = LambdaError::new(
+            rustack_lambda_model::error::LambdaErrorCode::InvalidRequestContentException,
+            auth_err.to_string(),
+        );
+        return wrap_error_response(&err, request_id);
     }
 
     // 5. Dispatch to handler.
@@ -176,12 +210,11 @@ fn wrap_error_response(
 }
 
 /// Collect the incoming body into a single `Bytes` buffer.
-async fn collect_body(incoming: Incoming) -> Result<Bytes, LambdaError> {
-    incoming
-        .collect()
-        .await
-        .map(http_body_util::Collected::to_bytes)
-        .map_err(|e| LambdaError::service_error(format!("Failed to read request body: {e}")))
+async fn collect_body(
+    incoming: Incoming,
+    budget: rustack_core::http::BodyBudget,
+) -> Result<Bytes, rustack_core::http::BodyReadError> {
+    rustack_core::http::collect_body(incoming, budget).await
 }
 
 /// Add common response headers to every Lambda response.

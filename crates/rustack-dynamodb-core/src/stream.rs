@@ -67,8 +67,11 @@ pub struct ChangeEvent {
 pub trait StreamEmitter: Send + Sync + 'static {
     /// Emit a change event for a successful write operation.
     ///
-    /// This method must not block. If the stream is disabled for the table,
-    /// the implementation should silently discard the event.
+    /// Called after all transaction items have committed, while the provider's
+    /// operation gate is held. Implementations must not block, panic, or reenter
+    /// the DynamoDB provider (including snapshot APIs). They may synchronously
+    /// append to their independently owned stream store or enqueue a notification.
+    /// If the stream is disabled for the table, discard the event.
     fn emit(&self, event: ChangeEvent);
 }
 
@@ -88,7 +91,9 @@ impl StreamEmitter for NoopStreamEmitter {
 /// A lifecycle manager for DynamoDB Streams.
 ///
 /// Observes DynamoDB table creation/update/deletion and manages
-/// corresponding streams in the `StreamStore`.
+/// corresponding streams in the `StreamStore`. Like `StreamEmitter`, callbacks
+/// run under the provider operation gate and must not block, panic, or reenter
+/// the DynamoDB provider.
 pub trait StreamLifecycle: Send + Sync + 'static {
     /// Called after a successful `CreateTable` or `UpdateTable` that enables streaming.
     /// Returns the stream ARN.

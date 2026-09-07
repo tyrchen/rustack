@@ -12,16 +12,20 @@ mod tests {
 
     use crate::lambda_client;
 
+    /// Valid empty ZIP archive (22-byte EOCD); uploads are validated as real ZIPs.
+    const EMPTY_ZIP: &[u8] = &[
+        80, 75, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
     /// Helper: generate a unique function name.
     fn func_name(prefix: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string()[..8].to_owned();
         format!("test-{prefix}-{id}")
     }
 
-    /// Create a minimal zip file (PK header + dummy data) as base64 for code uploads.
+    /// A valid, real ZIP archive for code uploads.
     fn dummy_zip_blob() -> Blob {
-        // Minimal zip content (not a real zip, but enough for the server to store).
-        Blob::new(b"PK\x03\x04fake-lambda-code".to_vec())
+        Blob::new(EMPTY_ZIP.to_vec())
     }
 
     /// Helper: create a function and return its name.
@@ -140,7 +144,7 @@ mod tests {
         let updated = client
             .update_function_code()
             .function_name(&name)
-            .zip_file(Blob::new(b"PK\x03\x04new-code-data".to_vec()))
+            .zip_file(Blob::new(EMPTY_ZIP.to_vec()))
             .send()
             .await
             .expect("update code should succeed");
@@ -168,9 +172,7 @@ mod tests {
         s3.put_object()
             .bucket(&bucket)
             .key(&key)
-            .body(aws_sdk_s3::primitives::ByteStream::from_static(
-                b"PK\x03\x04fake-s3-lambda-code",
-            ))
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(EMPTY_ZIP))
             .send()
             .await
             .expect("upload code object");

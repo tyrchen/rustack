@@ -2,6 +2,7 @@
 #![allow(missing_docs, clippy::doc_markdown, clippy::module_name_repetitions)]
 
 pub mod config;
+mod coordination;
 pub mod error;
 pub mod expression;
 pub mod handler;

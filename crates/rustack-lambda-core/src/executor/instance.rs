@@ -7,15 +7,14 @@
 //! versions.
 
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use tokio::sync::oneshot;
-use tracing::{debug, warn};
+use dashmap::DashMap;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tracing::debug;
 
 use super::{
     error::ExecutorError,
@@ -31,6 +30,11 @@ pub(crate) type PoolKey = (String, String);
 /// Object-safe so the pool can hold `Arc<dyn InstanceBackend>`.
 #[async_trait]
 pub(crate) trait InstanceBackend: Send + Sync + std::fmt::Debug {
+    /// Whether another OS execution resource can start without retiring an idle instance.
+    fn has_capacity(&self) -> bool {
+        true
+    }
+
     /// Spawn a bootstrap pointing at `runtime_api_addr` for the given function.
     /// Returns a handle the pool will keep alive until the instance is reaped.
     async fn spawn(
@@ -77,6 +81,8 @@ struct Instance {
     api: RuntimeApiHandle,
     backend: BackendHandle,
     last_used: Instant,
+    idle_permit: Option<OwnedSemaphorePermit>,
+    init_error: Option<oneshot::Receiver<bytes::Bytes>>,
 }
 
 /// Pool of warm instances per `(function, qualifier)` key.
@@ -90,7 +96,8 @@ pub(crate) struct InstancePool {
     max_warm: usize,
     idle_timeout: Duration,
     init_timeout: Duration,
-    pools: Mutex<HashMap<PoolKey, Vec<Instance>>>,
+    pools: DashMap<String, Vec<(String, Instance)>>,
+    idle_capacity: Arc<Semaphore>,
 }
 
 impl InstancePool {
@@ -105,12 +112,32 @@ impl InstancePool {
             max_warm,
             idle_timeout,
             init_timeout,
-            pools: Mutex::new(HashMap::new()),
+            pools: DashMap::new(),
+            idle_capacity: Arc::new(Semaphore::new(32)),
         }
     }
 
     pub(crate) fn key(req: &InvokeRequest) -> PoolKey {
-        (req.function_name.clone(), req.qualifier.clone())
+        let mut environment: Vec<_> = req.environment.iter().collect();
+        environment.sort();
+        let identity = format!(
+            "{:?}",
+            (
+                &req.qualifier,
+                &req.code_root,
+                &req.image_uri,
+                &req.runtime,
+                &req.handler,
+                &req.architectures,
+                environment,
+                req.timeout,
+                req.memory_mb
+            )
+        );
+        (
+            req.function_name.clone(),
+            crate::storage::compute_sha256(identity.as_bytes()),
+        )
     }
 
     /// Run a single invocation against an acquired (or freshly spawned) instance.
@@ -137,7 +164,16 @@ impl InstancePool {
             .await
             .map_err(|e| ExecutorError::Io(e.to_string()))?;
 
-        let result = match tokio::time::timeout(req.timeout, resp_rx).await {
+        let response = async {
+            match instance.init_error.take() {
+                Some(mut init) => tokio::select! {
+                    response = resp_rx => response,
+                    error = &mut init => error.map(RuntimeResult::InitError),
+                },
+                None => resp_rx.await,
+            }
+        };
+        let result = match tokio::time::timeout(req.timeout, response).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => {
                 // Bootstrap died before responding.
@@ -152,8 +188,10 @@ impl InstancePool {
             }
         };
 
-        instance.last_used = Instant::now();
-        self.release(key, instance);
+        if !matches!(result, RuntimeResult::InitError(_)) {
+            instance.last_used = Instant::now();
+            self.release(key, instance);
+        }
 
         match result {
             RuntimeResult::Success(payload) => Ok(InvokeResponse {
@@ -178,52 +216,57 @@ impl InstancePool {
     }
 
     fn try_acquire(&self, key: &PoolKey) -> Option<Instance> {
-        let mut pools = self.pools.lock();
-        let bucket = pools.get_mut(key)?;
-        bucket.pop()
+        let mut bucket = self.pools.get_mut(&key.0)?;
+        let Some(index) = bucket.iter().position(|(revision, _)| revision == &key.1) else {
+            bucket.clear();
+            return None;
+        };
+        let (_, mut instance) = bucket.swap_remove(index);
+        instance.idle_permit.take();
+        Some(instance)
     }
 
-    fn release(&self, key: PoolKey, instance: Instance) {
-        let mut pools = self.pools.lock();
-        let bucket = pools.entry(key).or_default();
-        if bucket.len() >= self.max_warm {
-            // Pool full — drop (kill) on background task, don't block.
-            tokio::spawn(async move {
-                drop(instance);
-            });
-        } else {
-            bucket.push(instance);
+    fn release(&self, key: PoolKey, mut instance: Instance) {
+        let Ok(permit) = Arc::clone(&self.idle_capacity).try_acquire_owned() else {
+            return;
+        };
+        let mut bucket = self.pools.entry(key.0).or_default();
+        if bucket.len() < self.max_warm.min(1) {
+            instance.idle_permit = Some(permit);
+            bucket.push((key.1, instance));
         }
     }
 
     async fn spawn_new(&self, req: &InvokeRequest) -> Result<Instance, ExecutorError> {
+        if !self.backend.has_capacity() {
+            for mut bucket in self.pools.iter_mut() {
+                if let Some((_, instance)) = bucket.pop() {
+                    drop(instance);
+                    break;
+                }
+            }
+        }
         let api = runtime_api::start()
             .await
             .map_err(|e| ExecutorError::Io(format!("bind runtime api: {e}")))?;
         let addr = api.addr();
-        let mut init_err_rx = api.take_init_error_rx().await;
+        let init_error = api.take_init_error_rx().await;
 
         // Race: backend spawn + first /next poll.  We don't observe /next here
         // directly — we rely on either submit landing on a polling bootstrap
         // OR an `/init/error` arriving.  To keep liveness, spawn the backend
         // within the init window and watch the init-error channel for a
         // fast-fail signal.
-        let backend = self.backend.spawn(req, addr).await?;
+        let backend = tokio::time::timeout(self.init_timeout, self.backend.spawn(req, addr))
+            .await
+            .map_err(|_| ExecutorError::Timeout(self.init_timeout))??;
         let inst = Instance {
             api,
             backend,
             last_used: Instant::now(),
+            idle_permit: None,
+            init_error,
         };
-        // If the bootstrap failed init, surface that promptly rather than
-        // waiting for the invocation timeout.
-        if let Some(rx) = init_err_rx.take() {
-            let init_timeout = self.init_timeout;
-            tokio::spawn(async move {
-                if let Ok(Ok(body)) = tokio::time::timeout(init_timeout, rx).await {
-                    warn!(error = %String::from_utf8_lossy(&body), "lambda bootstrap reported init error");
-                }
-            });
-        }
         debug!(function = %req.function_name, addr = %addr, "spawned new lambda instance");
         Ok(inst)
     }
@@ -233,30 +276,18 @@ impl InstancePool {
         let now = Instant::now();
         let idle = self.idle_timeout;
         let mut killed = 0usize;
-        let mut pools = self.pools.lock();
-        for bucket in pools.values_mut() {
-            let mut keep = Vec::with_capacity(bucket.len());
-            while let Some(inst) = bucket.pop() {
-                if now.duration_since(inst.last_used) > idle {
-                    killed += 1;
-                    drop(inst);
-                } else {
-                    keep.push(inst);
-                }
-            }
-            *bucket = keep;
+        for mut bucket in self.pools.iter_mut() {
+            let before = bucket.len();
+            bucket.retain(|(_, instance)| now.duration_since(instance.last_used) <= idle);
+            killed += before.saturating_sub(bucket.len());
         }
+        self.pools.retain(|_, bucket| !bucket.is_empty());
         killed
     }
 
     /// Drain and kill every instance in every pool.
     pub(crate) fn shutdown(&self) {
-        let pools = std::mem::take(&mut *self.pools.lock());
-        for (_, bucket) in pools {
-            for inst in bucket {
-                drop(inst);
-            }
-        }
+        self.pools.clear();
     }
 }
 

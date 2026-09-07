@@ -1047,6 +1047,9 @@ pub fn error_to_response(err: &S3Error, request_id: &str) -> http::Response<S3Re
 
 #[cfg(test)]
 mod tests {
+    use std::{error::Error, io, mem::size_of};
+
+    use http_body_util::BodyExt;
     use rustack_s3_model::request::StreamingBlob;
 
     use super::*;
@@ -1099,6 +1102,36 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("application/xml"),
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_compact_error_metadata_in_response() {
+        // Keep errors below Clippy's large-Err threshold without boxing every Result.
+        assert!(size_of::<S3Error>() < 128);
+        let err = S3Error::no_such_key("folder/a&b")
+            .with_request_id("request-123")
+            .with_source(io::Error::other("storage failure"))
+            .with_header("x-amz-delete-marker", "true");
+        assert_eq!(err.resource.as_deref(), Some("folder/a&b"));
+        assert_eq!(err.request_id.as_deref(), Some("request-123"));
+        assert_eq!(
+            err.source().map(ToString::to_string).as_deref(),
+            Some("storage failure")
+        );
+
+        let response = error_to_response(&err, "request-123");
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()["x-amz-delete-marker"], "true");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body")
+            .to_bytes();
+        let xml = String::from_utf8(body.to_vec()).expect("UTF-8 error XML");
+        assert!(xml.contains("<Code>NoSuchKey</Code>"));
+        assert!(xml.contains("<Resource>folder/a&amp;b</Resource>"));
+        assert!(xml.contains("<RequestId>request-123</RequestId>"));
     }
 
     #[test]

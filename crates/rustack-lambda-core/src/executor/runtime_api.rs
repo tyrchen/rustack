@@ -22,7 +22,7 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
     Method, Request, Response, StatusCode, body::Incoming, server::conn::http1, service::service_fn,
 };
@@ -30,7 +30,7 @@ use hyper_util::rt::TokioIo;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, warn};
 
@@ -140,8 +140,10 @@ pub async fn start() -> std::io::Result<RuntimeApiHandle> {
     });
 
     let accept_task = tokio::spawn(async move {
+        let mut connections = JoinSet::new();
         loop {
             tokio::select! {
+                result = connections.join_next(), if !connections.is_empty() => { if let Some(Err(error)) = result { warn!(%error, "Runtime API connection task failed"); } }
                 _ = shutdown_rx.changed() => {
                     debug!("runtime api: shutdown signalled, exiting accept loop");
                     break;
@@ -154,8 +156,9 @@ pub async fn start() -> std::io::Result<RuntimeApiHandle> {
                             continue;
                         }
                     };
+                    if connections.len() >= 4 { drop(stream); continue; }
                     let state = Arc::clone(&state);
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let io = TokioIo::new(stream);
                         let svc = service_fn(move |req| {
                             let state = Arc::clone(&state);
@@ -170,6 +173,12 @@ pub async fn start() -> std::io::Result<RuntimeApiHandle> {
                         }
                     });
                 }
+            }
+        }
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                debug!(%error, "Runtime API connection stopped");
             }
         }
     });
@@ -321,10 +330,20 @@ fn unix_secs_lower32() -> u32 {
 }
 
 async fn collect(body: Incoming) -> Result<Bytes, StatusCode> {
-    body.collect()
-        .await
-        .map(http_body_util::Collected::to_bytes)
-        .map_err(|_| StatusCode::BAD_REQUEST)
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Limited::new(body, 6 * 1024 * 1024).collect(),
+    )
+    .await
+    .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
+    .map(http_body_util::Collected::to_bytes)
+    .map_err(|error| {
+        if error.is::<http_body_util::LengthLimitError>() {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::BAD_REQUEST
+        }
+    })
 }
 
 fn simple(status: StatusCode, body: &[u8]) -> Response<Full<Bytes>> {

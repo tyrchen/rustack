@@ -1,14 +1,13 @@
 //! Lambda function execution engine.
 //!
-//! Converts the stubbed `Invoke` echo path into real execution by routing
-//! every request through an `Executor` trait. Backends include:
+//! Routes execution through an object-safe backend with explicit availability.
 //!
-//! - [`NoopExecutor`] — preserves the legacy "echo back the payload" behavior; used in unit tests
-//!   and when `LAMBDA_EXECUTOR=disabled`.
-//! - [`AutoExecutor`] — defaults macOS Zip Lambdas to Squib and otherwise uses native execution.
-//! - `NativeExecutor` (Phase 3) — spawns `provided.*` bootstraps directly on the host.
-//! - `DockerExecutor` (Phase 4) — runs any supported runtime in an AWS Lambda base image.
-//! - `SquibExecutor` — runs `arm64` Zip functions through a Squib microVM guest agent.
+//! - [`NoopExecutor`] rejects execution in Disabled/unsupported Docker modes.
+//! - [`AutoExecutor`] explicitly opts into Squib on macOS Zip functions, native otherwise.
+//! - [`NativeExecutor`] runs trusted host-matching bootstraps without isolation.
+//! - [`SquibExecutor`] runs arm64 Zip functions through a microVM guest agent.
+//!
+//! Docker execution is not supported; it never falls back to native or successful echo.
 //!
 //! All backends share a single in-process Lambda Runtime API server (Phase 2)
 //! so the bootstrap-side protocol is identical to AWS.
@@ -37,6 +36,11 @@ pub use types::{ExecutorBackend, InvokeRequest, InvokeResponse, PackageType};
 /// Backend that turns an [`InvokeRequest`] into an [`InvokeResponse`].
 #[async_trait]
 pub trait Executor: std::fmt::Debug + Send + Sync + 'static {
+    /// Check whether execution is enabled before accepting asynchronous work.
+    fn available(&self) -> Result<(), ExecutorError> {
+        Ok(())
+    }
+
     /// Run the function and return its response.
     async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError>;
 

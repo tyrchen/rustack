@@ -45,12 +45,6 @@
 //! // Use `service` with hyper server.
 //! ```
 
-// S3Error is a fundamental domain error type used pervasively as Result<T, S3Error>.
-// Its size (128 bytes) is inherent to its fields (code, message, resource, request_id,
-// status_code, source, headers). Boxing S3Error in every Result would add indirection
-// on the hot path for negligible benefit.
-#![allow(clippy::result_large_err)]
-
 pub mod body;
 pub mod codec;
 pub mod dispatch;
@@ -59,6 +53,7 @@ pub mod request;
 pub mod response;
 pub mod router;
 pub mod service;
+mod upload;
 
 // Re-export key types for convenience.
 pub use body::S3ResponseBody;

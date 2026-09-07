@@ -15,7 +15,6 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use hyper::{body::Incoming, service::Service};
 use rustack_auth::CredentialProvider;
 use rustack_s3_model::error::{S3Error, S3ErrorCode};
@@ -157,7 +156,7 @@ async fn process_request<H: S3Handler>(
 ) -> http::Response<S3ResponseBody> {
     let method = req.method().clone();
     let uri = req.uri().clone();
-    debug!(%method, %uri, request_id, "processing S3 request");
+    debug!(%method, request_id, "processing S3 request");
 
     // 1. Health check interception.
     if is_health_check(&method, uri.path()) {
@@ -180,7 +179,7 @@ async fn process_request<H: S3Handler>(
         Ok(ctx) => ctx,
         Err(err) => {
             warn!(
-                %method, %uri, error = %err, request_id,
+                %method, error = %err, request_id,
                 "failed to route S3 request"
             );
             return error_to_response(&err, request_id);
@@ -197,12 +196,46 @@ async fn process_request<H: S3Handler>(
 
     // 4. Collect body.
     let (mut parts, incoming) = req.into_parts();
-    let mut body = match collect_body(incoming).await {
+    let auth_mode = match rustack_auth::AuthMode::resolve(
+        config.skip_signature_validation,
+        config.credential_provider.as_deref(),
+    ) {
+        Ok(mode) => mode,
+        Err(err) => {
+            return error_to_response(
+                &S3Error::with_message(S3ErrorCode::AccessDenied, err.to_string()),
+                request_id,
+            );
+        }
+    };
+    if matches!(
+        ctx.operation,
+        rustack_s3_model::S3Operation::PutObject | rustack_s3_model::S3Operation::UploadPart
+    ) {
+        let upload = match crate::upload::receive(&mut parts, incoming, auth_mode).await {
+            Ok(upload) => upload,
+            Err(err) => return error_to_response(&err, request_id),
+        };
+        return match handler.handle_staged_upload(parts, upload, ctx).await {
+            Ok(response) => response,
+            Err(err) => error_to_response(&err, request_id),
+        };
+    }
+    if crate::codec::is_aws_chunked(&parts) {
+        return error_to_response(
+            &S3Error::with_message(
+                S3ErrorCode::InvalidRequest,
+                "aws-chunked is only supported for object uploads",
+            ),
+            request_id,
+        );
+    }
+    let body = match collect_body(incoming).await {
         Ok(body) => body,
         Err(err) => {
             error!(error = %err, request_id, "failed to collect request body");
-            let s3_err =
-                rustack_s3_model::error::S3Error::internal_error("Failed to read request body");
+            let mut s3_err = S3Error::with_message(S3ErrorCode::InvalidRequest, err.to_string());
+            s3_err.status_code = err.status_code();
             return error_to_response(&s3_err, request_id);
         }
     };
@@ -213,74 +246,34 @@ async fn process_request<H: S3Handler>(
         return error_to_response(&s3_err, request_id);
     }
 
-    // 4c. Decode AWS chunked transfer encoding.
-    if crate::codec::is_aws_chunked(&parts) {
-        match crate::codec::decode_aws_chunked(&body) {
-            Ok(result) => {
-                debug!(
-                    raw_len = body.len(),
-                    decoded_len = result.body.len(),
-                    trailing_header_count = result.trailing_headers.len(),
-                    request_id,
-                    "decoded aws-chunked body"
-                );
-                body = result.body;
-                crate::codec::strip_aws_chunked_encoding(&mut parts.headers);
-
-                // Inject trailing headers (e.g. checksum values) into request
-                // headers so downstream request parsing picks them up.
-                for (key, value) in &result.trailing_headers {
-                    if let Ok(hv) = http::header::HeaderValue::from_str(value) {
-                        if let Ok(hn) = http::header::HeaderName::from_bytes(key.as_bytes()) {
-                            // Only insert if not already present in the request headers.
-                            parts.headers.entry(hn).or_insert(hv);
-                        }
-                    }
-                }
-            }
-            Err(s3_err) => {
-                warn!(error = %s3_err.message, request_id, "failed to decode aws-chunked body");
-                return error_to_response(&s3_err, request_id);
-            }
-        }
-    }
-
     // 5. Authentication.
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let has_presigned = parts
-                .uri
-                .query()
-                .is_some_and(|q| q.contains("X-Amz-Signature"));
+    if let rustack_auth::AuthMode::Required(cred_provider) = auth_mode {
+        let has_presigned = parts
+            .uri
+            .query()
+            .is_some_and(|q| q.contains("X-Amz-Signature"));
 
-            let auth_result = if has_presigned {
-                rustack_auth::verify_presigned(&parts, cred_provider.as_ref())
-            } else if let Some(auth_header) = parts
-                .headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-            {
-                if rustack_auth::is_sigv2(auth_header) {
-                    rustack_auth::verify_sigv2(&parts, cred_provider.as_ref())
-                } else {
-                    let body_hash = rustack_auth::hash_payload(&body);
-                    rustack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-                }
+        let auth_result = if has_presigned {
+            rustack_auth::verify_presigned(&parts, cred_provider)
+        } else if let Some(auth_header) = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+        {
+            if rustack_auth::is_sigv2(auth_header) {
+                rustack_auth::verify_sigv2(&parts, cred_provider)
             } else {
-                // Anonymous request — allow through.
-                Ok(rustack_auth::AuthResult {
-                    access_key_id: String::new(),
-                    region: String::new(),
-                    service: String::new(),
-                    signed_headers: Vec::new(),
-                })
-            };
-
-            if let Err(auth_err) = auth_result {
-                warn!(error = %auth_err, request_id, "authentication failed");
-                let s3_err = S3Error::with_message(S3ErrorCode::AccessDenied, auth_err.to_string());
-                return error_to_response(&s3_err, request_id);
+                let body_hash = rustack_auth::hash_payload(&body);
+                rustack_auth::sigv4::verify_s3_sigv4(&parts, &body_hash, cred_provider)
             }
+        } else {
+            Err(rustack_auth::AuthError::MissingAuthHeader)
+        };
+
+        if let Err(auth_err) = auth_result {
+            warn!(error = %auth_err, request_id, "authentication failed");
+            let s3_err = S3Error::with_message(S3ErrorCode::AccessDenied, auth_err.to_string());
+            return error_to_response(&s3_err, request_id);
         }
     }
 
@@ -299,9 +292,8 @@ async fn process_request<H: S3Handler>(
 }
 
 /// Collect the full body from a hyper `Incoming` stream into `Bytes`.
-async fn collect_body(incoming: Incoming) -> Result<Bytes, hyper::Error> {
-    let collected = incoming.collect().await?;
-    Ok(collected.to_bytes())
+async fn collect_body(incoming: Incoming) -> Result<Bytes, rustack_core::http::BodyReadError> {
+    rustack_core::http::collect_body(incoming, rustack_core::http::BodyBudget::control()).await
 }
 
 /// Validate the `X-Amz-Content-Sha256` header against the request body.
@@ -311,6 +303,12 @@ async fn collect_body(incoming: Incoming) -> Result<Bytes, hyper::Error> {
 /// placeholder), we verify it matches the actual body content. An invalid or
 /// mismatching value returns `XAmzContentSHA256Mismatch`.
 fn validate_content_sha256(parts: &http::request::Parts, body: &[u8]) -> Result<(), S3Error> {
+    if parts.headers.get_all("x-amz-content-sha256").iter().count() > 1 {
+        return Err(S3Error::with_message(
+            S3ErrorCode::XAmzContentSHA256Mismatch,
+            "Duplicate payload hash header",
+        ));
+    }
     let Some(header_value) = parts.headers.get("x-amz-content-sha256") else {
         return Ok(());
     };
@@ -322,14 +320,8 @@ fn validate_content_sha256(parts: &http::request::Parts, body: &[u8]) -> Result<
         )
     })?;
 
-    // Skip validation for streaming and unsigned payload placeholders.
-    // AWS SDKs use various STREAMING-* prefixes (SigV4, SigV4a, CRT-based,
-    // etc.) and UNSIGNED-PAYLOAD variants. Rather than maintaining an
-    // exhaustive allowlist, accept any recognised placeholder pattern.
-    if hash_str == "UNSIGNED-PAYLOAD"
-        || hash_str.starts_with("STREAMING-")
-        || hash_str.starts_with("UNSIGNED-PAYLOAD-")
-    {
+    // Streaming protocols have a separate object-upload boundary and verifier.
+    if hash_str == "UNSIGNED-PAYLOAD" {
         return Ok(());
     }
 
@@ -596,33 +588,17 @@ mod tests {
     }
 
     #[test]
-    fn test_should_accept_streaming_payload() {
-        let parts = parts_with_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD");
-        assert!(validate_content_sha256(&parts, b"hello").is_ok());
-    }
-
-    #[test]
-    fn test_should_accept_streaming_payload_trailer() {
-        let parts = parts_with_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER");
-        assert!(validate_content_sha256(&parts, b"hello").is_ok());
-    }
-
-    #[test]
-    fn test_should_accept_streaming_sigv4a_payload() {
-        let parts = parts_with_sha256("STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD");
-        assert!(validate_content_sha256(&parts, b"hello").is_ok());
-    }
-
-    #[test]
-    fn test_should_accept_streaming_unsigned_payload_trailer() {
-        let parts = parts_with_sha256("STREAMING-UNSIGNED-PAYLOAD-TRAILER");
-        assert!(validate_content_sha256(&parts, b"hello").is_ok());
-    }
-
-    #[test]
-    fn test_should_accept_unsigned_payload_trailer() {
-        let parts = parts_with_sha256("UNSIGNED-PAYLOAD-TRAILER");
-        assert!(validate_content_sha256(&parts, b"hello").is_ok());
+    fn test_should_reject_streaming_markers_outside_upload_protocol() {
+        for marker in [
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER",
+            "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD",
+            "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+            "UNSIGNED-PAYLOAD-TRAILER",
+        ] {
+            let parts = parts_with_sha256(marker);
+            assert!(validate_content_sha256(&parts, b"hello").is_err());
+        }
     }
 
     #[test]

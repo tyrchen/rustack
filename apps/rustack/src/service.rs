@@ -25,6 +25,36 @@ pub fn gateway_body_from_string(s: impl Into<String>) -> GatewayBody {
         .boxed()
 }
 
+/// Preserve arbitrary data-plane bytes without lossy UTF-8 conversion.
+#[cfg(feature = "apigatewayv2")]
+pub fn gateway_body_from_bytes(bytes: Bytes) -> GatewayBody {
+    Full::new(bytes)
+        .map_err(|never: Infallible| match never {})
+        .boxed()
+}
+
+#[cfg(any(feature = "apigatewayv2", feature = "cloudfront-dataplane"))]
+fn body_error_response(error: &rustack_core::http::BodyReadError) -> http::Response<GatewayBody> {
+    use rustack_core::http::BodyReadError;
+    let status = match &error {
+        BodyReadError::TooLarge => http::StatusCode::PAYLOAD_TOO_LARGE,
+        BodyReadError::Deadline | BodyReadError::Idle => http::StatusCode::REQUEST_TIMEOUT,
+        BodyReadError::Transport(_) => http::StatusCode::BAD_REQUEST,
+        BodyReadError::InvalidBudget | BodyReadError::Allocation(_) => {
+            http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    let mut response = http::Response::new(gateway_body_from_string(
+        serde_json::json!({"message": error.to_string()}).to_string(),
+    ));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
 /// A routable AWS service registered with the gateway.
 ///
 /// Implementors declare which requests they handle (via [`matches`](ServiceRouter::matches))
@@ -1117,25 +1147,14 @@ mod apigatewayv2_router {
                 };
 
                 // Collect request body.
-                let body_bytes: Bytes = match http_body_util::BodyExt::collect(req.into_body())
-                    .await
-                    .map(http_body_util::Collected::to_bytes)
+                let body_bytes: Bytes = match rustack_core::http::collect_body(
+                    req.into_body(),
+                    rustack_core::http::BodyBudget::control(),
+                )
+                .await
                 {
                     Ok(b) => b,
-                    Err(e) => {
-                        let body =
-                            serde_json::json!({"message": format!("Failed to read body: {e}")});
-                        let resp = http::Response::builder()
-                            .status(http::StatusCode::BAD_REQUEST)
-                            .header("content-type", "application/json")
-                            .body(gateway_body_from_string(body.to_string()))
-                            .unwrap_or_else(|_| {
-                                http::Response::new(gateway_body_from_string(
-                                    "Bad Request".to_owned(),
-                                ))
-                            });
-                        return Ok(resp);
-                    }
+                    Err(error) => return Ok(super::body_error_response(&error)),
                 };
 
                 match handle_execution(
@@ -1153,7 +1172,7 @@ mod apigatewayv2_router {
                         let (parts, body) = resp.into_parts();
                         Ok(http::Response::from_parts(
                             parts,
-                            gateway_body_from_string(String::from_utf8_lossy(&body).into_owned()),
+                            super::gateway_body_from_bytes(body),
                         ))
                     }
                     Err(e) => {
@@ -1618,9 +1637,14 @@ mod cloudfront_dataplane_router {
             let plane = self.plane.clone();
             Box::pin(async move {
                 let (parts, incoming) = req.into_parts();
-                let body_bytes: Bytes = match incoming.collect().await {
-                    Ok(c) => c.to_bytes(),
-                    Err(_) => Bytes::new(),
+                let body_bytes: Bytes = match rustack_core::http::collect_body(
+                    incoming,
+                    rustack_core::http::BodyBudget::control(),
+                )
+                .await
+                {
+                    Ok(body) => body,
+                    Err(error) => return Ok(super::body_error_response(&error)),
                 };
                 let resp = plane
                     .handle_request(

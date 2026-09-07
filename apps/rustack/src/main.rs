@@ -23,7 +23,7 @@
 //!
 //! | Variable | Default | Description |
 //! |----------|---------|-------------|
-//! | `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address |
+//! | `GATEWAY_LISTEN` | `127.0.0.1:4566` | Bind address |
 //! | `SERVICES` | *(empty = all)* | Comma-separated list of services to enable |
 //! | `<SERVICE>_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SigV4 verification for `<SERVICE>` |
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
@@ -38,16 +38,17 @@ mod gateway;
 mod handler;
 #[cfg(all(feature = "lambda", feature = "s3"))]
 mod lambda_s3_bridge;
+mod runtime;
 mod service;
 mod snapshot;
 #[cfg(feature = "sns")]
 mod sns_bridge;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto::Builder as HttpConnBuilder,
 };
 #[cfg(feature = "apigatewayv2")]
@@ -72,6 +73,7 @@ use rustack_cloudwatch_core::handler::RustackCloudWatchHandler;
 use rustack_cloudwatch_core::provider::RustackCloudWatch;
 #[cfg(feature = "cloudwatch")]
 use rustack_cloudwatch_http::service::{CloudWatchHttpConfig, CloudWatchHttpService};
+use rustack_core::settings;
 #[cfg(feature = "dynamodb")]
 use rustack_dynamodb_core::config::DynamoDBConfig;
 #[cfg(feature = "dynamodb")]
@@ -202,7 +204,7 @@ use rustack_sts_core::handler::RustackStsHandler;
 use rustack_sts_core::provider::RustackSts;
 #[cfg(feature = "sts")]
 use rustack_sts_http::service::{StsHttpConfig, StsHttpService};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::Instant};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -212,6 +214,7 @@ use crate::events_bridge::LocalTargetDelivery;
 use crate::sns_bridge::RustackSqsPublisher;
 use crate::{
     gateway::GatewayService,
+    runtime::RuntimeWorkers,
     service::ServiceRouter,
     snapshot::{RuntimeProviders, SnapshotConfig},
 };
@@ -250,9 +253,9 @@ enum CliAction {
 
 /// Classify a sequence of CLI arguments (including argv\[0\]) into a [`CliAction`].
 ///
-/// Precedence: `--help` > `--version` > `--health-check`. Positional args are
-/// ignored (the binary takes no positional arguments today). Any other token
-/// that starts with `-` is treated as an unknown flag.
+/// Precedence: `--help` > `--version` > `--health-check`. The binary takes no
+/// positional arguments: any unexpected token (including unknown flags) is
+/// rejected as an unknown flag.
 fn classify_args<I, S>(args: I) -> CliAction
 where
     I: IntoIterator<Item = S>,
@@ -277,7 +280,14 @@ where
         match arg.as_str() {
             "-h" | "--help" => return CliAction::Help,
             "-v" | "--version" => return CliAction::Version,
-            "--health-check" => action = CliAction::HealthCheck,
+            "--health-check" => {
+                if !matches!(action, CliAction::Run { snapshot: None }) {
+                    return CliAction::UnknownFlag(
+                        "conflicting --health-check/--snapshot options".to_owned(),
+                    );
+                }
+                action = CliAction::HealthCheck;
+            }
             "--snapshot" => {
                 let Some(name) = iter.next() else {
                     return CliAction::MissingFlagValue("--snapshot".to_owned());
@@ -285,8 +295,13 @@ where
                 if name.starts_with('-') {
                     return CliAction::MissingFlagValue("--snapshot".to_owned());
                 }
-                if let CliAction::Run { snapshot } = &mut action {
-                    *snapshot = Some(name);
+                match &mut action {
+                    CliAction::Run { snapshot } if snapshot.is_none() => *snapshot = Some(name),
+                    _ => {
+                        return CliAction::UnknownFlag(
+                            "duplicate or conflicting --snapshot option".to_owned(),
+                        );
+                    }
                 }
             }
             other if other.starts_with("--snapshot=") => {
@@ -296,14 +311,18 @@ where
                 if name.is_empty() {
                     return CliAction::MissingFlagValue("--snapshot".to_owned());
                 }
-                if let CliAction::Run { snapshot } = &mut action {
-                    *snapshot = Some(name.to_owned());
+                match &mut action {
+                    CliAction::Run { snapshot } if snapshot.is_none() => {
+                        *snapshot = Some(name.to_owned());
+                    }
+                    _ => {
+                        return CliAction::UnknownFlag(
+                            "duplicate or conflicting --snapshot option".to_owned(),
+                        );
+                    }
                 }
             }
-            other if other.starts_with('-') => {
-                return CliAction::UnknownFlag(other.to_string());
-            }
-            _ => {}
+            other => return CliAction::UnknownFlag(other.to_string()),
         }
     }
     action
@@ -326,7 +345,7 @@ fn help_text() -> String {
          --snapshot <name>     Load snapshot before serving and save it on shutdown\n\
          \n\
          ENVIRONMENT:\n    \
-         GATEWAY_LISTEN        Bind address (default: 0.0.0.0:4566)\n    \
+         GATEWAY_LISTEN        Bind address (default: 127.0.0.1:4566)\n    \
          SERVICES              Comma-separated list of services to enable (default: all compiled-in)\n    \
          LOG_LEVEL             Log level filter (default: info)\n    \
          RUST_LOG              Fine-grained tracing filter (overrides LOG_LEVEL)\n    \
@@ -347,13 +366,14 @@ fn version_text() -> String {
 
 /// Initialize the tracing subscriber.
 ///
-/// Uses `RUST_LOG` if set, otherwise falls back to the `LOG_LEVEL` config value.
+/// Uses the validated `RUST_LOG` setting if present, otherwise falls back to the
+/// `LOG_LEVEL` config value. The facade value is authoritative so YAML-set
+/// filters work without exporting them into the real process environment.
 fn init_tracing(log_level: &str) -> Result<()> {
-    let filter = if std::env::var("RUST_LOG").is_ok() {
-        EnvFilter::from_default_env()
-    } else {
-        EnvFilter::try_new(log_level)
-            .with_context(|| format!("invalid log level filter: {log_level}"))?
+    let filter = match settings::var("RUST_LOG") {
+        Ok(filter) => EnvFilter::try_new(filter).with_context(|| "invalid RUST_LOG filter")?,
+        Err(_) => EnvFilter::try_new(log_level)
+            .with_context(|| format!("invalid log level filter: {log_level}"))?,
     };
 
     tracing_subscriber::fmt()
@@ -608,69 +628,93 @@ fn build_sts_http_config(config: &StsConfig) -> StsHttpConfig {
 fn build_credential_provider() -> Option<Arc<dyn rustack_auth::CredentialProvider>> {
     use rustack_auth::StaticCredentialProvider;
 
-    let access_key = std::env::var("ACCESS_KEY")
-        .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
+    let access_key = settings::var("ACCESS_KEY")
+        .or_else(|_| settings::var("AWS_ACCESS_KEY_ID"))
         .ok()?;
-    let secret_key = std::env::var("SECRET_KEY")
-        .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
+    let secret_key = settings::var("SECRET_KEY")
+        .or_else(|_| settings::var("AWS_SECRET_ACCESS_KEY"))
         .ok()?;
 
-    info!(
-        access_key = %access_key,
-        "configured credential provider from environment"
-    );
+    info!("configured credential provider (values redacted)");
 
     Some(Arc::new(StaticCredentialProvider::new(vec![(
         access_key, secret_key,
     )])))
 }
 
-/// Run the accept loop, serving connections until a shutdown signal is received.
-async fn serve(listener: TcpListener, service: GatewayService) -> Result<()> {
+/// Accept bounded connections, then return the shared shutdown deadline and drain result.
+async fn serve(listener: TcpListener, service: GatewayService) -> Result<(Instant, Result<()>)> {
+    let budgets = settings::budgets();
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-    let http = HttpConnBuilder::new(TokioExecutor::new());
-
+    let mut http = HttpConnBuilder::new(TokioExecutor::new());
+    http.http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(budgets.header_seconds));
+    http.http2().max_concurrent_streams(
+        u32::try_from(budgets.requests).context("HTTP/2 request budget exceeds u32")?,
+    );
+    let connections = Arc::new(Semaphore::new(budgets.connections));
+    // Eight reserved diagnostic-only sockets remain available under business saturation.
+    let diagnostics = Arc::new(Semaphore::new(8));
+    let mut tasks = JoinSet::new();
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("register SIGTERM handler")?;
     let shutdown = async {
-        tokio::signal::ctrl_c().await.ok();
-        info!("received shutdown signal, draining connections");
+        #[cfg(unix)]
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("wait for SIGINT"),
+            _ = terminate.recv() => Ok(()),
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await.context("wait for shutdown")
     };
-
     tokio::pin!(shutdown);
-
     loop {
         tokio::select! {
-            result = listener.accept() => {
-                let (stream, peer_addr) = match result {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        warn!(error = %e, "failed to accept connection");
-                        continue;
-                    }
-                };
-
-                let svc = service.clone();
-                let conn = http.serve_connection(TokioIo::new(stream), svc);
-                let conn = graceful.watch(conn.into_owned());
-
-                tokio::spawn(async move {
-                    if let Err(e) = conn.await {
-                        warn!(peer_addr = %peer_addr, error = %e, "connection error");
-                    }
-                });
+            biased;
+            result = &mut shutdown => { result?; break; }
+            result = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(error)) = result { warn!(error = %error, "connection task failed"); }
             }
-
-            () = &mut shutdown => {
-                info!("shutting down gracefully");
-                break;
+            result = listener.accept() => {
+                let (stream, peer_addr) = result.context("accept gateway connection")?;
+                let (permit, svc) = if let Ok(permit) = Arc::clone(&connections).try_acquire_owned() {
+                    (permit, service.clone())
+                } else if let Ok(permit) = Arc::clone(&diagnostics).try_acquire_owned() {
+                    (permit, service.clone().health_only())
+                } else {
+                    warn!(peer = %peer_addr, "gateway rejected connection: business and diagnostic capacity both exhausted");
+                    drop(stream);
+                    continue;
+                };
+                let conn = graceful.watch(http.serve_connection(TokioIo::new(stream), svc).into_owned());
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Err(error) = conn.await { warn!(%peer_addr, error = %error, "connection error"); }
+                });
             }
         }
     }
-
-    // Wait for in-flight requests to complete.
-    graceful.shutdown().await;
-    info!("all connections drained, exiting");
-
-    Ok(())
+    service.state().drain();
+    drop(listener);
+    let deadline = Instant::now() + Duration::from_secs(budgets.shutdown_seconds);
+    info!("stopped ingress; draining connections");
+    let drain_deadline = deadline - shutdown_cleanup_reserve();
+    let drained = tokio::time::timeout_at(drain_deadline, graceful.shutdown())
+        .await
+        .context("HTTP drain deadline exceeded");
+    if drained.is_err() {
+        tasks.abort_all();
+    }
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                warn!(error = %error, "connection task failed during drain");
+            }
+        }
+    }
+    Ok((deadline, drained))
 }
 
 /// Check whether a service name was compiled into this binary.
@@ -699,7 +743,7 @@ fn is_compiled_in(name: &str) -> bool {
 ///
 /// If `SERVICES` is unset or empty, returns all compiled-in services.
 fn parse_enabled_services() -> Vec<String> {
-    let raw = std::env::var("SERVICES").unwrap_or_default();
+    let raw = settings::var("SERVICES").unwrap_or_default();
     parse_services_value(&raw)
 }
 
@@ -775,37 +819,72 @@ fn parse_services_value(raw: &str) -> Vec<String> {
     }
 }
 
-/// Perform a health check by connecting to the gateway and requesting the health endpoint.
-///
-/// Exits with code 0 if the response is 200 OK and contains at least one
-/// running service, 1 otherwise.
+/// Structured `/health/ready` payload the probe requires.
+#[derive(serde::Deserialize)]
+struct ProbeStatus {
+    ready: bool,
+    services: std::collections::BTreeMap<String, String>,
+}
+
+/// Probe real HTTP status and structured readiness with one absolute deadline.
 async fn run_health_check(addr: &str) -> Result<()> {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpStream,
-    };
-
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .with_context(|| format!("cannot connect to {addr}"))?;
-
-    let request =
-        format!("GET /_localstack/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).await?;
-    // Do not half-close the write side: the HTTP request is self-framing
-    // (GET with no body) and the Connection: close header tells hyper not
-    // to expect further requests.  Hyper will close after responding,
-    // which gives read_to_string its EOF.
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response).await?;
-
-    // Accept any 200 response that reports at least one running service.
-    if response.contains("200 OK") && response.contains("\"running\"") {
+    let probe = async {
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .with_context(|| format!("connect health endpoint {addr}"))?;
+        let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+            .max_buf_size(65_536)
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(TokioIo::new(stream))
+            .await
+            .context("initialize health HTTP connection")?;
+        let mut tasks = JoinSet::new();
+        tasks.spawn(connection);
+        let mut request = http::Request::new(http_body_util::Empty::new());
+        *request.uri_mut() = http::Uri::from_static("/_health/ready");
+        request.headers_mut().insert(
+            http::header::HOST,
+            http::HeaderValue::from_str(addr).context("invalid health host")?,
+        );
+        let response = sender
+            .send_request(request)
+            .await
+            .context("request health status")?;
+        if response.status() != http::StatusCode::OK {
+            anyhow::bail!("health endpoint returned {}", response.status());
+        }
+        let budget = rustack_core::http::BodyBudget::new(
+            65_536,
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+        )?;
+        let bytes = rustack_core::http::collect_body(response.into_body(), budget)
+            .await
+            .context("read bounded health response")?;
+        let status: ProbeStatus =
+            serde_json::from_slice(&bytes).context("parse health response JSON")?;
+        if !status.ready
+            || status.services.is_empty()
+            || status
+                .services
+                .values()
+                .any(|state| !matches!(state.as_str(), "running" | "disabled"))
+        {
+            anyhow::bail!("runtime is not ready");
+        }
+        drop(sender);
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    return Err(error).context("health connection task failed");
+                }
+            }
+        }
         Ok(())
-    } else {
-        anyhow::bail!("unhealthy response from {addr}")
-    }
+    };
+    tokio::time::timeout(Duration::from_secs(3), probe)
+        .await
+        .context("health probe deadline exceeded")?
 }
 
 /// Read the gateway listen address from the environment.
@@ -813,25 +892,27 @@ async fn run_health_check(addr: &str) -> Result<()> {
 /// Checks `GATEWAY_LISTEN` (the canonical var) and falls back to the
 /// S3Config default when S3 is compiled in.
 fn gateway_listen_addr() -> String {
-    std::env::var("GATEWAY_LISTEN").unwrap_or_else(|_| "0.0.0.0:4566".to_string())
+    settings::var("GATEWAY_LISTEN").unwrap_or_else(|_| "127.0.0.1:4566".to_string())
 }
 
 /// Read the log level from the environment.
 fn log_level() -> String {
-    std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string())
+    settings::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string())
 }
 
 /// Built runtime services and provider handles.
 struct Runtime {
     services: Vec<Box<dyn ServiceRouter>>,
     providers: RuntimeProviders,
+    workers: RuntimeWorkers,
 }
 
 /// Build all enabled service routers based on environment configuration.
 #[allow(clippy::too_many_lines)]
-fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
+fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
     let mut providers = RuntimeProviders::default();
+    let mut workers = RuntimeWorkers::default();
 
     // ----- DynamoDB + DynamoDB Streams (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "dynamodb")]
@@ -870,6 +951,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
             providers.register_dynamodb_streams(Arc::clone(store));
         }
         providers.register_dynamodb(Arc::clone(&dynamodb_provider));
+        workers.dynamodb = Some(Arc::clone(&dynamodb_provider));
         let dynamodb_handler = RustackDynamoDBHandler::new(Arc::clone(&dynamodb_provider));
         let dynamodb_http_config = build_dynamodb_http_config(&dynamodb_config);
         let dynamodb_service =
@@ -903,6 +985,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
         );
         let sqs_provider = Arc::new(RustackSqs::new(sqs_config.clone()));
         providers.register_sqs(Arc::clone(&sqs_provider));
+        workers.sqs = Some(Arc::clone(&sqs_provider));
         let sqs_handler = RustackSqsHandler::new(Arc::clone(&sqs_provider));
         let sqs_http_config = build_sqs_http_config(&sqs_config);
         let sqs_service = SqsHttpService::new(Arc::new(sqs_handler), sqs_http_config);
@@ -1008,15 +1091,13 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
         );
         let sqs_publisher: Arc<dyn rustack_sns_core::publisher::SqsPublisher> =
             if let Some(ref sqs) = sqs_provider_arc {
-                Arc::new(RustackSqsPublisher::new(
-                    Arc::clone(sqs),
-                    sns_config.clone(),
-                ))
+                Arc::new(RustackSqsPublisher::new(Arc::clone(sqs)))
             } else {
-                Arc::new(rustack_sns_core::publisher::NoopSqsPublisher)
+                Arc::new(rustack_sns_core::publisher::UnavailableSqsPublisher)
             };
-        let sns_provider = RustackSns::new(sns_config.clone(), sqs_publisher);
-        let sns_handler = RustackSnsHandler::new(Arc::new(sns_provider));
+        let sns_provider = Arc::new(RustackSns::new(sns_config.clone(), sqs_publisher));
+        workers.sns = Some(Arc::clone(&sns_provider));
+        let sns_handler = RustackSnsHandler::new(sns_provider);
         let sns_http_config = build_sns_http_config(&sns_config);
         let sns_service = SnsHttpService::new(Arc::new(sns_handler), sns_http_config);
         services.push(Box::new(service::SnsServiceRouter::new(sns_service)));
@@ -1032,17 +1113,13 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
         );
         let delivery: Arc<dyn rustack_events_core::delivery::TargetDelivery> =
             if let Some(ref sqs) = sqs_provider_arc {
-                Arc::new(LocalTargetDelivery::new(
-                    Arc::clone(sqs),
-                    events_config.account_id.clone(),
-                    events_config.host.clone(),
-                    events_config.port,
-                ))
+                Arc::new(LocalTargetDelivery::new(Arc::clone(sqs)))
             } else {
-                Arc::new(rustack_events_core::delivery::NoopTargetDelivery)
+                Arc::new(rustack_events_core::delivery::UnavailableTargetDelivery)
             };
-        let events_provider = RustackEvents::new(events_config.clone(), delivery);
-        let events_handler = RustackEventsHandler::new(Arc::new(events_provider));
+        let events_provider = Arc::new(RustackEvents::new(events_config.clone(), delivery));
+        workers.events = Some(Arc::clone(&events_provider));
+        let events_handler = RustackEventsHandler::new(events_provider);
         let events_http_config = build_events_http_config(&events_config);
         let events_service = EventsHttpService::new(Arc::new(events_handler), events_http_config);
         services.push(Box::new(service::EventsServiceRouter::new(events_service)));
@@ -1121,7 +1198,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
             apigatewayv2_skip_signature_validation = apigw_config.skip_signature_validation,
             "initializing API Gateway v2 service",
         );
-        let apigw_provider = Arc::new(RustackApiGatewayV2::new(apigw_config.clone()));
+        let apigw_provider = Arc::new(RustackApiGatewayV2::new(apigw_config.clone())?);
         providers.register_apigatewayv2(Arc::clone(&apigw_provider));
         let apigw_handler = RustackApiGatewayV2Handler::new(Arc::clone(&apigw_provider));
         let apigw_http_config = build_apigatewayv2_http_config(&apigw_config);
@@ -1158,7 +1235,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
     // ----- Lambda (register before S3: S3 is the catch-all) -----
     #[cfg(feature = "lambda")]
     if is_enabled("lambda") {
-        let lambda_config = LambdaConfig::from_env();
+        let lambda_config = LambdaConfig::from_env()?;
         info!(
             lambda_skip_signature_validation = lambda_config.skip_signature_validation,
             lambda_docker_enabled = lambda_config.docker_enabled,
@@ -1180,6 +1257,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
         let lambda_provider =
             Arc::new(RustackLambda::new(lambda_config.clone()).with_code_fetcher(code_fetcher));
         providers.register_lambda(Arc::clone(&lambda_provider));
+        workers.lambda = Some(Arc::clone(&lambda_provider));
         let lambda_handler = RustackLambdaHandler::new(Arc::clone(&lambda_provider));
         let lambda_http_config = build_lambda_http_config(&lambda_config);
         let lambda_service = LambdaHttpService::new(Arc::new(lambda_handler), lambda_http_config);
@@ -1210,13 +1288,11 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
             if let Some(s3) = s3_provider_arc.as_ref() {
                 builder = builder.s3(Arc::clone(s3));
             }
-            match builder.build() {
-                Ok(plane) => {
-                    providers.register_cloudfront_cache(plane.clone());
-                    services.push(Box::new(service::CloudFrontDataPlaneRouter::new(plane)));
-                }
-                Err(e) => warn!(error = %e, "failed to initialise CloudFront data plane"),
-            }
+            let plane = builder
+                .build()
+                .map_err(|error| anyhow::anyhow!("initialize CloudFront data plane: {error}"))?;
+            providers.register_cloudfront_cache(plane.clone());
+            services.push(Box::new(service::CloudFrontDataPlaneRouter::new(plane)));
         }
 
         services.push(Box::new(service::CloudFrontServiceRouter::new(cf_service)));
@@ -1232,14 +1308,33 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Runtime {
         services.push(Box::new(service::S3ServiceRouter::new(s3_service)));
     }
 
-    Runtime {
+    Ok(Runtime {
         services,
         providers,
-    }
+        workers,
+    })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn shutdown_cleanup_reserve() -> Duration {
+    (Duration::from_secs(settings::budgets().shutdown_seconds) / 10).min(Duration::from_secs(1))
+}
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("create runtime")?;
+    let result = runtime.block_on(run());
+    // The supervisor has already joined normal work and reaped children. A blocked
+    // filesystem spawn_blocking cannot be aborted; do not let Tokio's destructor
+    // turn a reported shutdown timeout into an unbounded process hang.
+    runtime.shutdown_timeout(Duration::ZERO);
+    result
+}
+
+// Sequential supervisor steps stay explicit rather than being folded into helpers.
+#[allow(clippy::too_many_lines)]
+async fn run() -> Result<()> {
     // Parse CLI flags once and dispatch. Help / version are handled before
     // any tracing or config work so they're cheap and side-effect free.
     let snapshot_name = match classify_args(std::env::args()) {
@@ -1262,14 +1357,25 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
         CliAction::HealthCheck => {
-            let listen_addr = gateway_listen_addr();
-            let addr = listen_addr.replace("0.0.0.0", "127.0.0.1");
-            let healthy = run_health_check(&addr).await.is_ok();
-            std::process::exit(i32::from(!healthy));
+            let config = settings::initialize().await?;
+            let mut addr = config.listen();
+            if addr.ip().is_unspecified() {
+                addr.set_ip(if addr.is_ipv6() {
+                    std::net::Ipv6Addr::LOCALHOST.into()
+                } else {
+                    std::net::Ipv4Addr::LOCALHOST.into()
+                });
+            }
+            if let Err(error) = run_health_check(&addr.to_string()).await {
+                eprintln!("health check failed: {error:#}");
+                std::process::exit(1);
+            }
+            return Ok(());
         }
         CliAction::Run { snapshot } => snapshot,
     };
 
+    let config = settings::initialize().await?;
     let listen_addr = gateway_listen_addr();
     let log = log_level();
     init_tracing(&log)?;
@@ -1277,14 +1383,16 @@ async fn main() -> Result<()> {
 
     let enabled = parse_enabled_services();
 
-    // Warn about services that are requested but not compiled in.
     for name in &enabled {
         if !is_compiled_in(name) {
-            warn!(service = %name, "requested service is not compiled in, skipping");
+            anyhow::bail!(
+                "requested service '{name}' is unknown or not compiled in; see rustack --help"
+            );
         }
     }
-
-    let runtime = build_services(|name| enabled.iter().any(|s| s == name) && is_compiled_in(name));
+    config.validate_credentials(&enabled)?;
+    info!(settings = ?config, "validated runtime configuration");
+    let runtime = build_services(|name| enabled.iter().any(|s| s == name))?;
 
     if runtime.services.is_empty() {
         anyhow::bail!(
@@ -1293,15 +1401,22 @@ async fn main() -> Result<()> {
         );
     }
 
+    let _snapshot_lease = match snapshot_config.as_ref() {
+        Some(config) => Some(config.acquire_lease().await?),
+        None => None,
+    };
     if let Some(config) = snapshot_config.as_ref() {
+        info!(coverage = ?runtime.providers.coverage(), "snapshot includes only declared state; other services and SQS messages are not persisted");
         config.load(&runtime.providers).await?;
     }
 
     let Runtime {
         services,
         providers,
+        workers,
     } = runtime;
-    let gateway = GatewayService::new(services);
+    let workers = Arc::new(workers);
+    let gateway = GatewayService::new(services).with_workers(Arc::clone(&workers));
     let service_names = gateway.service_names();
 
     let addr: SocketAddr = listen_addr
@@ -1319,21 +1434,124 @@ async fn main() -> Result<()> {
         "starting Rustack Server",
     );
 
-    let serve_result = serve(listener, gateway).await;
-    let save_result = if let Some(config) = snapshot_config.as_ref() {
-        config.save(&providers, VERSION).await
-    } else {
-        Ok(())
+    let (deadline, serve_result) = match serve(listener, gateway).await {
+        Ok(outcome) => outcome,
+        Err(error) => (
+            Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds),
+            Err(error),
+        ),
     };
-    providers.shutdown().await;
-
-    serve_result?;
-    save_result
+    let work_deadline = deadline - shutdown_cleanup_reserve();
+    let save_result = async {
+        serve_result?;
+        workers
+            .quiesce(work_deadline.saturating_duration_since(Instant::now()))
+            .await?;
+        if let Some(config) = snapshot_config.as_ref() {
+            tokio::time::timeout_at(work_deadline, config.save(&providers, VERSION))
+                .await
+                .context("snapshot save deadline exceeded")??;
+        }
+        Result::<()>::Ok(())
+    }
+    .await;
+    let stop_result = async {
+        match tokio::time::timeout_at(deadline, workers.shutdown()).await {
+            Ok(result) => result.context("runtime shutdown failed")?,
+            Err(_) => anyhow::bail!(
+                "resource cleanup incomplete: shutdown deadline exceeded; dropping providers now \
+                 (kill_on_drop reaps remaining children)"
+            ),
+        }
+        Result::<()>::Ok(())
+    }
+    .await;
+    save_result?;
+    stop_result?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
+
+    async fn probe_fixture(status: &str, body: &str) -> Result<Result<()>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: \
+             {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut servers = JoinSet::new();
+        servers.spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            stream.write_all(response.as_bytes()).await
+        });
+        let result = run_health_check(&address.to_string()).await;
+        while let Some(joined) = servers.join_next().await {
+            joined??;
+        }
+        Ok(result)
+    }
+
+    #[tokio::test]
+    async fn test_should_parse_health_status_not_substrings() -> Result<()> {
+        let valid = r#"{"ready":true,"services":{"s3":"running"}}"#;
+        probe_fixture("200 OK", valid).await??;
+        assert!(probe_fixture("500 Error", valid).await?.is_err());
+        assert!(probe_fixture("200 OK", "200 OK running").await?.is_err());
+        assert!(
+            probe_fixture("200 OK", r#"{"ready":false,"services":{"s3":"running"}}"#)
+                .await?
+                .is_err()
+        );
+        assert!(
+            probe_fixture("200 OK", r#"{"ready":true,"services":{}}"#)
+                .await?
+                .is_err()
+        );
+        assert!(probe_fixture("200 OK", &"x".repeat(65_537)).await?.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_bound_health_probe_without_response_eof() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let mut servers = JoinSet::new();
+        servers.spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let _held_stream = stream;
+            std::future::pending::<()>().await;
+            Result::<()>::Ok(())
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_health_check(&address.to_string()),
+        )
+        .await?;
+        assert!(result.is_err());
+        servers.abort_all();
+        while let Some(joined) = servers.join_next().await {
+            assert!(joined.is_err_and(|error| error.is_cancelled()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_positionals_and_conflicting_runtime_flags() {
+        for args in [
+            vec!["rustack", "typo"],
+            vec!["rustack", "--snapshot", "one", "--snapshot", "two"],
+            vec!["rustack", "--health-check", "--snapshot", "dev"],
+            vec!["rustack", "--snapshot=dev", "--health-check"],
+        ] {
+            assert!(matches!(classify_args(args), CliAction::UnknownFlag(_)));
+        }
+    }
 
     #[test]
     fn test_should_parse_services_value_default() {

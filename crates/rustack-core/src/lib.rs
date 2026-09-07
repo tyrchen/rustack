@@ -6,6 +6,8 @@
 
 mod config;
 mod error;
+pub mod http;
+pub mod settings;
 mod state;
 mod types;
 

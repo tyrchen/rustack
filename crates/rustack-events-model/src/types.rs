@@ -63,9 +63,13 @@ pub struct Target {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_parameters: Option<Value>,
 
+    /// Parameters for a Kinesis target (retained for entry-level capability rejection).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinesis_parameters: Option<Value>,
+
     /// Parameters for an SQS queue target.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sqs_parameters: Option<Value>,
+    pub sqs_parameters: Option<SqsParameters>,
 
     /// Parameters for an HTTP endpoint target.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +94,14 @@ pub struct Target {
     /// Parameters for an AppSync target.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_sync_parameters: Option<Value>,
+}
+
+/// Complete AWS EventBridge parameters for SQS targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct SqsParameters {
+    /// FIFO message group identifier (1..128 ASCII printable non-space bytes).
+    pub message_group_id: String,
 }
 
 // ---------------------------------------------------------------------------
