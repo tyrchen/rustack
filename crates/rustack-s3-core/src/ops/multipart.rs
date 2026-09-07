@@ -46,11 +46,14 @@ use super::bucket::to_model_owner;
 
 // AWS S3 DTOs use signed integers (i32/i64) for inherently non-negative values.
 // These handler methods must remain async for consistency.
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
 )]
 impl RustackS3 {
     /// Create a new multipart upload.
@@ -839,7 +842,6 @@ type ChecksumOutputFields = (
 ///
 /// Returns at most one checksum. If multiple checksum fields are set, returns
 /// an error.
-#[allow(clippy::result_large_err)]
 fn extract_checksum_from_part(input: &UploadPartInput) -> Result<Option<ChecksumData>, S3Error> {
     let candidates: [(&str, &Option<String>); 5] = [
         ("CRC32", &input.checksum_crc32),

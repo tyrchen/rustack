@@ -23,7 +23,7 @@
 //!
 //! | Variable | Default | Description |
 //! |----------|---------|-------------|
-//! | `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address |
+//! | `GATEWAY_LISTEN` | `127.0.0.1:4566` | Bind address |
 //! | `SERVICES` | *(empty = all)* | Comma-separated list of services to enable |
 //! | `<SERVICE>_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SigV4 verification for `<SERVICE>` |
 //! | `S3_DOMAIN` | `s3.localhost.localstack.cloud` | Virtual hosting domain |
@@ -345,7 +345,7 @@ fn help_text() -> String {
          --snapshot <name>     Load snapshot before serving and save it on shutdown\n\
          \n\
          ENVIRONMENT:\n    \
-         GATEWAY_LISTEN        Bind address (default: 0.0.0.0:4566)\n    \
+         GATEWAY_LISTEN        Bind address (default: 127.0.0.1:4566)\n    \
          SERVICES              Comma-separated list of services to enable (default: all compiled-in)\n    \
          LOG_LEVEL             Log level filter (default: info)\n    \
          RUST_LOG              Fine-grained tracing filter (overrides LOG_LEVEL)\n    \

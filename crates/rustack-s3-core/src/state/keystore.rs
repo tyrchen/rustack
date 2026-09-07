@@ -75,6 +75,26 @@ impl Default for ObjectStore {
 }
 
 impl ObjectStore {
+    /// Resolve a delete marker for the current or explicitly requested version.
+    pub(crate) fn delete_marker(
+        &self,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Option<&S3DeleteMarker> {
+        let Self::Versioned(store) = self else {
+            return None;
+        };
+        let versions = store.objects.get(key)?;
+        let version = match version_id {
+            Some(id) => versions.iter().find(|version| version.version_id() == id),
+            None => versions.first(),
+        }?;
+        match version {
+            ObjectVersion::DeleteMarker(marker) => Some(marker),
+            ObjectVersion::Object(_) => None,
+        }
+    }
+
     /// Store an object. Returns the previous object for un-versioned stores.
     pub fn put(&mut self, object: S3Object) -> Option<S3Object> {
         match self {

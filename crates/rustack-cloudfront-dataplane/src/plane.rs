@@ -300,7 +300,7 @@ impl DataPlane {
                 .await
                 {
                     Ok(r) => r,
-                    Err(e) => return self.handle_origin_error(&dist.config, e).await,
+                    Err(e) => return Self::handle_origin_error(&dist.config, &e),
                 }
             }
             #[cfg(feature = "http-origin")]
@@ -317,7 +317,7 @@ impl DataPlane {
                 .await
                 {
                     Ok(r) => r,
-                    Err(e) => return self.handle_origin_error(&dist.config, e).await,
+                    Err(e) => return Self::handle_origin_error(&dist.config, &e),
                 }
             }
             #[cfg(not(feature = "http-origin"))]
@@ -360,11 +360,7 @@ impl DataPlane {
         response
     }
 
-    async fn handle_origin_error(
-        &self,
-        config: &DistributionConfig,
-        err: DataPlaneError,
-    ) -> Response<Bytes> {
+    fn handle_origin_error(config: &DistributionConfig, err: &DataPlaneError) -> Response<Bytes> {
         let status = err.http_status();
         // Check CustomErrorResponses.
         for cer in &config.custom_error_responses {
@@ -386,10 +382,10 @@ impl DataPlane {
                 }
                 return builder
                     .body(Bytes::from_static(b""))
-                    .unwrap_or_else(|_| error_response(&err));
+                    .unwrap_or_else(|_| error_response(err));
             }
         }
-        error_response(&err)
+        error_response(err)
     }
 
     fn check_divergence(

@@ -27,10 +27,9 @@ pub(crate) fn to_model_owner(owner: &InternalOwner) -> Owner {
     }
 }
 
-// These handler methods must remain async because some operations involve
-// storage I/O. Methods that are fully synchronous are allowed to be async
-// for consistency.
-#[allow(clippy::unused_async)]
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
+#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 impl RustackS3 {
     /// Create a new S3 bucket.
     pub async fn handle_create_bucket(

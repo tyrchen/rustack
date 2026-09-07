@@ -37,6 +37,51 @@ use crate::{
     validation::{validate_content_md5, validate_metadata, validate_object_key},
 };
 
+/// Look up an object while preserving delete-marker metadata on GET and HEAD errors.
+fn lookup_object<'a>(
+    store: &'a ObjectStore,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<&'a S3Object, S3Error> {
+    let object = match version_id {
+        Some(id) => store.get_version(key, id),
+        None => store.get(key),
+    };
+    object.ok_or_else(|| {
+        if let Some(marker) = store.delete_marker(key, version_id) {
+            let code = if version_id.is_some() {
+                S3ErrorCode::MethodNotAllowed
+            } else {
+                S3ErrorCode::NoSuchKey
+            };
+            let mut error = S3Error::new(code)
+                .with_header("x-amz-delete-marker", "true")
+                .with_header("x-amz-version-id", marker.version_id.clone());
+            if version_id.is_some() {
+                error = error.with_header(
+                    "Last-Modified",
+                    marker
+                        .last_modified
+                        .format("%a, %d %b %Y %H:%M:%S GMT")
+                        .to_string(),
+                );
+            }
+            error
+        } else if let Some(id) = version_id {
+            S3ServiceError::NoSuchVersion {
+                key: key.to_owned(),
+                version_id: id.to_owned(),
+            }
+            .into_s3_error()
+        } else {
+            S3ServiceError::NoSuchKey {
+                key: key.to_owned(),
+            }
+            .into_s3_error()
+        }
+    })
+}
+
 /// Check whether Object Lock (legal hold or retention) prevents deletion of a
 /// specific object version.
 ///
@@ -53,7 +98,6 @@ use crate::{
 ///   COMPLIANCE-mode or legal holds.
 ///
 /// Returns `Ok(())` when the deletion is allowed.
-#[allow(clippy::result_large_err)]
 fn check_object_lock_for_delete(
     store: &ObjectStore,
     key: &str,
@@ -93,11 +137,14 @@ fn check_object_lock_for_delete(
 // (sizes, part counts). Casting from u64/u32/usize is safe in practice.
 // These handler methods must remain async because some operations involve
 // storage I/O.
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
 )]
 impl RustackS3 {
     /// Put (upload) a new object.
@@ -303,27 +350,7 @@ impl RustackS3 {
                 .map_err(S3ServiceError::into_s3_error)?;
 
             let store = bucket.objects.read();
-            let obj = if let Some(ref version_id) = version_id_param {
-                store.get_version(&key, version_id).ok_or_else(|| {
-                    // Check if the version is a delete marker.
-                    if store.is_delete_marker(&key, version_id) {
-                        S3ServiceError::MethodNotAllowed
-                            .into_s3_error()
-                            .with_header("x-amz-delete-marker", "true")
-                            .with_header("x-amz-version-id", version_id.clone())
-                    } else {
-                        S3ServiceError::NoSuchVersion {
-                            key: key.clone(),
-                            version_id: version_id.clone(),
-                        }
-                        .into_s3_error()
-                    }
-                })?
-            } else {
-                store
-                    .get(&key)
-                    .ok_or_else(|| S3ServiceError::NoSuchKey { key: key.clone() }.into_s3_error())?
-            };
+            let obj = lookup_object(&store, &key, version_id_param.as_deref())?;
 
             // Conditional request checks.
             if let Some(ref if_match) = if_match_param {
@@ -493,26 +520,7 @@ impl RustackS3 {
             .map_err(S3ServiceError::into_s3_error)?;
 
         let store = bucket.objects.read();
-        let obj = if let Some(ref version_id) = version_id_param {
-            store.get_version(&key, version_id).ok_or_else(|| {
-                if store.is_delete_marker(&key, version_id) {
-                    S3ServiceError::MethodNotAllowed
-                        .into_s3_error()
-                        .with_header("x-amz-delete-marker", "true")
-                        .with_header("x-amz-version-id", version_id.clone())
-                } else {
-                    S3ServiceError::NoSuchVersion {
-                        key: key.clone(),
-                        version_id: version_id.clone(),
-                    }
-                    .into_s3_error()
-                }
-            })?
-        } else {
-            store
-                .get(&key)
-                .ok_or_else(|| S3ServiceError::NoSuchKey { key: key.clone() }.into_s3_error())?
-        };
+        let obj = lookup_object(&store, &key, version_id_param.as_deref())?;
 
         let obj_version_id = if obj.version_id == "null" {
             None

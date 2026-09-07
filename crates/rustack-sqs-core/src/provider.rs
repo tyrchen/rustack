@@ -380,7 +380,11 @@ impl RustackSqs {
     }
 
     /// Handle `GetQueueUrl`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn get_queue_url(
         &self,
         input: GetQueueUrlInput,
@@ -396,7 +400,11 @@ impl RustackSqs {
     }
 
     /// Handle `ListQueues`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     // max_results clamped to 1..=1000, always positive and fits in usize.
     pub async fn list_queues(&self, input: ListQueuesInput) -> Result<ListQueuesOutput, SqsError> {
@@ -722,7 +730,11 @@ impl RustackSqs {
     }
 
     /// Handle `RemovePermission`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn remove_permission(
         &self,
         input: RemovePermissionInput,
@@ -734,7 +746,11 @@ impl RustackSqs {
     // ---- Message Move Task Operations (stubs) ----
 
     /// Handle `StartMessageMoveTask`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn start_message_move_task(
         &self,
         _input: StartMessageMoveTaskInput,
@@ -746,7 +762,11 @@ impl RustackSqs {
     }
 
     /// Handle `CancelMessageMoveTask`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn cancel_message_move_task(
         &self,
         _input: CancelMessageMoveTaskInput,
@@ -758,7 +778,11 @@ impl RustackSqs {
     }
 
     /// Handle `ListMessageMoveTasks`.
-    #[allow(clippy::unused_async)] // Must be async to match the handler trait interface.
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Keep the provider API lazy and awaitable like the async handler interface"
+    )]
     pub async fn list_message_move_tasks(
         &self,
         _input: ListMessageMoveTasksInput,

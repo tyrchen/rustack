@@ -28,7 +28,6 @@ const DEFAULT_MAX_KEYS: i32 = 1000;
 /// # Errors
 ///
 /// Returns [`S3Error`] with [`S3ErrorCode::InvalidArgument`] if `max_keys` is negative.
-#[allow(clippy::result_large_err)]
 fn validate_max_keys(max_keys: Option<i32>) -> Result<i32, S3Error> {
     let value = max_keys.unwrap_or(DEFAULT_MAX_KEYS);
     if value < 0 {
@@ -82,11 +81,14 @@ fn to_common_prefixes(prefixes: &[String]) -> Vec<CommonPrefix> {
 
 // AWS S3 DTOs use signed integers (i32/i64) for inherently non-negative values.
 // These handler methods must remain async for consistency with other handlers.
+// Keep handlers lazy and uniformly awaitable at the dispatch boundary, including
+// in-memory operations that currently complete without yielding.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
 )]
 impl RustackS3 {
     /// List objects (v1 API).
