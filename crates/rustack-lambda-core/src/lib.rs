@@ -8,6 +8,8 @@
 //! - **Resolver**: Function name/ARN parsing and version resolution
 //! - **Config**: Service configuration from environment variables
 
+#![forbid(unsafe_code)]
+
 pub mod code;
 pub mod config;
 pub mod error;
@@ -16,3 +18,7 @@ pub mod handler;
 pub mod provider;
 pub mod resolver;
 pub mod storage;
+#[cfg(test)]
+#[path = "../../../tests/lambda-fixtures/minimal_zip.rs"]
+mod test_zip;
+mod work;

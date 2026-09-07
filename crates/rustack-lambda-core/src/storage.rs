@@ -29,6 +29,39 @@ pub struct FunctionStore {
     functions: DashMap<String, FunctionRecord>,
     /// Root directory for storing extracted code.
     code_dir: PathBuf,
+    /// Own completed artifacts until the store is dropped; in-flight revisions remain readable.
+    artifacts: DashMap<PathBuf, Artifact>,
+    staging: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+/// Owns a completed artifact and its resolved filesystem boundary.
+#[derive(Debug)]
+struct Artifact {
+    directory: Option<tempfile::TempDir>,
+    root: PathBuf,
+    extracted: PathBuf,
+}
+
+impl Drop for Artifact {
+    #[allow(clippy::disallowed_methods)] // Drop has no async context; cleanup is bounded to a store-owned directory and failures are reported.
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        let path = directory.keep();
+        let safe = std::fs::canonicalize(&self.root).is_ok_and(|root| root == self.root)
+            && std::fs::symlink_metadata(&self.root)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+            && std::fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
+        if !safe {
+            tracing::error!("Refusing cleanup of replaced Lambda artifact root");
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(path) {
+            tracing::error!(%error, "Lambda artifact cleanup failed");
+        }
+    }
 }
 
 /// Complete record for a Lambda function.
@@ -794,11 +827,87 @@ impl VersionRecordSnapshot {
 }
 
 impl FunctionStore {
+    fn validate_record(&self, record: &FunctionRecord) -> Result<(), LambdaServiceError> {
+        let invalid = |message: &str| LambdaServiceError::InvalidParameter {
+            message: message.into(),
+        };
+        crate::resolver::FunctionName::parse(&record.name)?;
+        crate::resolver::FunctionArn::parse(&record.arn)?;
+        let (name, qualifier) = crate::resolver::resolve_function_ref(&record.arn)?;
+        if name != record.name || qualifier.is_some() {
+            return Err(invalid("Function ARN mismatch"));
+        }
+        if record.latest.version != "$LATEST"
+            || record.next_version == 0
+            || record.next_version == u64::MAX
+            || record
+                .versions
+                .last_key_value()
+                .is_some_and(|(version, _)| *version >= record.next_version)
+            || record
+                .reserved_concurrent_executions
+                .is_some_and(|n| !(0..=1000).contains(&n))
+        {
+            return Err(invalid("Invalid function version or concurrency"));
+        }
+        for (number, version) in &record.versions {
+            if *number == 0 || version.version != number.to_string() {
+                return Err(invalid("Published version number mismatch"));
+            }
+        }
+        for (name, alias) in &record.aliases {
+            crate::resolver::Qualifier::parse(name)?;
+            if alias.name != *name {
+                return Err(invalid("Alias name mismatch"));
+            }
+            crate::resolver::Qualifier::parse(&alias.function_version)?;
+        }
+        for (qualifier, config) in &record.event_invoke_configs {
+            crate::resolver::Qualifier::parse(qualifier)?;
+            if config.qualifier != *qualifier {
+                return Err(invalid("Event qualifier mismatch"));
+            }
+        }
+        for version in std::iter::once(&record.latest).chain(record.versions.values()) {
+            crate::resolver::Qualifier::parse(&version.version)?;
+            if !(1..=900).contains(&version.timeout)
+                || !(128..=10240).contains(&version.memory_size)
+                || version.architectures.len() != 1
+                || version
+                    .architectures
+                    .iter()
+                    .any(|architecture| architecture != "arm64" && architecture != "x86_64")
+                || version.environment.len() > 128
+                || version
+                    .environment
+                    .iter()
+                    .any(|(key, value)| key.len() > 256 || value.len() > 4096)
+            {
+                return Err(invalid("Invalid execution configuration"));
+            }
+            if let Some(path) = &version.code_path {
+                if !self.artifacts.contains_key(path) {
+                    return Err(invalid("Code path is not an owned immutable artifact"));
+                }
+            }
+            if let Some(bytes) = &version.zip_bytes {
+                if version.code_sha256 != compute_sha256(bytes)
+                    || version.code_size != bytes.len() as u64
+                {
+                    return Err(invalid("Deployment package metadata mismatch"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create a new function store with the given code storage directory.
     pub fn new(code_dir: impl Into<PathBuf>) -> Self {
         Self {
             functions: DashMap::new(),
             code_dir: code_dir.into(),
+            artifacts: DashMap::new(),
+            staging: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         }
     }
 
@@ -815,6 +924,7 @@ impl FunctionStore {
     /// Returns `ResourceConflict` if a function with the same name already exists.
     pub fn insert(&self, record: FunctionRecord) -> Result<(), LambdaServiceError> {
         use dashmap::mapref::entry::Entry;
+        self.validate_record(&record)?;
         match self.functions.entry(record.name.clone()) {
             Entry::Occupied(_) => Err(LambdaServiceError::ResourceConflict {
                 message: format!("Function already exist: {}", record.name),
@@ -827,15 +937,15 @@ impl FunctionStore {
     }
 
     /// Get a clone of a function record by name.
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<FunctionRecord> {
-        self.functions.get(name).map(|r| r.value().clone())
+    pub fn get(&self, name: &str) -> Result<Option<FunctionRecord>, LambdaServiceError> {
+        crate::resolver::FunctionName::parse(name)?;
+        Ok(self.functions.get(name).map(|r| r.value().clone()))
     }
 
     /// Check whether a function exists.
-    #[must_use]
-    pub fn contains(&self, name: &str) -> bool {
-        self.functions.contains_key(name)
+    pub fn contains(&self, name: &str) -> Result<bool, LambdaServiceError> {
+        crate::resolver::FunctionName::parse(name)?;
+        Ok(self.functions.contains_key(name))
     }
 
     /// Mutate a function record in place.
@@ -849,8 +959,41 @@ impl FunctionStore {
     where
         F: FnOnce(&mut FunctionRecord) -> R,
     {
+        self.update_if_revision(name, None, f)
+    }
+
+    /// Atomically replace a validated record only if its latest revision still matches.
+    ///
+    /// # Errors
+    /// Rejects invalid names/state, missing functions, and concurrent updates/recreation.
+    pub fn update_if_revision<F, R>(
+        &self,
+        name: &str,
+        expected: Option<&str>,
+        f: F,
+    ) -> Result<R, LambdaServiceError>
+    where
+        F: FnOnce(&mut FunctionRecord) -> R,
+    {
+        crate::resolver::FunctionName::parse(name)?;
         match self.functions.get_mut(name) {
-            Some(mut entry) => Ok(f(entry.value_mut())),
+            Some(mut entry) => {
+                if expected.is_some_and(|revision| revision != entry.latest.revision_id) {
+                    return Err(LambdaServiceError::ResourceConflict {
+                        message: "Function changed while deployment was staged".into(),
+                    });
+                }
+                let mut candidate = entry.value().clone();
+                let result = f(&mut candidate);
+                if candidate.name != name {
+                    return Err(LambdaServiceError::InvalidParameter {
+                        message: "Function identity is immutable".into(),
+                    });
+                }
+                self.validate_record(&candidate)?;
+                *entry = candidate;
+                Ok(result)
+            }
             None => Err(LambdaServiceError::FunctionNotFound {
                 name: name.to_owned(),
             }),
@@ -860,9 +1003,9 @@ impl FunctionStore {
     /// Remove a function from the store.
     ///
     /// Returns the removed record, or `None` if it did not exist.
-    #[must_use]
-    pub fn remove(&self, name: &str) -> Option<FunctionRecord> {
-        self.functions.remove(name).map(|(_, v)| v)
+    pub fn remove(&self, name: &str) -> Result<Option<FunctionRecord>, LambdaServiceError> {
+        crate::resolver::FunctionName::parse(name)?;
+        Ok(self.functions.remove(name).map(|(_, v)| v))
     }
 
     /// List all function records.
@@ -909,42 +1052,46 @@ impl FunctionStore {
         &self,
         snapshot: FunctionStoreSnapshot,
     ) -> Result<(), LambdaServiceError> {
-        self.functions.clear();
-        match tokio::fs::remove_dir_all(&self.code_dir).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(LambdaServiceError::Internal {
-                    message: format!("Failed to clear Lambda code directory: {error}"),
+        self.validate_root().await?;
+        let mut staged = BTreeMap::new();
+        for function in snapshot.functions {
+            crate::resolver::FunctionName::parse(&function.name)?;
+            let (name, qualifier) = crate::resolver::resolve_function_ref(&function.arn)?;
+            if name != function.name || qualifier.is_some() {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Snapshot function ARN mismatch".into(),
+                });
+            }
+            for (alias, record) in &function.aliases {
+                crate::resolver::Qualifier::parse(alias)?;
+                crate::resolver::Qualifier::parse(&record.function_version)?;
+            }
+            let record = function.into_record(self).await?;
+            self.validate_record(&record)?;
+            if staged.insert(record.name.clone(), record).is_some() {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Duplicate snapshot function".into(),
                 });
             }
         }
-        tokio::fs::create_dir_all(&self.code_dir)
-            .await
-            .map_err(|error| LambdaServiceError::Internal {
-                message: format!("Failed to create Lambda code directory: {error}"),
-            })?;
-
-        for function in snapshot.functions {
-            let record = function.into_record(self).await?;
-            self.functions.insert(record.name.clone(), record);
+        self.functions.clear();
+        for (name, record) in staged {
+            self.functions.insert(name, record);
         }
         Ok(())
     }
 
     /// Store zip code bytes for a function version and extract them.
     ///
-    /// Writes the raw zip bytes to `{code_dir}/{function_name}/{version}/code.zip`
-    /// and unpacks the contents into `{code_dir}/{function_name}/{version}/extracted/`.
+    /// Writes ZIP bytes and extracted contents to a new private, internal-ID artifact.
+    /// Logical names and versions never participate in filesystem paths.
     /// Returns the **extracted directory** (which is what the executor needs as
     /// the code root, e.g. for `provided.*` it must contain a `bootstrap`
     /// binary), along with the base64-encoded SHA-256 and the code size.
     ///
     /// Unix file modes from the zip are preserved so executable bits stick.
-    /// Best-effort: if the bytes are not a valid zip (some early tests use a
-    /// stub `PK\x03\x04...` blob), the raw zip is still written but extraction
-    /// is silently skipped — the returned path simply won't contain an
-    /// executable, which the executor surfaces as a clear error at invoke time.
+    /// Every ZIP/IO error propagates. Failed staging never modifies old artifacts.
+    /// Completed artifacts remain owned by the store until shutdown/drop.
     ///
     /// # Errors
     ///
@@ -957,50 +1104,35 @@ impl FunctionStore {
         version: &str,
         zip_bytes: &[u8],
     ) -> Result<(PathBuf, String, u64), LambdaServiceError> {
-        let dir = self.code_dir.join(function_name).join(version);
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| LambdaServiceError::Internal {
-                message: format!("Failed to create code directory: {e}"),
-            })?;
-
-        let zip_path = dir.join("code.zip");
-        tokio::fs::write(&zip_path, zip_bytes)
-            .await
-            .map_err(|e| LambdaServiceError::Internal {
-                message: format!("Failed to write code zip: {e}"),
-            })?;
-
-        let extracted = dir.join("extracted");
-        // Wipe any prior extraction (UpdateFunctionCode).
-        if extracted.exists() {
-            tokio::fs::remove_dir_all(&extracted).await.map_err(|e| {
-                LambdaServiceError::Internal {
-                    message: format!("Failed to clear extracted dir: {e}"),
-                }
-            })?;
+        crate::resolver::FunctionName::parse(function_name)?;
+        crate::resolver::Qualifier::parse(version)?;
+        if zip_bytes.len() > 50 * 1024 * 1024 {
+            return Err(LambdaServiceError::InvalidZipFile {
+                message: "ZIP exceeds 50 MiB".into(),
+            });
         }
-        tokio::fs::create_dir_all(&extracted)
-            .await
-            .map_err(|e| LambdaServiceError::Internal {
-                message: format!("Failed to create extracted dir: {e}"),
+        self.validate_root().await?;
+        let permit = std::sync::Arc::clone(&self.staging)
+            .try_acquire_owned()
+            .map_err(|_| LambdaServiceError::ResourceNotReady {
+                message: "ZIP staging capacity exhausted".into(),
             })?;
-
-        let extract_to = extracted.clone();
+        let root = self.code_dir.clone();
         let bytes_owned = zip_bytes.to_vec();
-        let extract_result = tokio::task::spawn_blocking(move || {
-            extract_zip(&bytes_owned, &extract_to, MAX_EXTRACTED_SIZE)
-        })
-        .await
-        .map_err(|e| LambdaServiceError::Internal {
-            message: format!("zip extraction task join error: {e}"),
-        })?;
-        // A non-zip blob (test stub) is tolerated; a path-traversal attempt is not.
-        if let Err(err) = extract_result {
-            if matches!(err, LambdaServiceError::InvalidZipFile { .. }) {
-                return Err(err);
-            }
-        }
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            stage_zip(&root, &bytes_owned)
+        });
+        let artifact = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .map_err(|_| LambdaServiceError::Internal {
+                message: "ZIP staging deadline exceeded".into(),
+            })?
+            .map_err(|e| LambdaServiceError::Internal {
+                message: format!("ZIP extraction task failed: {e}"),
+            })??;
+        let extracted = artifact.extracted.clone();
+        self.artifacts.insert(extracted.clone(), artifact);
 
         let sha256 = compute_sha256(zip_bytes);
         let code_size = zip_bytes.len() as u64;
@@ -1008,15 +1140,130 @@ impl FunctionStore {
         Ok((extracted, sha256, code_size))
     }
 
-    /// Clean up code directory for a function.
+    /// Validate logical retirement of a function's code.
     ///
-    /// Removes the `{code_dir}/{function_name}` directory tree.
-    pub async fn cleanup_code(&self, function_name: &str) {
-        let dir = self.code_dir.join(function_name);
-        if dir.exists() {
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+    /// Immutable artifacts are retained until store drop so published/in-flight
+    /// references remain valid. No name-derived directory is ever deleted.
+    pub async fn cleanup_code(&self, function_name: &str) -> Result<(), LambdaServiceError> {
+        crate::resolver::FunctionName::parse(function_name)?;
+        self.validate_root().await
+    }
+
+    /// Check an immutable artifact before handing it to an executor.
+    pub async fn validate_artifact(&self, path: &Path) -> Result<(), LambdaServiceError> {
+        self.validate_root().await?;
+        let owned_root = self
+            .artifacts
+            .get(path)
+            .map(|artifact| artifact.root.clone())
+            .ok_or_else(|| LambdaServiceError::InvalidParameter {
+                message: "Unowned Lambda artifact".into(),
+            })?;
+        let root = tokio::fs::canonicalize(&self.code_dir)
+            .await
+            .map_err(|error| LambdaServiceError::Internal {
+                message: format!("Resolve artifact root: {error}"),
+            })?;
+        if root != owned_root {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Artifact root identity changed".into(),
+            });
+        }
+        let mut current = path;
+        while current != root {
+            let meta = tokio::fs::symlink_metadata(current)
+                .await
+                .map_err(|error| LambdaServiceError::Internal {
+                    message: format!("Inspect artifact: {error}"),
+                })?;
+            if meta.file_type().is_symlink() {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Symlink in Lambda artifact".into(),
+                });
+            }
+            current = current
+                .parent()
+                .ok_or_else(|| LambdaServiceError::InvalidParameter {
+                    message: "Artifact outside storage root".into(),
+                })?;
+        }
+        let resolved =
+            tokio::fs::canonicalize(path)
+                .await
+                .map_err(|error| LambdaServiceError::Internal {
+                    message: format!("Resolve artifact: {error}"),
+                })?;
+        if !resolved.starts_with(root) {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Artifact escapes storage root".into(),
+            });
+        }
+        let bootstrap = path.join("bootstrap");
+        match tokio::fs::symlink_metadata(bootstrap).await {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                Err(LambdaServiceError::InvalidParameter {
+                    message: "Bootstrap cannot be a symlink".into(),
+                })
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(LambdaServiceError::Internal {
+                message: format!("Inspect bootstrap: {error}"),
+            }),
         }
     }
+
+    /// Reject a symlink at the operator-selected artifact root.
+    pub async fn validate_root(&self) -> Result<(), LambdaServiceError> {
+        match tokio::fs::symlink_metadata(&self.code_dir).await {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                Err(LambdaServiceError::InvalidParameter {
+                    message: "Lambda artifact root must be a real directory".into(),
+                })
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(LambdaServiceError::Internal {
+                message: format!("Inspect artifact root: {error}"),
+            }),
+        }
+    }
+}
+
+/// Stage a package in a freshly created private directory on a blocking worker.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Synchronous filesystem work is isolated to spawn_blocking.
+fn stage_zip(root: &Path, bytes: &[u8]) -> Result<Artifact, LambdaServiceError> {
+    let io_error = |source| LambdaServiceError::ArtifactIo { source };
+    std::fs::create_dir_all(root).map_err(io_error)?;
+    if std::fs::symlink_metadata(root)
+        .map_err(io_error)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(LambdaServiceError::InvalidParameter {
+            message: "Artifact root is a symlink".into(),
+        });
+    }
+    let root = std::fs::canonicalize(root).map_err(io_error)?;
+    let artifact = tempfile::Builder::new()
+        .prefix("artifact-")
+        .tempdir_in(&root)
+        .map_err(io_error)?;
+    let extracted = artifact.path().join("extracted");
+    let result = (|| {
+        std::fs::create_dir(&extracted).map_err(io_error)?;
+        std::fs::write(artifact.path().join("code.zip"), bytes).map_err(io_error)?;
+        extract_zip(bytes, &extracted, MAX_EXTRACTED_SIZE)
+    })();
+    if let Err(error) = result {
+        artifact.close().map_err(io_error)?;
+        return Err(error);
+    }
+    Ok(Artifact {
+        directory: Some(artifact),
+        root,
+        extracted,
+    })
 }
 
 /// Maximum extracted deployment package size (250 MB, mirroring the AWS
@@ -1027,9 +1274,7 @@ const MAX_EXTRACTED_SIZE: u64 = 250 * 1024 * 1024;
 ///
 /// Rejects entries whose normalized path escapes `target` (path traversal)
 /// and archives whose entries would expand beyond [`MAX_EXTRACTED_SIZE`]
-/// (zip bombs). Returns a non-`InvalidZipFile` error to signal the bytes
-/// weren't a valid archive — callers may choose to ignore that case (e.g.
-/// test stubs).
+/// (zip bombs). ZIP and filesystem failures are always returned to the caller.
 ///
 /// Synchronous std::fs is intentional: this runs inside `spawn_blocking` and
 /// the `zip` crate's reader API is itself blocking, so wrapping each I/O in
@@ -1046,15 +1291,22 @@ fn extract_zip(
     };
 
     let cursor = Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| LambdaServiceError::Internal {
-        message: format!("not a valid zip archive: {e}"),
-    })?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| LambdaServiceError::InvalidZipFile {
+            message: format!("not a valid zip archive: {e}"),
+        })?;
 
+    if archive.len() > 10_000 {
+        return Err(LambdaServiceError::InvalidZipFile {
+            message: "Too many ZIP entries".into(),
+        });
+    }
+    let mut paths = std::collections::HashSet::new();
     let mut extracted_total: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| LambdaServiceError::Internal {
+            .map_err(|e| LambdaServiceError::InvalidZipFile {
                 message: format!("zip entry {i}: {e}"),
             })?;
         let Some(rel) = entry.enclosed_name() else {
@@ -1062,6 +1314,18 @@ fn extract_zip(
                 message: format!("zip entry has invalid path: {}", entry.name()),
             });
         };
+        if entry.name().len() > 1024
+            || entry.name().contains('\\')
+            || entry.name().split('/').any(|component| component == "..")
+            || entry
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170_000 == 0o120_000 || mode & 0o7000 != 0)
+            || !paths.insert(rel.clone())
+        {
+            return Err(LambdaServiceError::InvalidZipFile {
+                message: "Unsafe or duplicate ZIP entry".into(),
+            });
+        }
         let out_path = target.join(&rel);
         // Defense in depth: ensure the resolved path stays within target.
         if !out_path.starts_with(target) {
@@ -1091,15 +1355,22 @@ fn extract_zip(
                 message: format!("create parent {}: {e}", parent.display()),
             })?;
         }
-        let mut out = File::create(&out_path).map_err(|e| LambdaServiceError::Internal {
-            message: format!("create file {}: {e}", out_path.display()),
-        })?;
-        let copied = io::copy(&mut (&mut entry).take(remaining + 1), &mut out).map_err(|e| {
-            LambdaServiceError::Internal {
-                message: format!("write file {}: {e}", out_path.display()),
+        let mut out = File::create_new(&out_path)
+            .map_err(|source| LambdaServiceError::ArtifactIo { source })?;
+        let copied = io::copy(
+            &mut (&mut entry).take(remaining.saturating_add(1)),
+            &mut out,
+        )
+        .map_err(|source| {
+            if source.kind() == ErrorKind::InvalidData {
+                LambdaServiceError::InvalidZipFile {
+                    message: format!("ZIP CRC/decompression failed: {source}"),
+                }
+            } else {
+                LambdaServiceError::ArtifactIo { source }
             }
         })?;
-        extracted_total += copied;
+        extracted_total = extracted_total.saturating_add(copied);
         if extracted_total > max_extracted {
             return Err(LambdaServiceError::InvalidZipFile {
                 message: format!("zip archive expands beyond {max_extracted} bytes"),
@@ -1132,6 +1403,196 @@ pub fn compute_sha256(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_should_reject_hostile_names_at_every_store_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        let zip = crate::test_zip::minimal_zip(b"safe");
+        for name in [
+            "../escape",
+            "/absolute",
+            "a/b",
+            "a\\b",
+            "a%2fb",
+            "..",
+            "",
+            "é",
+        ] {
+            assert!(store.insert(sample_record(name)).is_err());
+            assert!(store.get(name).is_err());
+            assert!(store.contains(name).is_err());
+            assert!(store.remove(name).is_err());
+            assert!(store.update(name, |_| ()).is_err());
+            assert!(store.store_zip_code(name, "$LATEST", &zip).await.is_err());
+            assert!(store.cleanup_code(name).await.is_err());
+        }
+        assert!(store.is_empty());
+        assert!(
+            tokio::fs::read_dir(root.path())
+                .await
+                .unwrap()
+                .next_entry()
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_stage_immutable_artifacts_and_preserve_old_on_bad_zip() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        let (a, _, _) = store
+            .store_zip_code("safe", "$LATEST", &crate::test_zip::minimal_zip(b"A"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.store_zip_code("safe", "$LATEST", b"bad ZIP").await,
+            Err(LambdaServiceError::InvalidZipFile { .. })
+        ));
+        let (b, _, _) = store
+            .store_zip_code("safe", "$LATEST", &crate::test_zip::minimal_zip(b"B"))
+            .await
+            .unwrap();
+        assert_ne!(a, b);
+        assert_eq!(tokio::fs::read(a.join("fixture.txt")).await.unwrap(), b"A");
+        assert_eq!(tokio::fs::read(b.join("fixture.txt")).await.unwrap(), b"B");
+        assert!(
+            !a.components()
+                .any(|component| component.as_os_str() == "safe")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_propagate_crc_and_staging_io_errors_without_replacing_old_artifact() {
+        use std::io::{Cursor, Write};
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        let (old, _, _) = store
+            .store_zip_code("safe", "$LATEST", &crate::test_zip::minimal_zip(b"old"))
+            .await
+            .unwrap();
+        let mut corrupt = crate::test_zip::minimal_zip(b"crc-marker");
+        let position = corrupt
+            .windows(10)
+            .position(|bytes| bytes == b"crc-marker")
+            .unwrap();
+        corrupt[position] ^= 1;
+        assert!(
+            store
+                .store_zip_code("safe", "$LATEST", &corrupt)
+                .await
+                .is_err()
+        );
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("file", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"file").unwrap();
+        writer
+            .start_file("file/child", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"cannot create child below file").unwrap();
+        let conflict = writer.finish().unwrap().into_inner();
+        assert!(
+            store
+                .store_zip_code("safe", "$LATEST", &conflict)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            tokio::fs::read(old.join("fixture.txt")).await.unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            store.artifacts.len(),
+            1,
+            "failed staging cannot publish an artifact"
+        );
+        let mut dirs = tokio::fs::read_dir(root.path()).await.unwrap();
+        let mut count = 0;
+        while dirs.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 1, "failed staging directories are removed");
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_store_on_invalid_snapshot_and_update_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        store.insert(sample_record("safe")).unwrap();
+        let mut snapshot = store.export_snapshot();
+        snapshot.functions.first_mut().unwrap().name = "../escape".into();
+        assert!(store.import_snapshot(snapshot).await.is_err());
+        assert!(store.get("safe").unwrap().is_some());
+        assert!(
+            store
+                .update("safe", |record| record.name = "../escape".into())
+                .is_err()
+        );
+        assert_eq!(store.get("safe").unwrap().unwrap().name, "safe");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_root_and_replaced_artifact_without_touching_sentinel() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("sentinel");
+        tokio::fs::write(&sentinel, b"untouched").await.unwrap();
+        let link = root.path().join("linked");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let store = FunctionStore::new(&link);
+        assert!(
+            store
+                .store_zip_code("safe", "$LATEST", &crate::test_zip::minimal_zip(b"A"))
+                .await
+                .is_err()
+        );
+        assert!(store.cleanup_code("safe").await.is_err());
+        assert!(
+            store
+                .import_snapshot(FunctionStoreSnapshot::default())
+                .await
+                .is_err()
+        );
+        let store = FunctionStore::new(root.path().join("owned"));
+        let (artifact, _, _) = store
+            .store_zip_code("safe", "$LATEST", &crate::test_zip::minimal_zip(b"A"))
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(&artifact).await.unwrap();
+        std::os::unix::fs::symlink(outside.path(), &artifact).unwrap();
+        assert!(store.validate_artifact(&artifact).await.is_err());
+        drop(store);
+        assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"untouched");
+        let managed = root.path().join("replaceable");
+        let store = FunctionStore::new(&managed);
+        let (artifact, _, _) = store
+            .store_zip_code("safe", "$LATEST", &crate::test_zip::minimal_zip(b"A"))
+            .await
+            .unwrap();
+        let artifact_id = artifact.parent().unwrap().file_name().unwrap();
+        let outside_artifact = outside.path().join(artifact_id);
+        tokio::fs::create_dir(&outside_artifact).await.unwrap();
+        tokio::fs::write(outside_artifact.join("sentinel"), b"outside")
+            .await
+            .unwrap();
+        tokio::fs::rename(&managed, root.path().join("original-root"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), &managed).unwrap();
+        assert!(store.cleanup_code("safe").await.is_err());
+        drop(store);
+        assert_eq!(
+            tokio::fs::read(outside_artifact.join("sentinel"))
+                .await
+                .unwrap(),
+            b"outside"
+        );
+    }
 
     fn test_store() -> FunctionStore {
         FunctionStore::new("/tmp/rustack-lambda-test")
@@ -1192,7 +1653,7 @@ mod tests {
         let record = sample_record("my-func");
         store.insert(record).unwrap();
 
-        let retrieved = store.get("my-func").unwrap();
+        let retrieved = store.get("my-func").unwrap().unwrap();
         assert_eq!(retrieved.name, "my-func");
     }
 
@@ -1215,7 +1676,7 @@ mod tests {
             })
             .unwrap();
 
-        let retrieved = store.get("my-func").unwrap();
+        let retrieved = store.get("my-func").unwrap().unwrap();
         assert_eq!(retrieved.latest.timeout, 30);
     }
 
@@ -1230,11 +1691,11 @@ mod tests {
     fn test_should_remove_function() {
         let store = test_store();
         store.insert(sample_record("my-func")).unwrap();
-        assert!(store.contains("my-func"));
+        assert!(store.contains("my-func").unwrap());
 
-        let removed = store.remove("my-func");
+        let removed = store.remove("my-func").unwrap();
         assert!(removed.is_some());
-        assert!(!store.contains("my-func"));
+        assert!(!store.contains("my-func").unwrap());
     }
 
     #[test]
@@ -1379,12 +1840,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = FunctionStore::new(tmp.path());
 
-        // Stub bytes: not a valid zip, but storage tolerates it (extraction is
-        // silently skipped) so older tests that pre-date real packaging keep
-        // working. Returned dir is the (empty) extracted root.
-        let zip_data = b"PK\x03\x04fake-zip-data";
+        let zip_data = crate::test_zip::minimal_zip(b"fixture");
         let (dir, sha256, size) = store
-            .store_zip_code("test-func", "$LATEST", zip_data)
+            .store_zip_code("test-func", "$LATEST", &zip_data)
             .await
             .unwrap();
 
@@ -1400,7 +1858,12 @@ mod tests {
         assert!(!sha256.is_empty());
         assert_eq!(size, zip_data.len() as u64);
 
-        store.cleanup_code("test-func").await;
+        store.cleanup_code("test-func").await.unwrap();
+        assert!(
+            dir.exists(),
+            "in-flight immutable artifacts survive logical deletion"
+        );
+        drop(store);
         assert!(!dir.exists());
     }
 

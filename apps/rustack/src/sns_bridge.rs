@@ -1,82 +1,54 @@
-//! Bridge between SNS and SQS for fan-out delivery.
-//!
-//! Implements the [`SqsPublisher`] trait from `rustack-sns-core` by wrapping
-//! the actual SQS provider. This bridge lives in the server binary to avoid
-//! a direct dependency from `rustack-sns-core` to `rustack-sqs-core`.
-
+//! Application-owned SNS → SQS bridge; no core-to-core dependency.
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rustack_sns_core::{
-    config::SnsConfig,
-    publisher::{DeliveryError, SqsPublisher},
-};
+use rustack_sns_core::publisher::{DeliveryError, SqsPublisher};
 use rustack_sqs_core::provider::RustackSqs;
 use rustack_sqs_model::input::SendMessageInput;
 
-/// Production SQS publisher that delegates to the SQS provider.
+/// Production publisher using the SQS provider's authoritative ARN/URL scope.
 #[derive(Debug)]
 pub struct RustackSqsPublisher {
     sqs: Arc<RustackSqs>,
-    account_id: String,
-    host: String,
-    port: u16,
 }
-
 impl RustackSqsPublisher {
-    /// Create a new publisher wrapping the given SQS provider.
-    pub fn new(sqs: Arc<RustackSqs>, config: SnsConfig) -> Self {
-        Self {
-            sqs,
-            account_id: config.account_id,
-            host: config.host,
-            port: config.port,
-        }
-    }
-
-    /// Convert an SQS queue ARN to a queue URL.
-    ///
-    /// ARN format: `arn:aws:sqs:{region}:{account}:{queue_name}`
-    /// URL format: `http://{host}:{port}/{account}/{queue_name}`
-    fn arn_to_queue_url(&self, queue_arn: &str) -> String {
-        let parts: Vec<&str> = queue_arn.split(':').collect();
-        if parts.len() >= 6 {
-            let account = parts[4];
-            let queue_name = parts[5];
-            format!("http://{}:{}/{account}/{queue_name}", self.host, self.port)
-        } else {
-            // Fallback: use the ARN as-is (shouldn't happen with valid ARNs).
-            format!(
-                "http://{}:{}/{}/{}",
-                self.host, self.port, self.account_id, queue_arn
-            )
-        }
+    /// Connect to an enabled SQS provider.
+    pub fn new(sqs: Arc<RustackSqs>) -> Self {
+        Self { sqs }
     }
 }
-
 #[async_trait]
 impl SqsPublisher for RustackSqsPublisher {
+    fn validate(&self, arn: &str) -> Result<(), DeliveryError> {
+        self.sqs
+            .queue_url_for_arn(arn)
+            .map(|_| ())
+            .map_err(|error| DeliveryError::Unsupported(error.to_string()))
+    }
     async fn send_message(
         &self,
         queue_arn: &str,
-        message_body: &str,
-        message_group_id: Option<&str>,
-        message_deduplication_id: Option<&str>,
+        body: &str,
+        group: Option<&str>,
+        dedup: Option<&str>,
     ) -> Result<(), DeliveryError> {
-        let queue_url = self.arn_to_queue_url(queue_arn);
-        let input = SendMessageInput {
-            queue_url,
-            message_body: message_body.to_string(),
-            message_group_id: message_group_id.map(String::from),
-            message_deduplication_id: message_deduplication_id.map(String::from),
-            ..SendMessageInput::default()
-        };
+        self.validate(queue_arn)?;
+        let queue_url = self
+            .sqs
+            .queue_url_for_arn(queue_arn)
+            .map_err(|error| DeliveryError::Unsupported(error.to_string()))?;
         self.sqs
-            .send_message(input)
+            .send_message(SendMessageInput {
+                queue_url,
+                message_body: body.to_owned(),
+                message_group_id: group.map(str::to_owned),
+                message_deduplication_id: dedup.map(str::to_owned),
+                ..Default::default()
+            })
             .await
-            .map_err(|e| DeliveryError::SqsDeliveryFailed {
-                queue_arn: queue_arn.to_string(),
-                reason: e.to_string(),
+            .map_err(|error| DeliveryError::SqsDeliveryFailed {
+                queue_arn: queue_arn.to_owned(),
+                reason: error.to_string(),
             })?;
         Ok(())
     }
@@ -84,20 +56,67 @@ impl SqsPublisher for RustackSqsPublisher {
 
 #[cfg(test)]
 mod tests {
+    use rustack_sns_core::{config::SnsConfig, provider::RustackSns};
     use rustack_sqs_core::config::SqsConfig;
+    use rustack_sqs_model::input::{CreateQueueInput, ReceiveMessageInput};
 
     use super::*;
 
-    #[test]
-    fn test_should_convert_arn_to_queue_url() {
-        let publisher = RustackSqsPublisher {
-            sqs: Arc::new(RustackSqs::new(SqsConfig::default())),
-            account_id: "000000000000".to_string(),
-            host: "localhost".to_string(),
-            port: 4566,
-        };
-
-        let url = publisher.arn_to_queue_url("arn:aws:sqs:us-east-1:000000000000:my-queue");
-        assert_eq!(url, "http://localhost:4566/000000000000/my-queue");
+    #[tokio::test]
+    async fn test_should_deliver_sns_fifo_to_real_queue_with_identity() {
+        let sqs = Arc::new(RustackSqs::new(SqsConfig::default()));
+        let queue = sqs
+            .create_queue(
+                serde_json::from_value::<CreateQueueInput>(serde_json::json!({
+                    "QueueName":"sns.fifo","Attributes":{"FifoQueue":"true"}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .queue_url
+            .unwrap();
+        let sns = RustackSns::new(
+            SnsConfig::default(),
+            Arc::new(RustackSqsPublisher::new(sqs.clone())),
+        );
+        let topic = sns
+            .create_topic(
+                serde_json::from_value(
+                    serde_json::json!({"Name":"topic.fifo","Attributes":{"FifoTopic":"true"}}),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .topic_arn;
+        sns.subscribe(serde_json::from_value(serde_json::json!({"TopicArn":topic,"Protocol":"sqs","Endpoint":"arn:aws:sqs:us-east-1:000000000000:sns.fifo"})).unwrap()).unwrap();
+        sns.publish(serde_json::from_value(serde_json::json!({"TopicArn":topic,"Message":"payload","MessageGroupId":"g","MessageDeduplicationId":"d"})).unwrap()).await.unwrap();
+        sns.quiesce().await;
+        let messages = sqs
+            .receive_message(ReceiveMessageInput {
+                queue_url: queue,
+                message_system_attribute_names: vec!["All".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0]
+                .attributes
+                .get("MessageGroupId")
+                .map(String::as_str),
+            Some("g")
+        );
+        assert_eq!(
+            messages[0]
+                .attributes
+                .get("MessageDeduplicationId")
+                .map(String::as_str),
+            Some("d")
+        );
+        assert_eq!(sns.delivery_stats().delivered, 1);
+        sqs.shutdown_all().await;
     }
 }

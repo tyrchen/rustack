@@ -1,96 +1,132 @@
-//! Bridge between EventBridge and SQS for target delivery.
-//!
-//! Implements the [`TargetDelivery`] trait from `rustack-events-core` by wrapping
-//! the actual SQS provider. This bridge lives in the server binary to avoid
-//! a direct dependency from `rustack-events-core` to `rustack-sqs-core`.
-
+//! Application-owned EventBridge → SQS delivery bridge.
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rustack_events_core::delivery::{DeliveryError, TargetDelivery};
+use rustack_events_core::delivery::{DeliveryError, Target, TargetDelivery};
 use rustack_sqs_core::provider::RustackSqs;
 use rustack_sqs_model::input::SendMessageInput;
 
-/// Production target delivery that routes events to SQS queues.
+/// Actual in-process SQS target delivery, preserving all FIFO parameters.
 #[derive(Debug)]
 pub struct LocalTargetDelivery {
     sqs: Arc<RustackSqs>,
-    account_id: String,
-    host: String,
-    port: u16,
 }
-
 impl LocalTargetDelivery {
-    /// Create a new delivery bridge wrapping the given SQS provider.
-    pub fn new(sqs: Arc<RustackSqs>, account_id: String, host: String, port: u16) -> Self {
-        Self {
-            sqs,
-            account_id,
-            host,
-            port,
-        }
+    /// Connect the bridge to an enabled SQS provider.
+    pub fn new(sqs: Arc<RustackSqs>) -> Self {
+        Self { sqs }
     }
-
-    /// Convert an SQS queue ARN to a queue URL.
-    ///
-    /// ARN format: `arn:aws:sqs:{region}:{account}:{queue_name}`
-    /// URL format: `http://{host}:{port}/{account}/{queue_name}`
-    fn arn_to_queue_url(&self, queue_arn: &str) -> String {
-        let parts: Vec<&str> = queue_arn.split(':').collect();
-        if parts.len() >= 6 {
-            let account = parts[4];
-            let queue_name = parts[5];
-            format!("http://{}:{}/{account}/{queue_name}", self.host, self.port)
-        } else {
-            format!(
-                "http://{}:{}/{}/{}",
-                self.host, self.port, self.account_id, queue_arn
-            )
-        }
+    fn arn_to_queue_url(&self, arn: &str) -> Result<String, DeliveryError> {
+        self.sqs
+            .queue_url_for_arn(arn)
+            .map_err(|error| DeliveryError::InvalidArn(error.to_string()))
     }
 }
-
 #[async_trait]
 impl TargetDelivery for LocalTargetDelivery {
-    async fn deliver(&self, target_arn: &str, event_json: &str) -> Result<(), DeliveryError> {
-        if target_arn.contains(":sqs:") {
-            let queue_url = self.arn_to_queue_url(target_arn);
-            let input = SendMessageInput {
-                queue_url,
-                message_body: event_json.to_string(),
-                ..SendMessageInput::default()
-            };
-            self.sqs
-                .send_message(input)
-                .await
-                .map_err(|e| DeliveryError::TargetError(e.to_string()))?;
-            Ok(())
-        } else {
-            tracing::debug!(
-                target_arn = %target_arn,
-                "unsupported target type, event not delivered"
-            );
-            Ok(())
+    fn validate(&self, target: &Target) -> Result<(), DeliveryError> {
+        if let ["arn", _, service, _, _, _] = target.arn.split(':').collect::<Vec<_>>().as_slice() {
+            if *service != "sqs" {
+                return Err(DeliveryError::Unsupported(
+                    "Only SQS targets are executable".into(),
+                ));
+            }
         }
+        self.arn_to_queue_url(&target.arn)?;
+        let fifo = std::path::Path::new(&target.arn)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("fifo"));
+        if fifo && target.sqs_parameters.is_none() {
+            return Err(DeliveryError::Unsupported(
+                "FIFO target requires SqsParameters.MessageGroupId".into(),
+            ));
+        }
+        if !fifo && target.sqs_parameters.is_some() {
+            return Err(DeliveryError::Unsupported(
+                "SqsParameters requires a FIFO queue".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn deliver(&self, target: &Target, event_json: &str) -> Result<(), DeliveryError> {
+        self.validate(target)?;
+        self.sqs
+            .send_message(SendMessageInput {
+                queue_url: self.arn_to_queue_url(&target.arn)?,
+                message_body: event_json.to_owned(),
+                message_group_id: target
+                    .sqs_parameters
+                    .as_ref()
+                    .map(|parameters| parameters.message_group_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| DeliveryError::TargetError(error.to_string()))?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rustack_events_core::{config::EventsConfig, provider::RustackEvents};
     use rustack_sqs_core::config::SqsConfig;
+    use rustack_sqs_model::input::{CreateQueueInput, ReceiveMessageInput};
 
     use super::*;
 
-    #[test]
-    fn test_should_convert_arn_to_queue_url() {
-        let delivery = LocalTargetDelivery {
-            sqs: Arc::new(RustackSqs::new(SqsConfig::default())),
-            account_id: "000000000000".to_string(),
-            host: "localhost".to_string(),
-            port: 4566,
-        };
-
-        let url = delivery.arn_to_queue_url("arn:aws:sqs:us-east-1:000000000000:my-queue");
-        assert_eq!(url, "http://localhost:4566/000000000000/my-queue");
+    #[tokio::test]
+    async fn test_should_roundtrip_sqs_parameters_and_deliver_fifo_group() {
+        let sqs = Arc::new(RustackSqs::new(SqsConfig::default()));
+        let queue = sqs.create_queue(serde_json::from_value::<CreateQueueInput>(serde_json::json!({
+            "QueueName":"events.fifo", "Attributes":{"FifoQueue":"true","ContentBasedDeduplication":"true"}
+        })).unwrap()).await.unwrap().queue_url.unwrap();
+        let bridge = Arc::new(LocalTargetDelivery::new(sqs.clone()));
+        let events = RustackEvents::new(EventsConfig::default(), bridge);
+        events
+            .handle_put_rule(
+                serde_json::from_value(
+                    serde_json::json!({"Name":"rule", "EventPattern":"{\"source\":[\"test\"]}"}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let target = serde_json::json!({"Id":"fifo","Arn":"arn:aws:sqs:us-east-1:000000000000:events.fifo", "SqsParameters":{"MessageGroupId":"g"}});
+        let result = events
+            .handle_put_targets(
+                serde_json::from_value(
+                    serde_json::json!({"Rule":"rule","Targets":[target.clone()]}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result.failed_entry_count, 0);
+        let listed = events
+            .handle_list_targets_by_rule(
+                &serde_json::from_value(serde_json::json!({"Rule":"rule"})).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(serde_json::to_value(&listed.targets[0]).unwrap(), target);
+        let result = events.handle_put_events(&serde_json::from_value(serde_json::json!({"Entries":[{"Source":"test","DetailType":"test","Detail":"{}"}]})).unwrap()).unwrap();
+        assert_eq!(result.failed_entry_count, 0);
+        events.quiesce().await.unwrap();
+        let messages = sqs
+            .receive_message(ReceiveMessageInput {
+                queue_url: queue,
+                message_system_attribute_names: vec!["All".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0]
+                .attributes
+                .get("MessageGroupId")
+                .map(String::as_str),
+            Some("g")
+        );
+        assert_eq!(events.delivery_stats().delivered, 1);
+        sqs.shutdown_all().await;
     }
 }

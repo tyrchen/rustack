@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+rustack-core = { workspace = true }
 rustack-apigatewayv2-model = { workspace = true }
 rustack-auth = { workspace = true }
 hyper = { workspace = true }

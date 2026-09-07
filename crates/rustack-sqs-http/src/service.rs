@@ -3,7 +3,6 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use rustack_sqs_model::error::SqsError;
 
@@ -96,12 +95,16 @@ impl<H: SqsHandler> hyper::service::Service<http::Request<Incoming>> for SqsHttp
 }
 
 /// Process a single SQS HTTP request through the full pipeline.
-async fn process_request<H: SqsHandler>(
-    req: http::Request<Incoming>,
+async fn process_request<H: SqsHandler, B>(
+    req: http::Request<B>,
     handler: &H,
     config: &SqsHttpConfig,
     request_id: &str,
-) -> http::Response<SqsResponseBody> {
+) -> http::Response<SqsResponseBody>
+where
+    B: http_body::Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let (parts, incoming) = req.into_parts();
 
     // 1. Verify POST method (SQS only accepts POST).
@@ -122,23 +125,29 @@ async fn process_request<H: SqsHandler>(
     // 3. Collect body.
     let body = match collect_body(incoming).await {
         Ok(body) => body,
-        Err(err) => return error_to_response(&err, request_id),
+        Err(err) => {
+            let error = SqsError::new(
+                rustack_sqs_model::error::SqsErrorCode::InvalidParameterValue,
+                err.to_string(),
+            );
+            let mut response = error_to_response(&error, request_id);
+            *response.status_mut() = err.status_code();
+            return response;
+        }
     };
 
     // 4. Authenticate (if enabled).
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let body_hash = rustack_auth::hash_payload(&body);
-            if let Err(auth_err) =
-                rustack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-            {
-                let err = SqsError::new(
-                    rustack_sqs_model::error::SqsErrorCode::InvalidSecurity,
-                    auth_err.to_string(),
-                );
-                return error_to_response(&err, request_id);
-            }
-        }
+    if let Err(auth_err) = rustack_auth::AuthMode::resolve(
+        config.skip_signature_validation,
+        config.credential_provider.as_deref(),
+    )
+    .and_then(|mode| mode.verify(&parts, &rustack_auth::hash_payload(&body)))
+    {
+        let err = SqsError::new(
+            rustack_sqs_model::error::SqsErrorCode::InvalidSecurity,
+            auth_err.to_string(),
+        );
+        return error_to_response(&err, request_id);
     }
 
     // 5. Dispatch to handler.
@@ -149,12 +158,12 @@ async fn process_request<H: SqsHandler>(
 }
 
 /// Collect the incoming body into a single `Bytes` buffer.
-async fn collect_body(incoming: Incoming) -> Result<Bytes, SqsError> {
-    incoming
-        .collect()
-        .await
-        .map(http_body_util::Collected::to_bytes)
-        .map_err(|e| SqsError::internal_error(format!("Failed to read request body: {e}")))
+async fn collect_body<B>(incoming: B) -> Result<Bytes, rustack_core::http::BodyReadError>
+where
+    B: http_body::Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    rustack_core::http::collect_body(incoming, rustack_core::http::BodyBudget::control()).await
 }
 
 /// Add common response headers to every SQS response.
@@ -181,4 +190,135 @@ fn add_common_headers(
     );
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use http_body_util::Full;
+    use rustack_auth::{
+        StaticCredentialProvider,
+        canonical::build_canonical_request,
+        sigv4::{build_string_to_sign, compute_signature, derive_signing_key},
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Counter(AtomicUsize);
+    impl SqsHandler for Counter {
+        fn handle_operation(
+            &self,
+            _: rustack_sqs_model::operations::SqsOperation,
+            _: Bytes,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<SqsResponseBody>, SqsError>> + Send>>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(http::Response::new(SqsResponseBody::from_bytes(
+                    Bytes::from_static(b"{}"),
+                )))
+            })
+        }
+    }
+
+    fn request(body: &[u8], original: Option<&[u8]>) -> http::Request<Full<Bytes>> {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", "localhost")
+            .header("x-amz-date", "20260101T000000Z")
+            .header("x-amz-target", "AmazonSQS.SendMessage")
+            .body(Full::new(Bytes::copy_from_slice(body)))
+            .unwrap();
+        if let Some(original) = original {
+            let hash = rustack_auth::hash_payload(original);
+            let canonical = build_canonical_request(
+                "POST",
+                "/",
+                "",
+                &[("host", "localhost"), ("x-amz-date", "20260101T000000Z")],
+                &["host", "x-amz-date"],
+                &hash,
+            );
+            let text = build_string_to_sign(
+                "20260101T000000Z",
+                "20260101/us-east-1/sqs/aws4_request",
+                &rustack_auth::hash_payload(canonical.as_bytes()),
+            );
+            let signature = compute_signature(
+                &derive_signing_key("secret", "20260101", "us-east-1", "sqs"),
+                &text,
+            );
+            request.headers_mut().insert(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 \
+                     Credential=key/20260101/us-east-1/sqs/aws4_request,SignedHeaders=host;\
+                     x-amz-date,Signature={signature}"
+                )
+                .parse()
+                .unwrap(),
+            );
+            request
+                .headers_mut()
+                .insert("x-amz-content-sha256", hash.parse().unwrap());
+        }
+        request
+    }
+
+    #[tokio::test]
+    async fn test_should_never_dispatch_missing_credentials_or_tampered_payload() {
+        let handler = Counter::default();
+        let mut config = SqsHttpConfig {
+            skip_signature_validation: false,
+            ..SqsHttpConfig::default()
+        };
+        let response = process_request(request(b"original", None), &handler, &config, "test").await;
+        assert!(!response.status().is_success());
+        config.credential_provider = Some(Arc::new(StaticCredentialProvider::new(vec![(
+            "key".to_owned(),
+            "secret".to_owned(),
+        )])));
+        for request in [
+            request(b"original", None),
+            request(b"modified", Some(b"original")),
+        ] {
+            assert!(
+                !process_request(request, &handler, &config, "test")
+                    .await
+                    .status()
+                    .is_success()
+            );
+        }
+        assert_eq!(handler.0.load(Ordering::SeqCst), 0);
+        assert!(
+            process_request(
+                request(b"original", Some(b"original")),
+                &handler,
+                &config,
+                "test"
+            )
+            .await
+            .status()
+            .is_success()
+        );
+        assert_eq!(handler.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_oversized_body_without_dispatch() {
+        let handler = Counter::default();
+        let body = vec![0; 16 * 1024 * 1024 + 1];
+        let response = process_request(
+            request(&body, None),
+            &handler,
+            &SqsHttpConfig::default(),
+            "test",
+        )
+        .await;
+        assert!(!response.status().is_success());
+        assert_eq!(handler.0.load(Ordering::SeqCst), 0);
+    }
 }

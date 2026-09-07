@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+rustack-core = { workspace = true }
 rustack-dynamodb-model = { workspace = true }
 rustack-auth = { workspace = true }
 

@@ -18,9 +18,6 @@ pub struct StandardQueueStorage {
     pub delayed: Vec<QueueMessage>,
     /// Messages currently being processed by consumers.
     pub in_flight: HashMap<String, InFlightMessage>,
-    /// Messages that exceeded the DLQ `maxReceiveCount` threshold.
-    /// Stored here until actual DLQ routing is implemented.
-    pub dead_letters: Vec<QueueMessage>,
 }
 
 impl StandardQueueStorage {
@@ -77,8 +74,28 @@ impl StandardQueueStorage {
         self.available.clear();
         self.delayed.clear();
         self.in_flight.clear();
-        self.dead_letters.clear();
     }
+}
+
+/// Unambiguous FIFO deduplication identity, including the configured scope.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DedupKey {
+    /// Queue-wide identity.
+    Queue(String),
+    /// Internal handoff identity, isolated from caller-supplied deduplication IDs.
+    Redrive {
+        /// Source queue ARN.
+        source: String,
+        /// Original message ID.
+        message: String,
+    },
+    /// Group-local identity.
+    Group {
+        /// Message group identifier.
+        group: String,
+        /// Deduplication identifier.
+        id: String,
+    },
 }
 
 /// Cached information for a deduplicated message.
@@ -102,7 +119,7 @@ pub struct FifoQueueStorage {
     /// Messages currently being processed by consumers.
     in_flight: HashMap<String, FifoInFlightMessage>,
     /// Deduplication cache: effective_dedup_key -> original message info.
-    dedup_cache: HashMap<String, DedupCacheEntry>,
+    dedup_cache: HashMap<DedupKey, DedupCacheEntry>,
     /// Monotonically increasing sequence number.
     next_sequence: AtomicU64,
 }
@@ -155,9 +172,12 @@ pub enum EnqueueResult {
 impl FifoQueueStorage {
     /// Attempt to enqueue a message with deduplication.
     ///
-    /// The `effective_dedup_key` should already incorporate the dedup scope
-    /// (e.g., prefixed with group ID when scope is `messageGroup`).
-    pub fn enqueue(&mut self, mut msg: QueueMessage, effective_dedup_key: &str) -> EnqueueResult {
+    /// The structured key includes the scope without delimiter collisions.
+    pub fn enqueue(
+        &mut self,
+        mut msg: QueueMessage,
+        effective_dedup_key: &DedupKey,
+    ) -> EnqueueResult {
         // Check dedup cache.
         if let Some(entry) = self.dedup_cache.get(effective_dedup_key) {
             if Instant::now() < entry.expiry {
@@ -223,6 +243,17 @@ impl FifoQueueStorage {
         self.groups.retain(|_, q| !q.is_empty());
 
         result
+    }
+
+    /// Complete a reserved redrive, restoring to the group head on failure.
+    pub(crate) fn finish_redrive(&mut self, group_id: &str, restore: Option<QueueMessage>) {
+        self.blocked_groups.remove(group_id);
+        if let Some(message) = restore {
+            self.groups
+                .entry(group_id.to_owned())
+                .or_default()
+                .push_front(message);
+        }
     }
 
     /// Record a message as in-flight.

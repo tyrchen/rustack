@@ -1,6 +1,6 @@
 //! API Gateway v2 service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// API Gateway v2 service configuration.
 #[derive(Debug, Clone)]

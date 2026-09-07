@@ -11,6 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     sync::{Arc, atomic::AtomicU64},
+    time::Duration,
 };
 
 use dashmap::DashMap;
@@ -64,7 +65,7 @@ use crate::{
     config::SnsConfig,
     delivery::{EnvelopeParams, build_sns_envelope},
     filter::{evaluate_filter_policy, resolve_protocol_message},
-    publisher::SqsPublisher,
+    publisher::{DeliveryStats, PublishLifecycle, SqsPublisher, send_guarded},
     state::TopicStore,
     subscription::{
         FilterPolicyScope, SubscriptionAttributes, SubscriptionProtocol, SubscriptionRecord,
@@ -132,6 +133,7 @@ pub struct RustackSns {
     topics: TopicStore,
     /// SQS publisher for fan-out delivery.
     sqs_publisher: Arc<dyn SqsPublisher>,
+    publish_lifecycle: PublishLifecycle,
     /// Service configuration.
     config: Arc<SnsConfig>,
     /// Platform applications keyed by ARN.
@@ -151,6 +153,7 @@ impl fmt::Debug for RustackSns {
         f.debug_struct("RustackSns")
             .field("topics", &self.topics)
             .field("sqs_publisher", &"<dyn SqsPublisher>")
+            .field("publish_lifecycle", &self.publish_lifecycle)
             .field("config", &self.config)
             .field("platform_apps", &self.platform_apps.len())
             .field("platform_endpoints", &self.platform_endpoints.len())
@@ -168,6 +171,7 @@ impl RustackSns {
         Self {
             topics: TopicStore::new(),
             sqs_publisher,
+            publish_lifecycle: PublishLifecycle::default(),
             config: Arc::new(config),
             platform_apps: DashMap::new(),
             platform_endpoints: DashMap::new(),
@@ -175,6 +179,28 @@ impl RustackSns {
             opted_out_numbers: parking_lot::RwLock::new(HashSet::new()),
             sandbox_phones: DashMap::new(),
         }
+    }
+
+    /// Whether request-bound publication remains open; target failures are diagnostic.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.publish_lifecycle.is_ready()
+    }
+
+    /// Return cumulative target-attempt outcomes, including cancellation failures.
+    #[must_use]
+    pub fn delivery_stats(&self) -> DeliveryStats {
+        self.publish_lifecycle.stats()
+    }
+
+    /// Stop new Publish operations and wait for admitted fanout without deleting metadata.
+    pub async fn quiesce(&self) {
+        self.publish_lifecycle.quiesce().await;
+    }
+
+    /// Idempotently stop publishing; the runtime supplies its total deadline.
+    pub async fn shutdown(&self) {
+        self.quiesce().await;
     }
 
     // ---- Topic Management ----
@@ -388,7 +414,21 @@ impl RustackSns {
             .ok_or_else(|| SnsError::not_found("Topic does not exist"))?;
 
         let protocol = SubscriptionProtocol::parse(&input.protocol)?;
-
+        if protocol != SubscriptionProtocol::Sqs {
+            return Err(SnsError::invalid_parameter(
+                "Unsupported delivery protocol: only SQS subscriptions are executable",
+            ));
+        }
+        if input.attributes.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "RedrivePolicy" | "DeliveryPolicy" | "SubscriptionRoleArn"
+            )
+        }) {
+            return Err(SnsError::invalid_parameter(
+                "Unsupported subscription delivery parameter",
+            ));
+        }
         let endpoint = input.endpoint.unwrap_or_default();
         if endpoint.is_empty() {
             return Err(SnsError::invalid_parameter(
@@ -396,6 +436,18 @@ impl RustackSns {
             ));
         }
 
+        if endpoint
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix == "fifo")
+            && !topic.is_fifo
+        {
+            return Err(SnsError::invalid_parameter(
+                "Unsupported delivery: FIFO queues require a FIFO SNS topic",
+            ));
+        }
+        self.sqs_publisher
+            .validate(&endpoint)
+            .map_err(|error| SnsError::invalid_parameter(error.to_string()))?;
         // Idempotent: check for duplicate (same protocol + endpoint).
         for existing in &topic.subscriptions {
             if existing.protocol == protocol && existing.endpoint == endpoint {
@@ -410,6 +462,11 @@ impl RustackSns {
             }
         }
 
+        if topic.subscriptions.len() >= 128 {
+            return Err(SnsError::invalid_parameter(
+                "At most 128 subscriptions per topic are supported",
+            ));
+        }
         // Parse subscription attributes.
         let sub_attrs = SubscriptionAttributes::from_input(&input.attributes)?;
 
@@ -740,16 +797,22 @@ impl RustackSns {
 
     /// Handle `Publish`.
     pub async fn publish(&self, input: PublishInput) -> Result<PublishOutput, SnsError> {
+        let _permit = self
+            .publish_lifecycle
+            .admit()
+            .map_err(|error| SnsError::internal_error(error.to_string()))?;
         let target = resolve_publish_target(&input)?.to_owned();
         validate_publish_message(&input)?;
 
-        // Direct-to-phone-number publish (SMS stub): no topic lookup needed.
-        if input.phone_number.is_some() && input.topic_arn.is_none() && input.target_arn.is_none() {
-            debug!(phone_number = %target, "SMS publish (stub, not delivered)");
-            return Ok(PublishOutput {
-                message_id: Some(uuid::Uuid::new_v4().to_string()),
-                sequence_number: None,
-            });
+        if input.phone_number.is_some()
+            || input
+                .target_arn
+                .as_ref()
+                .is_some_and(|arn| arn.contains(":endpoint/"))
+        {
+            return Err(SnsError::invalid_parameter(
+                "Unsupported delivery: SMS and platform push are metadata-only",
+            ));
         }
 
         let topic_arn = target;
@@ -761,6 +824,17 @@ impl RustackSns {
             .ok_or_else(|| SnsError::not_found("Topic does not exist"))?;
 
         validate_fifo_publish(&input, &topic)?;
+        if !input.message_attributes.is_empty()
+            && topic
+                .subscriptions
+                .iter()
+                .any(|sub| sub.attributes.raw_message_delivery)
+        {
+            return Err(SnsError::invalid_parameter(
+                "Unsupported delivery: raw SNS message attributes are not forwarded; use envelope \
+                 delivery",
+            ));
+        }
 
         let is_fifo = topic.is_fifo;
 
@@ -1521,20 +1595,14 @@ impl RustackSns {
         is_fifo: bool,
     ) {
         for sub in subs {
-            match sub.protocol {
-                SubscriptionProtocol::Sqs => {
-                    self.deliver_to_sqs(
-                        sub, input, topic_arn, message_id, region, host, port, is_fifo,
-                    )
-                    .await;
-                }
-                _ => {
-                    debug!(
-                        protocol = %sub.protocol,
-                        endpoint = %sub.endpoint,
-                        "skipping delivery for unsupported protocol"
-                    );
-                }
+            if sub.protocol == SubscriptionProtocol::Sqs {
+                self.deliver_to_sqs(
+                    sub, input, topic_arn, message_id, region, host, port, is_fifo,
+                )
+                .await;
+            } else {
+                let _attempt = self.publish_lifecycle.attempt();
+                warn!(protocol = %sub.protocol, "Unsupported SNS delivery protocol");
             }
         }
     }
@@ -1552,6 +1620,7 @@ impl RustackSns {
         port: u16,
         is_fifo: bool,
     ) {
+        let mut attempt = self.publish_lifecycle.attempt();
         // Resolve the effective message for this subscriber's protocol.
         let effective_message =
             resolve_effective_message(&input.message, input.message_structure.as_deref(), sub);
@@ -1582,28 +1651,39 @@ impl RustackSns {
             }
         };
 
-        let group_id = if is_fifo {
+        // FIFO SNS topics may also fan out to standard SQS queues; only FIFO
+        // endpoints receive FIFO-only SendMessage parameters.
+        let fifo_endpoint = is_fifo
+            && sub
+                .endpoint
+                .rsplit_once('.')
+                .is_some_and(|(_, suffix)| suffix == "fifo");
+        let group_id = if fifo_endpoint {
             input.message_group_id.as_deref()
         } else {
             None
         };
-        let dedup_id = if is_fifo {
+        let dedup_id = if fifo_endpoint {
             input.message_deduplication_id.as_deref()
         } else {
             None
         };
 
-        if let Err(e) = self
-            .sqs_publisher
-            .send_message(&sub.endpoint, &body, group_id, dedup_id)
-            .await
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            send_guarded(
+                self.sqs_publisher.as_ref(),
+                &sub.endpoint,
+                &body,
+                group_id,
+                dedup_id,
+            ),
+        )
+        .await
         {
-            warn!(
-                subscription_arn = %sub.arn,
-                endpoint = %sub.endpoint,
-                error = %e,
-                "failed to deliver message to SQS"
-            );
+            Ok(Ok(())) => attempt.delivered(),
+            Ok(Err(error)) => warn!(error = %error, "SNS target delivery failed"),
+            Err(_) => warn!("SNS target delivery timed out"),
         }
     }
 }
@@ -1707,15 +1787,10 @@ fn apply_subscription_attribute(
         "RawMessageDelivery" => {
             sub.attributes.raw_message_delivery = value.eq_ignore_ascii_case("true");
         }
-        "RedrivePolicy" => {
-            sub.attributes.redrive_policy = if value.is_empty() { None } else { Some(value) };
-        }
-        "DeliveryPolicy" => {
-            sub.attributes.delivery_policy = if value.is_empty() { None } else { Some(value) };
-        }
-        "SubscriptionRoleArn" => {
-            sub.attributes.subscription_role_arn =
-                if value.is_empty() { None } else { Some(value) };
+        "RedrivePolicy" | "DeliveryPolicy" | "SubscriptionRoleArn" => {
+            return Err(SnsError::invalid_parameter(
+                "Unsupported subscription delivery parameter",
+            ));
         }
         other => {
             return Err(SnsError::invalid_parameter(format!(
@@ -1895,10 +1970,36 @@ fn build_permission_statement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::publisher::NoopSqsPublisher;
+    use crate::publisher::DeliveryError;
+
+    #[derive(Default)]
+    struct RecordingPublisher(dashmap::DashMap<String, String>);
+    #[async_trait::async_trait]
+    impl SqsPublisher for RecordingPublisher {
+        fn validate(&self, arn: &str) -> Result<(), DeliveryError> {
+            if arn.starts_with("arn:aws:sqs:") {
+                Ok(())
+            } else {
+                Err(DeliveryError::Unsupported("Expected SQS ARN".into()))
+            }
+        }
+        async fn send_message(
+            &self,
+            arn: &str,
+            body: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), DeliveryError> {
+            self.0.insert(arn.to_owned(), body.to_owned());
+            Ok(())
+        }
+    }
 
     fn make_provider() -> RustackSns {
-        RustackSns::new(SnsConfig::default(), Arc::new(NoopSqsPublisher))
+        RustackSns::new(
+            SnsConfig::default(),
+            Arc::new(RecordingPublisher::default()),
+        )
     }
 
     #[test]
@@ -2283,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_confirm_subscription() {
+    fn test_should_reject_unsupported_subscription_protocol_before_creating_metadata() {
         let provider = make_provider();
         let topic = provider
             .create_topic(CreateTopicInput {
@@ -2291,50 +2392,33 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-
-        // HTTP requires confirmation.
-        let sub = provider
-            .subscribe(SubscribeInput {
-                topic_arn: topic.topic_arn.clone(),
-                protocol: "http".to_owned(),
-                endpoint: Some("http://example.com/webhook".to_owned()),
-                return_subscription_arn: true,
-                ..Default::default()
-            })
-            .unwrap();
-
-        let sub_arn = sub.subscription_arn.unwrap();
-
-        // Get subscription and verify it's pending.
-        let attrs = provider
-            .get_subscription_attributes(&GetSubscriptionAttributesInput {
-                subscription_arn: sub_arn.clone(),
-            })
-            .unwrap();
-        assert_eq!(attrs.attributes.get("PendingConfirmation").unwrap(), "true");
-
-        // Confirm with a token.
-        let confirm_output = provider
-            .confirm_subscription(&ConfirmSubscriptionInput {
-                topic_arn: topic.topic_arn.clone(),
-                token: "any-valid-token".to_owned(),
-                authenticate_on_unsubscribe: None,
-            })
-            .unwrap();
-        assert_eq!(
-            confirm_output.subscription_arn.as_deref(),
-            Some(sub_arn.as_str())
-        );
-
-        // Verify it's now confirmed.
-        let attrs = provider
-            .get_subscription_attributes(&GetSubscriptionAttributesInput {
-                subscription_arn: sub_arn,
-            })
-            .unwrap();
-        assert_eq!(
-            attrs.attributes.get("PendingConfirmation").unwrap(),
-            "false"
+        for protocol in [
+            "http",
+            "https",
+            "email",
+            "email-json",
+            "sms",
+            "lambda",
+            "application",
+            "firehose",
+        ] {
+            let error = provider
+                .subscribe(SubscribeInput {
+                    topic_arn: topic.topic_arn.clone(),
+                    protocol: protocol.to_owned(),
+                    endpoint: Some("http://example.com/webhook".to_owned()),
+                    ..Default::default()
+                })
+                .unwrap_err();
+            assert!(error.message.contains("Unsupported delivery protocol"));
+        }
+        assert!(
+            provider
+                .topics
+                .get_topic(&topic.topic_arn)
+                .unwrap()
+                .subscriptions
+                .is_empty()
         );
     }
 

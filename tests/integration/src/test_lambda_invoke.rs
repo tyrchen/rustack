@@ -199,7 +199,7 @@ mod tests {
         config.init_timeout = Duration::from_secs(10);
         config.idle_timeout = Duration::from_mins(1);
         config.max_warm_instances = 1;
-        config.squib = SquibExecutorConfig::from_env();
+        config.squib = SquibExecutorConfig::from_env().expect("Squib configuration must be valid");
         config.squib.connect_timeout = Duration::from_secs(30);
 
         let tmp = tempfile::Builder::new()

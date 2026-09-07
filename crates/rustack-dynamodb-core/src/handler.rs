@@ -11,6 +11,7 @@ use rustack_dynamodb_model::{
     input::{CreateTableInput, DescribeTableInput},
     operations::DynamoDBOperation,
 };
+use tokio::task::spawn_blocking;
 
 use crate::provider::RustackDynamoDB;
 
@@ -39,7 +40,17 @@ impl DynamoDBHandler for RustackDynamoDBHandler {
         >,
     > {
         let provider = Arc::clone(&self.provider);
-        Box::pin(async move { dispatch(provider.as_ref(), op, &body) })
+        Box::pin(async move {
+            let permit = provider.requests.admit()?;
+            spawn_blocking(move || {
+                let _permit = permit;
+                dispatch(provider.as_ref(), op, &body)
+            })
+            .await
+            .map_err(|error| {
+                DynamoDBError::internal_error(format!("DynamoDB operation task failed: {error}"))
+            })?
+        })
     }
 }
 

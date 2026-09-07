@@ -8,7 +8,6 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use rustack_sns_model::error::SnsError;
 
@@ -128,7 +127,12 @@ async fn process_request<H: SnsHandler>(
     // 2. Collect body.
     let body = match collect_body(incoming).await {
         Ok(body) => body,
-        Err(err) => return error_to_response(&err, request_id),
+        Err(err) => {
+            let mut response =
+                error_to_response(&SnsError::invalid_parameter(err.to_string()), request_id);
+            *response.status_mut() = err.status_code();
+            return response;
+        }
     };
 
     // 3. Parse form params to extract Action for routing.
@@ -141,16 +145,14 @@ async fn process_request<H: SnsHandler>(
     };
 
     // 5. Authenticate (if enabled).
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let body_hash = rustack_auth::hash_payload(&body);
-            if let Err(auth_err) =
-                rustack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-            {
-                let err = SnsError::invalid_security(auth_err.to_string());
-                return error_to_response(&err, request_id);
-            }
-        }
+    if let Err(auth_err) = rustack_auth::AuthMode::resolve(
+        config.skip_signature_validation,
+        config.credential_provider.as_deref(),
+    )
+    .and_then(|mode| mode.verify(&parts, &rustack_auth::hash_payload(&body)))
+    {
+        let err = SnsError::invalid_security(auth_err.to_string());
+        return error_to_response(&err, request_id);
     }
 
     // 6. Dispatch to handler (pass raw body so handler can re-parse as needed).
@@ -161,12 +163,8 @@ async fn process_request<H: SnsHandler>(
 }
 
 /// Collect the incoming body into a single `Bytes` buffer.
-async fn collect_body(incoming: Incoming) -> Result<Bytes, SnsError> {
-    incoming
-        .collect()
-        .await
-        .map(http_body_util::Collected::to_bytes)
-        .map_err(|e| SnsError::internal_error(format!("Failed to read request body: {e}")))
+async fn collect_body(incoming: Incoming) -> Result<Bytes, rustack_core::http::BodyReadError> {
+    rustack_core::http::collect_body(incoming, rustack_core::http::BodyBudget::control()).await
 }
 
 /// Add common response headers to every SNS response.

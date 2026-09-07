@@ -7,7 +7,6 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use rustack_iam_model::error::IamError;
 
@@ -140,16 +139,14 @@ async fn process_request<H: IamHandler>(
     };
 
     // 5. Authenticate (if enabled).
-    if !config.skip_signature_validation {
-        if let Some(ref cred_provider) = config.credential_provider {
-            let body_hash = rustack_auth::hash_payload(&body);
-            if let Err(auth_err) =
-                rustack_auth::verify_sigv4(&parts, &body_hash, cred_provider.as_ref())
-            {
-                let err = IamError::invalid_security(auth_err.to_string());
-                return error_to_response(&err, request_id);
-            }
-        }
+    if let Err(auth_err) = rustack_auth::AuthMode::resolve(
+        config.skip_signature_validation,
+        config.credential_provider.as_deref(),
+    )
+    .and_then(|mode| mode.verify(&parts, &rustack_auth::hash_payload(&body)))
+    {
+        let err = IamError::invalid_security(auth_err.to_string());
+        return error_to_response(&err, request_id);
     }
 
     // 6. Dispatch to handler (pass raw body so handler can re-parse as needed).
@@ -161,11 +158,13 @@ async fn process_request<H: IamHandler>(
 
 /// Collect the incoming body into a single `Bytes` buffer.
 async fn collect_body(incoming: Incoming) -> Result<Bytes, IamError> {
-    incoming
-        .collect()
+    rustack_core::http::collect_body(incoming, rustack_core::http::BodyBudget::control())
         .await
-        .map(http_body_util::Collected::to_bytes)
-        .map_err(|e| IamError::internal_error(format!("Failed to read request body: {e}")))
+        .map_err(|e| {
+            let mut err = IamError::internal_error(e.to_string());
+            err.status_code = e.status_code();
+            err
+        })
 }
 
 /// Add common response headers to every IAM response.

@@ -1,10 +1,31 @@
 //! Queue URL and ARN generation and parsing.
 
+use rustack_core::settings::advertised_endpoint;
+
 /// Build a queue URL.
 ///
-/// Format: `http://<host>:<port>/<account-id>/<queue-name>`
+/// Uses the validated runtime advertised endpoint when installed; otherwise
+/// falls back to `http://<host>:<port>/<account-id>/<queue-name>`.
 #[must_use]
 pub fn queue_url(host: &str, port: u16, account_id: &str, queue_name: &str) -> String {
+    queue_url_with_endpoint(advertised_endpoint(), host, port, account_id, queue_name)
+}
+
+fn queue_url_with_endpoint(
+    endpoint: Option<&str>,
+    host: &str,
+    port: u16,
+    account_id: &str,
+    queue_name: &str,
+) -> String {
+    if let Some(endpoint) = endpoint {
+        return format!("{endpoint}/{account_id}/{queue_name}");
+    }
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
     format!("http://{host}:{port}/{account_id}/{queue_name}")
 }
 
@@ -51,6 +72,18 @@ mod tests {
         assert_eq!(
             queue_url("localhost", 4566, "000000000000", "my-queue"),
             "http://localhost:4566/000000000000/my-queue"
+        );
+    }
+
+    #[test]
+    fn test_should_preserve_advertised_scheme_authority_and_ipv6() {
+        assert_eq!(
+            queue_url_with_endpoint(Some("https://[::1]:8443"), "ignored", 1, "123", "queue"),
+            "https://[::1]:8443/123/queue"
+        );
+        assert_eq!(
+            queue_url_with_endpoint(None, "::1", 4567, "123", "queue"),
+            "http://[::1]:4567/123/queue"
         );
     }
 

@@ -25,11 +25,99 @@ use crate::{
 pub fn resolve_function_ref(
     function_ref: &str,
 ) -> Result<(String, Option<String>), LambdaServiceError> {
+    let result = resolve_raw(function_ref)?;
+    FunctionName::parse(&result.0)?;
+    if let Some(q) = &result.1 {
+        Qualifier::parse(q)?;
+    }
+    Ok(result)
+}
+
+/// Validated logical function name, never a filesystem component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionName(String);
+impl FunctionName {
+    /// Validate an AWS function name.
+    pub fn parse(value: &str) -> Result<Self, LambdaServiceError> {
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Invalid function name".into(),
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Validated full Lambda ARN with separately validated name and qualifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionArn {
+    name: FunctionName,
+    qualifier: Option<Qualifier>,
+}
+impl FunctionArn {
+    /// Parse a complete Lambda function ARN.
+    ///
+    /// # Errors
+    /// Rejects malformed ARN components, names, and qualifiers.
+    pub fn parse(value: &str) -> Result<Self, LambdaServiceError> {
+        if value.len() > 256 {
+            return Err(LambdaServiceError::InvalidArn {
+                arn: "ARN exceeds 256 bytes".into(),
+            });
+        }
+        let (name, qualifier) = parse_arn(value)?;
+        Ok(Self {
+            name: FunctionName::parse(&name)?,
+            qualifier: qualifier.as_deref().map(Qualifier::parse).transpose()?,
+        })
+    }
+}
+
+/// Validated version or alias selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qualifier(String);
+impl Qualifier {
+    /// Validate a version or alias.
+    pub fn parse(value: &str) -> Result<Self, LambdaServiceError> {
+        if value != "$LATEST"
+            && (value.is_empty()
+                || value.len() > 128
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                || (value.bytes().all(|b| b.is_ascii_digit())
+                    && value.parse::<u64>().map_or(true, |n| n == 0)))
+        {
+            return Err(LambdaServiceError::InvalidParameter {
+                message: "Invalid qualifier".into(),
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+fn resolve_raw(function_ref: &str) -> Result<(String, Option<String>), LambdaServiceError> {
+    if function_ref.len() > 256 {
+        return Err(LambdaServiceError::InvalidParameter {
+            message: "Function reference exceeds 256 bytes".into(),
+        });
+    }
     if function_ref.starts_with("arn:") {
-        parse_arn(function_ref)
+        let arn = FunctionArn::parse(function_ref)?;
+        Ok((arn.name.0, arn.qualifier.map(|qualifier| qualifier.0)))
     } else if let Some((left, right)) = function_ref.split_once(':') {
         // Handle partial ARN: `{account}:function:{name}[:{qualifier}]`
         if let Some(rest) = right.strip_prefix("function:") {
+            if left.len() != 12 || !left.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(LambdaServiceError::InvalidArn {
+                    arn: function_ref.to_owned(),
+                });
+            }
             if let Some((name, qualifier)) = rest.split_once(':') {
                 Ok((name.to_owned(), Some(qualifier.to_owned())))
             } else {
@@ -51,18 +139,21 @@ fn parse_arn(arn: &str) -> Result<(String, Option<String>), LambdaServiceError> 
     let parts: Vec<&str> = arn.split(':').collect();
     // Unqualified ARN: arn:aws:lambda:region:account:function:name = 7 parts
     // Qualified ARN:   arn:aws:lambda:region:account:function:name:qualifier = 8 parts
-    if parts.len() < 7 || parts[0] != "arn" || parts[2] != "lambda" || parts[5] != "function" {
+    if !matches!(parts.as_slice(), ["arn", "aws" | "aws-cn" | "aws-us-gov", "lambda", region, account, "function", _, ..] if !region.is_empty() && region.len() <= 64 && region.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()))
+        || !(7..=8).contains(&parts.len())
+    {
         return Err(LambdaServiceError::InvalidArn {
             arn: arn.to_owned(),
         });
     }
 
-    let name = parts[6].to_owned();
-    let qualifier = if parts.len() >= 8 && !parts[7].is_empty() {
-        Some(parts[7].to_owned())
-    } else {
-        None
-    };
+    let name = parts
+        .get(6)
+        .ok_or_else(|| LambdaServiceError::InvalidArn {
+            arn: arn.to_owned(),
+        })?
+        .to_string();
+    let qualifier = parts.get(7).map(|value| (*value).to_owned());
 
     Ok((name, qualifier))
 }
@@ -84,6 +175,9 @@ pub fn resolve_version<'a>(
     function: &'a FunctionRecord,
     qualifier: Option<&str>,
 ) -> Result<&'a VersionRecord, LambdaServiceError> {
+    if let Some(q) = qualifier {
+        Qualifier::parse(q)?;
+    }
     match qualifier {
         None | Some("$LATEST") => Ok(&function.latest),
         Some(q) => {
@@ -259,6 +353,27 @@ mod tests {
             event_invoke_configs: HashMap::new(),
             created_at: "2024-01-01T00:00:00.000+0000".to_owned(),
         }
+    }
+
+    #[test]
+    fn test_should_reject_invalid_names_arns_and_qualifiers() {
+        for reference in [
+            "../escape",
+            "/absolute",
+            "a%2fb",
+            "a\\b",
+            "a:",
+            "a:0",
+            "a:../prod",
+            "a:prod:extra",
+            "bad:function:foo",
+            "arn:aws:lambda:us-east-1:123:function:foo",
+            "arn:aws:lambda:us-east-1:123456789012:function:foo:prod:extra",
+            "arn:aws:lambda:us-east-1:123456789012:function:foo:",
+        ] {
+            assert!(resolve_function_ref(reference).is_err(), "{reference}");
+        }
+        assert!(resolve_version(&make_function(), Some("../escape")).is_err());
     }
 
     // ---- resolve_function_ref tests ----

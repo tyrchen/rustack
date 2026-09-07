@@ -121,7 +121,7 @@ rustack-cloudfront-dataplane = { workspace = true, optional = true }
 tokio = { workspace = true }
 
 # HTTP
-hyper = { workspace = true }
+hyper = { workspace = true, features = ["client"] }
 hyper-util = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

@@ -117,21 +117,33 @@ impl RuntimeProviders {
         self.services.push(Arc::new(service));
     }
 
-    /// Stop stateful provider background workers after snapshot save.
-    pub(crate) async fn shutdown(&self) {
-        for service in &self.services {
-            if let Err(error) = service.shutdown().await {
-                warn!(
-                    service = service.service_name(),
-                    error = %error,
-                    "snapshot service shutdown failed",
-                );
-            }
-        }
+    /// Explicit persistence coverage; workers are owned by the runtime supervisor.
+    pub(crate) fn coverage(&self) -> Vec<(&'static str, &'static str)> {
+        self.services
+            .iter()
+            .map(|service| {
+                (
+                    service.service_name(),
+                    snapshot_coverage(service.service_name()),
+                )
+            })
+            .collect()
     }
 
     fn services(&self) -> &[Arc<dyn SnapshotService>] {
         &self.services
+    }
+}
+
+/// Human-facing coverage is not the binary archive's resource/data encoding kind.
+pub(crate) fn snapshot_coverage(service: &str) -> &'static str {
+    match service {
+        "s3" | "dynamodb" => "resources-and-data",
+        "dynamodbstreams" => "resources-and-records",
+        "lambda" => "resources-and-code",
+        "cloudfront-cache" | "cloudfront-dataplane" => "cache-data",
+        "sqs" | "ssm" | "iam" | "apigatewayv2" | "cloudfront" => "resources-only",
+        _ => "unsupported",
     }
 }
 
@@ -146,10 +158,6 @@ trait SnapshotService: Send + Sync {
     async fn save_meta(&self, data_staging_dir: &Path) -> Result<Vec<u8>>;
 
     async fn load_meta(&self, state_cbor: &[u8], data_staging_dir: &Path) -> Result<()>;
-
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(feature = "s3")]
@@ -253,11 +261,6 @@ impl SnapshotService for SqsSnapshotService {
         self.provider.import_snapshot(snapshot).await?;
         Ok(())
     }
-
-    async fn shutdown(&self) -> Result<()> {
-        self.provider.shutdown_all().await;
-        Ok(())
-    }
 }
 
 #[cfg(feature = "ssm")]
@@ -325,11 +328,6 @@ impl SnapshotService for LambdaSnapshotService {
     async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
         let snapshot: LambdaSnapshot = decode_state(state_cbor)?;
         self.provider.import_snapshot(snapshot).await?;
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<()> {
-        self.provider.shutdown().await;
         Ok(())
     }
 }
@@ -422,7 +420,45 @@ pub(crate) struct SnapshotConfig {
     root: PathBuf,
 }
 
+/// Advisory file lock retained for the full lifetime of a named snapshot runtime.
+#[derive(Debug)]
+#[allow(clippy::disallowed_types)] // OS advisory lock requires the blocking std File API.
+pub(crate) struct SnapshotLease {
+    _file: std::fs::File,
+}
+
 impl SnapshotConfig {
+    /// Acquire an OS-released exclusive lease before loading or serving a named snapshot.
+    ///
+    /// The blocking std file API is required for advisory locking and is isolated
+    /// inside a blocking worker; tokio offers no equivalent lock surface.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub(crate) async fn acquire_lease(&self) -> Result<SnapshotLease> {
+        let root = self.root.clone();
+        let name = self.name.as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&root).context("create snapshot root for lease")?;
+            let lock_path = root.join(format!(".{name}.lock"));
+            if std::fs::symlink_metadata(&lock_path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                bail!("snapshot lock path must not be a symbolic link");
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .context("open snapshot lease")?;
+            file.try_lock()
+                .context("snapshot is already owned by another runtime")?;
+            Ok(SnapshotLease { _file: file })
+        })
+        .await
+        .context("snapshot lease task failed")?
+    }
+
     /// Build snapshot configuration from a CLI-provided name.
     ///
     /// # Errors
@@ -446,6 +482,8 @@ impl SnapshotConfig {
     pub(crate) async fn load(&self, providers: &RuntimeProviders) -> Result<()> {
         let started = Instant::now();
         let dir = self.snapshot_dir();
+        cleanup_stale_staging(&self.root, self.name.as_str()).await?;
+        recover_snapshot(&self.root, &dir, self.name.as_str()).await?;
         if !path_exists(&dir).await? {
             info!(snapshot = %self.name.as_str(), path = %dir.display(), "snapshot not found, starting empty");
             return Ok(());
@@ -453,6 +491,14 @@ impl SnapshotConfig {
 
         let manifest_path = dir.join(MANIFEST_FILE);
         let manifest = read_manifest(&manifest_path).await?;
+        if manifest.snapshot_name != self.name.as_str() {
+            bail!(
+                "snapshot manifest names {} but was requested as {}; refusing to import a renamed \
+                 or copied directory",
+                manifest.snapshot_name,
+                self.name.as_str()
+            );
+        }
         if manifest.schema_version != SNAPSHOT_SCHEMA_VERSION {
             bail!(
                 "unsupported snapshot schema version {} in {}",
@@ -794,7 +840,7 @@ async fn read_manifest(path: &Path) -> Result<SnapshotManifest> {
 }
 
 async fn record_snapshot_timing(metric: &str, elapsed: Duration) {
-    let Ok(path) = std::env::var(SNAPSHOT_PERF_FILE_ENV) else {
+    let Ok(path) = rustack_core::settings::var(SNAPSHOT_PERF_FILE_ENV) else {
         return;
     };
     let line = format!("{metric}={}\n", elapsed.as_millis());
@@ -813,7 +859,7 @@ async fn record_snapshot_timing(metric: &str, elapsed: Duration) {
 }
 
 fn snapshot_root() -> PathBuf {
-    std::env::var(SNAPSHOT_ROOT_ENV)
+    rustack_core::settings::var(SNAPSHOT_ROOT_ENV)
         .map_or_else(|_| PathBuf::from(DEFAULT_SNAPSHOT_ROOT), PathBuf::from)
 }
 
@@ -841,41 +887,172 @@ async fn remove_dir_if_exists(path: &Path) -> Result<()> {
 }
 
 async fn replace_directory(temp: &Path, target: &Path, root: &Path, name: &str) -> Result<()> {
-    let suffix = unique_suffix()?;
-    let backup = root.join(format!(".{name}.bak.{suffix}"));
-    remove_dir_if_exists(&backup).await?;
-
+    recover_snapshot(root, target, name).await?;
+    validate_generation(temp, name)
+        .await
+        .context("validate prepared snapshot")?;
+    sync_tree(temp).await?;
+    let backup = root.join(format!(".{name}.previous"));
     let had_target = path_exists(target).await?;
     if had_target {
-        fs::rename(target, &backup).await.with_context(|| {
-            format!(
-                "failed to move existing snapshot {} to backup {}",
-                target.display(),
-                backup.display()
-            )
-        })?;
+        fs::rename(target, &backup)
+            .await
+            .context("preserve previous committed snapshot")?;
+        sync_directory(root).await?;
     }
-
-    match fs::rename(temp, target).await {
-        Ok(()) => {
-            if had_target {
-                remove_dir_if_exists(&backup).await?;
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if had_target {
-                let _ = fs::rename(&backup, target).await;
-            }
-            Err(error).with_context(|| {
+    if let Err(error) = fs::rename(temp, target).await {
+        if had_target {
+            fs::rename(&backup, target).await.with_context(|| {
                 format!(
-                    "failed to replace snapshot {} with {}",
-                    target.display(),
-                    temp.display()
+                    "snapshot publication failed ({error}); recovery also failed; previous \
+                     snapshot retained at {}",
+                    backup.display()
                 )
-            })
+            })?;
+            sync_directory(root).await?;
+        }
+        return Err(error).context("publish prepared snapshot");
+    }
+    sync_directory(root).await?;
+    if had_target {
+        remove_dir_if_exists(&backup).await?;
+        sync_directory(root).await?;
+    }
+    Ok(())
+}
+
+/// Recover an interrupted publish, including the legacy randomly named backups.
+async fn recover_snapshot(root: &Path, target: &Path, name: &str) -> Result<()> {
+    if !path_exists(root).await? {
+        return Ok(());
+    }
+    let previous = root.join(format!(".{name}.previous"));
+    let backup = if path_exists(&previous).await? {
+        Some(previous)
+    } else if !path_exists(target).await? {
+        let mut entries = fs::read_dir(root)
+            .await
+            .context("inspect snapshot recovery candidates")?;
+        let prefix = format!(".{name}.bak.");
+        let mut candidate = None;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                if candidate.is_some() {
+                    bail!(
+                        "multiple legacy snapshot backups require explicit operator recovery; \
+                         refusing empty startup"
+                    );
+                }
+                candidate = Some(entry.path());
+            }
+        }
+        candidate
+    } else {
+        None
+    };
+    let Some(backup) = backup else {
+        return Ok(());
+    };
+    if path_exists(target).await? && validate_generation(target, name).await.is_ok() {
+        remove_dir_if_exists(&backup).await?;
+        sync_directory(root).await?;
+        return Ok(());
+    }
+    validate_generation(&backup, name)
+        .await
+        .context("previous snapshot is not a valid recovery generation")?;
+    if path_exists(target).await? {
+        let failed = root.join(format!(".{name}.failed.{}", unique_suffix()?));
+        fs::rename(target, failed)
+            .await
+            .context("retain invalid snapshot for diagnosis")?;
+    }
+    fs::rename(&backup, target)
+        .await
+        .context("recover previous committed snapshot")?;
+    sync_directory(root).await?;
+    warn!(
+        snapshot = name,
+        "recovered previous committed snapshot after interrupted publication"
+    );
+    Ok(())
+}
+
+async fn cleanup_stale_staging(root: &Path, name: &str) -> Result<()> {
+    let mut entries = fs::read_dir(root)
+        .await
+        .context("inspect snapshot staging leftovers")?;
+    let prefixes = [
+        format!(".{name}.tmp."),
+        format!(".{name}.{LOAD_STAGING_PREFIX}."),
+    ];
+    while let Some(entry) = entries.next_entry().await? {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if prefixes.iter().any(|prefix| file_name.starts_with(prefix))
+            && entry.file_type().await?.is_dir()
+        {
+            remove_dir_if_exists(&entry.path()).await?;
         }
     }
+    Ok(())
+}
+
+async fn validate_generation(directory: &Path, name: &str) -> Result<()> {
+    let manifest = read_manifest(&directory.join(MANIFEST_FILE)).await?;
+    if manifest.schema_version != SNAPSHOT_SCHEMA_VERSION || manifest.snapshot_name != name {
+        bail!("snapshot generation name/schema mismatch");
+    }
+    for entry in manifest.services.values() {
+        let meta = read_archive(
+            &snapshot_child(directory, &entry.meta_file)?,
+            ArchiveKind::ServiceMeta,
+        )
+        .await?;
+        get_required_section(&meta, SECTION_STATE_CBOR)?;
+        if let Some(data) = &entry.data_file {
+            read_archive(&snapshot_child(directory, data)?, ArchiveKind::ServiceData).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn sync_tree(root: &Path) -> Result<()> {
+    let mut pending = vec![root.to_owned()];
+    let mut directories = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut entries = fs::read_dir(&directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let kind = entry.file_type().await?;
+            if kind.is_symlink() {
+                bail!("snapshot generation contains a symbolic link");
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                fs::File::open(entry.path()).await?.sync_all().await?;
+            } else {
+                bail!("snapshot generation contains a non-regular entry");
+            }
+        }
+        directories.push(directory);
+    }
+    for directory in directories.into_iter().rev() {
+        sync_directory(&directory).await?;
+    }
+    Ok(())
+}
+
+async fn sync_directory(directory: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::File::open(directory)
+        .await
+        .context("open snapshot directory for durability")?
+        .sync_all()
+        .await
+        .context("sync snapshot directory")?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
 }
 
 fn unique_suffix() -> Result<String> {
@@ -922,6 +1099,131 @@ mod tests {
     fn test_should_accept_manifest_child_path() {
         let path = snapshot_child(Path::new("/tmp/snapshot"), "services/s3/meta.ss.zst");
         assert!(path.is_ok());
+    }
+
+    async fn generation(root: &Path, folder: &str, version: &str) -> Result<PathBuf> {
+        let directory = root.join(folder);
+        fs::create_dir_all(&directory).await?;
+        write_manifest(
+            &directory.join(MANIFEST_FILE),
+            &SnapshotManifest::new("dev", version)?,
+        )
+        .await?;
+        Ok(directory)
+    }
+
+    #[tokio::test]
+    async fn test_should_recover_gap_between_snapshot_renames() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = generation(root.path(), "dev", "old").await?;
+        fs::rename(&target, root.path().join(".dev.previous")).await?;
+        recover_snapshot(root.path(), &target, "dev").await?;
+        assert_eq!(
+            read_manifest(&target.join(MANIFEST_FILE))
+                .await?
+                .rustack_version,
+            "old"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_keep_valid_new_generation_after_publish_crash() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = generation(root.path(), "dev", "new").await?;
+        let previous = generation(root.path(), ".dev.previous", "old").await?;
+        recover_snapshot(root.path(), &target, "dev").await?;
+        assert_eq!(
+            read_manifest(&target.join(MANIFEST_FILE))
+                .await?
+                .rustack_version,
+            "new"
+        );
+        assert!(!path_exists(&previous).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_recover_old_when_published_generation_is_invalid() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = generation(root.path(), "dev", "new").await?;
+        generation(root.path(), ".dev.previous", "old").await?;
+        fs::write(target.join(MANIFEST_FILE), b"corrupt").await?;
+        recover_snapshot(root.path(), &target, "dev").await?;
+        assert_eq!(
+            read_manifest(&target.join(MANIFEST_FILE))
+                .await?
+                .rustack_version,
+            "old"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_refuse_empty_start_with_invalid_recovery_generation() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join(".dev.previous")).await?;
+        let config = SnapshotConfig {
+            root: root.path().to_owned(),
+            name: SnapshotName::try_from("dev".to_owned())?,
+        };
+        assert!(config.load(&RuntimeProviders::default()).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_recover_legacy_backup_and_refuse_ambiguous_backups() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("dev");
+        generation(root.path(), ".dev.bak.legacy", "old").await?;
+        recover_snapshot(root.path(), &target, "dev").await?;
+        fs::rename(&target, root.path().join(".dev.bak.one")).await?;
+        generation(root.path(), ".dev.bak.two", "other").await?;
+        assert!(recover_snapshot(root.path(), &target, "dev").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_exclusively_lease_named_snapshot_until_owner_drops() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = SnapshotConfig {
+            root: root.path().to_owned(),
+            name: SnapshotName::try_from("dev".to_owned())?,
+        };
+        let lease = config.acquire_lease().await?;
+        assert!(config.acquire_lease().await.is_err());
+        drop(lease);
+        let _next = config.acquire_lease().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_publish_valid_generation_and_preserve_old_on_invalid_prepare() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let target = generation(root.path(), "dev", "old").await?;
+        let staged = generation(root.path(), ".dev.tmp.new", "new").await?;
+        replace_directory(&staged, &target, root.path(), "dev").await?;
+        assert_eq!(
+            read_manifest(&target.join(MANIFEST_FILE))
+                .await?
+                .rustack_version,
+            "new"
+        );
+        let invalid = root.path().join(".dev.tmp.invalid");
+        fs::create_dir(&invalid).await?;
+        assert!(
+            replace_directory(&invalid, &target, root.path(), "dev")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            read_manifest(&target.join(MANIFEST_FILE))
+                .await?
+                .rustack_version,
+            "new"
+        );
+        Ok(())
     }
 
     #[tokio::test]

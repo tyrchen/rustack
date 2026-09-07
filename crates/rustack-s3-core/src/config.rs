@@ -18,14 +18,14 @@ use typed_builder::TypedBuilder;
 /// use rustack_s3_core::config::S3Config;
 ///
 /// let config = S3Config::default();
-/// assert_eq!(config.gateway_listen, "0.0.0.0:4566");
+/// assert_eq!(config.gateway_listen, "127.0.0.1:4566");
 /// assert!(config.s3_virtual_hosting);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, TypedBuilder)]
 #[serde(rename_all = "camelCase")]
 pub struct S3Config {
-    /// Bind address for the gateway (e.g. `"0.0.0.0:4566"`).
-    #[builder(default = String::from("0.0.0.0:4566"))]
+    /// Bind address for the gateway (e.g. `"127.0.0.1:4566"`).
+    #[builder(default = String::from("127.0.0.1:4566"))]
     pub gateway_listen: String,
 
     /// Whether S3 virtual-hosted-style addressing is enabled.
@@ -64,7 +64,7 @@ pub struct S3Config {
 impl Default for S3Config {
     fn default() -> Self {
         Self {
-            gateway_listen: String::from("0.0.0.0:4566"),
+            gateway_listen: String::from("127.0.0.1:4566"),
             s3_virtual_hosting: true,
             s3_domain: String::from("s3.localhost.localstack.cloud"),
             s3_skip_signature_validation: true,
@@ -84,7 +84,7 @@ impl S3Config {
     ///
     /// | Variable | Default |
     /// |----------|---------|
-    /// | `GATEWAY_LISTEN` | `0.0.0.0:4566` |
+    /// | `GATEWAY_LISTEN` | `127.0.0.1:4566` |
     /// | `S3_VIRTUAL_HOSTING` | `true` |
     /// | `S3_DOMAIN` | `s3.localhost.localstack.cloud` |
     /// | `S3_SKIP_SIGNATURE_VALIDATION` | `true` |
@@ -106,33 +106,33 @@ impl S3Config {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(v) = std::env::var("GATEWAY_LISTEN") {
+        if let Ok(v) = rustack_core::settings::var("GATEWAY_LISTEN") {
             config.gateway_listen = v;
         }
-        if let Ok(v) = std::env::var("S3_VIRTUAL_HOSTING") {
+        if let Ok(v) = rustack_core::settings::var("S3_VIRTUAL_HOSTING") {
             config.s3_virtual_hosting = parse_bool(&v);
         }
-        if let Ok(v) = std::env::var("S3_DOMAIN") {
+        if let Ok(v) = rustack_core::settings::var("S3_DOMAIN") {
             config.s3_domain = v;
         }
-        if let Ok(v) = std::env::var("S3_SKIP_SIGNATURE_VALIDATION") {
+        if let Ok(v) = rustack_core::settings::var("S3_SKIP_SIGNATURE_VALIDATION") {
             config.s3_skip_signature_validation = parse_bool(&v);
         }
-        if let Ok(v) = std::env::var("S3_MAX_MEMORY_OBJECT_SIZE") {
+        if let Ok(v) = rustack_core::settings::var("S3_MAX_MEMORY_OBJECT_SIZE") {
             if let Ok(n) = v.parse::<usize>() {
                 config.s3_max_memory_object_size = n;
             }
         }
-        if let Ok(v) = std::env::var("DEFAULT_REGION") {
+        if let Ok(v) = rustack_core::settings::var("DEFAULT_REGION") {
             config.default_region = v;
         }
-        if let Ok(v) = std::env::var("LOG_LEVEL") {
+        if let Ok(v) = rustack_core::settings::var("LOG_LEVEL") {
             config.log_level = v;
         }
-        if let Ok(v) = std::env::var("PERSISTENCE") {
+        if let Ok(v) = rustack_core::settings::var("PERSISTENCE") {
             config.persistence = parse_bool(&v);
         }
-        if let Ok(v) = std::env::var("DATA_DIR") {
+        if let Ok(v) = rustack_core::settings::var("DATA_DIR") {
             config.data_dir = v;
         }
 
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn test_should_create_default_config() {
         let config = S3Config::default();
-        assert_eq!(config.gateway_listen, "0.0.0.0:4566");
+        assert_eq!(config.gateway_listen, "127.0.0.1:4566");
         assert!(config.s3_virtual_hosting);
         assert_eq!(config.s3_domain, "s3.localhost.localstack.cloud");
         assert!(config.s3_skip_signature_validation);

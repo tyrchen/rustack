@@ -1,6 +1,6 @@
 //! SES service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// SES service configuration.
 #[derive(Debug, Clone)]

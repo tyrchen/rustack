@@ -6,13 +6,17 @@
 
 use std::{
     collections::HashMap,
+    future::{Future, poll_fn},
+    pin::Pin,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 
+use dashmap::DashMap;
 use rustack_sqs_model::{
     error::SqsError,
     input::{ReceiveMessageInput, SendMessageInput},
@@ -20,21 +24,117 @@ use rustack_sqs_model::{
     types::Message,
 };
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     time::Instant,
 };
 
 use super::{
     attributes::QueueAttributes,
-    storage::{EnqueueResult, FifoQueueStorage, StandardQueueStorage},
+    storage::{DedupKey, EnqueueResult, FifoQueueStorage, StandardQueueStorage},
 };
 use crate::message::{
     InFlightMessage, QueueMessage, generate_receipt_handle, md5_of_body, md5_of_message_attributes,
     now_epoch_millis,
 };
 
+/// Registry routing shared with the queue manager, never held across await.
+type QueueRoutes = Weak<DashMap<String, Arc<QueueHandle>>>;
+
+#[derive(Debug, Default)]
+struct RedriveManager {
+    routes: QueueRoutes,
+    pending: Vec<PendingTransfer>,
+    quiescing: bool,
+}
+
+#[derive(Debug)]
+struct PendingTransfer {
+    message: QueueMessage,
+    reply: oneshot::Receiver<Result<(), SqsError>>,
+    completion: Option<Result<(), SqsError>>,
+}
+
+impl RedriveManager {
+    fn handoff(&mut self, message: &QueueMessage, target_arn: &str, source_arn: &str) -> bool {
+        if self.quiescing || self.pending.len() >= 128 || source_arn == target_arn {
+            return false;
+        }
+        let Some(routes) = self.routes.upgrade() else {
+            return false;
+        };
+        let Some(name) = target_arn.rsplit(':').next() else {
+            return false;
+        };
+        let Some(target) = routes.get(name).map(|entry| Arc::clone(entry.value())) else {
+            tracing::warn!("DLQ target unavailable; retaining source message");
+            return false;
+        };
+        if target.metadata.arn != target_arn || target.shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        let (reply, receiver) = oneshot::channel();
+        if target
+            .sender
+            .try_send(QueueCommand::Transfer {
+                message: message.clone(),
+                source_arn: source_arn.to_owned(),
+                reply,
+            })
+            .is_err()
+        {
+            tracing::warn!("DLQ target channel unavailable/full; retaining source message");
+            return false;
+        }
+        self.pending.push(PendingTransfer {
+            message: message.clone(),
+            reply: receiver,
+            completion: None,
+        });
+        true
+    }
+}
+
+/// Register each acknowledgment with the actor's waker; no timer polling or
+/// actor-to-actor await blocks ordinary queue commands.
+async fn wait_for_transfer(pending: &mut [PendingTransfer]) {
+    poll_fn(|context| {
+        for transfer in &mut *pending {
+            if transfer.completion.is_some() {
+                return Poll::Ready(());
+            }
+            if let Poll::Ready(result) = Pin::new(&mut transfer.reply).poll(context) {
+                transfer.completion = Some(result.unwrap_or_else(|_| {
+                    Err(SqsError::internal_error(
+                        "DLQ actor closed before acknowledgment",
+                    ))
+                }));
+                return Poll::Ready(());
+            }
+        }
+        Poll::Pending
+    })
+    .await;
+}
+
 /// Commands sent to a queue actor via its channel.
 pub enum QueueCommand {
+    /// Test-only actor supervision fault injection.
+    #[cfg(test)]
+    CrashActor,
+    /// Transfer a dead-letter message without blocking the source actor.
+    Transfer {
+        /// Original message retained by the source until acknowledgment.
+        message: QueueMessage,
+        /// Exact source queue ARN.
+        source_arn: String,
+        /// Confirms successful enqueue or rejection before mutation.
+        reply: oneshot::Sender<Result<(), SqsError>>,
+    },
+    /// Stop initiating redrives and acknowledge after pending transfers settle.
+    Quiesce {
+        /// Completion acknowledgment.
+        reply: oneshot::Sender<()>,
+    },
     /// Send a message to the queue.
     SendMessage {
         /// The send message input.
@@ -110,6 +210,8 @@ pub enum QueueCommand {
 impl std::fmt::Debug for QueueCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Transfer { .. } => write!(f, "Transfer"),
+            Self::Quiesce { .. } => write!(f, "Quiesce"),
             Self::SendMessage { .. } => write!(f, "SendMessage"),
             Self::ReceiveMessage { .. } => write!(f, "ReceiveMessage"),
             Self::DeleteMessage { .. } => write!(f, "DeleteMessage"),
@@ -120,6 +222,8 @@ impl std::fmt::Debug for QueueCommand {
             Self::GetTags { .. } => write!(f, "GetTags"),
             Self::SetTags { .. } => write!(f, "SetTags"),
             Self::RemoveTags { .. } => write!(f, "RemoveTags"),
+            #[cfg(test)]
+            Self::CrashActor => write!(f, "CrashActor"),
             Self::Shutdown => write!(f, "Shutdown"),
         }
     }
@@ -168,6 +272,9 @@ pub struct QueueActor {
     account_id: String,
     /// Pending long-poll receivers.
     pending_long_polls: Vec<PendingLongPoll>,
+    redrive: RedriveManager,
+    quiesce_reply: Option<oneshot::Sender<()>>,
+    stopping: bool,
 }
 
 /// A pending long-poll request waiting for messages.
@@ -228,13 +335,32 @@ impl QueueActor {
             last_purge_at: None,
             account_id,
             pending_long_polls: Vec::new(),
+            redrive: RedriveManager::default(),
+            quiesce_reply: None,
+            stopping: false,
         }
+    }
+
+    /// Connect this actor to the manager's queue routing registry.
+    pub(crate) fn with_routes(mut self, routes: QueueRoutes) -> Self {
+        self.redrive.routes = routes;
+        self
     }
 
     /// Run the actor event loop.
     pub async fn run(mut self) {
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut commands_open = true;
         loop {
+            self.settle_transfers();
+            if self.redrive.pending.is_empty() {
+                if let Some(reply) = self.quiesce_reply.take() {
+                    let _ = reply.send(());
+                }
+                if self.stopping {
+                    break;
+                }
+            }
             // Compute the earliest long-poll deadline so we can expire it precisely
             // instead of waiting for the next 1-second cleanup tick.
             let next_poll_deadline = self
@@ -245,15 +371,26 @@ impl QueueActor {
                 .unwrap_or_else(|| Instant::now() + Duration::from_hours(24));
 
             tokio::select! {
-                Some(cmd) = self.commands.recv() => {
+                command = self.commands.recv(), if commands_open => {
+                    let Some(cmd) = command else {
+                        commands_open = false;
+                        self.stopping = true;
+                        self.redrive.quiescing = true;
+                        continue;
+                    };
                     let should_fulfill_long_polls = match cmd {
-                        QueueCommand::Shutdown => break,
+                        QueueCommand::Shutdown => {
+                            self.stopping = true;
+                            self.redrive.quiescing = true;
+                            false
+                        },
                         cmd => self.handle_command(cmd),
                     };
                     if should_fulfill_long_polls && !self.pending_long_polls.is_empty() {
                         self.fulfill_pending_long_polls();
                     }
                 }
+                () = wait_for_transfer(&mut self.redrive.pending), if !self.redrive.pending.is_empty() => {}
                 _ = cleanup_interval.tick() => {
                     self.periodic_cleanup();
                 }
@@ -269,7 +406,36 @@ impl QueueActor {
     #[allow(clippy::too_many_lines)]
     fn handle_command(&mut self, cmd: QueueCommand) -> bool {
         match cmd {
+            #[cfg(test)]
+            QueueCommand::CrashActor => panic!("injected queue actor crash"),
+            QueueCommand::Transfer {
+                message,
+                source_arn,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return false;
+                }
+                let result = self.accept_transfer(message, &source_arn);
+                let accepted = result.is_ok();
+                let _ = reply.send(result);
+                accepted
+            }
+            QueueCommand::Quiesce { reply } => {
+                self.redrive.quiescing = true;
+                if self
+                    .quiesce_reply
+                    .as_ref()
+                    .is_none_or(oneshot::Sender::is_closed)
+                {
+                    self.quiesce_reply = Some(reply);
+                }
+                false
+            }
             QueueCommand::SendMessage { input, reply } => {
+                if reply.is_closed() {
+                    return false;
+                }
                 let result = self.handle_send_message(input);
                 let should_fulfill_long_polls = matches!(&result, Ok((_, true)));
                 let _ = reply.send(result.map(|(output, _)| output));
@@ -301,10 +467,13 @@ impl QueueActor {
                 attribute_names,
                 reply,
             } => {
-                let counts = match &self.storage {
+                let mut counts = match &self.storage {
                     QueueStorage::Standard(s) => s.counts(),
                     QueueStorage::Fifo(s) => s.counts(),
                 };
+                counts.1 = counts
+                    .1
+                    .saturating_add(u32::try_from(self.redrive.pending.len()).unwrap_or(u32::MAX));
                 let attrs = self.attributes.to_map(
                     &attribute_names,
                     self.is_fifo,
@@ -348,6 +517,107 @@ impl QueueActor {
             QueueCommand::Shutdown => {
                 // Handled in the event loop.
                 false
+            }
+        }
+    }
+
+    fn accept_transfer(
+        &mut self,
+        mut message: QueueMessage,
+        source_arn: &str,
+    ) -> Result<(), SqsError> {
+        if self.stopping || self.is_fifo != message.message_group_id.is_some() {
+            return Err(SqsError::invalid_parameter_value(
+                "DLQ unavailable or queue type mismatch",
+            ));
+        }
+        if message.body.len() > usize::try_from(self.attributes.maximum_message_size).unwrap_or(0) {
+            return Err(SqsError::invalid_parameter_value(
+                "Message exceeds DLQ maximum size",
+            ));
+        }
+        let source_scope = source_arn.rsplit_once(':').map(|(scope, _)| scope);
+        let target_scope = self.arn.rsplit_once(':').map(|(scope, _)| scope);
+        if source_scope != target_scope {
+            return Err(SqsError::invalid_parameter_value(
+                "DLQ must be in the same account and region",
+            ));
+        }
+        if let Some(policy) = &self.attributes.redrive_allow_policy {
+            let policy: serde_json::Value = serde_json::from_str(policy)
+                .map_err(|_| SqsError::invalid_parameter_value("Invalid RedriveAllowPolicy"))?;
+            let allowed = match policy
+                .get("redrivePermission")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("allowAll") => true,
+                Some("byQueue") => policy
+                    .get("sourceQueueArns")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|arns| arns.iter().any(|arn| arn.as_str() == Some(source_arn))),
+                _ => false,
+            };
+            if !allowed {
+                return Err(SqsError::invalid_parameter_value(
+                    "DLQ redrive permission denied",
+                ));
+            }
+        }
+        message.dead_letter_queue_source_arn = Some(source_arn.to_owned());
+        message.approximate_receive_count = 0;
+        message.approximate_first_receive_timestamp = None;
+        message.available_at = Instant::now();
+        message.delay_seconds = 0;
+        match &mut self.storage {
+            QueueStorage::Standard(storage) => storage.available.push_back(message),
+            QueueStorage::Fifo(storage) => {
+                message.sent_timestamp = now_epoch_millis();
+                message.message_deduplication_id = Some(message.message_id.clone());
+                let key = DedupKey::Redrive {
+                    source: source_arn.to_owned(),
+                    message: message.message_id.clone(),
+                };
+                storage.enqueue(message, &key);
+            }
+        }
+        Ok(())
+    }
+
+    fn settle_transfers(&mut self) {
+        let pending = std::mem::take(&mut self.redrive.pending);
+        for mut transfer in pending {
+            let result = if let Some(completed) = transfer.completion.take() {
+                completed
+            } else {
+                match transfer.reply.try_recv() {
+                    Ok(result) => result,
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        self.redrive.pending.push(transfer);
+                        continue;
+                    }
+                    Err(oneshot::error::TryRecvError::Closed) => Err(SqsError::internal_error(
+                        "DLQ actor closed before acknowledgment",
+                    )),
+                }
+            };
+            let group = transfer
+                .message
+                .message_group_id
+                .clone()
+                .unwrap_or_default();
+            let restore = if result.is_err() {
+                tracing::warn!("DLQ delivery failed; restoring source message");
+                Some(transfer.message)
+            } else {
+                None
+            };
+            match &mut self.storage {
+                QueueStorage::Standard(storage) => {
+                    if let Some(message) = restore {
+                        storage.available.push_front(message);
+                    }
+                }
+                QueueStorage::Fifo(storage) => storage.finish_redrive(&group, restore),
             }
         }
     }
@@ -423,6 +693,7 @@ impl QueueActor {
         };
 
         let msg = QueueMessage {
+            dead_letter_queue_source_arn: None,
             message_id: message_id.clone(),
             body: input.message_body,
             md5_of_body: body_md5.clone(),
@@ -499,10 +770,14 @@ impl QueueActor {
         // Build the effective dedup key based on DeduplicationScope.
         // "queue" scope: global dedup across all groups (default).
         // "messageGroup" scope: dedup only within the same group.
+        let message_deduplication_id = Some(dedup_id.clone());
         let effective_dedup_key = if self.attributes.deduplication_scope == "messageGroup" {
-            format!("{group_id}:{dedup_id}")
+            DedupKey::Group {
+                group: group_id.clone(),
+                id: dedup_id,
+            }
         } else {
-            dedup_id
+            DedupKey::Queue(dedup_id)
         };
 
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -510,6 +785,7 @@ impl QueueActor {
         let attr_md5 = md5_of_message_attributes(&input.message_attributes);
 
         let msg = QueueMessage {
+            dead_letter_queue_source_arn: None,
             message_id: message_id.clone(),
             body: input.message_body,
             md5_of_body: body_md5.clone(),
@@ -521,7 +797,7 @@ impl QueueActor {
             approximate_first_receive_timestamp: None,
             sequence_number: None,
             message_group_id: Some(group_id),
-            message_deduplication_id: input.message_deduplication_id,
+            message_deduplication_id,
             available_at: Instant::now(),
             delay_seconds: 0,
         };
@@ -611,9 +887,23 @@ impl QueueActor {
         system_attribute_names: &[String],
         message_attribute_names: &[String],
     ) -> Vec<Message> {
+        // Visibility is evaluated at receive time, not only on the periodic timer.
+        match &mut self.storage {
+            QueueStorage::Standard(storage) => {
+                storage.return_expired_inflight();
+                storage.promote_delayed();
+            }
+            QueueStorage::Fifo(storage) => {
+                storage.return_expired_inflight();
+            }
+        }
         let merged_sys_attrs = merge_attribute_names(attribute_names, system_attribute_names);
         let vis_timeout = Duration::from_secs(visibility_timeout as u64);
-
+        let mut redrive = RedriveRequest {
+            manager: &mut self.redrive,
+            attributes: &self.attributes,
+            source_arn: &self.arn,
+        };
         match &mut self.storage {
             QueueStorage::Standard(storage) => try_receive_standard(
                 storage,
@@ -621,7 +911,7 @@ impl QueueActor {
                 vis_timeout,
                 &merged_sys_attrs,
                 message_attribute_names,
-                &self.attributes,
+                &mut redrive,
             ),
             QueueStorage::Fifo(storage) => try_receive_fifo(
                 storage,
@@ -629,6 +919,7 @@ impl QueueActor {
                 vis_timeout,
                 &merged_sys_attrs,
                 message_attribute_names,
+                &mut redrive,
             ),
         }
     }
@@ -700,6 +991,7 @@ impl QueueActor {
                 return Err(SqsError::purge_queue_in_progress());
             }
         }
+        self.redrive.pending.clear();
         match &mut self.storage {
             QueueStorage::Standard(s) => s.purge(),
             QueueStorage::Fifo(s) => s.purge(),
@@ -785,6 +1077,25 @@ impl QueueActor {
 // Standard queue receive helper
 // ---------------------------------------------------------------------------
 
+struct RedriveRequest<'a> {
+    manager: &'a mut RedriveManager,
+    attributes: &'a QueueAttributes,
+    source_arn: &'a str,
+}
+
+impl RedriveRequest<'_> {
+    fn target(&self, message: &QueueMessage) -> Option<String> {
+        self.attributes
+            .redrive_policy
+            .as_ref()
+            .filter(|policy| {
+                message.approximate_receive_count
+                    >= u32::try_from(policy.max_receive_count).unwrap_or(u32::MAX)
+            })
+            .map(|policy| policy.dead_letter_target_arn.clone())
+    }
+}
+
 /// Receive messages from a standard queue.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn try_receive_standard(
@@ -793,32 +1104,28 @@ fn try_receive_standard(
     vis_timeout: Duration,
     sys_attrs: &[String],
     msg_attrs: &[String],
-    queue_attrs: &QueueAttributes,
+    redrive: &mut RedriveRequest<'_>,
 ) -> Vec<Message> {
     let mut result = Vec::new();
 
-    while result.len() < max {
+    let scan_budget = storage.available.len().min(128);
+    for _ in 0..scan_budget {
+        if result.len() >= max {
+            break;
+        }
         match storage.available.pop_front() {
             Some(mut msg) => {
-                msg.approximate_receive_count += 1;
+                if let Some(target) = redrive.target(&msg) {
+                    if !redrive.manager.handoff(&msg, &target, redrive.source_arn) {
+                        // Standard queues have no group ordering constraint: retain
+                        // the poison message without starving healthy messages.
+                        storage.available.push_back(msg);
+                    }
+                    continue;
+                }
+                msg.approximate_receive_count = msg.approximate_receive_count.saturating_add(1);
                 if msg.approximate_first_receive_timestamp.is_none() {
                     msg.approximate_first_receive_timestamp = Some(now_epoch_millis());
-                }
-
-                // Check DLQ redrive threshold.
-                if let Some(ref policy) = queue_attrs.redrive_policy {
-                    #[allow(clippy::cast_sign_loss)]
-                    if msg.approximate_receive_count > policy.max_receive_count as u32 {
-                        // Move to dead_letters storage instead of silently dropping.
-                        // Actual DLQ routing (cross-queue send) can be added later.
-                        tracing::debug!(
-                            message_id = %msg.message_id,
-                            receive_count = msg.approximate_receive_count,
-                            "message exceeded maxReceiveCount, moved to dead letters"
-                        );
-                        storage.dead_letters.push(msg);
-                        continue;
-                    }
                 }
 
                 let receipt_handle = generate_receipt_handle(&msg.message_id);
@@ -852,12 +1159,19 @@ fn try_receive_fifo(
     vis_timeout: Duration,
     sys_attrs: &[String],
     msg_attrs: &[String],
+    redrive: &mut RedriveRequest<'_>,
 ) -> Vec<Message> {
     let received = storage.receive(max);
     let mut result = Vec::new();
 
     for (mut msg, group_id) in received {
-        msg.approximate_receive_count += 1;
+        if let Some(target) = redrive.target(&msg) {
+            if !redrive.manager.handoff(&msg, &target, redrive.source_arn) {
+                storage.finish_redrive(&group_id, Some(msg));
+            }
+            continue;
+        }
+        msg.approximate_receive_count = msg.approximate_receive_count.saturating_add(1);
         if msg.approximate_first_receive_timestamp.is_none() {
             msg.approximate_first_receive_timestamp = Some(now_epoch_millis());
         }
@@ -883,8 +1197,8 @@ pub struct QueueHandle {
     pub sender: mpsc::Sender<QueueCommand>,
     /// Queue metadata (read-only after creation).
     pub metadata: QueueMetadata,
-    /// Actor task join handle.
-    pub task: tokio::task::JoinHandle<()>,
+    /// Supervisor-observed actor completion, including panic status.
+    pub completion: watch::Receiver<Option<bool>>,
     /// Shutdown flag.
     pub shutdown: Arc<AtomicBool>,
 }
@@ -1037,10 +1351,37 @@ impl QueueHandle {
         Ok(())
     }
 
+    /// Stop initiating redrive and wait for all accepted handoffs without clearing messages.
+    ///
+    /// # Errors
+    /// Returns an error if the actor is closed or a simultaneous quiesce is in progress.
+    pub async fn quiesce(&self) -> Result<(), SqsError> {
+        let (reply, receiver) = oneshot::channel();
+        self.sender
+            .send(QueueCommand::Quiesce { reply })
+            .await
+            .map_err(|_| SqsError::internal_error("Queue actor is not running"))?;
+        receiver
+            .await
+            .map_err(|_| SqsError::internal_error("Queue quiesce did not complete"))
+    }
+
     /// Shutdown the queue actor.
     pub async fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = self.sender.send(QueueCommand::Shutdown).await;
+        let mut completion = self.completion.clone();
+        loop {
+            if let Some(success) = *completion.borrow_and_update() {
+                if !success {
+                    tracing::error!("SQS actor shutdown observed a panic");
+                }
+                return;
+            }
+            if completion.changed().await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -1074,6 +1415,11 @@ fn build_message(
     let want_sys = |name: &str| want_all_sys || system_attr_names.iter().any(|n| n == name);
 
     let mut attributes = HashMap::new();
+    if want_sys("DeadLetterQueueSourceArn") {
+        if let Some(arn) = &msg.dead_letter_queue_source_arn {
+            attributes.insert("DeadLetterQueueSourceArn".to_owned(), arn.clone());
+        }
+    }
     if want_sys("SenderId") {
         attributes.insert("SenderId".to_owned(), msg.sender_id.clone());
     }

@@ -13,14 +13,199 @@
 //! is automatically cleaned up when the entry is removed from the map (via
 //! the internal stored data `Drop` implementation).
 
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use dashmap::DashMap;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tracing::{debug, trace, warn};
 
 use crate::{checksums, error::S3ServiceError};
+
+/// Immutable, unpublished upload data; the temporary file is removed on last drop.
+#[derive(Debug)]
+pub struct StagedUpload {
+    path: tempfile::TempPath,
+    size: u64,
+    hashes: checksums::HasherResult,
+}
+
+impl StagedUpload {
+    /// Open the immutable upload for bounded reads.
+    pub async fn open(&self) -> Result<tokio::fs::File, std::io::Error> {
+        tokio::time::timeout(Duration::from_secs(5), tokio::fs::File::open(&self.path)).await?
+    }
+
+    /// Size of decoded object bytes.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Incrementally computed checksums over decoded object bytes.
+    #[must_use]
+    pub fn hashes(&self) -> &checksums::HasherResult {
+        &self.hashes
+    }
+
+    /// Return a checksum computed while staging the object.
+    pub fn checksum(
+        &self,
+        algorithm: checksums::ChecksumAlgorithm,
+    ) -> Result<&str, S3ServiceError> {
+        self.hashes
+            .checksums
+            .iter()
+            .find(|value| value.algorithm == algorithm)
+            .map(|value| value.value.as_str())
+            .ok_or_else(|| S3ServiceError::Internal(anyhow::anyhow!("missing staged checksum")))
+    }
+
+    /// Validate an optional Content-MD5 declaration against staged bytes.
+    pub fn validate_md5(&self, declared: Option<&str>) -> Result<(), S3ServiceError> {
+        use base64::Engine as _;
+        if let Some(declared) = declared {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(declared)
+                .map_err(|_| S3ServiceError::BadDigest)?;
+            if hex::encode(bytes) != self.hashes.md5_hex {
+                return Err(S3ServiceError::BadDigest);
+            }
+        }
+        Ok(())
+    }
+
+    /// Private generated file location, never derived from an S3 key.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Immutable file and validated byte range for a streaming download.
+#[derive(Debug, Clone)]
+pub struct StagedRead {
+    /// Keep the immutable file alive until the response finishes.
+    pub upload: Arc<StagedUpload>,
+    /// First byte of the selected range.
+    pub offset: u64,
+    /// Number of bytes to deliver.
+    pub length: u64,
+}
+
+impl StagedRead {
+    /// Read a proxy-sized object range with a pre-allocation cap and IO deadline.
+    /// # Errors
+    /// Rejects oversized ranges before opening the file and propagates read errors.
+    pub async fn collect_bounded(&self, limit: u64) -> Result<Bytes, std::io::Error> {
+        if self.length > limit
+            || self
+                .offset
+                .checked_add(self.length)
+                .is_none_or(|end| end > self.upload.size())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "object range exceeds proxy budget",
+            ));
+        }
+        let read = async {
+            use tokio::io::AsyncSeekExt as _;
+            let mut file = self.upload.open().await?;
+            file.seek(std::io::SeekFrom::Start(self.offset)).await?;
+            let mut remaining = self.length;
+            let mut data = Vec::new();
+            let mut buffer = vec![0; 64 * 1024];
+            while remaining != 0 {
+                let max = usize::try_from(remaining.min(buffer.len() as u64))
+                    .map_err(std::io::Error::other)?;
+                let target = buffer
+                    .get_mut(..max)
+                    .ok_or_else(|| std::io::Error::other("invalid read length"))?;
+                let count = file.read(target).await?;
+                if count == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "truncated stored object",
+                    ));
+                }
+                rustack_core::http::append_bounded(
+                    &mut data,
+                    target
+                        .get(..count)
+                        .ok_or_else(|| std::io::Error::other("invalid read count"))?,
+                    limit,
+                )
+                .map_err(std::io::Error::other)?;
+                remaining = remaining.saturating_sub(count as u64);
+            }
+            Ok(Bytes::from(data))
+        };
+        tokio::time::timeout(
+            Duration::from_secs(rustack_core::settings::budgets().body_total_seconds),
+            read,
+        )
+        .await?
+    }
+}
+
+/// Bounded-memory staging writer. Dropping before finish removes unpublished data.
+#[derive(Debug)]
+pub struct UploadWriter {
+    file: tokio::fs::File,
+    path: tempfile::TempPath,
+    size: u64,
+    hasher: checksums::StreamingHasher,
+}
+
+impl UploadWriter {
+    /// Create a private staging file outside the object namespace.
+    pub async fn new() -> Result<Self, std::io::Error> {
+        let temporary = tokio::task::spawn_blocking(tempfile::NamedTempFile::new).await??;
+        let (file, path) = temporary.into_parts();
+        Ok(Self {
+            file: tokio::fs::File::from_std(file),
+            path,
+            size: 0,
+            hasher: checksums::StreamingHasher::new(&[
+                checksums::ChecksumAlgorithm::Crc32,
+                checksums::ChecksumAlgorithm::Crc32c,
+                checksums::ChecksumAlgorithm::Crc64Nvme,
+                checksums::ChecksumAlgorithm::Sha1,
+                checksums::ChecksumAlgorithm::Sha256,
+            ]),
+        })
+    }
+
+    /// Write one decoded frame with independent storage deadline and size enforcement.
+    pub async fn write(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+        let size = self
+            .size
+            .checked_add(data.len() as u64)
+            .filter(|size| *size <= rustack_core::settings::budgets().s3_object_body_bytes)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "S3 object exceeds 5 GiB")
+            })?;
+        tokio::time::timeout(Duration::from_secs(5), self.file.write_all(data)).await??;
+        self.hasher.update(data);
+        self.size = size;
+        Ok(())
+    }
+
+    /// Flush and freeze the upload; this does not publish it into object storage.
+    pub async fn finish(mut self) -> Result<StagedUpload, std::io::Error> {
+        tokio::time::timeout(Duration::from_secs(5), self.file.flush()).await??;
+        Ok(StagedUpload {
+            path: self.path,
+            size: self.size,
+            hashes: self.hasher.finish(),
+        })
+    }
+}
 
 /// Composite key identifying a stored object: `(bucket, key, version_id)`.
 type StorageKey = (String, String, String);
@@ -62,6 +247,8 @@ pub struct WriteResult {
 /// to a temporary file on disk. When a [`StoredData::OnDisk`] value is
 /// dropped, the temporary file is removed.
 enum StoredData {
+    /// Validated staged data shared with active readers.
+    Staged(Arc<StagedUpload>),
     /// Small objects kept entirely in memory.
     InMemory {
         /// The raw object bytes.
@@ -79,6 +266,7 @@ enum StoredData {
 impl std::fmt::Debug for StoredData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Staged(upload) => f.debug_tuple("Staged").field(&upload.size()).finish(),
             Self::InMemory { data } => f
                 .debug_struct("InMemory")
                 .field("size", &data.len())
@@ -115,9 +303,71 @@ impl Drop for StoredData {
 }
 
 impl StoredData {
+    async fn append_to(&self, writer: &mut UploadWriter) -> Result<String, S3ServiceError> {
+        let mut hasher = checksums::StreamingHasher::new(&[]);
+        if let Self::InMemory { data } = self {
+            writer
+                .write(data)
+                .await
+                .map_err(|error| S3ServiceError::Internal(error.into()))?;
+            hasher.update(data);
+        } else {
+            let mut file = match self {
+                Self::Staged(upload) => upload.open().await,
+                Self::OnDisk { path, .. } => {
+                    tokio::time::timeout(Duration::from_secs(5), tokio::fs::File::open(path))
+                        .await
+                        .map_err(|error| S3ServiceError::Internal(error.into()))?
+                }
+                Self::InMemory { .. } => {
+                    return Err(S3ServiceError::Internal(anyhow::anyhow!(
+                        "unexpected storage variant"
+                    )));
+                }
+            }
+            .map_err(|error| S3ServiceError::Internal(error.into()))?;
+            let mut buffer = vec![0; 64 * 1024];
+            loop {
+                let length = tokio::time::timeout(Duration::from_secs(5), file.read(&mut buffer))
+                    .await
+                    .map_err(|error| S3ServiceError::Internal(error.into()))?
+                    .map_err(|error| S3ServiceError::Internal(error.into()))?;
+                if length == 0 {
+                    break;
+                }
+                let data = buffer.get(..length).ok_or_else(|| {
+                    S3ServiceError::Internal(anyhow::anyhow!("invalid file read length"))
+                })?;
+                hasher.update(data);
+                writer
+                    .write(data)
+                    .await
+                    .map_err(|error| S3ServiceError::Internal(error.into()))?;
+            }
+        }
+        Ok(hasher.finish().md5_hex)
+    }
+
     /// Read the full data from this stored entry.
     async fn read_all(&self) -> Result<Bytes, S3ServiceError> {
         match self {
+            Self::Staged(upload) => {
+                if upload.size() > rustack_core::http::UPSTREAM_BODY_LIMIT {
+                    return Err(S3ServiceError::Internal(anyhow::anyhow!(
+                        "large object requires streaming read"
+                    )));
+                }
+                let mut file = upload
+                    .open()
+                    .await
+                    .map_err(|e| S3ServiceError::Internal(e.into()))?;
+                let mut data = Vec::new();
+                tokio::time::timeout(Duration::from_secs(30), file.read_to_end(&mut data))
+                    .await
+                    .map_err(|e| S3ServiceError::Internal(e.into()))?
+                    .map_err(|e| S3ServiceError::Internal(e.into()))?;
+                Ok(Bytes::from(data))
+            }
             Self::InMemory { data } => Ok(data.clone()),
             Self::OnDisk { path, size } => {
                 let mut file = tokio::fs::File::open(path).await.map_err(|e| {
@@ -252,6 +502,67 @@ impl InMemoryStorage {
         })
     }
 
+    /// Publish a fully validated immutable staged object without copying its bytes.
+    #[must_use]
+    pub fn write_staged_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        upload: Arc<StagedUpload>,
+    ) -> WriteResult {
+        let result = WriteResult {
+            etag: format!("\"{}\"", upload.hashes.md5_hex),
+            size: upload.size,
+            md5_hex: upload.hashes.md5_hex.clone(),
+        };
+        self.objects.insert(
+            (bucket.to_owned(), key.to_owned(), version_id.to_owned()),
+            StoredData::Staged(upload),
+        );
+        result
+    }
+
+    /// Publish a fully validated immutable staged multipart part.
+    #[must_use]
+    pub fn write_staged_part(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+        upload: Arc<StagedUpload>,
+    ) -> WriteResult {
+        let result = WriteResult {
+            etag: format!("\"{}\"", upload.hashes.md5_hex),
+            size: upload.size,
+            md5_hex: upload.hashes.md5_hex.clone(),
+        };
+        self.parts.insert(
+            (bucket.to_owned(), upload_id.to_owned(), part_number),
+            StoredData::Staged(upload),
+        );
+        result
+    }
+
+    /// Return a shared immutable staged object for streaming HTTP responses.
+    #[must_use]
+    pub fn staged_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Option<Arc<StagedUpload>> {
+        self.objects
+            .get(&(bucket.to_owned(), key.to_owned(), version_id.to_owned()))
+            .and_then(|entry| {
+                if let StoredData::Staged(upload) = entry.value() {
+                    Some(Arc::clone(upload))
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Read object data. Returns the full [`Bytes`] for the object.
     ///
     /// If `range` is specified as `(start, end)` (inclusive on both ends),
@@ -311,6 +622,9 @@ impl InMemoryStorage {
         dst_key: &str,
         dst_version_id: &str,
     ) -> Result<WriteResult, S3ServiceError> {
+        if let Some(upload) = self.staged_object(src_bucket, src_key, src_version_id) {
+            return Ok(self.write_staged_object(dst_bucket, dst_key, dst_version_id, upload));
+        }
         let data = self
             .read_object(src_bucket, src_key, src_version_id, None)
             .await?;
@@ -417,24 +731,30 @@ impl InMemoryStorage {
         version_id: &str,
         part_numbers: &[u32],
     ) -> Result<(WriteResult, Vec<String>), S3ServiceError> {
-        let mut combined = BytesMut::new();
+        let mut writer = UploadWriter::new()
+            .await
+            .map_err(|error| S3ServiceError::Internal(error.into()))?;
         let mut part_md5_hexes = Vec::with_capacity(part_numbers.len());
-
         for &part_number in part_numbers {
-            let part_data = self.read_part(bucket, upload_id, part_number).await?;
-            let md5_hex = checksums::compute_md5(&part_data);
-            part_md5_hexes.push(md5_hex);
-            combined.extend_from_slice(&part_data);
+            let entry = self
+                .parts
+                .get(&(bucket.to_owned(), upload_id.to_owned(), part_number))
+                .ok_or(S3ServiceError::InvalidPart)?;
+            part_md5_hexes.push(entry.value().append_to(&mut writer).await?);
         }
-
-        let combined_bytes = combined.freeze();
-        let size = combined_bytes.len() as u64;
+        let upload = Arc::new(
+            writer
+                .finish()
+                .await
+                .map_err(|error| S3ServiceError::Internal(error.into()))?,
+        );
+        let size = upload.size();
 
         // Compute composite ETag: MD5-of-concatenated-MD5s with part count suffix.
         let etag = checksums::compute_multipart_etag(&part_md5_hexes, part_numbers.len());
 
         // Store the assembled object.
-        let stored = self.store_data(combined_bytes).await?;
+        let stored = StoredData::Staged(upload);
         self.objects.insert(
             (bucket.to_owned(), key.to_owned(), version_id.to_owned()),
             stored,

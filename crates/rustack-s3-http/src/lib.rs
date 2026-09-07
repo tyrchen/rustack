@@ -59,6 +59,7 @@ pub mod request;
 pub mod response;
 pub mod router;
 pub mod service;
+mod upload;
 
 // Re-export key types for convenience.
 pub use body::S3ResponseBody;

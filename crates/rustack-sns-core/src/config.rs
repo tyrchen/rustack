@@ -1,6 +1,6 @@
 //! SNS service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// SNS service configuration.
 #[derive(Debug, Clone)]

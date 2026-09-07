@@ -1,6 +1,6 @@
 //! IAM service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// IAM service configuration.
 ///

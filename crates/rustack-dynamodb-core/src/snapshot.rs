@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{
     provider::RustackDynamoDB,
-    state::DynamoDBTable,
+    state::{DynamoDBServiceState, DynamoDBTable},
     storage::{KeySchema, StorageError, TableStorage},
 };
 
@@ -96,6 +96,7 @@ impl RustackDynamoDB {
     /// Export DynamoDB tables and items into a snapshot.
     #[must_use]
     pub fn export_snapshot(&self) -> DynamoDBSnapshot {
+        let _operation = self.operation_gate.lock();
         let tables = self
             .state
             .snapshot_tables()
@@ -131,8 +132,8 @@ impl RustackDynamoDB {
     ///
     /// Returns an error if a stored item cannot be restored into its table.
     pub fn import_snapshot(&self, snapshot: DynamoDBSnapshot) -> Result<(), DynamoDBSnapshotError> {
-        self.reset();
-
+        let _operation = self.operation_gate.lock();
+        let replacement = DynamoDBServiceState::new();
         for table_snapshot in snapshot.tables {
             let table_name = table_snapshot.name.clone();
             let storage = TableStorage::new(table_snapshot.key_schema.clone());
@@ -168,7 +169,7 @@ impl RustackDynamoDB {
                 storage,
             };
 
-            self.state.create_table(table).map_err(|source| {
+            replacement.create_table(table).map_err(|source| {
                 DynamoDBSnapshotError::RestoreTable {
                     table: table_name,
                     source: Box::new(source),
@@ -176,6 +177,8 @@ impl RustackDynamoDB {
             })?;
         }
 
+        self.state.replace_from(replacement);
+        self.tokens.clear();
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 //! Secrets Manager service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// Secrets Manager service configuration.
 #[derive(Debug, Clone)]

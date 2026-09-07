@@ -45,13 +45,28 @@ pub struct RustackApiGatewayV2 {
 )]
 impl RustackApiGatewayV2 {
     /// Create a new provider with the given configuration.
-    #[must_use]
-    pub fn new(config: ApiGatewayV2Config) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns an error if the explicitly isolated upstream client cannot be built.
+    pub fn new(config: ApiGatewayV2Config) -> Result<Self, ApiGatewayV2ServiceError> {
+        let http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(
+                rustack_core::settings::budgets().body_total_seconds.min(30),
+            ))
+            .build()
+            .map_err(|e| {
+                ApiGatewayV2ServiceError::Internal(format!(
+                    "Failed to build HTTP proxy client: {e}"
+                ))
+            })?;
+        Ok(Self {
             store: ApiStore::new(),
             config: Arc::new(config),
-            http_client: reqwest::Client::new(),
-        }
+            http_client,
+        })
     }
 
     /// Returns a reference to the API store.

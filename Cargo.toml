@@ -113,11 +113,15 @@ http = "1.4"
 http-body = "1.0"
 http-body-util = "0.1"
 
+# Validated runtime configuration (YAML only).
+config = { version = "0.15.25", default-features = false, features = ["yaml"] }
+url = "2.5.8"
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ciborium = "0.2"
-quick-xml = "0.39"
+quick-xml = "0.41"
 zstd = { version = "0.13.3", default-features = false }
 
 # Error handling

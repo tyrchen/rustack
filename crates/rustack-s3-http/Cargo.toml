@@ -11,6 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+rustack-core = { workspace = true }
+rustack-s3-core = { workspace = true }
 rustack-s3-model = { workspace = true }
 rustack-auth = { workspace = true }
 rustack-s3-xml = { workspace = true }

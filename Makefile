@@ -20,7 +20,7 @@ deny:
 	@cargo deny check
 
 run:
-	@cargo run -p rustack
+	@cargo run -p rustack-cli --bin rustack
 
 release:
 	@cargo release tag --execute

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::manual_let_else)]
 #![allow(clippy::too_many_lines)]

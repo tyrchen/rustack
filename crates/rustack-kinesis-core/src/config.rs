@@ -1,6 +1,6 @@
 //! Kinesis service configuration.
 
-use std::env;
+use rustack_core::settings as env;
 
 /// Kinesis service configuration.
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 # Rustack
 
-A high-performance, LocalStack-compatible AWS service emulator written in Rust. **18 services, 779 routed operations, <1s startup, ~8 MB Docker image.**
+A local AWS service emulator written in Rust, with **18 service adapters**. Routed operation counts describe API surface—not full AWS semantics, authorization enforcement, execution support, or persistence. See the [capability and safety guide](docs/runtime-hardening.md) before choosing a test workload.
 
 ## Install
 
@@ -12,13 +12,13 @@ cargo install rustack-cli
 cargo install --git https://github.com/tyrchen/rustack rustack-cli
 
 # Or use Docker
-docker run -p 4566:4566 ghcr.io/tyrchen/rustack:latest
+docker run --rm -p 127.0.0.1:4566:4566 ghcr.io/tyrchen/rustack:latest
 ```
 
 ## Quick Start
 
 ```bash
-# Start the server (all 18 services on port 4566)
+# Start the server on loopback:4566 (all compiled services; Lambda execution disabled)
 rustack
 
 # Or start with specific services only
@@ -42,10 +42,12 @@ services:
   rustack:
     image: ghcr.io/tyrchen/rustack:latest
     ports:
-      - "4566:4566"
+      - "127.0.0.1:4566:4566"
     environment:
       - SERVICES=s3,dynamodb,sqs,lambda
       - LOG_LEVEL=info
+      - GATEWAY_LISTEN=0.0.0.0:4566
+      - RUSTACK_ADVERTISED_ENDPOINT=http://rustack:4566
 
   app:
     build: .
@@ -60,21 +62,17 @@ services:
 
 ## Why Rustack?
 
-| | Rustack | LocalStack |
-|---|---|---|
-| **Language** | Rust (static binary) | Python |
-| **Docker image** | ~8 MB (scratch) | ~475 MB / ~1.88 GB on disk |
-| **Startup time** | < 1 second | 10-45s (S3 only); up to 2 min (all) |
-| **Memory (idle)** | ~10 MB | ~750 MB minimum |
-| **Services** | 18 | 80+ |
-| **Operations** | 600+ | More per service, but behind paywall |
-| **CI cold start** | Pull + ready in ~3s | Pull + ready in 30-90s |
-| **Auth** | SigV4 + SigV2 + presigned URLs | SigV4 (Pro for IAM enforcement) |
-| **License** | MIT, fully open source | Registration-required; free tier limited |
+- A single Rust binary for local SDK, CLI and infrastructure tests.
+- Select services at build time and startup; inspect live readiness and capabilities.
+- MIT licensed. Local emulation deliberately omits production IAM enforcement and isolation.
 
-## Supported Services
+Startup time, memory and image size depend on build features, workload, platform and snapshot size; historical measurements are not guarantees for this revision.
 
-| Service | Operations | Protocol |
+## Service API Surface
+
+The counts below describe routed operations. **Metadata CRUD is not evidence that execution, delivery, policy enforcement or restart persistence is implemented.** Use the [capability and safety guide](docs/runtime-hardening.md) and `GET /_rustack/capabilities` for those boundaries.
+
+| Service | Routed operations | Protocol |
 |---------|-----------|----------|
 | **S3** | 71 | REST XML |
 | **DynamoDB** | 24 | awsJson 1.0 |
@@ -284,11 +282,14 @@ DescribeStream, GetShardIterator, GetRecords, ListStreams
 
 ## Configuration
 
-All settings are controlled via environment variables:
+Set `RUSTACK_CONFIG` to a YAML file; environment values override the corresponding YAML environment entries. Unknown YAML keys, invalid values, unknown/uncompiled services, and strict signature validation without credentials fail startup. See [the complete configuration and migration guide](docs/runtime-hardening.md).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address and port |
+| `GATEWAY_LISTEN` | `127.0.0.1:4566` | Bind address and port; container image explicitly binds `0.0.0.0` |
+| `RUSTACK_CONFIG` | *(unset)* | YAML configuration file |
+| `RUSTACK_ADVERTISED_ENDPOINT` | *(derived from bind address)* | Public local HTTP(S) authority for generated URLs |
+| `LAMBDA_EXECUTOR` | `disabled` | Explicit `native`/`squib` selection required for execution; Docker unsupported |
 | `SERVICES` | *(empty = all)* | Comma-separated list of services to enable |
 | `LOG_LEVEL` | `info` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `RUST_LOG` | | Fine-grained tracing filter (overrides `LOG_LEVEL`) |
@@ -309,7 +310,7 @@ SERVICES=s3,dynamodb,sqs rustack
 **Compile-time** — exclude services from the binary entirely:
 
 ```bash
-cargo build -p rustack --no-default-features --features s3,dynamodb
+cargo build -p rustack-cli --bin rustack --no-default-features --features s3,dynamodb
 ```
 
 Available features: `s3`, `dynamodb`, `dynamodbstreams`, `sqs`, `ssm`, `sns`, `lambda`, `events`, `logs`, `kms`, `kinesis`, `secretsmanager`, `ses`, `apigatewayv2`, `cloudfront`, `cloudfront-dataplane`, `cloudwatch`, `iam`, `sts`
@@ -366,7 +367,7 @@ Each service follows the same three-crate pattern. The unified server binary (`r
 
 ## Development
 
-**Prerequisites:** Rust 1.93+ (pinned in `rust-toolchain.toml`)
+**Prerequisites:** the repository-selected stable Rust toolchain, plus nightly rustfmt. Use an explicit `cargo +<toolchain>` when intentionally keeping a local toolchain override; do not infer compatibility from old minimum-version claims.
 
 ```bash
 make build      # Compile all crates

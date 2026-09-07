@@ -99,10 +99,7 @@ fn all_fields_are_exists_false(fields: &[FieldMatcher]) -> bool {
 fn navigate_path<'a>(event: &'a Value, path: &[String]) -> Option<&'a Value> {
     let mut current = event;
     for segment in path {
-        match current.get(segment.as_str()) {
-            Some(next) => current = next,
-            None => return None,
-        }
+        current = current.get(segment.as_str())?;
     }
     Some(current)
 }
