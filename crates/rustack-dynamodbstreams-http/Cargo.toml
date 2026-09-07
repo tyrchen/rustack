@@ -31,4 +31,4 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 # http_body::Body trait
-http-body = "1.0"
+http-body = "1.1"

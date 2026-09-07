@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 rustack-s3-model = { workspace = true }
 quick-xml = { workspace = true }
-bytes = "1.11"
+bytes = "1.12"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2.0"
 tracing = "0.1"

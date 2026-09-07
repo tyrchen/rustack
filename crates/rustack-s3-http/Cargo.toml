@@ -17,20 +17,20 @@ rustack-s3-model = { workspace = true }
 rustack-auth = { workspace = true }
 rustack-s3-xml = { workspace = true }
 
-hyper = { version = "1.9", features = ["server", "http1", "http2"] }
+hyper = { version = "1.11", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful"] }
-http = "1.4"
-http-body = "1.0"
+http = "1.5"
+http-body = "1.1"
 http-body-util = "0.1"
-bytes = "1.11"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "signal", "sync", "io-util"] }
+bytes = "1.12"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "sync", "io-util"] }
 chrono = { version = "0.4", features = ["serde"] }
 percent-encoding = "2.3"
 tracing = "0.1"
 thiserror = "2.0"
 futures = "0.3"
 pin-project-lite = "0.2"
-uuid = { version = "1.23", features = ["v4"] }
+uuid = { version = "1.26", features = ["v4"] }
 mime = "0.3"
 sha2 = { workspace = true }
 hex = { workspace = true }
