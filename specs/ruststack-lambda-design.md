@@ -123,7 +123,7 @@ With the target operations implemented, the following tools work:
 10. **Concurrency limits** -- accept ReservedConcurrentExecutions but do not enforce throttling
 11. **SnapStart** -- accept configuration, do not implement JVM snapshot/restore
 12. **InvokeWithResponseStream** -- streaming response mode is out of scope for MVP
-13. **S3-based deployment packages** -- accept S3Bucket/S3Key parameters but do not fetch from S3. Only `ZipFile` (inline) and `ImageUri` (Docker) are functional.
+13. **S3-based deployment packages** -- support S3Bucket/S3Key code via an in-process S3 bridge (see [ruststack-lambda-s3-code-design](./ruststack-lambda-s3-code-design.md)). External S3 endpoints as code source are out of scope.
 14. **Data persistence across restarts** -- in-memory only, matching other services
 15. **Durable executions** -- new Lambda feature, out of scope
 
@@ -2731,7 +2731,7 @@ test-lambda-localstack:
 | Behavior | AWS Lambda | LocalStack | Rustack | Justification |
 |----------|-----------|------------|-----------|---------------|
 | Function state transitions | Async: Pending -> Active | Immediate Active | Immediate Active | Simpler for local dev |
-| S3 code deployment | Supported | Supported (with S3) | Not supported | Avoid cross-service dependency for MVP |
+| S3 code deployment | Supported | Supported (with S3) | Supported (with in-process S3 bridge) | Trait + app bridge keeps core crates decoupled |
 | Layers | Downloaded and mounted | Supported | Metadata only | Avoid complexity |
 | Concurrent execution limits | Enforced | Optional | Not enforced | Not needed for local dev |
 | Cold start time | 100ms-5s | Similar | Docker-dependent | Real Docker containers |

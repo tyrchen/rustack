@@ -3352,6 +3352,7 @@ name = "rustack-integration"
 version = "0.9.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-apigatewayv2",
@@ -3380,6 +3381,8 @@ dependencies = [
  "reqwest 0.13.2",
  "rustack-lambda-core",
  "rustack-lambda-model",
+ "rustack-s3-core",
+ "rustack-s3-model",
  "serde_json",
  "tempfile",
  "tokio",

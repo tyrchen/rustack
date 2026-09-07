@@ -86,15 +86,15 @@ pub struct UpdateFunctionCodeInput {
     /// Base64-encoded zip file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zip_file: Option<String>,
-    /// S3 bucket (accepted, not functional).
+    /// S3 bucket for the deployment package.
     #[serde(rename = "S3Bucket")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_bucket: Option<String>,
-    /// S3 key (accepted, not functional).
+    /// S3 key for the deployment package.
     #[serde(rename = "S3Key")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_key: Option<String>,
-    /// S3 object version (accepted, not functional).
+    /// S3 object version for the deployment package.
     #[serde(rename = "S3ObjectVersion")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_object_version: Option<String>,

@@ -43,6 +43,11 @@ mod tests {
         storage::FunctionStore,
     };
     use rustack_lambda_model::{input::CreateFunctionInput, types::FunctionCode};
+    use rustack_s3_core::{RustackS3, S3Config};
+    use rustack_s3_model::{
+        input::{CreateBucketInput, PutObjectInput},
+        request::StreamingBlob,
+    };
 
     fn workspace_root() -> PathBuf {
         let manifest = env!("CARGO_MANIFEST_DIR");
@@ -358,6 +363,124 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&resp.payload).expect("response is JSON");
         assert_eq!(v["echo"]["hello"], "world");
         assert!(!v["request_id"].as_str().unwrap().is_empty());
+
+        provider.shutdown().await;
+    }
+
+    /// Minimal in-process S3 code fetcher for the round-trip test. The full
+    /// production bridge (bucket/version resolution) lives in
+    /// `apps/rustack/src/lambda_s3_bridge.rs` and is covered by its own unit
+    /// tests; here we only need bytes out of an un-versioned test bucket.
+    #[derive(Debug)]
+    struct TestS3CodeFetcher {
+        s3: Arc<RustackS3>,
+    }
+
+    #[async_trait::async_trait]
+    impl rustack_lambda_core::code::S3CodeFetcher for TestS3CodeFetcher {
+        async fn fetch_code(
+            &self,
+            bucket: &str,
+            key: &str,
+            version: Option<&str>,
+        ) -> Result<bytes::Bytes, rustack_lambda_core::code::S3CodeFetchError> {
+            let version_id = version.unwrap_or("null");
+            self.s3
+                .storage()
+                .read_object(bucket, key, version_id, None)
+                .await
+                .map_err(|e| {
+                    rustack_lambda_core::code::S3CodeFetchError::Internal(anyhow::anyhow!("{e}"))
+                })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires native bootstrap fixture build; gate via RUSTACK_LAMBDA_NATIVE_TESTS=1"]
+    async fn test_should_invoke_function_created_with_s3_code() {
+        if skip_unless_native_tests_enabled() {
+            return;
+        }
+        crate::init_tracing();
+
+        // Upload the fixture zip into an in-process S3 provider.
+        let zip = fixture_zip();
+        let s3 = Arc::new(RustackS3::new(S3Config::default()));
+        s3.handle_create_bucket(CreateBucketInput {
+            bucket: "code-bucket".to_owned(),
+            ..Default::default()
+        })
+        .await
+        .expect("create bucket");
+        s3.handle_put_object(PutObjectInput {
+            bucket: "code-bucket".to_owned(),
+            key: "bootstrap.zip".to_owned(),
+            body: Some(StreamingBlob {
+                data: bytes::Bytes::copy_from_slice(&zip),
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("put object");
+
+        // Build a native-executor provider wired to the S3 fetcher.
+        let mut config = LambdaConfig::default();
+        config.executor = ExecutorBackend::Native;
+        config.init_timeout = Duration::from_secs(5);
+        config.idle_timeout = Duration::from_mins(1);
+        config.max_warm_instances = 1;
+        let tmp = tempfile::Builder::new()
+            .prefix("rustack-lambda-s3-code-it-")
+            .tempdir()
+            .expect("tempdir");
+        let dir = tmp.keep();
+        let store = FunctionStore::new(dir);
+        let provider = Arc::new(
+            RustackLambda::with_store(store, config)
+                .with_code_fetcher(Arc::new(TestS3CodeFetcher { s3 })),
+        );
+
+        // Create the function from S3 code — the object must be downloaded and
+        // stored as the deployment package.
+        let name = unique_name("s3-code");
+        let create_input = CreateFunctionInput {
+            function_name: name.clone(),
+            runtime: Some("provided.al2023".to_owned()),
+            role: "arn:aws:iam::000000000000:role/test-role".to_owned(),
+            handler: Some("bootstrap".to_owned()),
+            timeout: Some(5),
+            architectures: Some(vec![host_arch_label().to_owned()]),
+            code: FunctionCode {
+                s3_bucket: Some("code-bucket".to_owned()),
+                s3_key: Some("bootstrap.zip".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        provider
+            .create_function(create_input)
+            .await
+            .expect("create_function with S3 code");
+
+        // Invoke must succeed — this fails with "missing code root" before
+        // the fix.
+        let outcome = provider
+            .invoke(
+                &name,
+                None,
+                br#"{"hello":"from-s3"}"#,
+                InvokeKind::RequestResponse,
+            )
+            .await
+            .expect("invoke");
+        let resp = match outcome {
+            InvokeOutcome::Sync(r) => r,
+            other => panic!("expected Sync, got {other:?}"),
+        };
+        assert_eq!(resp.status, 200);
+        assert!(resp.function_error.is_none());
+        let v: serde_json::Value = serde_json::from_slice(&resp.payload).expect("response is JSON");
+        assert_eq!(v["echo"]["hello"], "from-s3");
 
         provider.shutdown().await;
     }

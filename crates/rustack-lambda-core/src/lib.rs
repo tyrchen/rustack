@@ -8,6 +8,7 @@
 //! - **Resolver**: Function name/ARN parsing and version resolution
 //! - **Config**: Service configuration from environment variables
 
+pub mod code;
 pub mod config;
 pub mod error;
 pub mod executor;

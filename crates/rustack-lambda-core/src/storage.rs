@@ -988,12 +988,13 @@ impl FunctionStore {
 
         let extract_to = extracted.clone();
         let bytes_owned = zip_bytes.to_vec();
-        let extract_result =
-            tokio::task::spawn_blocking(move || extract_zip(&bytes_owned, &extract_to))
-                .await
-                .map_err(|e| LambdaServiceError::Internal {
-                    message: format!("zip extraction task join error: {e}"),
-                })?;
+        let extract_result = tokio::task::spawn_blocking(move || {
+            extract_zip(&bytes_owned, &extract_to, MAX_EXTRACTED_SIZE)
+        })
+        .await
+        .map_err(|e| LambdaServiceError::Internal {
+            message: format!("zip extraction task join error: {e}"),
+        })?;
         // A non-zip blob (test stub) is tolerated; a path-traversal attempt is not.
         if let Err(err) = extract_result {
             if matches!(err, LambdaServiceError::InvalidZipFile { .. }) {
@@ -1018,20 +1019,30 @@ impl FunctionStore {
     }
 }
 
+/// Maximum extracted deployment package size (250 MB, mirroring the AWS
+/// unzipped-package limit). Bounds zip-bomb expansion during extraction.
+const MAX_EXTRACTED_SIZE: u64 = 250 * 1024 * 1024;
+
 /// Extract a zip archive into `target`, preserving unix file modes.
 ///
-/// Rejects entries whose normalized path escapes `target` (path traversal).
-/// Returns a non-`InvalidZipFile` error to signal the bytes weren't a valid
-/// archive — callers may choose to ignore that case (e.g. test stubs).
+/// Rejects entries whose normalized path escapes `target` (path traversal)
+/// and archives whose entries would expand beyond [`MAX_EXTRACTED_SIZE`]
+/// (zip bombs). Returns a non-`InvalidZipFile` error to signal the bytes
+/// weren't a valid archive — callers may choose to ignore that case (e.g.
+/// test stubs).
 ///
 /// Synchronous std::fs is intentional: this runs inside `spawn_blocking` and
 /// the `zip` crate's reader API is itself blocking, so wrapping each I/O in
 /// tokio would only add overhead.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-fn extract_zip(zip_bytes: &[u8], target: &Path) -> Result<(), LambdaServiceError> {
+fn extract_zip(
+    zip_bytes: &[u8],
+    target: &Path,
+    max_extracted: u64,
+) -> Result<(), LambdaServiceError> {
     use std::{
         fs::{self, File},
-        io::{self, Cursor, Write as _},
+        io::{self, Cursor, Read as _, Write as _},
     };
 
     let cursor = Cursor::new(zip_bytes);
@@ -1039,6 +1050,7 @@ fn extract_zip(zip_bytes: &[u8], target: &Path) -> Result<(), LambdaServiceError
         message: format!("not a valid zip archive: {e}"),
     })?;
 
+    let mut extracted_total: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -1063,6 +1075,17 @@ fn extract_zip(zip_bytes: &[u8], target: &Path) -> Result<(), LambdaServiceError
             })?;
             continue;
         }
+        // Zip-bomb guard: reject entries whose declared uncompressed size
+        // exceeds the remaining budget, and cap actual bytes copied.
+        let remaining = max_extracted.saturating_sub(extracted_total);
+        if entry.size() > remaining {
+            return Err(LambdaServiceError::InvalidZipFile {
+                message: format!(
+                    "zip archive expands beyond {max_extracted} bytes (entry: {})",
+                    entry.name(),
+                ),
+            });
+        }
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|e| LambdaServiceError::Internal {
                 message: format!("create parent {}: {e}", parent.display()),
@@ -1071,9 +1094,17 @@ fn extract_zip(zip_bytes: &[u8], target: &Path) -> Result<(), LambdaServiceError
         let mut out = File::create(&out_path).map_err(|e| LambdaServiceError::Internal {
             message: format!("create file {}: {e}", out_path.display()),
         })?;
-        io::copy(&mut entry, &mut out).map_err(|e| LambdaServiceError::Internal {
-            message: format!("write file {}: {e}", out_path.display()),
+        let copied = io::copy(&mut (&mut entry).take(remaining + 1), &mut out).map_err(|e| {
+            LambdaServiceError::Internal {
+                message: format!("write file {}: {e}", out_path.display()),
+            }
         })?;
+        extracted_total += copied;
+        if extracted_total > max_extracted {
+            return Err(LambdaServiceError::InvalidZipFile {
+                message: format!("zip archive expands beyond {max_extracted} bytes"),
+            });
+        }
         out.flush().map_err(|e| LambdaServiceError::Internal {
             message: format!("flush file {}: {e}", out_path.display()),
         })?;
@@ -1442,6 +1473,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LambdaServiceError::InvalidZipFile { .. }));
+    }
+
+    #[test]
+    fn test_should_reject_zip_that_expands_beyond_extraction_budget() {
+        use std::io::Write as _;
+
+        // A small compressed entry that declares a large uncompressed size
+        // must be rejected when it exceeds the extraction budget.
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            w.start_file("big.bin", opts).unwrap();
+            w.write_all(&vec![0u8; 1024]).unwrap();
+            w.finish().unwrap();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            extract_zip(&buf, tmp.path(), 100).expect_err("expansion beyond budget must fail");
+        assert!(
+            matches!(err, LambdaServiceError::InvalidZipFile { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_extract_zip_within_budget() {
+        use std::io::Write as _;
+
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            w.start_file("small.txt", opts).unwrap();
+            w.write_all(b"hello").unwrap();
+            w.finish().unwrap();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        extract_zip(&buf, tmp.path(), 1024).expect("within-budget zip extracts");
+        assert!(tmp.path().join("small.txt").exists());
     }
 
     // ---- Event source mapping store tests ----
