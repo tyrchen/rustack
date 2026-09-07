@@ -3,11 +3,266 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
-## [rustack-v0.6.0](https://github.com/compare/v0.5.0..rustack-v0.6.0) - 2026-03-31
+## [rustack-sts-model-v0.9.0](https://github.com/compare/v0.9.1..rustack-sts-model-v0.9.0) - 2026-09-07
+
+### Bug Fixes
+
+- **(lambda)** support S3 code packages for CreateFunction and UpdateFunctionCode (#34) (#51) - ([4418dc9](https://github.com/commit/4418dc93cc692547d798101b2b3a6d149b80cada)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- bump deps - ([032fc6b](https://github.com/commit/032fc6b914b4c57dd9ac24c2f8524819e51d3478)) - Tyr Chen
+
+---
+## [0.9.1](https://github.com/compare/v0.9.0..v0.9.1) - 2026-05-28
+
+### Other
+
+- Add Squib Lambda executor backend (#27)
+
+## Summary
+
+- Add `LAMBDA_EXECUTOR=squib` using the published `squib = "0.2.0"`
+crates.io release.
+- Add a default Rustack Squib Lambda guest image builder: Firecracker
+arm64 kernel, latest AL2023 minimal arm64 rootfs with SHA256
+verification, injected static guest agent, loopback bring-up helper,
+hypervisor entitlements, and generated Squib config under
+`target/rustack-lambda-squib`.
+- Implement the host-side Squib Lambda executor: lazy microVM startup,
+macOS Zip auto-selection, arm64 Zip validation, bounded vsock CONNECT
+retries, Zip-byte staging over vsock, staged invoke JSON, guest shutdown
+control message, and response decoding.
+- Add `tools/lambda-squib-agent`, which runs inside the guest, extracts
+uploaded Lambda Zips safely, serves the Lambda Runtime API on loopback,
+runs `bootstrap`, returns Lambda-shaped results, and powers the guest
+off on shutdown.
+- Add `make lambda-squib-image` and `make test-lambda-invoke-squib`; the
+e2e builds the demo app with `cargo lambda build --arm64 --output-format
+zip`, uploads the Zip through Rustack's normal `CreateFunction` path,
+and invokes it through `ExecutorBackend::Auto` on Squib.
+- Update the Squib runtime design spec to match the implemented AL2023
+guest/rootfs and vsock protocol.
+
+## Verification
+
+- `make test-lambda-invoke-squib` ✅ live macOS/HVF Squib e2e, `cargo
+lambda --arm64` Zip returned `{"echo":{"hello":"squib"},...}`
+- `cargo +nightly fmt --all`
+- `cargo +nightly fmt --manifest-path
+tools/lambda-squib-agent/Cargo.toml`
+- `cargo build`
+- `cargo test`
+- `cargo clippy -- -D warnings`
+- `cargo clippy --manifest-path tools/lambda-squib-agent/Cargo.toml
+--target aarch64-unknown-linux-musl -- -D warnings`
+- `cargo audit`
+- `cargo deny check`
+- `git diff --check`
+- pre-commit hook suite passed: fmt, `cargo deny`, typos, `cargo check`,
+clippy, nextest
+
+## Known Existing Check Gap
+
+- `cargo clippy -- -D warnings -W clippy::pedantic` still fails on
+pre-existing workspace-wide `clippy::doc_markdown` warnings in
+existing/generated model and auth/core crates. Baseline `cargo clippy --
+-D warnings` is clean for this PR. - ([ab8bc61](https://github.com/commit/ab8bc61a3e45058c7d42de8443f9d215cc110b18)) - Tyr Chen
+
+---
+## [0.9.0](https://github.com/compare/v0.8.0..v0.9.0) - 2026-05-27
+
+### Documentation
+
+- refresh README for v0.8.0 - ([e5d52a4](https://github.com/commit/e5d52a485608ece91fcd752597a2ef6cf01dc846)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- **(deps)** bump tmp from 0.2.5 to 0.2.6 in /examples/pulumi/rustack-target (#26) - ([1e17a22](https://github.com/commit/1e17a22e1ce64567cd6f39649c3edd0a9c4e18f9)) - dependabot[bot]
+- update agents / skills - ([2718545](https://github.com/commit/2718545d0d3060dcc970d8479f20801406f53033)) - Tyr Chen
+- update smoke test script - ([86e5ed0](https://github.com/commit/86e5ed094ad91f049505be3d5bed273f1b70976e)) - Tyr Chen
+
+### Other
+
+- Add runtime snapshot support (#25)
+
+## Summary
+- replace the initial JSON snapshot shape with v2 binary `*.ss.zst`
+archives: `manifest.ss.zst`, per-service `services/<name>/meta.ss.zst`,
+and optional per-service `services/<name>/data.ss.zst`
+- add the service snapshot abstraction and bounded-parallel runtime
+save/load path, with CBOR metadata, zstd compression, CRC checks, path
+validation, and atomic directory replacement
+- persist hackathon-app state across S3 data, DynamoDB data, SQS, SSM,
+IAM, Lambda, API Gateway V2, CloudFront, and DynamoDB Streams resources
+- add a real CloudFront data-plane response cache and snapshot it as
+`services/cloudfront-cache/{meta,data}.ss.zst`
+- add specs for the binary snapshot design plus hackathon and commerce
+Pulumi snapshot smoke/perf targets
+- add `examples/pulumi/commerce-platform-app`, a larger 223-resource
+fixture with S3/DynamoDB/SQS/SSM/IAM/Lambda/API Gateway/CloudFront
+coverage and CDN cache warm/restore verification
+- remove the old AWS SDK legacy `rustls 0.21` feature path from test/dev
+dependencies so `cargo deny`/`cargo audit` pass with current RustSec
+advisories
+
+## Verification
+- `npm install` and `npm run typecheck` in
+`examples/pulumi/commerce-platform-app`
+- `make -n pulumi-commerce-snapshot-smoke`
+- `CARGO_INCREMENTAL=0 cargo check -p rustack-cloudfront-dataplane`
+- `CARGO_INCREMENTAL=0 cargo check -p rustack-cli`
+- `cargo +nightly fmt --check`
+- `git diff --check`
+- `bash -n scripts/pulumi-rustack-smoke.sh`
+- `CARGO_INCREMENTAL=0 cargo test -p rustack-cloudfront-dataplane --lib`
+- `CARGO_INCREMENTAL=0 cargo test -p rustack-cli snapshot`
+- `CARGO_INCREMENTAL=0 make pulumi-commerce-snapshot-smoke`
+- `CARGO_INCREMENTAL=0 cargo clippy -p rustack-cloudfront-dataplane -p
+rustack-cli --all-targets --no-deps -- -D warnings -W clippy::pedantic
+-A clippy::doc_markdown -A clippy::missing_errors_doc`
+- `CARGO_INCREMENTAL=0 cargo build --workspace`
+- `CARGO_INCREMENTAL=0 cargo test --workspace --all-targets`
+- `cargo deny check`
+- `cargo audit`
+- `make pulumi-hackathon-snapshot-smoke`
+
+## Hackathon Snapshot Perf
+- final command: `make pulumi-hackathon-snapshot-smoke`
+- internal save/load: `save_ms=4`, `load_ms=5`
+- diagnostic wall/readiness: `save_wall_ms=107`, `load_ready_ms=434`
+- archive sizes: `manifest_bytes=459`, `meta_bytes=10554`,
+`data_bytes=397`
+- correctness: Pulumi refresh reported `26 unchanged`; smoke verified
+the S3 frontend object and a DynamoDB item written before restart after
+snapshot load
+
+## Commerce Snapshot Perf
+- final command: `make pulumi-commerce-snapshot-smoke`
+- result: `resources=223 s3_runtime_objects=320 ddb_runtime_items=480
+cdn_warm_requests=80 save_ms=84 save_wall_ms=157 load_ms=103
+load_ready_ms=451 manifest_bytes=521 meta_bytes=69418 data_bytes=7929`
+- correctness: Pulumi refresh succeeded; smoke verified runtime S3 data,
+runtime DynamoDB data, and a restored first-request CloudFront cache hit
+after snapshot load
+
+## Notes
+- Pre-commit `cargo-test` was skipped during the final commit because
+its `cargo nextest run --all-features --workspace --exclude
+rustack-integration -- --include-ignored` wrapper spawned long-running
+ignored/native-test coverage during commit. The equivalent manual gates
+above, including full workspace tests and commerce e2e/perf smoke,
+passed. - ([21a4cbf](https://github.com/commit/21a4cbf9df309ff293ddf03a63bbcf2daf6be29e)) - Tyr Chen
+
+---
+## [0.8.0](https://github.com/compare/v0.7.2..v0.8.0) - 2026-05-26
+
+### Bug Fixes
+
+- **(sqs)** long-poll wakeup race + DashMap guard held across await (#20) - ([b18763e](https://github.com/commit/b18763e34c0b7d796917c2950943368d487b24ec)) - Toly
+- **(sqs)** harden long-poll wakeups and queue registry (#23) - ([379791c](https://github.com/commit/379791ccd2c47a47a06845ae59203311be59358a)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- **(sqs)** bump fixed SQS core release - ([6372cc0](https://github.com/commit/6372cc0fc3060e13711034bb7e11551835d18b85)) - Tyr Chen
+- bump workspace to v0.8.0 - ([f154aef](https://github.com/commit/f154aef870ec69b61fcc4445700d40b9c2479a93)) - Tyr Chen
+
+### Other
+
+- Add Pulumi target service coverage (#24)
+
+## Summary
+- Add a detailed Pulumi target design spec under `specs/` and update
+Pulumi user docs
+- Expand the TypeScript Pulumi AWS provider smoke project to provision
+representative resources across the current Rustack service set
+- Add a real-world hackathon serverless Pulumi stack covering CloudFront
+-> S3/API Gateway/Lambda/DynamoDB/S3/SQS/SSM and async image processing
+- Fix Pulumi/Terraform AWS provider compatibility gaps in SSM, SNS, S3,
+DynamoDB, Lambda, CloudFront, and local SQS queue URL generation
+- Keep `make pulumi-smoke`, `make pulumi-hackathon-smoke`, the local
+smoke runner, and the PR workflow as executable compatibility contracts
+
+## Covered services
+- API Gateway V2, CloudFront, CloudWatch, CloudWatch Logs, DynamoDB,
+DynamoDB Streams, EventBridge, IAM, Kinesis, KMS, Lambda, S3, Secrets
+Manager, SES, SNS, SQS, SSM, and STS
+
+## Additional hackathon stack coverage
+- `aws.apigatewayv2.Integration`, `aws.apigatewayv2.Route`
+- `aws.cloudfront.Distribution`, `aws.cloudfront.OriginAccessControl`
+- `aws.iam.RolePolicy`
+- `aws.lambda.EventSourceMapping`, `aws.lambda.Permission`
+- `aws.s3.BucketPolicy`
+- SSM `SecureString` parameter for protected-route token material
+
+## Validation
+- `npm run typecheck` in `examples/pulumi/rustack-target`
+- `npm run typecheck` in `examples/pulumi/hackathon-app`
+- `cargo fmt --all` (stable rustfmt reports existing nightly-only
+rustfmt option warnings)
+- `cargo test -p rustack-sqs-core`
+- `cargo clippy -p rustack-s3-model --all-targets -- -D warnings`
+- `cargo check --workspace --all-targets`
+- Targeted unit tests for SSM/SNS/S3/DynamoDB/Lambda/CloudFront
+compatibility fixes
+- `RUSTACK_ENDPOINT=http://127.0.0.1:4567
+PULUMI_STACK=rustack-smoke-final make pulumi-smoke`
+- `RUSTACK_ENDPOINT=http://127.0.0.1:4567
+PULUMI_STACK=rustack-hackathon-final make pulumi-hackathon-smoke`
+- `git diff --check`
+
+Note: local port 4566 was already occupied by another Rustack process,
+so the final smoke runs used 4567. The smoke runner can now auto-start
+Rustack on any local `http://127.0.0.1:<port>` endpoint.
+
+Note: `git commit` pre-commit hooks currently fail on pre-existing
+typos/format suggestions outside this change, so the latest commit was
+created with `--no-verify` after the checks above passed. - ([f755af2](https://github.com/commit/f755af2beefdac7fa8822997a688d2247435e00f)) - Tyr Chen
+
+---
+## [0.7.2](https://github.com/compare/v0.7.0..v0.7.2) - 2026-04-24
+
+### Bug Fixes
+
+- **(ci)** S3 FULL_OBJECT multipart checksum and Alternator test collection - ([8859e7a](https://github.com/commit/8859e7ace8b8a0341b6b04790d494b44ccff19a3)) - Tyr Chen
+
+### Features
+
+- **(cli)** add --help/-h and --version/-v flags, bump rustack-cli to 0.7.1 - ([a82b010](https://github.com/commit/a82b0105b17025ba3c745df263fc319fd12ab760)) - Tyr Chen
+- **(lambda)** real Invoke via in-process Lambda Runtime API + native process backend - ([90fe347](https://github.com/commit/90fe347a228f7b74163867ff971479c0b32b0613)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- **(deps)** bump rand 0.10, hmac 0.13, digest 0.11 (#21) - ([970ae13](https://github.com/commit/970ae13fdee282b3b338f16bec5a04585f72c240)) - Tyr Chen
+- **(lambda)** bump rustack-lambda-core to 0.7.1 - ([dfd4e77](https://github.com/commit/dfd4e779fce02a568c35d6ede922b187bccef633)) - Tyr Chen
+
+---
+## [0.7.0](https://github.com/compare/v0.6.0..v0.7.0) - 2026-04-19
+
+### Bug Fixes
+
+- add missing description to rustack-s3-model for crates.io publishing - ([fd6cb40](https://github.com/commit/fd6cb40a84071ba08d4d56e12e21ff4e3af02b0c)) - Tyr Chen
+
+### Features
+
+- **(cloudfront)** full CloudFront management plane + minimal pass-through data plane (#19) - ([062ed1b](https://github.com/commit/062ed1b4469711fe8743735ffb43e7132115c766)) - Tyr Chen
+- rename app crate to rustack-cli to avoid crates.io name conflict - ([84fb832](https://github.com/commit/84fb83248095e40a6d984bb5befa67d283af717f)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- bump workspace to v0.7.0 - ([170c5ad](https://github.com/commit/170c5ad8e5100e312570dbd6806c9b995532ab8c)) - Tyr Chen
+
+---
+## [0.6.0](https://github.com/compare/v0.5.0..v0.6.0) - 2026-03-31
 
 ### Features
 
 - rename ruststack → rustack, bump to v0.6.0 (#17) - ([46b7397](https://github.com/commit/46b7397c675a2d19902cc6aea31a3405c237c79d)) - Tyr Chen
+
+### Other
+
+- Update CHANGELOG.md - ([68303aa](https://github.com/commit/68303aa4f64d25b0add2e944c7e20b3c84aaee18)) - Tyr Chen
 
 ---
 ## [0.5.0](https://github.com/compare/v0.4.3..v0.5.0) - 2026-03-26
@@ -96,14 +351,7 @@ All notable changes to this project will be documented in this file. See [conven
 - gate Docker release on build workflow success - ([b2eb5c6](https://github.com/commit/b2eb5c6ed3ffc2c1fd6f75e5c21e4b93fb126b77)) - Tyr Chen
 
 ---
-## [0.4.0](https://github.com/compare/v0..v0.4.0) - 2026-03-09
-
-### Miscellaneous Chores
-
-- bump Dockerfile base image to rust:1.93-slim - ([d2f7dd7](https://github.com/commit/d2f7dd76a9a9e5125241055519488bdf7b6df990)) - Tyr Chen
-
----
-## [0](https://github.com/compare/v0.3.1..v0) - 2026-03-08
+## [0.4.0](https://github.com/compare/v0.3.1..v0.4.0) - 2026-03-09
 
 ### Bug Fixes
 
@@ -112,6 +360,10 @@ All notable changes to this project will be documented in this file. See [conven
 ### Features
 
 - add GSI (Global Secondary Index) query support for DynamoDB - ([4c7b252](https://github.com/commit/4c7b252d8b748c260c0d6776e998159efdbf8e3f)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- bump Dockerfile base image to rust:1.93-slim - ([d2f7dd7](https://github.com/commit/d2f7dd76a9a9e5125241055519488bdf7b6df990)) - Tyr Chen
 
 ---
 ## [0.3.1](https://github.com/compare/v0.3.0..v0.3.1) - 2026-03-08
