@@ -470,10 +470,8 @@ mod tests {
         let date = now.format("%Y%m%d").to_string();
 
         let credential = format!("{TEST_ACCESS_KEY}/{date}/us-east-1/s3/aws4_request");
-        let encoded_credential = percent_encoding::utf8_percent_encode(
-            &credential,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_credential =
+            percent_encoding::utf8_percent_encode(&credential, percent_encoding::NON_ALPHANUMERIC);
 
         // Raw value on the wire, as a client like Transmit 5 would send it.
         let query_without_sig = format!(

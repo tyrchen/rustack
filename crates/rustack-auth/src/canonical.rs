@@ -199,10 +199,7 @@ pub fn build_canonical_query_string_normalized(query: &str) -> String {
             // being double-encoded, then re-encode per the SigV4 rules.
             let decoded_name = percent_decode_str(name).decode_utf8_lossy();
             let decoded_value = percent_decode_str(value).decode_utf8_lossy();
-            (
-                sigv4_encode(&decoded_name),
-                sigv4_encode(&decoded_value),
-            )
+            (sigv4_encode(&decoded_name), sigv4_encode(&decoded_value))
         })
         .collect();
 

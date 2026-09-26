@@ -833,8 +833,9 @@ mod tests {
         );
 
         let auth_value = format!(
-            "AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,\
-             SignedHeaders=host;x-amz-date,Signature={signature}"
+            "AWS4-HMAC-SHA256 \
+             Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;\
+             x-amz-date,Signature={signature}"
         );
         let uri = format!("http://examplebucket.s3.amazonaws.com/bucket-1?{wire_query}");
         let (parts, _body) = http::Request::builder()
@@ -884,8 +885,9 @@ mod tests {
         );
 
         let auth_value = format!(
-            "AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,\
-             SignedHeaders=host;x-amz-date,Signature={signature}"
+            "AWS4-HMAC-SHA256 \
+             Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;\
+             x-amz-date,Signature={signature}"
         );
         let uri = format!("http://examplebucket.s3.amazonaws.com/bucket-1?{wire_query}");
         let (parts, _body) = http::Request::builder()
