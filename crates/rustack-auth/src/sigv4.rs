@@ -331,11 +331,17 @@ fn verify_sigv4_with_policy(
     // Passing the normalized string through `build_canonical_request` is safe:
     // it is already sorted and contains no raw `&`/`=`, so the raw sorting pass
     // is a no-op.
+    // The fallback is skipped when the wire query contains a raw `+`: it is
+    // the one byte whose meaning downstream decoders disagree on (S3 decodes
+    // a literal plus, API Gateway / Lambda decode a space), so no single
+    // normalized form is safe for every service. Reject the ambiguous
+    // representation instead of guessing (the raw attempt above already
+    // failed, so fall through to the signature mismatch below).
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
-    let normalized_matches =
-        build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
+    let normalized_matches = !query.contains('+')
+        && build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
             normalized != build_canonical_query_string(query) && signature_matches(&normalized)
         });
     if normalized_matches {
@@ -907,17 +913,12 @@ mod tests {
     #[test]
     fn test_should_reject_plus_sign_tampering_in_normalized_query() {
         // A request signed for `x=%2B` (a literal plus) must not verify when
-        // the wire query is tampered to `x=+`. Normalization decodes `+` as a
-        // space — matching the downstream API Gateway / Lambda form decoding —
-        // so the tampered query normalizes to `x=%20` and the original
-        // signature no longer matches.
+        // the wire query is tampered to `x=+`. The raw attempt fails (bytes
+        // differ) and the normalized fallback is skipped for queries with a
+        // raw `+`, because downstream decoders disagree on its meaning (S3:
+        // literal plus; API Gateway / Lambda: space).
         let provider = test_credential_provider();
         let empty_hash = hash_payload(b"");
-
-        assert_ne!(
-            build_canonical_query_string_normalized("x=+").unwrap(),
-            "x=%2B"
-        );
 
         let parts = build_normalized_fallback_request_parts("x=%2B", "x=+");
         let result = verify_sigv4(&parts, &empty_hash, &provider);
@@ -925,16 +926,33 @@ mod tests {
     }
 
     #[test]
-    fn test_should_verify_form_encoded_space_via_normalized_query() {
-        // A form-style client sends `x=a+b` (meaning `a b`) while signing the
-        // SigV4-normalized `x=a%20b`. The normalized fallback accepts it,
-        // since downstream decoders treat `+` as a space.
+    fn test_should_reject_inverse_plus_sign_tampering_in_normalized_query() {
+        // The inverse collision: a request signed for `x=%20` (a space) must
+        // not verify when the wire query is tampered to `x=+`. S3's downstream
+        // decoder keeps the literal plus, so accepting the original signature
+        // would authenticate a different effective parameter value.
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+
+        let parts = build_normalized_fallback_request_parts("x=%20", "x=+");
+        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
+    }
+
+    #[test]
+    fn test_should_reject_ambiguous_raw_plus_in_normalized_fallback() {
+        // A form-style client sending `x=a+b` (meaning `a b` downstream of
+        // API Gateway / Lambda) while signing the normalized `x=a%20b` is
+        // rejected: the same wire bytes mean a literal plus downstream of S3,
+        // so the fallback cannot pick a canonical form that is safe for every
+        // service. Per the SigV4 spec `+` must be percent-encoded in the
+        // canonical query string, so spec-compliant signers are unaffected.
         let provider = test_credential_provider();
         let empty_hash = hash_payload(b"");
 
         let parts = build_normalized_fallback_request_parts("x=a%20b", "x=a+b");
         let result = verify_sigv4(&parts, &empty_hash, &provider);
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }
 
     #[test]

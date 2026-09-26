@@ -176,13 +176,13 @@ pub fn build_canonical_query_string(query: &str) -> String {
 /// encoding of U+FFFD, `%EF%BF%BD`) to the same normalized string, creating
 /// signature collisions where tampered parameters still verify.
 ///
-/// A literal `+` is decoded as a space, matching the
-/// `application/x-www-form-urlencoded` semantics used by downstream consumers
-/// (API Gateway and Lambda handlers): `%2B` stays a plus while a raw `+`
-/// becomes `%20` after re-encoding, so the two can never normalize to the
-/// same canonical string. Without this, a captured request signed for
-/// `x=%2B` could be tampered to `x=+` and still verify, while downstream
-/// decodes a different (space) value.
+/// A literal `+` is treated as a literal plus (re-encoded as `%2B`), per the
+/// SigV4 encoding rules. Note that downstream decoders disagree on the
+/// meaning of a raw `+` (S3 decodes a literal plus, API Gateway and Lambda
+/// decode a space), so verification callers must NOT attempt the normalized
+/// fallback when the wire query contains a raw `+`: no single normalized
+/// form is safe for every service. The raw-preserving first attempt is
+/// unaffected — only the ambiguous fallback is skipped.
 ///
 /// # Examples
 ///
@@ -240,18 +240,16 @@ pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, Au
 /// Percent-decode one query parameter name or value for normalization, then
 /// re-encode it per the SigV4 rules.
 ///
-/// A literal `+` is translated to a space first, matching the
-/// `application/x-www-form-urlencoded` decoding used by downstream consumers
-/// (API Gateway and Lambda handlers). Without this, `%2B` and a raw `+`
-/// would normalize to the same string, letting a tampered query verify with
-/// the original signature while downstream decodes a different value.
+/// A literal `+` is treated as a literal plus (re-encoded as `%2B`). This is
+/// only unambiguous because verification callers skip the normalized fallback
+/// when the wire query contains a raw `+` — downstream decoders disagree on
+/// its meaning (S3: literal plus; API Gateway / Lambda: space), so no single
+/// normalized form is safe. See [`build_canonical_query_string_normalized`].
 ///
 /// Decoding is strict UTF-8: invalid sequences are rejected with
-/// [`AuthError::InvalidQueryString`] instead of being lossily replaced (see
-/// [`build_canonical_query_string_normalized`]).
+/// [`AuthError::InvalidQueryString`] instead of being lossily replaced.
 fn decode_query_component(component: &str) -> Result<String, AuthError> {
-    let with_form_spaces = component.replace('+', " ");
-    let decoded = percent_decode_str(&with_form_spaces)
+    let decoded = percent_decode_str(component)
         .decode_utf8()
         .map_err(|_| AuthError::InvalidQueryString)?;
     Ok(sigv4_encode(&decoded))
@@ -586,23 +584,19 @@ mod tests {
     }
 
     #[test]
-    fn test_should_decode_plus_as_space_in_normalized_query() {
-        // Downstream consumers (API Gateway / Lambda handlers) decode `+` as a
-        // space, so normalization must do the same: `%2B` (a literal plus) and
-        // a raw `+` must not collapse to the same canonical string, otherwise
-        // a tampered `x=+` would verify with a signature made for `x=%2B`.
+    fn test_should_encode_raw_plus_as_literal_plus_in_normalized_query() {
+        // The pure normalization treats `+` as a literal plus per the SigV4
+        // encoding rules. This is only safe because the verification callers
+        // skip the normalized fallback when the wire query contains a raw
+        // `+` — downstream decoders disagree on its meaning (S3: literal
+        // plus; API Gateway / Lambda: space), so the fallback must not guess.
         assert_eq!(
-            build_canonical_query_string_normalized("x=%2B").unwrap(),
+            build_canonical_query_string_normalized("x=+").unwrap(),
             "x=%2B"
         );
         assert_eq!(
-            build_canonical_query_string_normalized("x=+").unwrap(),
-            "x=%20"
-        );
-        // Same for parameter names.
-        assert_eq!(
-            build_canonical_query_string_normalized("a+b=c").unwrap(),
-            "a%20b=c"
+            build_canonical_query_string_normalized("x=%2B").unwrap(),
+            "x=%2B"
         );
     }
 

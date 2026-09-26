@@ -208,11 +208,18 @@ pub fn verify_presigned(
     // Second attempt: SigV4-normalized query string (percent-decode, then
     // re-encode per spec, excluding `X-Amz-Signature`). This matches
     // spec-compliant clients that sign the encoded form.
+    // The fallback is skipped when the wire query contains a raw `+`: it is
+    // the one byte whose meaning downstream decoders disagree on (S3 decodes
+    // a literal plus, API Gateway / Lambda decode a space), so no single
+    // normalized form is safe for every service. Reject the ambiguous
+    // representation instead of guessing.
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
-    let normalized_matches = build_canonical_query_string_without_signature_normalized(query)
-        .is_ok_and(|normalized| normalized != canonical_query && signature_matches(&normalized));
+    let normalized_matches = !query.contains('+')
+        && build_canonical_query_string_without_signature_normalized(query).is_ok_and(
+            |normalized| normalized != canonical_query && signature_matches(&normalized),
+        );
     if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded (normalized query string)");
         return Ok(AuthResult {
@@ -559,6 +566,60 @@ mod tests {
 
         // Tamper: `%2B` becomes a raw `+` on the wire.
         let tampered_query = query_without_sig.replace("x=%2B", "x=+");
+        let full_query = format!("{tampered_query}&X-Amz-Signature={signature}");
+        let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{full_query}");
+
+        let (parts, _body) = http::Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("host", "examplebucket.s3.amazonaws.com")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let result = verify_presigned(&parts, &provider);
+        assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
+    }
+
+    #[test]
+    fn test_should_reject_inverse_plus_sign_tampering_in_presigned_url() {
+        // The inverse collision through the presigned-URL path: signed
+        // `x=%20` (a space), tampered to `x=+` on the wire. S3's downstream
+        // decoder keeps the literal plus, so the original signature must not
+        // verify the tampered URL.
+        let provider = test_credential_provider();
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = now.format("%Y%m%d").to_string();
+
+        let credential = format!("{TEST_ACCESS_KEY}/{date}/us-east-1/s3/aws4_request");
+        let encoded_credential =
+            percent_encoding::utf8_percent_encode(&credential, percent_encoding::NON_ALPHANUMERIC);
+
+        let query_without_sig = format!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={encoded_credential}&\
+             X-Amz-Date={timestamp}&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&x=%20"
+        );
+
+        // Sign the normalized canonical query string.
+        let canonical_query =
+            build_canonical_query_string_without_signature_normalized(&query_without_sig).unwrap();
+        assert!(canonical_query.contains("x=%20"));
+
+        #[rustfmt::skip]
+        let canonical_request = format!(
+            "GET\n/test.txt\n{canonical_query}\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
+        );
+
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
+        let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
+
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
+        let signature = compute_signature(&signing_key, &string_to_sign);
+
+        // Tamper: `%20` becomes a raw `+` on the wire.
+        let tampered_query = query_without_sig.replace("x=%20", "x=+");
         let full_query = format!("{tampered_query}&X-Amz-Signature={signature}");
         let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{full_query}");
 
