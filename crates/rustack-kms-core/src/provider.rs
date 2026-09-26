@@ -30,7 +30,7 @@ use rustack_kms_model::{
     },
     types::{
         AliasListEntry, DataKeySpec, EncryptionAlgorithmSpec, GrantListEntry, KeyListEntry,
-        KeyManagerType, KeyMetadata, KeySpec, KeyState, KeyUsageType, OriginType, Tag,
+        KeyManagerType, KeyMetadata, KeySpec, KeyState, KeyUsageType, MessageType, OriginType, Tag,
     },
 };
 
@@ -700,6 +700,8 @@ impl RustackKms {
                 private_key_der,
                 &input.message,
                 &input.signing_algorithm,
+                // AWS defaults to RAW when MessageType is not specified.
+                &input.message_type.clone().unwrap_or(MessageType::Raw),
             )?,
             _ => {
                 return Err(KmsError::with_message(
@@ -735,6 +737,8 @@ impl RustackKms {
                 &input.message,
                 &input.signature,
                 &input.signing_algorithm,
+                // AWS defaults to RAW when MessageType is not specified.
+                &input.message_type.clone().unwrap_or(MessageType::Raw),
             )?,
             _ => {
                 return Err(KmsError::with_message(
