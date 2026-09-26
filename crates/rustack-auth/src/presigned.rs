@@ -12,9 +12,10 @@
 //!
 //! For presigned URLs, the payload hash is always `UNSIGNED-PAYLOAD`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{NaiveDateTime, Utc};
+use percent_encoding::percent_decode_str;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tracing::debug;
@@ -23,7 +24,6 @@ use crate::{
     canonical::{
         build_canonical_headers, build_canonical_query_string,
         build_canonical_query_string_normalized, build_canonical_uri, build_signed_headers_string,
-        service_supports_normalized_fallback,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -58,20 +58,42 @@ pub struct ParsedPresignedParams {
 
 /// Parse presigned URL query parameters into their components.
 ///
+/// `X-Amz-*` authentication parameter names must appear literally and exactly
+/// once. The normalized fallback verifies the percent-decoded form of the
+/// query, so an authentication parameter smuggled in under an encoded alias
+/// (e.g. `%58-Amz-Expires` for `X-Amz-Expires`) or repeated would verify
+/// under one effective value while a different one is extracted here —
+/// silently changing e.g. the effective expiry. Rejecting them keeps the
+/// extracted parameters identical to what the signature was verified against.
+///
 /// # Errors
 ///
 /// Returns [`AuthError::MissingQueryParam`] if any required parameter is absent,
+/// [`AuthError::InvalidAuthParam`] if an `X-Amz-*` authentication parameter is
+/// duplicated or percent-encoded instead of literal,
 /// [`AuthError::UnsupportedAlgorithm`] if the algorithm is not `AWS4-HMAC-SHA256`,
 /// or [`AuthError::InvalidCredential`] if the credential format is invalid.
 pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, AuthError> {
-    let params: HashMap<String, String> = query
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .filter_map(|param| {
-            let (key, value) = param.split_once('=')?;
-            Some((key.to_owned(), url_decode(value)))
-        })
-        .collect();
+    let mut params: HashMap<String, String> = HashMap::new();
+    // Decoded `X-Amz-*` names already seen, for duplicate detection.
+    let mut seen_auth_params: HashSet<String> = HashSet::new();
+    for param in query.split('&').filter(|s| !s.is_empty()) {
+        let Some((key, value)) = param.split_once('=') else {
+            continue;
+        };
+        // Keys that are not valid UTF-8 after percent-decoding cannot alias
+        // an `X-Amz-*` name (normalization rejects them too), so they are
+        // left for the regular signature checks.
+        if let Ok(decoded) = percent_decode_str(key).decode_utf8() {
+            if decoded.starts_with("X-Amz-") {
+                let name = decoded.into_owned();
+                if name != key || !seen_auth_params.insert(name.clone()) {
+                    return Err(AuthError::InvalidAuthParam(name));
+                }
+            }
+        }
+        params.insert(key.to_owned(), url_decode(value));
+    }
 
     let algorithm = get_required_param(&params, "X-Amz-Algorithm")?;
     if algorithm != "AWS4-HMAC-SHA256" {
@@ -114,6 +136,11 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 
 /// Verify a presigned URL request.
 ///
+/// This is the S3 presigned entry point: S3 percent-decodes every query
+/// parameter before acting on it, so the SigV4-normalized fallback's
+/// encoding-equivalence assertion holds here. Other endpoints must not use
+/// this function unless their query decoding has been audited the same way.
+///
 /// This function:
 /// 1. Parses the presigned URL query parameters
 /// 2. Checks whether the URL has expired
@@ -126,6 +153,7 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 ///
 /// Returns an [`AuthError`] if:
 /// - Required query parameters are missing or malformed
+/// - An `X-Amz-*` authentication parameter is duplicated or percent-encoded
 /// - The URL has expired
 /// - The access key is not found
 /// - Required signed headers are missing
@@ -209,22 +237,20 @@ pub fn verify_presigned(
     // Second attempt: SigV4-normalized query string (percent-decode, then
     // re-encode per spec, excluding `X-Amz-Signature`). This matches
     // spec-compliant clients that sign the encoded form.
+    // This is the S3 presigned entry point: S3 percent-decodes every query
+    // parameter before acting on it, so the normalized equivalence holds.
+    // Fallback eligibility comes from the serving endpoint calling this
+    // function, never from the request — the credential scope's service
+    // string is request-supplied and must not select it.
     // The fallback is skipped when the wire query contains a raw `+`: it is
     // the one byte whose meaning downstream decoders disagree on (S3 decodes
     // a literal plus, API Gateway / Lambda decode a space), so no single
     // normalized form is safe for every service. Reject the ambiguous
     // representation instead of guessing.
-    // The fallback is additionally restricted to services whose downstream
-    // query decoding has been audited (see `service_supports_normalized_fallback`
-    // in `canonical.rs`): the normalized form asserts that alternate wire
-    // encodings are equivalent, which only holds when the service
-    // percent-decodes query parameters before acting on them. Unlisted
-    // services fail closed (raw-only verification).
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
     let normalized_matches = !query.contains('+')
-        && service_supports_normalized_fallback(&parsed.service)
         && build_canonical_query_string_without_signature_normalized(query).is_ok_and(
             |normalized| normalized != canonical_query && signature_matches(&normalized),
         );
@@ -368,6 +394,98 @@ mod tests {
 
         let result = parse_presigned_params(query);
         assert!(matches!(result, Err(AuthError::MissingQueryParam(_))));
+    }
+
+    #[test]
+    fn test_should_reject_encoded_alias_of_auth_param() {
+        // `%58` decodes to `X`, so `%58-Amz-Expires` is an encoded alias of
+        // `X-Amz-Expires`. The normalized fallback verifies the decoded
+        // form, which would let the extracted expiry silently differ from
+        // the verified one.
+        let query = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKID%2F20130524%\
+                     2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=60&\
+                     %58-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=abc";
+
+        let result = parse_presigned_params(query);
+        assert!(matches!(result, Err(AuthError::InvalidAuthParam(_))));
+    }
+
+    #[test]
+    fn test_should_reject_duplicate_auth_param() {
+        // A repeated authentication parameter is ambiguous: the normalized
+        // canonical query sorts the values, so swapping them between
+        // positions keeps the signature valid while changing which value a
+        // first-match/last-match extraction would read.
+        let query = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKID%2F20130524%\
+                     2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=60&\
+                     X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=abc";
+
+        let result = parse_presigned_params(query);
+        assert!(matches!(result, Err(AuthError::InvalidAuthParam(_))));
+    }
+
+    #[test]
+    fn test_should_reject_auth_param_alias_rewrite_in_presigned_url() {
+        // End-to-end: a presigned URL signed in normalized form over
+        // `X-Amz-Expires=60&%58-Amz-Expires=86400` verifies the identical
+        // canonical query after the values are swapped between the raw names
+        // (`X-Amz-Expires=86400&%58-Amz-Expires=60`) — normalization decodes
+        // both names and sorts the values. Without the alias rejection the
+        // rewritten URL would verify while the effective expiry silently
+        // extends from 60 to 86400 seconds.
+        let provider = test_credential_provider();
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = now.format("%Y%m%d").to_string();
+
+        let credential = format!("{TEST_ACCESS_KEY}/{date}/us-east-1/s3/aws4_request");
+        let encoded_credential =
+            percent_encoding::utf8_percent_encode(&credential, percent_encoding::NON_ALPHANUMERIC);
+
+        let query_without_sig = format!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={encoded_credential}&\
+             X-Amz-Date={timestamp}&X-Amz-Expires=60&%58-Amz-Expires=86400&\
+             X-Amz-SignedHeaders=host"
+        );
+
+        let canonical_query =
+            build_canonical_query_string_without_signature_normalized(&query_without_sig).unwrap();
+        assert!(canonical_query.contains("X-Amz-Expires=60&X-Amz-Expires=86400"));
+
+        #[rustfmt::skip]
+        let canonical_request = format!(
+            "GET\n/test.txt\n{canonical_query}\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
+        );
+
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
+        let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
+
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
+        let signature = compute_signature(&signing_key, &string_to_sign);
+
+        // Attacker's rewrite: the same values attached to the opposite raw
+        // names. The normalized canonical query (and signature) is unchanged.
+        let rewritten_query = format!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={encoded_credential}&\
+             X-Amz-Date={timestamp}&X-Amz-Expires=86400&%58-Amz-Expires=60&\
+             X-Amz-SignedHeaders=host&X-Amz-Signature={signature}"
+        );
+        let rewritten_canonical =
+            build_canonical_query_string_without_signature_normalized(&rewritten_query).unwrap();
+        assert_eq!(rewritten_canonical, canonical_query);
+
+        let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{rewritten_query}");
+        let (parts, _body) = http::Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("host", "examplebucket.s3.amazonaws.com")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let result = verify_presigned(&parts, &provider);
+        assert!(matches!(result, Err(AuthError::InvalidAuthParam(_))));
     }
 
     #[test]

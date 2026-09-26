@@ -20,7 +20,7 @@ use tracing::debug;
 use crate::{
     canonical::{
         build_canonical_query_string, build_canonical_query_string_normalized,
-        build_canonical_request, service_supports_normalized_fallback,
+        build_canonical_request,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -204,6 +204,16 @@ pub fn compute_signature(signing_key: &[u8], data: &str) -> String {
 /// 4. Computes the expected signature
 /// 5. Compares signatures using constant-time comparison
 ///
+/// The query string is verified exactly as it appears on the wire
+/// (raw-preserving). Unlike [`verify_s3_sigv4`], this does NOT attempt the
+/// SigV4-normalized fallback: the normalized form asserts that alternate
+/// wire encodings are equivalent, which is only true when the serving
+/// endpoint percent-decodes query parameters before acting on them. Whether
+/// the fallback is safe is a property of the serving endpoint, never of the
+/// request — the credential scope's service string is request-supplied and
+/// must not select it. Endpoints whose query decoding has been audited opt
+/// in by calling [`verify_s3_sigv4`] instead.
+///
 /// # Errors
 ///
 /// Returns an [`AuthError`] if:
@@ -216,13 +226,27 @@ pub fn verify_sigv4(
     body_hash: &str,
     credential_provider: &dyn CredentialProvider,
 ) -> Result<AuthResult, AuthError> {
-    verify_sigv4_with_policy(parts, body_hash, credential_provider, false)
+    verify_sigv4_with_policy(parts, body_hash, credential_provider, false, false)
 }
 
 /// Verify S3 SigV4, allowing the explicit unsigned-payload protocol exception.
 ///
 /// This verifies the seed signature only for streaming markers. Callers MUST additionally
 /// verify every chunk and signed trailer with [`StreamingVerifier`] before publishing data.
+///
+/// In addition to the raw-preserving attempt, this accepts the
+/// SigV4-normalized canonical query string as a fallback (see
+/// [`build_canonical_query_string_normalized`]): spec-compliant S3 clients
+/// such as Transmit 5 sign the encoded form even when the wire carries the
+/// raw value. This endpoint entry point is the opt-in — S3 percent-decodes
+/// every query parameter before acting on it
+/// (`rustack-s3-http/src/router.rs::parse_query_params`), so the normalized
+/// equivalence holds. Do NOT use this entry point for an endpoint that reads
+/// query parameters from the raw query string without decoding (e.g.
+/// CloudFront's `DeleteRealtimeLogConfig` reading `Name`): a verified
+/// signature could then authorize a different effective value than the one
+/// acted upon. Such endpoints must use [`verify_sigv4`].
+///
 /// # Errors
 /// Returns an authentication error for invalid signatures or payload declarations.
 pub fn verify_s3_sigv4(
@@ -230,7 +254,7 @@ pub fn verify_s3_sigv4(
     body_hash: &str,
     credential_provider: &dyn CredentialProvider,
 ) -> Result<AuthResult, AuthError> {
-    verify_sigv4_with_policy(parts, body_hash, credential_provider, true)
+    verify_sigv4_with_policy(parts, body_hash, credential_provider, true, true)
 }
 
 fn verify_sigv4_with_policy(
@@ -238,6 +262,7 @@ fn verify_sigv4_with_policy(
     body_hash: &str,
     credential_provider: &dyn CredentialProvider,
     allow_unsigned: bool,
+    allow_normalized_fallback: bool,
 ) -> Result<AuthResult, AuthError> {
     let payload_hash = validated_payload_hash(parts, body_hash, allow_unsigned)?;
     if parts
@@ -331,6 +356,15 @@ fn verify_sigv4_with_policy(
     // Passing the normalized string through `build_canonical_request` is safe:
     // it is already sorted and contains no raw `&`/`=`, so the raw sorting pass
     // is a no-op.
+    // This attempt only runs when the caller opted in via
+    // `allow_normalized_fallback` — i.e. the serving endpoint, not the
+    // request. The normalized form asserts that alternate wire encodings are
+    // equivalent, which is only true when the endpoint percent-decodes query
+    // parameters before acting on them. The credential scope's service string
+    // is request-supplied and must never select this: otherwise a request
+    // scoped `s3` served by a non-decoding endpoint (e.g. CloudFront reading
+    // `Name` raw) would verify a replayed encoding that acts on a different
+    // value.
     // The fallback is skipped when the wire query contains a raw `+`: it is
     // the one byte whose meaning downstream decoders disagree on (S3 decodes
     // a literal plus, API Gateway / Lambda decode a space), so no single
@@ -340,16 +374,8 @@ fn verify_sigv4_with_policy(
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
-    // The fallback is additionally restricted to services whose downstream
-    // query decoding has been audited (see `service_supports_normalized_fallback`):
-    // the normalized form asserts that alternate wire encodings are
-    // equivalent, which is only true when the service percent-decodes query
-    // parameters before acting on them. Services that read parameters from
-    // the raw query (e.g. CloudFront's `DeleteRealtimeLogConfig` reading
-    // `Name`) would otherwise verify a signature for one value while acting
-    // on another. Unlisted services fail closed (raw-only verification).
-    let normalized_matches = !query.contains('+')
-        && service_supports_normalized_fallback(&parsed.service)
+    let normalized_matches = allow_normalized_fallback
+        && !query.contains('+')
         && build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
             normalized != build_canonical_query_string(query) && signature_matches(&normalized)
         });
@@ -867,7 +893,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        let result = verify_s3_sigv4(&parts, &empty_hash, &provider);
         assert!(result.is_ok());
     }
 
@@ -931,7 +957,7 @@ mod tests {
         let empty_hash = hash_payload(b"");
 
         let parts = build_normalized_fallback_request_parts("s3", "x=%2B", "x=+");
-        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        let result = verify_s3_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }
 
@@ -945,7 +971,7 @@ mod tests {
         let empty_hash = hash_payload(b"");
 
         let parts = build_normalized_fallback_request_parts("s3", "x=%20", "x=+");
-        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        let result = verify_s3_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }
 
@@ -961,31 +987,34 @@ mod tests {
         let empty_hash = hash_payload(b"");
 
         let parts = build_normalized_fallback_request_parts("s3", "x=a%20b", "x=a+b");
-        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        let result = verify_s3_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }
 
     #[test]
-    fn test_should_skip_normalized_fallback_for_unaudited_service() {
-        // The normalized fallback asserts that alternate wire encodings are
-        // equivalent, which is only true when the downstream service
-        // percent-decodes query parameters. A service whose decoding has not
-        // been audited (e.g. CloudFront reading `Name` from the raw query)
-        // must not get the fallback: a verified signature could otherwise
-        // authorize a different effective value than the one acted upon.
-        // Here the wire `prefix=periods/` normalizes to the signed
-        // `prefix=periods%2F`, but the `execute-api` service is not
-        // allowlisted, so verification falls through to the mismatch.
+    fn test_should_select_normalized_fallback_by_endpoint_not_scope() {
+        // Fallback eligibility is a property of the serving endpoint, never
+        // of the request: the credential scope's service string is
+        // request-supplied. A request scoped `s3` served by a non-decoding
+        // endpoint (e.g. CloudFront reading `Name` from the raw query) must
+        // not get the fallback even though the scope claims `s3` — otherwise
+        // a captured `Name=a%2Fb` signature could be replayed as `Name=a/b`
+        // and act on a different value than the one signed.
+        // The generic verifier (used by non-S3 endpoints) rejects the
+        // Transmit-5-style encoding difference; the S3 entry point accepts it.
         let provider = test_credential_provider();
         let empty_hash = hash_payload(b"");
 
-        let parts = build_normalized_fallback_request_parts(
-            "execute-api",
-            "prefix=periods%2F",
-            "prefix=periods/",
-        );
-        let result = verify_sigv4(&parts, &empty_hash, &provider);
-        assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
+        let parts =
+            build_normalized_fallback_request_parts("s3", "prefix=periods%2F", "prefix=periods/");
+        assert!(matches!(
+            verify_sigv4(&parts, &empty_hash, &provider),
+            Err(AuthError::SignatureDoesNotMatch)
+        ));
+
+        let parts =
+            build_normalized_fallback_request_parts("s3", "prefix=periods%2F", "prefix=periods/");
+        assert!(verify_s3_sigv4(&parts, &empty_hash, &provider).is_ok());
     }
 
     #[test]

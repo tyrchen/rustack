@@ -167,28 +167,6 @@ pub fn build_canonical_query_string(query: &str) -> String {
 /// carry a handful of parameters.
 const MAX_NORMALIZED_QUERY_PARAMS: usize = 1024;
 
-/// Whether the SigV4-normalized query fallback may be attempted for `service`.
-///
-/// The fallback treats alternate wire encodings as equivalent to the signed
-/// canonical query string (e.g. `prefix=periods/` on the wire vs
-/// `prefix=periods%2F` signed). That equivalence only holds when the
-/// downstream service percent-decodes query parameters before acting on
-/// them — otherwise a verified signature can authorize a different effective
-/// value (e.g. CloudFront's `DeleteRealtimeLogConfig` reads `Name` from the
-/// raw query without decoding, so a `Name=a%2Fb` signature would verify a
-/// replayed `Name=a/b` that deletes a different configuration).
-///
-/// Services are allowlisted here after auditing their query decoding; the
-/// default is to skip the fallback (fail closed), so a new or unaudited
-/// service is never worse off than the raw-preserving behavior.
-///
-/// Audit record:
-/// - `s3`: every query parameter goes through percent-decoding
-///   (`rustack-s3-http/src/router.rs::parse_query_params`).
-pub(crate) fn service_supports_normalized_fallback(service: &str) -> bool {
-    matches!(service, "s3")
-}
-
 /// Build the canonical query string following the AWS SigV4 specification.
 ///
 /// Each parameter name and value is first percent-decoded (so already-encoded
@@ -241,8 +219,9 @@ pub(crate) fn service_supports_normalized_fallback(service: &str) -> bool {
 /// not valid UTF-8 after percent-decoding, or if the query contains more than
 /// `MAX_NORMALIZED_QUERY_PARAMS` parameters (fail closed before allocating).
 ///
-/// Note: verification callers additionally gate the normalized fallback on
-/// [`service_supports_normalized_fallback`] and skip it when the wire query
+/// Note: verification callers only attempt the normalized fallback from
+/// endpoint-specific entry points (e.g. [`crate::sigv4::verify_s3_sigv4`])
+/// whose query decoding has been audited, and skip it when the wire query
 /// contains a raw `+`; see the `+` paragraph above.
 pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, AuthError> {
     if query.is_empty() {
