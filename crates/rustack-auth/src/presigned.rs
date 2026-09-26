@@ -211,10 +211,8 @@ pub fn verify_presigned(
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
-    let normalized_matches =
-        build_canonical_query_string_without_signature_normalized(query).is_ok_and(|normalized| {
-            normalized != canonical_query && signature_matches(&normalized)
-        });
+    let normalized_matches = build_canonical_query_string_without_signature_normalized(query)
+        .is_ok_and(|normalized| normalized != canonical_query && signature_matches(&normalized));
     if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded (normalized query string)");
         return Ok(AuthResult {

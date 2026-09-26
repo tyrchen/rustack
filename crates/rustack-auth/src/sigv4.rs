@@ -334,9 +334,10 @@ fn verify_sigv4_with_policy(
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
-    let normalized_matches = build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
-        normalized != build_canonical_query_string(query) && signature_matches(&normalized)
-    });
+    let normalized_matches =
+        build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
+            normalized != build_canonical_query_string(query) && signature_matches(&normalized)
+        });
     if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded (normalized query string)");
         return Ok(AuthResult {
