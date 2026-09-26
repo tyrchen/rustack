@@ -176,6 +176,14 @@ pub fn build_canonical_query_string(query: &str) -> String {
 /// encoding of U+FFFD, `%EF%BF%BD`) to the same normalized string, creating
 /// signature collisions where tampered parameters still verify.
 ///
+/// A literal `+` is decoded as a space, matching the
+/// `application/x-www-form-urlencoded` semantics used by downstream consumers
+/// (API Gateway and Lambda handlers): `%2B` stays a plus while a raw `+`
+/// becomes `%20` after re-encoding, so the two can never normalize to the
+/// same canonical string. Without this, a captured request signed for
+/// `x=%2B` could be tampered to `x=+` and still verify, while downstream
+/// decodes a different (space) value.
+///
 /// # Examples
 ///
 /// ```
@@ -203,19 +211,20 @@ pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, Au
         return Ok(String::new());
     }
 
-    let mut params: Vec<(String, String)> = Vec::with_capacity(query.len() / 8);
+    // Size the buffer by parameter count, not byte length: `query.len() / 8`
+    // would let a single long parameter pre-allocate a large number of
+    // entries before any signature check runs (memory amplification on
+    // unauthenticated requests).
+    let mut params: Vec<(String, String)> =
+        Vec::with_capacity(query.matches('&').count().saturating_add(1));
     for param in query.split('&').filter(|s| !s.is_empty()) {
         let (name, value) = param.split_once('=').unwrap_or((param, ""));
         // Decode first so that already-encoded input round-trips instead of
         // being double-encoded, then re-encode per the SigV4 rules.
-        // Strict UTF-8 on purpose: see the doc comment above.
-        let decoded_name = percent_decode_str(name)
-            .decode_utf8()
-            .map_err(|_| AuthError::InvalidQueryString)?;
-        let decoded_value = percent_decode_str(value)
-            .decode_utf8()
-            .map_err(|_| AuthError::InvalidQueryString)?;
-        params.push((sigv4_encode(&decoded_name), sigv4_encode(&decoded_value)));
+        params.push((
+            decode_query_component(name)?,
+            decode_query_component(value)?,
+        ));
     }
 
     // Sort by encoded name, then by encoded value, per the SigV4 spec.
@@ -226,6 +235,26 @@ pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, Au
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&"))
+}
+
+/// Percent-decode one query parameter name or value for normalization, then
+/// re-encode it per the SigV4 rules.
+///
+/// A literal `+` is translated to a space first, matching the
+/// `application/x-www-form-urlencoded` decoding used by downstream consumers
+/// (API Gateway and Lambda handlers). Without this, `%2B` and a raw `+`
+/// would normalize to the same string, letting a tampered query verify with
+/// the original signature while downstream decodes a different value.
+///
+/// Decoding is strict UTF-8: invalid sequences are rejected with
+/// [`AuthError::InvalidQueryString`] instead of being lossily replaced (see
+/// [`build_canonical_query_string_normalized`]).
+fn decode_query_component(component: &str) -> Result<String, AuthError> {
+    let with_form_spaces = component.replace('+', " ");
+    let decoded = percent_decode_str(&with_form_spaces)
+        .decode_utf8()
+        .map_err(|_| AuthError::InvalidQueryString)?;
+    Ok(sigv4_encode(&decoded))
 }
 
 /// Build the canonical headers string from the request headers.
@@ -557,6 +586,27 @@ mod tests {
     }
 
     #[test]
+    fn test_should_decode_plus_as_space_in_normalized_query() {
+        // Downstream consumers (API Gateway / Lambda handlers) decode `+` as a
+        // space, so normalization must do the same: `%2B` (a literal plus) and
+        // a raw `+` must not collapse to the same canonical string, otherwise
+        // a tampered `x=+` would verify with a signature made for `x=%2B`.
+        assert_eq!(
+            build_canonical_query_string_normalized("x=%2B").unwrap(),
+            "x=%2B"
+        );
+        assert_eq!(
+            build_canonical_query_string_normalized("x=+").unwrap(),
+            "x=%20"
+        );
+        // Same for parameter names.
+        assert_eq!(
+            build_canonical_query_string_normalized("a+b=c").unwrap(),
+            "a%20b=c"
+        );
+    }
+
+    #[test]
     fn test_should_reject_invalid_utf8_in_normalized_query() {
         // `%FF` is not valid UTF-8. Lossy decoding would map it to U+FFFD,
         // colliding with a legitimately signed `x=%EF%BF%BD` parameter, so
@@ -565,10 +615,7 @@ mod tests {
             build_canonical_query_string_normalized("x=%FF"),
             Err(AuthError::InvalidQueryString)
         ));
-        assert!(matches!(
-            build_canonical_query_string_normalized("x=%EF%BF%BD"),
-            Ok(_)
-        ));
+        assert!(build_canonical_query_string_normalized("x=%EF%BF%BD").is_ok());
     }
 
     #[test]

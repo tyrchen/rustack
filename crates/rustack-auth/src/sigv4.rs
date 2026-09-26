@@ -856,6 +856,87 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Build request parts for a GET whose Authorization header signs
+    /// `signed_query`, while the request line carries `wire_query`.
+    /// Exercises the normalized-fallback path of [`verify_sigv4`].
+    fn build_normalized_fallback_request_parts(
+        signed_query: &str,
+        wire_query: &str,
+    ) -> http::request::Parts {
+        let empty_hash = hash_payload(b"");
+        let headers = [
+            ("host", "examplebucket.s3.amazonaws.com"),
+            ("x-amz-date", "20130524T000000Z"),
+        ];
+        let signed = ["host", "x-amz-date"];
+        let canonical = build_canonical_request(
+            "GET",
+            "/bucket-1",
+            signed_query,
+            &headers.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            &signed,
+            &empty_hash,
+        );
+        let string_to_sign = build_string_to_sign(
+            "20130524T000000Z",
+            "20130524/us-east-1/s3/aws4_request",
+            &hash_payload(canonical.as_bytes()),
+        );
+        let signature = compute_signature(
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &string_to_sign,
+        );
+        let auth_value = format!(
+            "AWS4-HMAC-SHA256 \
+             Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;\
+             x-amz-date,Signature={signature}"
+        );
+        let uri = format!("http://examplebucket.s3.amazonaws.com/bucket-1?{wire_query}");
+        http::Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("host", "examplebucket.s3.amazonaws.com")
+            .header("x-amz-date", "20130524T000000Z")
+            .header(http::header::AUTHORIZATION, &auth_value)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
+    #[test]
+    fn test_should_reject_plus_sign_tampering_in_normalized_query() {
+        // A request signed for `x=%2B` (a literal plus) must not verify when
+        // the wire query is tampered to `x=+`. Normalization decodes `+` as a
+        // space — matching the downstream API Gateway / Lambda form decoding —
+        // so the tampered query normalizes to `x=%20` and the original
+        // signature no longer matches.
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+
+        assert_ne!(
+            build_canonical_query_string_normalized("x=+").unwrap(),
+            "x=%2B"
+        );
+
+        let parts = build_normalized_fallback_request_parts("x=%2B", "x=+");
+        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
+    }
+
+    #[test]
+    fn test_should_verify_form_encoded_space_via_normalized_query() {
+        // A form-style client sends `x=a+b` (meaning `a b`) while signing the
+        // SigV4-normalized `x=a%20b`. The normalized fallback accepts it,
+        // since downstream decoders treat `+` as a space.
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+
+        let parts = build_normalized_fallback_request_parts("x=a%20b", "x=a+b");
+        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn test_should_still_verify_request_signed_with_raw_query_values() {
         // Clients such as minio-java (via OkHttp) sign the raw, unencoded
