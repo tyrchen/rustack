@@ -20,7 +20,7 @@ use tracing::debug;
 use crate::{
     canonical::{
         build_canonical_query_string, build_canonical_query_string_normalized,
-        build_canonical_request,
+        build_canonical_request, service_supports_normalized_fallback,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -340,7 +340,16 @@ fn verify_sigv4_with_policy(
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
+    // The fallback is additionally restricted to services whose downstream
+    // query decoding has been audited (see `service_supports_normalized_fallback`):
+    // the normalized form asserts that alternate wire encodings are
+    // equivalent, which is only true when the service percent-decodes query
+    // parameters before acting on them. Services that read parameters from
+    // the raw query (e.g. CloudFront's `DeleteRealtimeLogConfig` reading
+    // `Name`) would otherwise verify a signature for one value while acting
+    // on another. Unlisted services fail closed (raw-only verification).
     let normalized_matches = !query.contains('+')
+        && service_supports_normalized_fallback(&parsed.service)
         && build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
             normalized != build_canonical_query_string(query) && signature_matches(&normalized)
         });
@@ -866,6 +875,7 @@ mod tests {
     /// `signed_query`, while the request line carries `wire_query`.
     /// Exercises the normalized-fallback path of [`verify_sigv4`].
     fn build_normalized_fallback_request_parts(
+        service: &str,
         signed_query: &str,
         wire_query: &str,
     ) -> http::request::Parts {
@@ -885,17 +895,17 @@ mod tests {
         );
         let string_to_sign = build_string_to_sign(
             "20130524T000000Z",
-            "20130524/us-east-1/s3/aws4_request",
+            &format!("20130524/us-east-1/{service}/aws4_request"),
             &hash_payload(canonical.as_bytes()),
         );
         let signature = compute_signature(
-            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", service),
             &string_to_sign,
         );
         let auth_value = format!(
             "AWS4-HMAC-SHA256 \
-             Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;\
-             x-amz-date,Signature={signature}"
+             Credential={TEST_ACCESS_KEY}/20130524/us-east-1/{service}/aws4_request,\
+             SignedHeaders=host;x-amz-date,Signature={signature}"
         );
         let uri = format!("http://examplebucket.s3.amazonaws.com/bucket-1?{wire_query}");
         http::Request::builder()
@@ -920,7 +930,7 @@ mod tests {
         let provider = test_credential_provider();
         let empty_hash = hash_payload(b"");
 
-        let parts = build_normalized_fallback_request_parts("x=%2B", "x=+");
+        let parts = build_normalized_fallback_request_parts("s3", "x=%2B", "x=+");
         let result = verify_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }
@@ -934,7 +944,7 @@ mod tests {
         let provider = test_credential_provider();
         let empty_hash = hash_payload(b"");
 
-        let parts = build_normalized_fallback_request_parts("x=%20", "x=+");
+        let parts = build_normalized_fallback_request_parts("s3", "x=%20", "x=+");
         let result = verify_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }
@@ -950,7 +960,30 @@ mod tests {
         let provider = test_credential_provider();
         let empty_hash = hash_payload(b"");
 
-        let parts = build_normalized_fallback_request_parts("x=a%20b", "x=a+b");
+        let parts = build_normalized_fallback_request_parts("s3", "x=a%20b", "x=a+b");
+        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
+    }
+
+    #[test]
+    fn test_should_skip_normalized_fallback_for_unaudited_service() {
+        // The normalized fallback asserts that alternate wire encodings are
+        // equivalent, which is only true when the downstream service
+        // percent-decodes query parameters. A service whose decoding has not
+        // been audited (e.g. CloudFront reading `Name` from the raw query)
+        // must not get the fallback: a verified signature could otherwise
+        // authorize a different effective value than the one acted upon.
+        // Here the wire `prefix=periods/` normalizes to the signed
+        // `prefix=periods%2F`, but the `execute-api` service is not
+        // allowlisted, so verification falls through to the mismatch.
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+
+        let parts = build_normalized_fallback_request_parts(
+            "execute-api",
+            "prefix=periods%2F",
+            "prefix=periods/",
+        );
         let result = verify_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
     }

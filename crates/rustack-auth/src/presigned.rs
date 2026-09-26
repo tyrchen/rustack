@@ -23,6 +23,7 @@ use crate::{
     canonical::{
         build_canonical_headers, build_canonical_query_string,
         build_canonical_query_string_normalized, build_canonical_uri, build_signed_headers_string,
+        service_supports_normalized_fallback,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -213,10 +214,17 @@ pub fn verify_presigned(
     // a literal plus, API Gateway / Lambda decode a space), so no single
     // normalized form is safe for every service. Reject the ambiguous
     // representation instead of guessing.
+    // The fallback is additionally restricted to services whose downstream
+    // query decoding has been audited (see `service_supports_normalized_fallback`
+    // in `canonical.rs`): the normalized form asserts that alternate wire
+    // encodings are equivalent, which only holds when the service
+    // percent-decodes query parameters before acting on them. Unlisted
+    // services fail closed (raw-only verification).
     // If the query is not valid UTF-8 after percent-decoding, normalization
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
     let normalized_matches = !query.contains('+')
+        && service_supports_normalized_fallback(&parsed.service)
         && build_canonical_query_string_without_signature_normalized(query).is_ok_and(
             |normalized| normalized != canonical_query && signature_matches(&normalized),
         );

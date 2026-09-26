@@ -156,6 +156,39 @@ pub fn build_canonical_query_string(query: &str) -> String {
         .join("&")
 }
 
+/// Maximum number of query parameters the normalized fallback will parse.
+///
+/// Each component becomes a pair of owned strings, so an unbounded parameter
+/// count would let a few input bytes per parameter amplify into large
+/// allocations on every raw-signature miss (unauthenticated requests reach
+/// this path). Queries above the cap fail closed with
+/// [`AuthError::InvalidQueryString`], which verification callers already map
+/// to "skip the fallback". 1024 leaves ample headroom: real S3 query strings
+/// carry a handful of parameters.
+const MAX_NORMALIZED_QUERY_PARAMS: usize = 1024;
+
+/// Whether the SigV4-normalized query fallback may be attempted for `service`.
+///
+/// The fallback treats alternate wire encodings as equivalent to the signed
+/// canonical query string (e.g. `prefix=periods/` on the wire vs
+/// `prefix=periods%2F` signed). That equivalence only holds when the
+/// downstream service percent-decodes query parameters before acting on
+/// them — otherwise a verified signature can authorize a different effective
+/// value (e.g. CloudFront's `DeleteRealtimeLogConfig` reads `Name` from the
+/// raw query without decoding, so a `Name=a%2Fb` signature would verify a
+/// replayed `Name=a/b` that deletes a different configuration).
+///
+/// Services are allowlisted here after auditing their query decoding; the
+/// default is to skip the fallback (fail closed), so a new or unaudited
+/// service is never worse off than the raw-preserving behavior.
+///
+/// Audit record:
+/// - `s3`: every query parameter goes through percent-decoding
+///   (`rustack-s3-http/src/router.rs::parse_query_params`).
+pub(crate) fn service_supports_normalized_fallback(service: &str) -> bool {
+    matches!(service, "s3")
+}
+
 /// Build the canonical query string following the AWS SigV4 specification.
 ///
 /// Each parameter name and value is first percent-decoded (so already-encoded
@@ -205,18 +238,31 @@ pub fn build_canonical_query_string(query: &str) -> String {
 /// # Errors
 ///
 /// Returns [`AuthError::InvalidQueryString`] if a parameter name or value is
-/// not valid UTF-8 after percent-decoding.
+/// not valid UTF-8 after percent-decoding, or if the query contains more than
+/// `MAX_NORMALIZED_QUERY_PARAMS` parameters (fail closed before allocating).
+///
+/// Note: verification callers additionally gate the normalized fallback on
+/// [`service_supports_normalized_fallback`] and skip it when the wire query
+/// contains a raw `+`; see the `+` paragraph above.
 pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, AuthError> {
     if query.is_empty() {
         return Ok(String::new());
+    }
+
+    // Bound the parameter count before allocating or parsing (see
+    // `MAX_NORMALIZED_QUERY_PARAMS`): each component becomes a pair of owned
+    // strings, so an unbounded count would amplify small inputs on every
+    // raw-signature miss. Fail closed; callers map this to "skip the fallback".
+    let param_count = query.matches('&').count().saturating_add(1);
+    if param_count > MAX_NORMALIZED_QUERY_PARAMS {
+        return Err(AuthError::InvalidQueryString);
     }
 
     // Size the buffer by parameter count, not byte length: `query.len() / 8`
     // would let a single long parameter pre-allocate a large number of
     // entries before any signature check runs (memory amplification on
     // unauthenticated requests).
-    let mut params: Vec<(String, String)> =
-        Vec::with_capacity(query.matches('&').count().saturating_add(1));
+    let mut params: Vec<(String, String)> = Vec::with_capacity(param_count);
     for param in query.split('&').filter(|s| !s.is_empty()) {
         let (name, value) = param.split_once('=').unwrap_or((param, ""));
         // Decode first so that already-encoded input round-trips instead of
@@ -581,6 +627,22 @@ mod tests {
             build_canonical_query_string_normalized("flag&b=2").unwrap(),
             "b=2&flag="
         );
+    }
+
+    #[test]
+    fn test_should_reject_query_above_param_cap_in_normalized_query() {
+        // Each parameter becomes a pair of owned strings, so the parameter
+        // count is capped before allocating: fail closed on too many params.
+        let at_cap = "a=1&".repeat(1023) + "a=1";
+        assert_eq!(at_cap.split('&').count(), 1024);
+        assert!(build_canonical_query_string_normalized(&at_cap).is_ok());
+
+        let over_cap = "a=1&".repeat(1024) + "a=1";
+        assert_eq!(over_cap.split('&').count(), 1025);
+        assert!(matches!(
+            build_canonical_query_string_normalized(&over_cap),
+            Err(AuthError::InvalidQueryString)
+        ));
     }
 
     #[test]
