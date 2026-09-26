@@ -695,7 +695,12 @@ impl RustackKms {
             } => crypto::rsa_sign(private_key_der, &input.message, &input.signing_algorithm)?,
             KeyMaterial::Ec {
                 private_key_der, ..
-            } => crypto::ecdsa_sign(private_key_der, &input.message, &input.signing_algorithm)?,
+            } => crypto::ecdsa_sign(
+                &key.key_spec,
+                private_key_der,
+                &input.message,
+                &input.signing_algorithm,
+            )?,
             _ => {
                 return Err(KmsError::with_message(
                     KmsErrorCode::InvalidKeyUsageException,
@@ -725,6 +730,7 @@ impl RustackKms {
                 &input.signing_algorithm,
             )?,
             KeyMaterial::Ec { public_key_der, .. } => crypto::ecdsa_verify(
+                &key.key_spec,
                 public_key_der,
                 &input.message,
                 &input.signature,

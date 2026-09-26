@@ -11,6 +11,15 @@ use aws_lc_rs::{
     rand::{SecureRandom, SystemRandom},
     signature::{self, EcdsaKeyPair, KeyPair as _, RsaKeyPair},
 };
+use k256::{
+    ecdsa::{
+        SigningKey, VerifyingKey,
+        signature::{Signer, Verifier},
+    },
+    elliptic_curve::Generate as _,
+    pkcs8::{DecodePrivateKey, EncodePrivateKey},
+};
+use rand::rngs::SysRng; // rand 0.10 renamed OsRng to SysRng; same OS entropy source.
 use rustack_kms_model::{
     error::{KmsError, KmsErrorCode},
     types::{
@@ -53,6 +62,7 @@ pub fn generate_key_material(spec: &KeySpec) -> Result<KeyMaterial, KmsError> {
         KeySpec::EccNistP256 => generate_ec_key(&signature::ECDSA_P256_SHA256_ASN1_SIGNING),
         KeySpec::EccNistP384 => generate_ec_key(&signature::ECDSA_P384_SHA384_ASN1_SIGNING),
         KeySpec::EccNistP521 => generate_ec_p521_key(),
+        KeySpec::EccSecgP256k1 => generate_secp256k1_key(),
         KeySpec::Hmac224 => generate_hmac_key(28),
         KeySpec::Hmac256 => generate_hmac_key(32),
         KeySpec::Hmac384 => generate_hmac_key(48),
@@ -116,6 +126,41 @@ fn generate_ec_key(
         private_key_der: pkcs8.as_ref().to_vec(),
         public_key_der,
     })
+}
+
+/// Generate a secp256k1 (ECC_SECG_P256K1) key pair.
+///
+/// aws-lc-rs does not expose secp256k1 ECDSA, so this uses the pure-Rust
+/// `k256` crate. The private key is stored PKCS#8 DER-encoded and the public
+/// key as uncompressed SEC1 bytes, matching the convention used for the
+/// NIST-curve `KeyMaterial::Ec` keys above.
+fn generate_secp256k1_key() -> Result<KeyMaterial, KmsError> {
+    let (private_key_der, public_key_der) = secp256k1_keypair_raw()?;
+    Ok(KeyMaterial::Ec {
+        private_key_der,
+        public_key_der,
+    })
+}
+
+/// Generate a raw secp256k1 key pair.
+///
+/// Returns `(private_key_pkcs8_der, public_key_sec1_uncompressed)`.
+fn secp256k1_keypair_raw() -> Result<(Vec<u8>, Vec<u8>), KmsError> {
+    let signing_key = SigningKey::try_generate_from_rng(&mut SysRng)
+        .map_err(|e| KmsError::internal_error(format!("Failed to generate secp256k1 key: {e}")))?;
+    let private_key_der = signing_key
+        .to_pkcs8_der()
+        .map_err(|e| {
+            KmsError::internal_error(format!("Failed to encode secp256k1 private key: {e}"))
+        })?
+        .as_bytes()
+        .to_vec();
+    let public_key_der = signing_key
+        .verifying_key()
+        .to_sec1_point(false)
+        .as_bytes()
+        .to_vec();
+    Ok((private_key_der, public_key_der))
 }
 
 /// Generate a P-521 ECDSA key pair.
@@ -405,11 +450,28 @@ fn rsa_verify_algorithm(
 // ---------------------------------------------------------------------------
 
 /// Sign a message using an ECDSA key.
+///
+/// The `spec` selects the curve: secp256k1 keys (`KeySpec::EccSecgP256k1`) are
+/// handled by the pure-Rust `k256` crate, all other curves by `aws-lc-rs`.
 pub fn ecdsa_sign(
+    spec: &KeySpec,
     private_key_der: &[u8],
     message: &[u8],
     algorithm: &SigningAlgorithmSpec,
 ) -> Result<Vec<u8>, KmsError> {
+    if *spec == KeySpec::EccSecgP256k1 {
+        // AWS KMS only supports ECDSA_SHA_256 with ECC_SECG_P256K1.
+        if *algorithm != SigningAlgorithmSpec::EcdsaSha256 {
+            return Err(KmsError::with_message(
+                KmsErrorCode::UnsupportedOperationException,
+                format!(
+                    "Unsupported ECDSA signing algorithm for secp256k1: {}",
+                    algorithm.as_str()
+                ),
+            ));
+        }
+        return secp256k1_sign(private_key_der, message);
+    }
     let signing_alg = ecdsa_signing_algorithm(algorithm)?;
     let key_pair = EcdsaKeyPair::from_pkcs8(signing_alg, private_key_der)
         .map_err(|e| KmsError::internal_error(format!("Failed to load ECDSA key pair: {e}")))?;
@@ -420,15 +482,57 @@ pub fn ecdsa_sign(
 }
 
 /// Verify an ECDSA signature.
+///
+/// The `spec` selects the curve: secp256k1 keys (`KeySpec::EccSecgP256k1`) are
+/// handled by the pure-Rust `k256` crate, all other curves by `aws-lc-rs`.
 pub fn ecdsa_verify(
+    spec: &KeySpec,
     public_key_bytes: &[u8],
     message: &[u8],
     sig: &[u8],
     algorithm: &SigningAlgorithmSpec,
 ) -> Result<bool, KmsError> {
+    if *spec == KeySpec::EccSecgP256k1 {
+        // AWS KMS only supports ECDSA_SHA_256 with ECC_SECG_P256K1.
+        if *algorithm != SigningAlgorithmSpec::EcdsaSha256 {
+            return Err(KmsError::with_message(
+                KmsErrorCode::UnsupportedOperationException,
+                format!(
+                    "Unsupported ECDSA verification algorithm for secp256k1: {}",
+                    algorithm.as_str()
+                ),
+            ));
+        }
+        return secp256k1_verify(public_key_bytes, message, sig);
+    }
     let verify_alg = ecdsa_verify_algorithm(algorithm)?;
     let public_key = signature::UnparsedPublicKey::new(verify_alg, public_key_bytes);
     Ok(public_key.verify(message, sig).is_ok())
+}
+
+/// Sign a message using a secp256k1 key.
+///
+/// Returns the ASN.1 DER-encoded signature, matching the format AWS KMS uses.
+fn secp256k1_sign(private_key_der: &[u8], message: &[u8]) -> Result<Vec<u8>, KmsError> {
+    let signing_key = SigningKey::from_pkcs8_der(private_key_der)
+        .map_err(|e| KmsError::internal_error(format!("Failed to load secp256k1 key pair: {e}")))?;
+    // k256 uses deterministic RFC 6979 nonces, so no RNG is required here.
+    let signature: k256::ecdsa::Signature = signing_key.sign(message);
+    Ok(signature.to_der().as_bytes().to_vec())
+}
+
+/// Verify a secp256k1 signature.
+///
+/// A malformed signature is reported as `Ok(false)` (invalid), consistent with
+/// the `aws-lc-rs` verification path above.
+fn secp256k1_verify(public_key_bytes: &[u8], message: &[u8], sig: &[u8]) -> Result<bool, KmsError> {
+    let verifying_key = VerifyingKey::from_sec1_bytes(public_key_bytes).map_err(|e| {
+        KmsError::internal_error(format!("Failed to load secp256k1 public key: {e}"))
+    })?;
+    let Ok(signature) = k256::ecdsa::Signature::from_der(sig) else {
+        return Ok(false);
+    };
+    Ok(verifying_key.verify(message, &signature).is_ok())
 }
 
 /// Map signing algorithm to ECDSA signing algorithm.
@@ -545,6 +649,7 @@ pub fn generate_data_key_pair(spec: &DataKeyPairSpec) -> Result<(Vec<u8>, Vec<u8
         DataKeyPairSpec::EccNistP521 => {
             generate_ec_pair_raw(&signature::ECDSA_P521_SHA512_ASN1_SIGNING)
         }
+        DataKeyPairSpec::EccSecgP256k1 => secp256k1_keypair_raw(),
         _ => Err(KmsError::with_message(
             KmsErrorCode::UnsupportedOperationException,
             format!("Data key pair spec {} is not supported", spec.as_str()),
@@ -599,4 +704,120 @@ pub fn rsa_public_key_der(private_key_der: &[u8]) -> Result<Vec<u8>, KmsError> {
     let key_pair = RsaKeyPair::from_pkcs8(private_key_der)
         .map_err(|e| KmsError::internal_error(format!("Failed to load RSA key pair: {e}")))?;
     Ok(key_pair.public_key().as_ref().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_generate_secp256k1_key_material() {
+        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
+        match material {
+            KeyMaterial::Ec {
+                private_key_der,
+                public_key_der,
+            } => {
+                assert!(!private_key_der.is_empty());
+                // Uncompressed SEC1 public key: 0x04 || x || y (65 bytes).
+                assert_eq!(public_key_der.len(), 65);
+                assert_eq!(public_key_der[0], 0x04);
+            }
+            other => panic!("expected EC key material, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_should_sign_and_verify_with_secp256k1() {
+        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
+        let (private_key_der, public_key_der) = match material {
+            KeyMaterial::Ec {
+                private_key_der,
+                public_key_der,
+            } => (private_key_der, public_key_der),
+            other => panic!("expected EC key material, got {other:?}"),
+        };
+
+        let message = b"hello secp256k1";
+        let spec = KeySpec::EccSecgP256k1;
+        let algorithm = SigningAlgorithmSpec::EcdsaSha256;
+
+        let signature = ecdsa_sign(&spec, &private_key_der, message, &algorithm).unwrap();
+        assert!(!signature.is_empty());
+
+        let valid = ecdsa_verify(&spec, &public_key_der, message, &signature, &algorithm).unwrap();
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_should_reject_tampered_message_with_secp256k1() {
+        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
+        let (private_key_der, public_key_der) = match material {
+            KeyMaterial::Ec {
+                private_key_der,
+                public_key_der,
+            } => (private_key_der, public_key_der),
+            other => panic!("expected EC key material, got {other:?}"),
+        };
+
+        let spec = KeySpec::EccSecgP256k1;
+        let algorithm = SigningAlgorithmSpec::EcdsaSha256;
+        let signature = ecdsa_sign(&spec, &private_key_der, b"original", &algorithm).unwrap();
+
+        let valid =
+            ecdsa_verify(&spec, &public_key_der, b"tampered", &signature, &algorithm).unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_should_report_malformed_signature_as_invalid_with_secp256k1() {
+        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
+        let public_key_der = match material {
+            KeyMaterial::Ec { public_key_der, .. } => public_key_der,
+            other => panic!("expected EC key material, got {other:?}"),
+        };
+
+        let spec = KeySpec::EccSecgP256k1;
+        let algorithm = SigningAlgorithmSpec::EcdsaSha256;
+        let valid = ecdsa_verify(
+            &spec,
+            &public_key_der,
+            b"message",
+            b"not-a-der-signature",
+            &algorithm,
+        )
+        .unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_should_reject_non_sha256_algorithm_for_secp256k1() {
+        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
+        let (private_key_der, public_key_der) = match material {
+            KeyMaterial::Ec {
+                private_key_der,
+                public_key_der,
+            } => (private_key_der, public_key_der),
+            other => panic!("expected EC key material, got {other:?}"),
+        };
+
+        let spec = KeySpec::EccSecgP256k1;
+        let algorithm = SigningAlgorithmSpec::EcdsaSha384;
+
+        let sign_err = ecdsa_sign(&spec, &private_key_der, b"message", &algorithm).unwrap_err();
+        assert_eq!(sign_err.code, KmsErrorCode::UnsupportedOperationException);
+
+        let verify_err =
+            ecdsa_verify(&spec, &public_key_der, b"message", b"sig", &algorithm).unwrap_err();
+        assert_eq!(verify_err.code, KmsErrorCode::UnsupportedOperationException);
+    }
+
+    #[test]
+    fn test_should_generate_secp256k1_data_key_pair() {
+        let (private_der, public_der) =
+            generate_data_key_pair(&DataKeyPairSpec::EccSecgP256k1).unwrap();
+        assert!(!private_der.is_empty());
+        assert_eq!(public_der.len(), 65);
+        assert_eq!(public_der[0], 0x04);
+    }
 }

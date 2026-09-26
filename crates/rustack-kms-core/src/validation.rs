@@ -87,7 +87,9 @@ pub fn signing_algorithms_for_spec(spec: &KeySpec) -> Vec<SigningAlgorithmSpec> 
             SigningAlgorithmSpec::RsassaPssSha384,
             SigningAlgorithmSpec::RsassaPssSha512,
         ],
-        KeySpec::EccNistP256 => vec![SigningAlgorithmSpec::EcdsaSha256],
+        KeySpec::EccNistP256 | KeySpec::EccSecgP256k1 => {
+            vec![SigningAlgorithmSpec::EcdsaSha256]
+        }
         KeySpec::EccNistP384 => vec![SigningAlgorithmSpec::EcdsaSha384],
         KeySpec::EccNistP521 => vec![SigningAlgorithmSpec::EcdsaSha512],
         _ => vec![],
@@ -160,4 +162,32 @@ pub fn validate_tag(key: &str, value: &str) -> Result<(), KmsError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_list_ecdsa_sha256_for_secp256k1() {
+        assert_eq!(
+            signing_algorithms_for_spec(&KeySpec::EccSecgP256k1),
+            vec![SigningAlgorithmSpec::EcdsaSha256]
+        );
+    }
+
+    #[test]
+    fn test_should_default_to_sign_verify_for_secp256k1() {
+        assert_eq!(
+            default_key_usage(&KeySpec::EccSecgP256k1),
+            KeyUsageType::SignVerify
+        );
+        assert!(
+            validate_key_spec_usage(&KeySpec::EccSecgP256k1, &KeyUsageType::SignVerify).is_ok()
+        );
+        assert!(
+            validate_key_spec_usage(&KeySpec::EccSecgP256k1, &KeyUsageType::EncryptDecrypt)
+                .is_err()
+        );
+    }
 }
