@@ -331,10 +331,13 @@ fn verify_sigv4_with_policy(
     // Passing the normalized string through `build_canonical_request` is safe:
     // it is already sorted and contains no raw `&`/`=`, so the raw sorting pass
     // is a no-op.
-    let normalized_query = build_canonical_query_string_normalized(query);
-    if normalized_query != build_canonical_query_string(query)
-        && signature_matches(&normalized_query)
-    {
+    // If the query is not valid UTF-8 after percent-decoding, normalization
+    // is impossible; the raw attempt above already failed, so fall through to
+    // the signature mismatch below.
+    let normalized_matches = build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
+        normalized != build_canonical_query_string(query) && signature_matches(&normalized)
+    });
+    if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded (normalized query string)");
         return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
@@ -804,7 +807,7 @@ mod tests {
         let empty_hash = hash_payload(b"");
 
         let wire_query = "prefix=periods/&max-keys=1";
-        let normalized_query = build_canonical_query_string_normalized(wire_query);
+        let normalized_query = build_canonical_query_string_normalized(wire_query).unwrap();
         assert_eq!(normalized_query, "max-keys=1&prefix=periods%2F");
 
         // Sign the request the way a spec-compliant client does: canonical

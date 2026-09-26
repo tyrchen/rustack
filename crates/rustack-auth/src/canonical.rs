@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
+use crate::error::AuthError;
+
 /// The set of characters that must be percent-encoded in URI path segments.
 ///
 /// Per AWS SigV4 spec, all characters except unreserved characters
@@ -167,50 +169,63 @@ pub fn build_canonical_query_string(query: &str) -> String {
 /// canonical query string `prefix=periods%2F`, which the raw-preserving
 /// [`build_canonical_query_string`] would not reproduce.
 ///
+/// Percent-decoding uses strict UTF-8 validation: a parameter that is not
+/// valid UTF-8 after decoding is rejected with
+/// [`AuthError::InvalidQueryString`] instead of being lossily decoded.
+/// Lossy decoding would map distinct wire encodings (e.g. `%FF` and the
+/// encoding of U+FFFD, `%EF%BF%BD`) to the same normalized string, creating
+/// signature collisions where tampered parameters still verify.
+///
 /// # Examples
 ///
 /// ```
 /// use rustack_auth::canonical::build_canonical_query_string_normalized;
 ///
-/// assert_eq!(build_canonical_query_string_normalized(""), "");
+/// assert_eq!(build_canonical_query_string_normalized("").unwrap(), "");
 /// // Raw `/` in the value is encoded, parameters are sorted.
 /// assert_eq!(
-///     build_canonical_query_string_normalized("prefix=periods/&max-keys=1"),
+///     build_canonical_query_string_normalized("prefix=periods/&max-keys=1").unwrap(),
 ///     "max-keys=1&prefix=periods%2F"
 /// );
 /// // Already-encoded input is decoded first: no double-encoding.
 /// assert_eq!(
-///     build_canonical_query_string_normalized("prefix=periods%2F"),
+///     build_canonical_query_string_normalized("prefix=periods%2F").unwrap(),
 ///     "prefix=periods%2F"
 /// );
 /// ```
-#[must_use]
-pub fn build_canonical_query_string_normalized(query: &str) -> String {
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidQueryString`] if a parameter name or value is
+/// not valid UTF-8 after percent-decoding.
+pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, AuthError> {
     if query.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
-    let mut params: Vec<(String, String)> = query
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .map(|param| {
-            let (name, value) = param.split_once('=').unwrap_or((param, ""));
-            // Decode first so that already-encoded input round-trips instead of
-            // being double-encoded, then re-encode per the SigV4 rules.
-            let decoded_name = percent_decode_str(name).decode_utf8_lossy();
-            let decoded_value = percent_decode_str(value).decode_utf8_lossy();
-            (sigv4_encode(&decoded_name), sigv4_encode(&decoded_value))
-        })
-        .collect();
+    let mut params: Vec<(String, String)> = Vec::with_capacity(query.len() / 8);
+    for param in query.split('&').filter(|s| !s.is_empty()) {
+        let (name, value) = param.split_once('=').unwrap_or((param, ""));
+        // Decode first so that already-encoded input round-trips instead of
+        // being double-encoded, then re-encode per the SigV4 rules.
+        // Strict UTF-8 on purpose: see the doc comment above.
+        let decoded_name = percent_decode_str(name)
+            .decode_utf8()
+            .map_err(|_| AuthError::InvalidQueryString)?;
+        let decoded_value = percent_decode_str(value)
+            .decode_utf8()
+            .map_err(|_| AuthError::InvalidQueryString)?;
+        params.push((sigv4_encode(&decoded_name), sigv4_encode(&decoded_value)));
+    }
 
     // Sort by encoded name, then by encoded value, per the SigV4 spec.
     params.sort_unstable();
 
-    params
+    Ok(params
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
-        .join("&")
+        .join("&"))
 }
 
 /// Build the canonical headers string from the request headers.
@@ -490,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_should_return_empty_for_empty_normalized_query() {
-        assert_eq!(build_canonical_query_string_normalized(""), "");
+        assert_eq!(build_canonical_query_string_normalized("").unwrap(), "");
     }
 
     #[test]
@@ -498,7 +513,7 @@ mod tests {
         // The Transmit 5 case from the issue: the client signs the encoded form
         // while the raw query string carries the unencoded value.
         assert_eq!(
-            build_canonical_query_string_normalized("prefix=periods/&max-keys=1"),
+            build_canonical_query_string_normalized("prefix=periods/&max-keys=1").unwrap(),
             "max-keys=1&prefix=periods%2F"
         );
     }
@@ -507,11 +522,11 @@ mod tests {
     fn test_should_not_double_encode_in_normalized_query() {
         // Already-encoded input is decoded first, then re-encoded.
         assert_eq!(
-            build_canonical_query_string_normalized("prefix=periods%2F"),
+            build_canonical_query_string_normalized("prefix=periods%2F").unwrap(),
             "prefix=periods%2F"
         );
         assert_eq!(
-            build_canonical_query_string_normalized("key=hello%20world"),
+            build_canonical_query_string_normalized("key=hello%20world").unwrap(),
             "key=hello%20world"
         );
     }
@@ -520,7 +535,7 @@ mod tests {
     fn test_should_encode_special_characters_in_normalized_query() {
         // `:` and `*` are not unreserved characters, so they are encoded.
         assert_eq!(
-            build_canonical_query_string_normalized("events=s3:ObjectCreated:*"),
+            build_canonical_query_string_normalized("events=s3:ObjectCreated:*").unwrap(),
             "events=s3%3AObjectCreated%3A%2A"
         );
     }
@@ -528,7 +543,7 @@ mod tests {
     #[test]
     fn test_should_sort_normalized_query_by_encoded_name_then_value() {
         assert_eq!(
-            build_canonical_query_string_normalized("b=2&a=1&a=0"),
+            build_canonical_query_string_normalized("b=2&a=1&a=0").unwrap(),
             "a=0&a=1&b=2"
         );
     }
@@ -536,9 +551,24 @@ mod tests {
     #[test]
     fn test_should_treat_missing_value_as_empty_in_normalized_query() {
         assert_eq!(
-            build_canonical_query_string_normalized("flag&b=2"),
+            build_canonical_query_string_normalized("flag&b=2").unwrap(),
             "b=2&flag="
         );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_utf8_in_normalized_query() {
+        // `%FF` is not valid UTF-8. Lossy decoding would map it to U+FFFD,
+        // colliding with a legitimately signed `x=%EF%BF%BD` parameter, so
+        // normalization must reject it instead of silently replacing it.
+        assert!(matches!(
+            build_canonical_query_string_normalized("x=%FF"),
+            Err(AuthError::InvalidQueryString)
+        ));
+        assert!(matches!(
+            build_canonical_query_string_normalized("x=%EF%BF%BD"),
+            Ok(_)
+        ));
     }
 
     #[test]

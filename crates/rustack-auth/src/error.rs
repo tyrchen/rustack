@@ -49,4 +49,8 @@ pub enum AuthError {
     /// A required query parameter for presigned URL authentication is missing.
     #[error("Missing required query parameter: {0}")]
     MissingQueryParam(String),
+
+    /// A query string parameter is not valid UTF-8 after percent-decoding.
+    #[error("Invalid query string: parameter is not valid UTF-8")]
+    InvalidQueryString,
 }

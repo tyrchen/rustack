@@ -208,8 +208,14 @@ pub fn verify_presigned(
     // Second attempt: SigV4-normalized query string (percent-decode, then
     // re-encode per spec, excluding `X-Amz-Signature`). This matches
     // spec-compliant clients that sign the encoded form.
-    let normalized_query = build_canonical_query_string_without_signature_normalized(query);
-    if normalized_query != canonical_query && signature_matches(&normalized_query) {
+    // If the query is not valid UTF-8 after percent-decoding, normalization
+    // is impossible; the raw attempt above already failed, so fall through to
+    // the signature mismatch below.
+    let normalized_matches =
+        build_canonical_query_string_without_signature_normalized(query).is_ok_and(|normalized| {
+            normalized != canonical_query && signature_matches(&normalized)
+        });
+    if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded (normalized query string)");
         return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
@@ -235,7 +241,14 @@ fn build_canonical_query_string_without_signature(query: &str) -> String {
 ///
 /// The remaining parameters are percent-decoded, re-encoded per the SigV4 spec,
 /// and sorted. See [`build_canonical_query_string_normalized`].
-fn build_canonical_query_string_without_signature_normalized(query: &str) -> String {
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidQueryString`] if a parameter is not valid UTF-8
+/// after percent-decoding.
+fn build_canonical_query_string_without_signature_normalized(
+    query: &str,
+) -> Result<String, AuthError> {
     build_canonical_query_string_normalized(&filter_signature_param(query))
 }
 
@@ -481,7 +494,7 @@ mod tests {
 
         // Sign the normalized canonical query string.
         let canonical_query =
-            build_canonical_query_string_without_signature_normalized(&query_without_sig);
+            build_canonical_query_string_without_signature_normalized(&query_without_sig).unwrap();
         assert!(canonical_query.contains("prefix=periods%2F"));
 
         #[rustfmt::skip]
