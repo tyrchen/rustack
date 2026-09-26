@@ -21,8 +21,8 @@ use tracing::debug;
 
 use crate::{
     canonical::{
-        build_canonical_headers, build_canonical_query_string, build_canonical_uri,
-        build_signed_headers_string,
+        build_canonical_headers, build_canonical_query_string,
+        build_canonical_query_string_normalized, build_canonical_uri, build_signed_headers_string,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -156,9 +156,6 @@ pub fn verify_presigned(
     let uri = parts.uri.path();
     let canonical_uri = build_canonical_uri(uri);
 
-    // Build the canonical query string WITHOUT X-Amz-Signature.
-    let canonical_query = build_canonical_query_string_without_signature(query);
-
     // Collect signed headers.
     let signed_header_refs: Vec<&str> = parsed.signed_headers.iter().map(String::as_str).collect();
     let header_pairs: Vec<(&str, &str)> =
@@ -167,60 +164,88 @@ pub fn verify_presigned(
     let canonical_headers = build_canonical_headers(&header_pairs, &signed_header_refs);
     let signed_headers_str = build_signed_headers_string(&signed_header_refs);
 
-    // For presigned URLs, the payload hash is always UNSIGNED-PAYLOAD.
-    #[rustfmt::skip]
-    let canonical_request = format!(
-        "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n\n{signed_headers_str}\n{UNSIGNED_PAYLOAD}"
-    );
-
-    debug!("Built presigned canonical request");
-
-    // Hash the canonical request.
-    let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-
-    // Build string to sign.
+    // Build the credential scope and derive the signing key once; both
+    // canonicalization attempts below share them.
     let credential_scope = format!(
         "{}/{}/{}/aws4_request",
         parsed.date, parsed.region, parsed.service
     );
-    let string_to_sign =
-        build_string_to_sign(&parsed.timestamp, &credential_scope, &canonical_hash);
-
-    debug!(string_to_sign, "Built presigned string to sign");
-
-    // Derive signing key and compute signature.
     let signing_key =
         derive_signing_key(&secret_key, &parsed.date, &parsed.region, &parsed.service);
-    let expected_signature = compute_signature(&signing_key, &string_to_sign);
-
-    // Constant-time comparison.
     let provided_bytes = parsed.signature.as_bytes();
-    let expected_bytes = expected_signature.as_bytes();
 
-    if provided_bytes.ct_eq(expected_bytes).into() {
+    // Check the provided signature against the canonical request built from
+    // `canonical_query`. Returns true on a constant-time match.
+    // For presigned URLs, the payload hash is always UNSIGNED-PAYLOAD.
+    #[rustfmt::skip]
+    let signature_matches = |canonical_query: &str| -> bool {
+        let canonical_request = format!(
+            "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n\n{signed_headers_str}\n{UNSIGNED_PAYLOAD}"
+        );
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let string_to_sign =
+            build_string_to_sign(&parsed.timestamp, &credential_scope, &canonical_hash);
+        let expected_signature = compute_signature(&signing_key, &string_to_sign);
+        bool::from(provided_bytes.ct_eq(expected_signature.as_bytes()))
+    };
+
+    debug!("Built presigned canonical request");
+
+    // First attempt: raw query string values preserved as-is (excluding
+    // `X-Amz-Signature`). This matches clients that sign whatever encoding
+    // appears in the URL.
+    let canonical_query = build_canonical_query_string_without_signature(query);
+    if signature_matches(&canonical_query) {
         debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded");
-        Ok(AuthResult {
+        return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
             region: parsed.region,
             service: parsed.service,
             signed_headers: parsed.signed_headers,
-        })
-    } else {
-        debug!("Presigned URL signature mismatch");
-        Err(AuthError::SignatureDoesNotMatch)
+        });
     }
+
+    // Second attempt: SigV4-normalized query string (percent-decode, then
+    // re-encode per spec, excluding `X-Amz-Signature`). This matches
+    // spec-compliant clients that sign the encoded form.
+    let normalized_query = build_canonical_query_string_without_signature_normalized(query);
+    if normalized_query != canonical_query && signature_matches(&normalized_query) {
+        debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded (normalized query string)");
+        return Ok(AuthResult {
+            access_key_id: parsed.access_key_id,
+            region: parsed.region,
+            service: parsed.service,
+            signed_headers: parsed.signed_headers,
+        });
+    }
+
+    debug!("Presigned URL signature mismatch");
+    Err(AuthError::SignatureDoesNotMatch)
 }
 
 /// Build the canonical query string excluding the `X-Amz-Signature` parameter.
 ///
-/// The remaining parameters are sorted and re-encoded per the SigV4 spec.
+/// The remaining parameters are sorted; raw values are preserved as-is.
+/// See [`build_canonical_query_string`].
 fn build_canonical_query_string_without_signature(query: &str) -> String {
-    let filtered: String = query
+    build_canonical_query_string(&filter_signature_param(query))
+}
+
+/// Build the SigV4-normalized canonical query string excluding `X-Amz-Signature`.
+///
+/// The remaining parameters are percent-decoded, re-encoded per the SigV4 spec,
+/// and sorted. See [`build_canonical_query_string_normalized`].
+fn build_canonical_query_string_without_signature_normalized(query: &str) -> String {
+    build_canonical_query_string_normalized(&filter_signature_param(query))
+}
+
+/// Remove the `X-Amz-Signature` parameter from a query string.
+fn filter_signature_param(query: &str) -> String {
+    query
         .split('&')
         .filter(|param| !param.starts_with("X-Amz-Signature="))
         .collect::<Vec<_>>()
-        .join("&");
-    build_canonical_query_string(&filtered)
+        .join("&")
 }
 
 /// Check whether the presigned URL has expired.
@@ -433,5 +458,58 @@ mod tests {
         assert_eq!(auth_result.access_key_id, TEST_ACCESS_KEY);
         assert_eq!(auth_result.region, "us-east-1");
         assert_eq!(auth_result.service, "s3");
+    }
+
+    #[test]
+    fn test_should_verify_presigned_url_signed_with_normalized_query() {
+        // A spec-compliant client signs the normalized canonical query string
+        // even when the URL carries raw values (e.g. `prefix=periods/`).
+        let provider = test_credential_provider();
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = now.format("%Y%m%d").to_string();
+
+        let credential = format!("{TEST_ACCESS_KEY}/{date}/us-east-1/s3/aws4_request");
+        let encoded_credential = percent_encoding::utf8_percent_encode(
+            &credential,
+            percent_encoding::NON_ALPHANUMERIC,
+        );
+
+        // Raw value on the wire, as a client like Transmit 5 would send it.
+        let query_without_sig = format!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={encoded_credential}&\
+             X-Amz-Date={timestamp}&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&prefix=periods/"
+        );
+
+        // Sign the normalized canonical query string.
+        let canonical_query =
+            build_canonical_query_string_without_signature_normalized(&query_without_sig);
+        assert!(canonical_query.contains("prefix=periods%2F"));
+
+        #[rustfmt::skip]
+        let canonical_request = format!(
+            "GET\n/test.txt\n{canonical_query}\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
+        );
+
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
+        let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
+
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
+        let signature = compute_signature(&signing_key, &string_to_sign);
+
+        let full_query = format!("{query_without_sig}&X-Amz-Signature={signature}");
+        let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{full_query}");
+
+        let (parts, _body) = http::Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("host", "examplebucket.s3.amazonaws.com")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let result = verify_presigned(&parts, &provider);
+        assert!(result.is_ok());
     }
 }

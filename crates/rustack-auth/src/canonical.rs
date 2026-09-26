@@ -118,6 +118,10 @@ pub fn build_canonical_uri(path: &str) -> String {
 /// raw. The server must use the exact same encoding the client used for signing,
 /// which is whatever appears in the HTTP request.
 ///
+/// For spec-compliant clients (e.g. Transmit 5) that sign the normalized form,
+/// see [`build_canonical_query_string_normalized`]. Signature verification
+/// tries both forms so that either client style is accepted.
+///
 /// # Examples
 ///
 /// ```
@@ -141,6 +145,68 @@ pub fn build_canonical_query_string(query: &str) -> String {
         .map(|param| param.split_once('=').unwrap_or((param, "")))
         .collect();
 
+    params.sort_unstable();
+
+    params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Build the canonical query string following the AWS SigV4 specification.
+///
+/// Each parameter name and value is first percent-decoded (so already-encoded
+/// input is not double-encoded) and then re-encoded using the SigV4 encoding
+/// rules: every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`,
+/// `_`, `.`, `~`) is percent-encoded with uppercase hex. Parameters are then
+/// sorted by encoded name, then by encoded value for duplicate names.
+///
+/// This matches what spec-compliant S3 clients (AWS SDKs, Transmit 5, …) sign.
+/// For example, a client sending `?prefix=periods/` on the wire signs the
+/// canonical query string `prefix=periods%2F`, which the raw-preserving
+/// [`build_canonical_query_string`] would not reproduce.
+///
+/// # Examples
+///
+/// ```
+/// use rustack_auth::canonical::build_canonical_query_string_normalized;
+///
+/// assert_eq!(build_canonical_query_string_normalized(""), "");
+/// // Raw `/` in the value is encoded, parameters are sorted.
+/// assert_eq!(
+///     build_canonical_query_string_normalized("prefix=periods/&max-keys=1"),
+///     "max-keys=1&prefix=periods%2F"
+/// );
+/// // Already-encoded input is decoded first: no double-encoding.
+/// assert_eq!(
+///     build_canonical_query_string_normalized("prefix=periods%2F"),
+///     "prefix=periods%2F"
+/// );
+/// ```
+#[must_use]
+pub fn build_canonical_query_string_normalized(query: &str) -> String {
+    if query.is_empty() {
+        return String::new();
+    }
+
+    let mut params: Vec<(String, String)> = query
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .map(|param| {
+            let (name, value) = param.split_once('=').unwrap_or((param, ""));
+            // Decode first so that already-encoded input round-trips instead of
+            // being double-encoded, then re-encode per the SigV4 rules.
+            let decoded_name = percent_decode_str(name).decode_utf8_lossy();
+            let decoded_value = percent_decode_str(value).decode_utf8_lossy();
+            (
+                sigv4_encode(&decoded_name),
+                sigv4_encode(&decoded_value),
+            )
+        })
+        .collect();
+
+    // Sort by encoded name, then by encoded value, per the SigV4 spec.
     params.sort_unstable();
 
     params
@@ -224,9 +290,17 @@ pub fn build_signed_headers_string(signed_headers: &[&str]) -> String {
     sorted.join(";")
 }
 
+/// Percent-encode a string using the AWS SigV4 encoding rules.
+///
+/// Every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`, `_`,
+/// `.`, `~`) is percent-encoded with uppercase hexadecimal digits.
+fn sigv4_encode(input: &str) -> String {
+    utf8_percent_encode(input, URI_ENCODE_SET).to_string()
+}
+
 /// URI-encode a single path segment using the AWS SigV4 encoding rules.
 fn uri_encode(input: &str) -> String {
-    utf8_percent_encode(input, URI_ENCODE_SET).to_string()
+    sigv4_encode(input)
 }
 
 /// Collapse consecutive whitespace characters in a string to a single space.
@@ -414,6 +488,59 @@ mod tests {
         assert_eq!(
             result,
             "events=s3:ObjectAccessed:*&events=s3:ObjectCreated:*&prefix=p"
+        );
+    }
+
+    #[test]
+    fn test_should_return_empty_for_empty_normalized_query() {
+        assert_eq!(build_canonical_query_string_normalized(""), "");
+    }
+
+    #[test]
+    fn test_should_encode_raw_values_in_normalized_query() {
+        // The Transmit 5 case from the issue: the client signs the encoded form
+        // while the raw query string carries the unencoded value.
+        assert_eq!(
+            build_canonical_query_string_normalized("prefix=periods/&max-keys=1"),
+            "max-keys=1&prefix=periods%2F"
+        );
+    }
+
+    #[test]
+    fn test_should_not_double_encode_in_normalized_query() {
+        // Already-encoded input is decoded first, then re-encoded.
+        assert_eq!(
+            build_canonical_query_string_normalized("prefix=periods%2F"),
+            "prefix=periods%2F"
+        );
+        assert_eq!(
+            build_canonical_query_string_normalized("key=hello%20world"),
+            "key=hello%20world"
+        );
+    }
+
+    #[test]
+    fn test_should_encode_special_characters_in_normalized_query() {
+        // `:` and `*` are not unreserved characters, so they are encoded.
+        assert_eq!(
+            build_canonical_query_string_normalized("events=s3:ObjectCreated:*"),
+            "events=s3%3AObjectCreated%3A%2A"
+        );
+    }
+
+    #[test]
+    fn test_should_sort_normalized_query_by_encoded_name_then_value() {
+        assert_eq!(
+            build_canonical_query_string_normalized("b=2&a=1&a=0"),
+            "a=0&a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn test_should_treat_missing_value_as_empty_in_normalized_query() {
+        assert_eq!(
+            build_canonical_query_string_normalized("flag&b=2"),
+            "b=2&flag="
         );
     }
 

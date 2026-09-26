@@ -18,7 +18,12 @@ use subtle::ConstantTimeEq;
 use tracing::debug;
 
 use crate::{
-    canonical::build_canonical_request, credentials::CredentialProvider, error::AuthError,
+    canonical::{
+        build_canonical_query_string, build_canonical_query_string_normalized,
+        build_canonical_request,
+    },
+    credentials::CredentialProvider,
+    error::AuthError,
 };
 
 /// The only algorithm supported by this implementation.
@@ -279,46 +284,68 @@ fn verify_sigv4_with_policy(
     let signed_header_refs: Vec<&str> = parsed.signed_headers.iter().map(String::as_str).collect();
     let header_pairs: Vec<(&str, &str)> = collect_signed_headers(parts, &signed_header_refs)?;
 
-    let canonical_request = build_canonical_request(
-        method,
-        uri,
-        query,
-        &header_pairs,
-        &signed_header_refs,
-        payload_hash,
-    );
-
-    // Hash the canonical request.
-    let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-
-    // Build the credential scope and string to sign.
+    // Build the credential scope and derive the signing key once; both
+    // canonicalization attempts below share them.
     let credential_scope = format!(
         "{}/{}/{}/aws4_request",
         parsed.date, parsed.region, parsed.service
     );
-    let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
-
-    // Derive the signing key and compute the expected signature.
     let signing_key =
         derive_signing_key(&secret_key, &parsed.date, &parsed.region, &parsed.service);
-    let expected_signature = compute_signature(&signing_key, &string_to_sign);
-
-    // Constant-time comparison to prevent timing attacks.
     let provided_bytes = parsed.signature.as_bytes();
-    let expected_bytes = expected_signature.as_bytes();
 
-    if provided_bytes.ct_eq(expected_bytes).into() {
+    // Check the provided signature against the canonical request built from
+    // `query_string`. Returns true on a constant-time match.
+    let signature_matches = |query_string: &str| -> bool {
+        let canonical_request = build_canonical_request(
+            method,
+            uri,
+            query_string,
+            &header_pairs,
+            &signed_header_refs,
+            payload_hash,
+        );
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
+        let expected_signature = compute_signature(&signing_key, &string_to_sign);
+        bool::from(provided_bytes.ct_eq(expected_signature.as_bytes()))
+    };
+
+    // First attempt: raw query string values preserved as-is. This matches
+    // clients that sign whatever encoding appears on the wire (e.g. AWS SDKs
+    // with pre-encoded values, minio-java via OkHttp with raw values).
+    if signature_matches(query) {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded");
-        Ok(AuthResult {
+        return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
             region: parsed.region,
             service: parsed.service,
             signed_headers: parsed.signed_headers,
-        })
-    } else {
-        debug!("Signature mismatch");
-        Err(AuthError::SignatureDoesNotMatch)
+        });
     }
+
+    // Second attempt: SigV4-normalized query string (percent-decode, then
+    // re-encode per spec). This matches spec-compliant clients such as
+    // Transmit 5, which sign the encoded form even when the wire carries the
+    // raw value (e.g. `prefix=periods/` on the wire, `prefix=periods%2F` signed).
+    // Passing the normalized string through `build_canonical_request` is safe:
+    // it is already sorted and contains no raw `&`/`=`, so the raw sorting pass
+    // is a no-op.
+    let normalized_query = build_canonical_query_string_normalized(query);
+    if normalized_query != build_canonical_query_string(query)
+        && signature_matches(&normalized_query)
+    {
+        debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded (normalized query string)");
+        return Ok(AuthResult {
+            access_key_id: parsed.access_key_id,
+            region: parsed.region,
+            service: parsed.service,
+            signed_headers: parsed.signed_headers,
+        });
+    }
+
+    debug!("Signature mismatch");
+    Err(AuthError::SignatureDoesNotMatch)
 }
 
 /// SigV4 streaming HMAC chain, including terminal chunks and signed trailers.
@@ -766,6 +793,113 @@ mod tests {
 
         let result = verify_sigv4(&parts, &empty_hash, &provider);
         assert!(matches!(result, Err(AuthError::SignatureDoesNotMatch)));
+    }
+
+    #[test]
+    fn test_should_verify_request_signed_with_normalized_query_string() {
+        // Reproduces the Transmit 5 scenario from the issue: the client signs
+        // the SigV4-normalized canonical query string (`prefix=periods%2F`)
+        // while the request line carries the raw value (`prefix=periods/`).
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+
+        let wire_query = "prefix=periods/&max-keys=1";
+        let normalized_query = build_canonical_query_string_normalized(wire_query);
+        assert_eq!(normalized_query, "max-keys=1&prefix=periods%2F");
+
+        // Sign the request the way a spec-compliant client does: canonical
+        // request built from the normalized query string.
+        let headers = [
+            ("host", "examplebucket.s3.amazonaws.com"),
+            ("x-amz-date", "20130524T000000Z"),
+        ];
+        let signed = ["host", "x-amz-date"];
+        let canonical = build_canonical_request(
+            "GET",
+            "/bucket-1",
+            &normalized_query,
+            &headers.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            &signed,
+            &empty_hash,
+        );
+        let string_to_sign = build_string_to_sign(
+            "20130524T000000Z",
+            "20130524/us-east-1/s3/aws4_request",
+            &hash_payload(canonical.as_bytes()),
+        );
+        let signature = compute_signature(
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &string_to_sign,
+        );
+
+        let auth_value = format!(
+            "AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,\
+             SignedHeaders=host;x-amz-date,Signature={signature}"
+        );
+        let uri = format!("http://examplebucket.s3.amazonaws.com/bucket-1?{wire_query}");
+        let (parts, _body) = http::Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("host", "examplebucket.s3.amazonaws.com")
+            .header("x-amz-date", "20130524T000000Z")
+            .header(http::header::AUTHORIZATION, &auth_value)
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_should_still_verify_request_signed_with_raw_query_values() {
+        // Clients such as minio-java (via OkHttp) sign the raw, unencoded
+        // values. The raw-preserving first attempt must keep accepting them.
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+
+        let wire_query = "events=s3:ObjectCreated:*&prefix=test";
+
+        let headers = [
+            ("host", "examplebucket.s3.amazonaws.com"),
+            ("x-amz-date", "20130524T000000Z"),
+        ];
+        let signed = ["host", "x-amz-date"];
+        let canonical = build_canonical_request(
+            "GET",
+            "/bucket-1",
+            wire_query,
+            &headers.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            &signed,
+            &empty_hash,
+        );
+        let string_to_sign = build_string_to_sign(
+            "20130524T000000Z",
+            "20130524/us-east-1/s3/aws4_request",
+            &hash_payload(canonical.as_bytes()),
+        );
+        let signature = compute_signature(
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &string_to_sign,
+        );
+
+        let auth_value = format!(
+            "AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request,\
+             SignedHeaders=host;x-amz-date,Signature={signature}"
+        );
+        let uri = format!("http://examplebucket.s3.amazonaws.com/bucket-1?{wire_query}");
+        let (parts, _body) = http::Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("host", "examplebucket.s3.amazonaws.com")
+            .header("x-amz-date", "20130524T000000Z")
+            .header(http::header::AUTHORIZATION, &auth_value)
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let result = verify_sigv4(&parts, &empty_hash, &provider);
+        assert!(result.is_ok());
     }
 
     #[test]
