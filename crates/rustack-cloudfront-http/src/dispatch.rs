@@ -838,12 +838,13 @@ async fn handle(
         }
         Operation::DeleteRealtimeLogConfig => {
             // Delete is POST-ish with name in body normally; accept query
-            // `Name=` or body `<Name>`.
+            // `Name=` or body `<Name>`. Query values are percent-decoded,
+            // matching AWS and `query_resource` below.
             let name = if let Some(q) = uri.query() {
                 q.split('&')
                     .find_map(|kv| kv.strip_prefix("Name="))
-                    .unwrap_or("")
-                    .to_owned()
+                    .map(percent_decode)
+                    .unwrap_or_default()
             } else {
                 let root = parse_root(&body)?;
                 root.child_text("Name").to_owned()
@@ -973,3 +974,76 @@ fn stub_response(
 // Silence unused import warnings when Method is not otherwise used in this file.
 #[allow(dead_code)]
 fn _force_method_usage(_m: Method) {}
+
+#[cfg(test)]
+mod tests {
+    use rustack_cloudfront_core::CloudFrontConfig;
+    use rustack_cloudfront_model::RealtimeLogConfig;
+
+    use super::*;
+
+    fn provider_with_realtime_log_config(name: &str) -> Arc<RustackCloudFront> {
+        let provider = Arc::new(RustackCloudFront::new(CloudFrontConfig::default()));
+        provider
+            .create_realtime_log_config(RealtimeLogConfig {
+                arn: String::new(),
+                name: name.to_owned(),
+                sampling_rate: 100,
+                end_points: Vec::new(),
+                fields: Vec::new(),
+            })
+            .unwrap();
+        provider
+    }
+
+    fn delete_realtime_log_config_route() -> RouteMatch {
+        RouteMatch {
+            operation: Operation::DeleteRealtimeLogConfig,
+            path_params: PathParams::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_delete_realtime_log_config_with_percent_encoded_name() {
+        // AWS decodes query parameter values, so `Name=a%2Fb` on the wire
+        // addresses the config named `a/b` — the same decoding
+        // `query_resource` already applies to `Resource`.
+        let provider = provider_with_realtime_log_config("a/b");
+        let uri: Uri = "/2020-05-31/realtime-log-config?Name=a%2Fb"
+            .parse()
+            .unwrap();
+
+        let result = handle(
+            &provider,
+            delete_realtime_log_config_route(),
+            &uri,
+            None,
+            Bytes::new(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(provider.get_realtime_log_config("a/b").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_should_delete_realtime_log_config_with_plain_name() {
+        // Unencoded names keep working as before.
+        let provider = provider_with_realtime_log_config("my-config");
+        let uri: Uri = "/2020-05-31/realtime-log-config?Name=my-config"
+            .parse()
+            .unwrap();
+
+        let result = handle(
+            &provider,
+            delete_realtime_log_config_route(),
+            &uri,
+            None,
+            Bytes::new(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(provider.get_realtime_log_config("my-config").is_err());
+    }
+}
