@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
+use crate::error::AuthError;
+
 /// The set of characters that must be percent-encoded in URI path segments.
 ///
 /// Per AWS SigV4 spec, all characters except unreserved characters
@@ -118,6 +120,10 @@ pub fn build_canonical_uri(path: &str) -> String {
 /// raw. The server must use the exact same encoding the client used for signing,
 /// which is whatever appears in the HTTP request.
 ///
+/// For spec-compliant clients (e.g. Transmit 5) that sign the normalized form,
+/// see [`build_canonical_query_string_normalized`]. Signature verification
+/// tries both forms so that either client style is accepted.
+///
 /// # Examples
 ///
 /// ```
@@ -148,6 +154,130 @@ pub fn build_canonical_query_string(query: &str) -> String {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// Maximum number of query parameters the normalized fallback will parse.
+///
+/// Each component becomes a pair of owned strings, so an unbounded parameter
+/// count would let a few input bytes per parameter amplify into large
+/// allocations on every raw-signature miss (unauthenticated requests reach
+/// this path). Queries above the cap fail closed with
+/// [`AuthError::InvalidQueryString`], which verification callers already map
+/// to "skip the fallback". 1024 leaves ample headroom: real S3 query strings
+/// carry a handful of parameters.
+const MAX_NORMALIZED_QUERY_PARAMS: usize = 1024;
+
+/// Build the canonical query string following the AWS SigV4 specification.
+///
+/// Each parameter name and value is first percent-decoded (so already-encoded
+/// input is not double-encoded) and then re-encoded using the SigV4 encoding
+/// rules: every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`,
+/// `_`, `.`, `~`) is percent-encoded with uppercase hex. Parameters are then
+/// sorted by encoded name, then by encoded value for duplicate names.
+///
+/// This matches what spec-compliant S3 clients (AWS SDKs, Transmit 5, …) sign.
+/// For example, a client sending `?prefix=periods/` on the wire signs the
+/// canonical query string `prefix=periods%2F`, which the raw-preserving
+/// [`build_canonical_query_string`] would not reproduce.
+///
+/// Percent-decoding uses strict UTF-8 validation: a parameter that is not
+/// valid UTF-8 after decoding is rejected with
+/// [`AuthError::InvalidQueryString`] instead of being lossily decoded.
+/// Lossy decoding would map distinct wire encodings (e.g. `%FF` and the
+/// encoding of U+FFFD, `%EF%BF%BD`) to the same normalized string, creating
+/// signature collisions where tampered parameters still verify.
+///
+/// A literal `+` is treated as a literal plus (re-encoded as `%2B`), per the
+/// SigV4 encoding rules. Note that downstream decoders disagree on the
+/// meaning of a raw `+` (S3 decodes a literal plus, API Gateway and Lambda
+/// decode a space), so verification callers must NOT attempt the normalized
+/// fallback when the wire query contains a raw `+`: no single normalized
+/// form is safe for every service. The raw-preserving first attempt is
+/// unaffected — only the ambiguous fallback is skipped.
+///
+/// # Examples
+///
+/// ```
+/// use rustack_auth::canonical::build_canonical_query_string_normalized;
+///
+/// assert_eq!(build_canonical_query_string_normalized("").unwrap(), "");
+/// // Raw `/` in the value is encoded, parameters are sorted.
+/// assert_eq!(
+///     build_canonical_query_string_normalized("prefix=periods/&max-keys=1").unwrap(),
+///     "max-keys=1&prefix=periods%2F"
+/// );
+/// // Already-encoded input is decoded first: no double-encoding.
+/// assert_eq!(
+///     build_canonical_query_string_normalized("prefix=periods%2F").unwrap(),
+///     "prefix=periods%2F"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidQueryString`] if a parameter name or value is
+/// not valid UTF-8 after percent-decoding, or if the query contains more than
+/// `MAX_NORMALIZED_QUERY_PARAMS` parameters (fail closed before allocating).
+///
+/// Note: verification callers only attempt the normalized fallback from
+/// endpoint-specific entry points (e.g. [`crate::sigv4::verify_s3_sigv4`])
+/// whose query decoding has been audited, and skip it when the wire query
+/// contains a raw `+`; see the `+` paragraph above.
+pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, AuthError> {
+    if query.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Bound the parameter count before allocating or parsing (see
+    // `MAX_NORMALIZED_QUERY_PARAMS`): each component becomes a pair of owned
+    // strings, so an unbounded count would amplify small inputs on every
+    // raw-signature miss. Fail closed; callers map this to "skip the fallback".
+    let param_count = query.matches('&').count().saturating_add(1);
+    if param_count > MAX_NORMALIZED_QUERY_PARAMS {
+        return Err(AuthError::InvalidQueryString);
+    }
+
+    // Size the buffer by parameter count, not byte length: `query.len() / 8`
+    // would let a single long parameter pre-allocate a large number of
+    // entries before any signature check runs (memory amplification on
+    // unauthenticated requests).
+    let mut params: Vec<(String, String)> = Vec::with_capacity(param_count);
+    for param in query.split('&').filter(|s| !s.is_empty()) {
+        let (name, value) = param.split_once('=').unwrap_or((param, ""));
+        // Decode first so that already-encoded input round-trips instead of
+        // being double-encoded, then re-encode per the SigV4 rules.
+        params.push((
+            decode_query_component(name)?,
+            decode_query_component(value)?,
+        ));
+    }
+
+    // Sort by encoded name, then by encoded value, per the SigV4 spec.
+    params.sort_unstable();
+
+    Ok(params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&"))
+}
+
+/// Percent-decode one query parameter name or value for normalization, then
+/// re-encode it per the SigV4 rules.
+///
+/// A literal `+` is treated as a literal plus (re-encoded as `%2B`). This is
+/// only unambiguous because verification callers skip the normalized fallback
+/// when the wire query contains a raw `+` — downstream decoders disagree on
+/// its meaning (S3: literal plus; API Gateway / Lambda: space), so no single
+/// normalized form is safe. See [`build_canonical_query_string_normalized`].
+///
+/// Decoding is strict UTF-8: invalid sequences are rejected with
+/// [`AuthError::InvalidQueryString`] instead of being lossily replaced.
+fn decode_query_component(component: &str) -> Result<String, AuthError> {
+    let decoded = percent_decode_str(component)
+        .decode_utf8()
+        .map_err(|_| AuthError::InvalidQueryString)?;
+    Ok(sigv4_encode(&decoded))
 }
 
 /// Build the canonical headers string from the request headers.
@@ -224,9 +354,17 @@ pub fn build_signed_headers_string(signed_headers: &[&str]) -> String {
     sorted.join(";")
 }
 
+/// Percent-encode a string using the AWS SigV4 encoding rules.
+///
+/// Every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`, `_`,
+/// `.`, `~`) is percent-encoded with uppercase hexadecimal digits.
+fn sigv4_encode(input: &str) -> String {
+    utf8_percent_encode(input, URI_ENCODE_SET).to_string()
+}
+
 /// URI-encode a single path segment using the AWS SigV4 encoding rules.
 fn uri_encode(input: &str) -> String {
-    utf8_percent_encode(input, URI_ENCODE_SET).to_string()
+    sigv4_encode(input)
 }
 
 /// Collapse consecutive whitespace characters in a string to a single space.
@@ -415,6 +553,104 @@ mod tests {
             result,
             "events=s3:ObjectAccessed:*&events=s3:ObjectCreated:*&prefix=p"
         );
+    }
+
+    #[test]
+    fn test_should_return_empty_for_empty_normalized_query() {
+        assert_eq!(build_canonical_query_string_normalized("").unwrap(), "");
+    }
+
+    #[test]
+    fn test_should_encode_raw_values_in_normalized_query() {
+        // The Transmit 5 case from the issue: the client signs the encoded form
+        // while the raw query string carries the unencoded value.
+        assert_eq!(
+            build_canonical_query_string_normalized("prefix=periods/&max-keys=1").unwrap(),
+            "max-keys=1&prefix=periods%2F"
+        );
+    }
+
+    #[test]
+    fn test_should_not_double_encode_in_normalized_query() {
+        // Already-encoded input is decoded first, then re-encoded.
+        assert_eq!(
+            build_canonical_query_string_normalized("prefix=periods%2F").unwrap(),
+            "prefix=periods%2F"
+        );
+        assert_eq!(
+            build_canonical_query_string_normalized("key=hello%20world").unwrap(),
+            "key=hello%20world"
+        );
+    }
+
+    #[test]
+    fn test_should_encode_special_characters_in_normalized_query() {
+        // `:` and `*` are not unreserved characters, so they are encoded.
+        assert_eq!(
+            build_canonical_query_string_normalized("events=s3:ObjectCreated:*").unwrap(),
+            "events=s3%3AObjectCreated%3A%2A"
+        );
+    }
+
+    #[test]
+    fn test_should_sort_normalized_query_by_encoded_name_then_value() {
+        assert_eq!(
+            build_canonical_query_string_normalized("b=2&a=1&a=0").unwrap(),
+            "a=0&a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn test_should_treat_missing_value_as_empty_in_normalized_query() {
+        assert_eq!(
+            build_canonical_query_string_normalized("flag&b=2").unwrap(),
+            "b=2&flag="
+        );
+    }
+
+    #[test]
+    fn test_should_reject_query_above_param_cap_in_normalized_query() {
+        // Each parameter becomes a pair of owned strings, so the parameter
+        // count is capped before allocating: fail closed on too many params.
+        let at_cap = "a=1&".repeat(1023) + "a=1";
+        assert_eq!(at_cap.split('&').count(), 1024);
+        assert!(build_canonical_query_string_normalized(&at_cap).is_ok());
+
+        let over_cap = "a=1&".repeat(1024) + "a=1";
+        assert_eq!(over_cap.split('&').count(), 1025);
+        assert!(matches!(
+            build_canonical_query_string_normalized(&over_cap),
+            Err(AuthError::InvalidQueryString)
+        ));
+    }
+
+    #[test]
+    fn test_should_encode_raw_plus_as_literal_plus_in_normalized_query() {
+        // The pure normalization treats `+` as a literal plus per the SigV4
+        // encoding rules. This is only safe because the verification callers
+        // skip the normalized fallback when the wire query contains a raw
+        // `+` — downstream decoders disagree on its meaning (S3: literal
+        // plus; API Gateway / Lambda: space), so the fallback must not guess.
+        assert_eq!(
+            build_canonical_query_string_normalized("x=+").unwrap(),
+            "x=%2B"
+        );
+        assert_eq!(
+            build_canonical_query_string_normalized("x=%2B").unwrap(),
+            "x=%2B"
+        );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_utf8_in_normalized_query() {
+        // `%FF` is not valid UTF-8. Lossy decoding would map it to U+FFFD,
+        // colliding with a legitimately signed `x=%EF%BF%BD` parameter, so
+        // normalization must reject it instead of silently replacing it.
+        assert!(matches!(
+            build_canonical_query_string_normalized("x=%FF"),
+            Err(AuthError::InvalidQueryString)
+        ));
+        assert!(build_canonical_query_string_normalized("x=%EF%BF%BD").is_ok());
     }
 
     #[test]
