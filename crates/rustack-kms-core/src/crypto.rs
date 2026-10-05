@@ -1071,4 +1071,43 @@ mod tests {
         // Data key pair public keys follow the same KMS contract: X.509 SPKI.
         assert_spki_secp256k1_der(&public_der);
     }
+
+    /// Regression test for <https://github.com/tyrchen/rustack/issues/57>.
+    ///
+    /// A `Sign` request with `MessageType::DIGEST` and a wrong-length digest
+    /// must report a validation error, not `InvalidArnException`, even though
+    /// the key identifier is valid.
+    #[test]
+    fn test_should_report_validation_exception_for_wrong_length_digest() {
+        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
+        let private_key_der = match material {
+            KeyMaterial::Ec {
+                private_key_der, ..
+            } => private_key_der,
+            other => panic!("expected EC key material, got {other:?}"),
+        };
+
+        // `c2hvcnQ=` is base64 for the five bytes `short`, as in issue #57.
+        let err = ecdsa_sign(
+            &KeySpec::EccSecgP256k1,
+            &private_key_der,
+            b"short",
+            &SigningAlgorithmSpec::EcdsaSha256,
+            &MessageType::Digest,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.code,
+            KmsErrorCode::ValidationException,
+            "wrong-length DIGEST must be a validation error, got {:?}: {}",
+            err.code,
+            err.message
+        );
+        assert!(
+            err.message.contains("32-byte"),
+            "error message should explain the digest length requirement, got: {}",
+            err.message
+        );
+    }
 }

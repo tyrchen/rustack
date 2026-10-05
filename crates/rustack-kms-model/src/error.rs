@@ -10,7 +10,6 @@ use std::fmt;
 #[non_exhaustive]
 pub enum KmsErrorCode {
     /// AlreadyExistsException error.
-    #[default]
     AlreadyExistsException,
     /// CloudHsmClusterInvalidConfigurationException error.
     CloudHsmClusterInvalidConfigurationException,
@@ -64,6 +63,9 @@ pub enum KmsErrorCode {
     TagException,
     /// UnsupportedOperationException error.
     UnsupportedOperationException,
+    /// ValidationException error (client-side input validation failure).
+    #[default]
+    ValidationException,
     /// XksKeyAlreadyInUseException error.
     XksKeyAlreadyInUseException,
     /// XksKeyInvalidConfigurationException error.
@@ -112,6 +114,7 @@ impl KmsErrorCode {
             Self::NotFoundException => "NotFoundException",
             Self::TagException => "TagException",
             Self::UnsupportedOperationException => "UnsupportedOperationException",
+            Self::ValidationException => "ValidationException",
             Self::XksKeyAlreadyInUseException => "XksKeyAlreadyInUseException",
             Self::XksKeyInvalidConfigurationException => "XksKeyInvalidConfigurationException",
             Self::XksKeyNotFoundException => "XksKeyNotFoundException",
@@ -141,6 +144,7 @@ impl KmsErrorCode {
             | Self::MissingAction
             | Self::TagException
             | Self::UnsupportedOperationException
+            | Self::ValidationException
             | Self::XksKeyAlreadyInUseException
             | Self::XksKeyInvalidConfigurationException
             | Self::XksKeyNotFoundException => http::StatusCode::BAD_REQUEST,
@@ -225,10 +229,10 @@ impl KmsError {
         Self::with_message(KmsErrorCode::KMSInternalException, message)
     }
 
-    /// Validation error.
+    /// Validation error (client-side input validation failure, HTTP 400).
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {
-        Self::with_message(KmsErrorCode::InvalidArnException, message)
+        Self::with_message(KmsErrorCode::ValidationException, message)
     }
 
     /// Missing action header.
