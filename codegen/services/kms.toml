@@ -37,6 +37,10 @@ phase2 = [
 [errors.custom]
 MissingAction = { status = 400, message = "Missing required header: X-Amz-Target" }
 InvalidAction = { status = 400, message = "Operation is not supported" }
+# Not part of the AWS KMS Smithy model: rustack reports client-side input
+# validation failures (e.g. wrong-length DIGEST for Sign) as
+# ValidationException, matching LocalStack/AWS behavior. See issue #57.
+ValidationException = { status = 400, message = "The request was rejected because an input parameter was invalid." }
 
 [output]
 file_layout = "flat"

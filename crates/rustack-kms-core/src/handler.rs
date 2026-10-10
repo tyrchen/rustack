@@ -276,3 +276,58 @@ fn serialize<T: serde::Serialize>(
         .map_err(|e| KmsError::internal_error(format!("Failed to serialize response: {e}")))?;
     Ok(json_response(json, request_id))
 }
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+    use rustack_kms_http::response::{error_to_json, error_to_response};
+    use rustack_kms_model::{
+        error::KmsErrorCode,
+        input::CreateKeyInput,
+        operations::KmsOperation,
+        types::{KeySpec, KeyUsageType},
+    };
+    use serde_json::{Value, json};
+
+    use super::dispatch;
+    use crate::{config::KmsConfig, provider::RustackKms};
+
+    /// Regression coverage for the JSON requests from issue #57, including Verify.
+    #[test]
+    fn test_should_return_validation_exception_for_digest_requests_with_valid_key() {
+        let provider = RustackKms::new(KmsConfig::default());
+        let created = provider
+            .create_key(CreateKeyInput {
+                key_spec: Some(KeySpec::EccSecgP256k1),
+                key_usage: Some(KeyUsageType::SignVerify),
+                ..CreateKeyInput::default()
+            })
+            .unwrap();
+        let metadata = created.key_metadata.unwrap();
+
+        // Both key IDs and ARNs resolve successfully: the input digest is invalid.
+        for key_id in [metadata.key_id, metadata.arn.unwrap()] {
+            for operation in [KmsOperation::Sign, KmsOperation::Verify] {
+                let mut request = json!({
+                    "KeyId": key_id,
+                    "Message": "c2hvcnQ=",
+                    "MessageType": "DIGEST",
+                    "SigningAlgorithm": "ECDSA_SHA_256",
+                });
+                if operation == KmsOperation::Verify {
+                    request["Signature"] = json!("c2ln");
+                }
+                let error = dispatch(&provider, operation, &serde_json::to_vec(&request).unwrap())
+                    .unwrap_err();
+                assert_eq!(error.code, KmsErrorCode::ValidationException);
+                let response = error_to_response(&error, "regression-request");
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body: Value = serde_json::from_slice(&error_to_json(&error)).unwrap();
+                assert_eq!(body["__type"], "ValidationException");
+                assert_eq!(body["message"], error.message);
+                assert!(error.message.contains("32-byte"));
+                assert!(error.message.contains("got 5 bytes"));
+            }
+        }
+    }
+}

@@ -807,6 +807,8 @@ pub fn rsa_public_key_der(private_key_der: &[u8]) -> Result<Vec<u8>, KmsError> {
 
 #[cfg(test)]
 mod tests {
+    use http::StatusCode;
+
     use super::*;
 
     /// Assert the bytes are a DER-encoded X.509 `SubjectPublicKeyInfo` for
@@ -933,39 +935,50 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reject_non_32_byte_digest_with_secp256k1() {
-        let material = generate_key_material(&KeySpec::EccSecgP256k1).unwrap();
-        let (private_key_der, public_key_der) = match material {
-            KeyMaterial::Ec {
-                private_key_der,
-                public_key_der,
-            } => (private_key_der, public_key_der),
-            other => panic!("expected EC key material, got {other:?}"),
-        };
-
+    fn test_should_report_validation_exception_for_wrong_length_digest() {
+        let (private_key_der, public_key_der) = secp256k1_keypair_raw().unwrap();
         let spec = KeySpec::EccSecgP256k1;
         let algorithm = SigningAlgorithmSpec::EcdsaSha256;
-
-        let sign_err = ecdsa_sign(
+        let valid_signature = ecdsa_sign(
             &spec,
             &private_key_der,
-            b"too short",
+            &[0; 32],
             &algorithm,
             &MessageType::Digest,
         )
-        .unwrap_err();
-        assert!(sign_err.message.contains("32-byte"));
+        .unwrap();
 
-        let verify_err = ecdsa_verify(
-            &spec,
-            &public_key_der,
-            b"too short",
-            b"sig",
-            &algorithm,
-            &MessageType::Digest,
-        )
-        .unwrap_err();
-        assert!(verify_err.message.contains("32-byte"));
+        for length in [0, 5, 31, 33, 64, 4096] {
+            let message = vec![0; length];
+            let sign_error = ecdsa_sign(
+                &spec,
+                &private_key_der,
+                &message,
+                &algorithm,
+                &MessageType::Digest,
+            )
+            .unwrap_err();
+            assert_eq!(sign_error.code, KmsErrorCode::ValidationException);
+            assert_eq!(sign_error.status_code, StatusCode::BAD_REQUEST);
+            assert!(sign_error.message.contains("32-byte"));
+            assert!(sign_error.message.contains(&format!("got {length} bytes")));
+
+            // Digest validation must take precedence over signature validity.
+            for signature in [valid_signature.as_slice(), b"malformed signature"] {
+                let verify_error = ecdsa_verify(
+                    &spec,
+                    &public_key_der,
+                    &message,
+                    signature,
+                    &algorithm,
+                    &MessageType::Digest,
+                )
+                .unwrap_err();
+                assert_eq!(verify_error.code, sign_error.code);
+                assert_eq!(verify_error.status_code, sign_error.status_code);
+                assert_eq!(verify_error.message, sign_error.message);
+            }
+        }
     }
 
     #[test]
