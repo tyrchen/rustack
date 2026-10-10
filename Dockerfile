@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
 
-# Retain the repository-selected toolchain without depending on a local
-# rust-toolchain.toml (maintainers may delete it). rust:1.95 matches the
-# repository pin; rustup adds the musl targets to that toolchain.
-FROM rust:1.95-slim AS builder
+# Match the repository toolchain pin and add musl targets to that toolchain.
+FROM rust:1.99.0-slim AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+COPY rust-toolchain.toml ./
 RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
