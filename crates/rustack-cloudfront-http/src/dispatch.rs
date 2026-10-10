@@ -5,10 +5,10 @@
 //! `RustackCloudFront` provider, and turns the domain result into an HTTP
 //! response with correct status codes and ETag/Location headers.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri};
+use http::{HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use rustack_cloudfront_core::RustackCloudFront;
 use rustack_cloudfront_model::{
     CloudFrontError, CloudFrontOriginAccessIdentityConfig, FunctionConfig, KeyValueStore,
@@ -837,13 +837,14 @@ async fn handle(
             ))
         }
         Operation::DeleteRealtimeLogConfig => {
-            // Delete is POST-ish with name in body normally; accept query
-            // `Name=` or body `<Name>`. Query values are percent-decoded,
-            // matching AWS and `query_resource` below.
+            // Accept `Name=` as a query extension in addition to body `<Name>`.
+            // Decode query values once, like `query_resource` below; XML body
+            // values are already decoded by the XML parser.
             let name = if let Some(q) = uri.query() {
                 q.split('&')
                     .find_map(|kv| kv.strip_prefix("Name="))
                     .map(percent_decode)
+                    .transpose()?
                     .unwrap_or_default()
             } else {
                 let root = parse_root(&body)?;
@@ -921,7 +922,7 @@ fn query_resource(uri: &Uri) -> Result<String, CloudFrontError> {
     let q = uri.query().unwrap_or("");
     for kv in q.split('&') {
         if let Some(v) = kv.strip_prefix("Resource=") {
-            return Ok(percent_decode(v));
+            return percent_decode(v);
         }
     }
     Err(CloudFrontError::MissingArgument(
@@ -929,10 +930,15 @@ fn query_resource(uri: &Uri) -> Result<String, CloudFrontError> {
     ))
 }
 
-fn percent_decode(s: &str) -> String {
+fn percent_decode(s: &str) -> Result<String, CloudFrontError> {
     percent_encoding::percent_decode_str(s)
-        .decode_utf8_lossy()
-        .into_owned()
+        .decode_utf8()
+        .map(Cow::into_owned)
+        .map_err(|_| {
+            CloudFrontError::InvalidArgument(
+                "Query parameter value must be valid UTF-8 after percent-decoding".into(),
+            )
+        })
 }
 
 fn stub_response(
@@ -971,12 +977,9 @@ fn stub_response(
     Ok(xml_response(StatusCode::OK, w.finish(), None))
 }
 
-// Silence unused import warnings when Method is not otherwise used in this file.
-#[allow(dead_code)]
-fn _force_method_usage(_m: Method) {}
-
 #[cfg(test)]
 mod tests {
+    use http_body_util::BodyExt;
     use rustack_cloudfront_core::CloudFrontConfig;
     use rustack_cloudfront_model::RealtimeLogConfig;
 
@@ -1045,5 +1048,161 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(provider.get_realtime_log_config("my-config").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_should_decode_query_name_once_and_preserve_delimiters() {
+        for (name, encoded) in [
+            ("a/b", "a%2fb"),
+            ("a&b=c", "a%26b%3Dc"),
+            ("a+b", "a%2Bb"),
+            ("a+b", "a+b"),
+            ("a b", "a%20b"),
+            ("a%2Fb", "a%252Fb"),
+            ("日志", "%E6%97%A5%E5%BF%97"),
+            ("�", "%EF%BF%BD"),
+        ] {
+            let provider = provider_with_realtime_log_config(name);
+            let uri: Uri = format!(
+                "/2020-05-31/realtime-log-config?Other=ignored&Name={encoded}&Other=also-ignored"
+            )
+            .parse()
+            .unwrap();
+            let response = handle(
+                &provider,
+                delete_realtime_log_config_route(),
+                &uri,
+                None,
+                Bytes::new(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{encoded}");
+            assert!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .is_empty(),
+                "{encoded}",
+            );
+            assert!(
+                matches!(
+                    provider.get_realtime_log_config(name),
+                    Err(CloudFrontError::NoSuchResource { .. }),
+                ),
+                "{encoded}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_invalid_utf8_name_without_deleting_replacement_character() {
+        for encoded in ["%FF", "%FE", "%C0%AF", "%ED%A0%80", "%E6%97"] {
+            let provider = provider_with_realtime_log_config("�");
+            let uri: Uri = format!("/2020-05-31/realtime-log-config?Name={encoded}")
+                .parse()
+                .unwrap();
+            let result = handle(
+                &provider,
+                delete_realtime_log_config_route(),
+                &uri,
+                None,
+                Bytes::new(),
+            )
+            .await;
+
+            assert!(
+                matches!(result, Err(CloudFrontError::InvalidArgument(_))),
+                "{encoded}",
+            );
+            assert!(provider.get_realtime_log_config("�").is_ok(), "{encoded}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_return_invalid_argument_http_response_for_invalid_utf8_name() {
+        let provider = provider_with_realtime_log_config("�");
+        let uri: Uri = "/2020-05-31/realtime-log-config?Name=%FF".parse().unwrap();
+        let response = dispatch(
+            &provider,
+            delete_realtime_log_config_route(),
+            &uri,
+            &HeaderMap::new(),
+            None,
+            Bytes::new(),
+            "request-id",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers().get("x-amzn-errortype"),
+            Some(&HeaderValue::from_static("InvalidArgument")),
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(xml.contains("<Code>InvalidArgument</Code>"));
+        assert!(provider.get_realtime_log_config("�").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_percent_sequences_in_xml_body_name() {
+        let provider = provider_with_realtime_log_config("a%2Fb&c");
+        let uri: Uri = "/2020-05-31/realtime-log-config".parse().unwrap();
+        let response = handle(
+            &provider,
+            delete_realtime_log_config_route(),
+            &uri,
+            None,
+            Bytes::from_static(
+                b"<DeleteRealtimeLogConfigRequest><Name>a%2Fb&amp;c</Name></DeleteRealtimeLogConfigRequest>",
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(provider.get_realtime_log_config("a%2Fb&c").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_malformed_xml_body_without_deleting_config() {
+        for body in [
+            "<Request><Name>my-config</Other></Request>",
+            "<Request><Name>my-config</Name>",
+            "<Request><Name>my-config</Name></Request><Other/>",
+        ] {
+            let provider = provider_with_realtime_log_config("my-config");
+            let uri: Uri = "/2020-05-31/realtime-log-config".parse().unwrap();
+            let result = handle(
+                &provider,
+                delete_realtime_log_config_route(),
+                &uri,
+                None,
+                Bytes::from(body),
+            )
+            .await;
+
+            assert!(matches!(result, Err(CloudFrontError::MalformedInput(_))));
+            assert!(provider.get_realtime_log_config("my-config").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_should_decode_resource_query_strictly_and_once() {
+        let uri: Uri = "/2020-05-31/tags?Resource=arn%3Atest%3Aa%252Fb"
+            .parse()
+            .unwrap();
+        assert_eq!(query_resource(&uri).unwrap(), "arn:test:a%2Fb");
+
+        let uri: Uri = "/2020-05-31/tags?Resource=%FF".parse().unwrap();
+        assert!(matches!(
+            query_resource(&uri),
+            Err(CloudFrontError::InvalidArgument(_)),
+        ));
     }
 }

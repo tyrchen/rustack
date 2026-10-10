@@ -4,7 +4,7 @@
 //! map to domain types. This avoids a separate serde path and matches the
 //! trim-whitespace semantics AWS applies to every element.
 
-use quick_xml::{Reader, events::Event};
+use quick_xml::{Reader, escape::resolve_xml_entity, events::Event};
 
 /// A lightweight XML tree node.
 #[derive(Debug, Default, Clone)]
@@ -101,8 +101,6 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
         return Ok(Node::default());
     }
     let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(true);
-    reader.config_mut().check_end_names = false;
 
     let mut stack: Vec<Node> = Vec::with_capacity(16);
     let mut root: Option<Node> = None;
@@ -110,6 +108,9 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
+                if stack.is_empty() && root.is_some() {
+                    return Err("multiple XML root elements".into());
+                }
                 let name = std::str::from_utf8(e.name().as_ref())
                     .map_err(|err| format!("invalid utf8 in name: {err}"))?
                     .to_owned();
@@ -119,7 +120,13 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
                 });
             }
             Ok(Event::End(_)) => {
-                if let Some(done) = stack.pop() {
+                if let Some(mut done) = stack.pop() {
+                    // References and CDATA split text into multiple events;
+                    // trim only after reassembling the complete element value.
+                    let trimmed = done.text.trim();
+                    if trimmed.len() != done.text.len() {
+                        done.text = trimmed.to_owned();
+                    }
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(done);
                     } else {
@@ -128,6 +135,9 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
                 }
             }
             Ok(Event::Empty(e)) => {
+                if stack.is_empty() && root.is_some() {
+                    return Err("multiple XML root elements".into());
+                }
                 let name = std::str::from_utf8(e.name().as_ref())
                     .map_err(|err| format!("invalid utf8 in name: {err}"))?
                     .to_owned();
@@ -145,16 +155,44 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
                 if let Some(top) = stack.last_mut() {
                     let raw =
                         std::str::from_utf8(t.as_ref()).map_err(|e| format!("text utf8: {e}"))?;
-                    top.text.push_str(&unescape_xml(raw));
+                    top.text.push_str(raw);
                 }
             }
+            Ok(Event::GeneralRef(reference)) => {
+                let character = reference
+                    .resolve_char_ref()
+                    .map_err(|err| format!("invalid character reference: {err}"))?;
+                if let Some(character) = character {
+                    if !is_xml_character(character) {
+                        return Err("character reference is not a valid XML character".into());
+                    }
+                    if let Some(top) = stack.last_mut() {
+                        top.text.push(character);
+                    }
+                } else {
+                    let name = reference
+                        .decode()
+                        .map_err(|err| format!("entity utf8: {err}"))?;
+                    let value = resolve_xml_entity(&name)
+                        .ok_or_else(|| "unsupported XML entity".to_owned())?;
+                    if let Some(top) = stack.last_mut() {
+                        top.text.push_str(value);
+                    }
+                }
+            }
+            Ok(Event::DocType(_)) => return Err("XML document types are not supported".into()),
             Ok(Event::CData(c)) => {
                 if let Some(top) = stack.last_mut() {
                     let s = std::str::from_utf8(&c).map_err(|e| format!("cdata utf8: {e}"))?;
                     top.text.push_str(s);
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                if !stack.is_empty() {
+                    return Err("unclosed XML element".into());
+                }
+                break;
+            }
             Ok(_) => {}
             Err(e) => return Err(format!("xml parse error: {e}")),
         }
@@ -163,46 +201,15 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
     root.ok_or_else(|| "empty XML document".to_owned())
 }
 
-/// Minimal XML entity unescaping (covers the five core entities plus numeric).
-fn unescape_xml(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(idx) = rest.find('&') {
-        out.push_str(&rest[..idx]);
-        let remainder = &rest[idx..];
-        if let Some(end) = remainder.find(';') {
-            let entity = &remainder[1..end];
-            let replaced = match entity {
-                "amp" => "&".to_owned(),
-                "lt" => "<".to_owned(),
-                "gt" => ">".to_owned(),
-                "quot" => "\"".to_owned(),
-                "apos" => "'".to_owned(),
-                hash if hash.starts_with('#') => {
-                    let (radix, num) = if hash.starts_with("#x") || hash.starts_with("#X") {
-                        (16, &hash[2..])
-                    } else {
-                        (10, &hash[1..])
-                    };
-                    if let Ok(n) = u32::from_str_radix(num, radix) {
-                        char::from_u32(n)
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| format!("&{entity};"))
-                    } else {
-                        format!("&{entity};")
-                    }
-                }
-                _ => format!("&{entity};"),
-            };
-            out.push_str(&replaced);
-            rest = &remainder[end + 1..];
-        } else {
-            out.push_str(remainder);
-            rest = "";
-        }
-    }
-    out.push_str(rest);
-    out
+/// The XML 1.0 `Char` production excludes controls, surrogates and U+FFFE/U+FFFF.
+fn is_xml_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}' | '\u{A}' | '\u{D}'
+            | '\u{20}'..='\u{D7FF}'
+            | '\u{E000}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{10FFFF}'
+    )
 }
 
 #[cfg(test)]
@@ -229,5 +236,47 @@ mod tests {
             .map(|x| x.text.as_str())
             .collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_should_decode_predefined_and_numeric_entities_once() {
+        let node = parse(b"<Name>&lt;&gt;&quot;&apos;&amp;&#38;&#x26;&amp;amp;</Name>").unwrap();
+        assert_eq!(node.text, "<>\"'&&&&amp;");
+    }
+
+    #[test]
+    fn test_should_preserve_text_order_and_spaces_across_entities_and_cdata() {
+        let node = parse(b"<Name>  a &amp; <![CDATA[b&c]]> &#38; d  </Name>").unwrap();
+        assert_eq!(node.text, "a & b&c & d");
+    }
+
+    #[test]
+    fn test_should_reject_unknown_entities_document_types_and_invalid_character_references() {
+        for xml in [
+            "<Name>a&unknown;b</Name>",
+            "<!DOCTYPE Name [<!ENTITY name 'value'>]><Name>&name;</Name>",
+            "<!DOCTYPE Name SYSTEM 'file:///etc/passwd'><Name>value</Name>",
+            "<Name>&#0;</Name>",
+            "<Name>&#1;</Name>",
+            "<Name>&#xD800;</Name>",
+            "<Name>&#xFFFE;</Name>",
+            "<Name>&#x110000;</Name>",
+            "<Name>&#not-a-number;</Name>",
+        ] {
+            assert!(parse(xml.as_bytes()).is_err(), "{xml}");
+        }
+    }
+
+    #[test]
+    fn test_should_reject_mismatched_unclosed_and_multiple_root_elements() {
+        for xml in [
+            "<Request><Name>config</Other></Request>",
+            "<Request><Name>config</Name>",
+            "<Request><Name>config",
+            "<Request></Request><Other/>",
+            "<Request/><Other></Other>",
+        ] {
+            assert!(parse(xml.as_bytes()).is_err(), "{xml}");
+        }
     }
 }
