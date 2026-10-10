@@ -6,6 +6,8 @@
 
 use quick_xml::{Reader, escape::resolve_xml_entity, events::Event};
 
+const XML_WHITESPACE: [char; 4] = [' ', '\t', '\r', '\n'];
+
 /// A lightweight XML tree node.
 #[derive(Debug, Default, Clone)]
 pub struct Node {
@@ -123,10 +125,11 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
                 if let Some(mut done) = stack.pop() {
                     // References and CDATA split text into multiple events;
                     // trim only after reassembling the complete element value.
-                    let trimmed = done.text.trim_matches([' ', '\t', '\r', '\n']);
-                    if trimmed.len() != done.text.len() {
-                        done.text = trimmed.to_owned();
-                    }
+                    let end = done.text.trim_end_matches(XML_WHITESPACE).len();
+                    done.text.truncate(end);
+                    let start =
+                        done.text.len() - done.text.trim_start_matches(XML_WHITESPACE).len();
+                    done.text.drain(..start);
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(done);
                     } else {
