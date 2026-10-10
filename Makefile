@@ -132,6 +132,68 @@ codegen-download:
 	@curl -sL $(SMITHY_MODELS_REPO)/models/sts/service/2011-06-15/sts-2011-06-15.json -o codegen/smithy-model/sts.json
 	@echo "Done."
 
+# Functional smoke uses exact existing SDK integration tests against a running server.
+# Keep the manifest explicit: a removed/renamed test must fail, not silently pass.
+SMOKE_ENDPOINT ?= http://127.0.0.1:4566
+SERVICE_SMOKE_TESTS := \
+	test_object::tests::test_should_put_and_get_object \
+	test_object::tests::test_should_delete_object \
+	test_list::tests::test_should_list_objects_v2 \
+	test_ssm::tests::test_should_put_and_get_parameter \
+	test_ssm::tests::test_should_overwrite_parameter \
+	test_dynamodb::tests::test_should_put_and_get_item \
+	test_dynamodb::tests::test_should_query_by_partition_and_sort_key \
+	test_dynamodbstreams::tests::test_should_capture_put_item_as_insert_event \
+	test_sqs::tests::test_should_send_and_receive_message \
+	test_sqs::tests::test_should_delete_message \
+	test_sns::tests::test_should_fan_out_to_sqs \
+	test_kinesis::tests::test_should_put_and_get_record \
+	test_kms::tests::test_should_encrypt_decrypt_symmetric \
+	test_kms::tests::test_should_sign_secp256k1_and_reject_wrong_length_digest \
+	test_secretsmanager::tests::test_should_create_and_get_secret_string \
+	test_secretsmanager::tests::test_should_put_new_secret_version \
+	test_ses::tests::test_should_send_email \
+	test_cloudwatch::tests::test_should_put_and_get_metric_statistics \
+	test_iam::test_should_create_role_and_get_role \
+	test_sts::tests::test_should_get_caller_identity_root \
+	test_lambda::tests::test_should_create_and_get_function \
+	test_lambda::tests::test_should_invoke_dry_run \
+	test_lambda::tests::test_should_create_function_with_s3_code \
+	test_lambda::tests::test_should_update_function_code_from_s3_and_read_new_metadata \
+	test_lambda::tests::test_should_fail_create_function_with_missing_s3_bucket \
+	test_apigatewayv2::tests::test_should_execute_mock_integration \
+	test_events::tests::test_events_should_deliver_to_sqs_target \
+	test_logs::tests::test_logs_should_put_and_get_log_events \
+	test_cloudfront_dataplane::test_dp_should_serve_s3_object_via_path_based_url \
+	test_cloudfront::test_should_roundtrip_cloudfront_geo_restrictions_and_disable_distribution
+
+smoke-services:
+	@curl --fail --silent --show-error --max-time 5 "$(SMOKE_ENDPOINT)/_localstack/health" >/dev/null
+	@bash -euo pipefail -c '\
+		manifest=$$(mktemp); \
+		trap "rm -f \"$$manifest\"" EXIT; \
+		cargo test -p rustack-integration --lib -- --ignored --list >"$$manifest"; \
+		for test in $(SERVICE_SMOKE_TESTS); do \
+			if ! grep -Fxq "$$test: test" "$$manifest"; then \
+				echo "Missing smoke test: $$test" >&2; exit 1; \
+			fi; \
+		done; \
+		for test in $(SERVICE_SMOKE_TESTS); do \
+			echo "Service smoke: $$test"; \
+			S3_ENDPOINT_URL="$(SMOKE_ENDPOINT)" cargo test -p rustack-integration --lib "$$test" -- --ignored --exact --test-threads=1; \
+		done'
+
+# Recent security/data/lifecycle fixes have regression tests beyond the live API smoke.
+smoke-regressions:
+	@cargo test --workspace
+	@$(MAKE) test-lambda-invoke-native
+
+# Run regression and functional assertions, then provisioning against the same server.
+smoke:
+	@$(MAKE) smoke-regressions
+	@$(MAKE) smoke-services
+	@RUSTACK_ENDPOINT="$(SMOKE_ENDPOINT)" RUSTACK_SKIP_START=1 $(MAKE) pulumi-smoke
+
 integration:
 	@cargo test -p rustack-integration -- --ignored
 
@@ -692,3 +754,5 @@ test-iam-integration:
 	test-events-unit test-events-patterns test-events-integration \
 	test-apigatewayv2-unit test-apigatewayv2-integration \
 	test-iam-unit test-iam-integration
+
+.PHONY: smoke smoke-services smoke-regressions

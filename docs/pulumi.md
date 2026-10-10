@@ -6,6 +6,10 @@ API endpoints.
 
 ## Quick Start
 
+For service behavior assertions as well as provisioning, see
+[local smoke tests](./smoke-tests.md). `make smoke` runs both against a running
+local server; `make pulumi-smoke` below runs only the provisioning check.
+
 ```bash
 make pulumi-smoke
 ```

@@ -11,7 +11,6 @@ SERVER_PID=""
 STATE_DIR=""
 CREATED_STATE_DIR="0"
 STACK_READY="0"
-UP_SUCCEEDED="0"
 
 is_running() {
   kill -0 "$1" >/dev/null 2>&1
@@ -53,19 +52,29 @@ stop_rustack() {
 
 cleanup() {
   local exit_code=$?
+  local cleanup_failed=0
   set +e
 
   if [[ "$STACK_READY" == "1" && "${PULUMI_KEEP_STACK:-0}" != "1" ]]; then
-    (
-      cd "$EXAMPLE_DIR" || exit 0
-      if [[ "$UP_SUCCEEDED" == "1" && "${PULUMI_SKIP_DESTROY:-0}" != "1" ]]; then
+    if ! (
+      cd "$EXAMPLE_DIR" || exit 1
+      if [[ "${PULUMI_SKIP_DESTROY:-0}" != "1" ]]; then
         echo "Destroying Pulumi smoke resources (SQS delete confirmation can take around 2 minutes)"
-        pulumi destroy --stack "$STACK_NAME" --yes --skip-preview >/dev/null 2>&1
+        if ! pulumi destroy --stack "$STACK_NAME" --yes --skip-preview; then
+          echo "Pulumi smoke resource cleanup failed" >&2
+          exit 1
+        fi
       fi
       echo "Removing Pulumi smoke stack"
-      pulumi stack rm "$STACK_NAME" --yes >/dev/null 2>&1
+      if ! pulumi stack rm "$STACK_NAME" --yes >/dev/null; then
+        echo "Pulumi smoke stack removal failed" >&2
+        exit 1
+      fi
       rm -f "Pulumi.$STACK_NAME.yaml"
-    )
+    ); then
+      exit_code=1
+      cleanup_failed=1
+    fi
   fi
 
   if [[ -n "$SERVER_PID" ]]; then
@@ -78,7 +87,9 @@ cleanup() {
     fi
   fi
 
-  if [[ "$CREATED_STATE_DIR" == "1" && -n "$STATE_DIR" ]]; then
+  if [[ "$cleanup_failed" == "1" && -n "$STATE_DIR" ]]; then
+    echo "Preserving failed Pulumi smoke state at $STATE_DIR" >&2
+  elif [[ "$CREATED_STATE_DIR" == "1" && -n "$STATE_DIR" ]]; then
     rm -rf "$STATE_DIR"
   fi
 
@@ -237,11 +248,9 @@ pulumi config set secretKey "$AWS_SECRET_ACCESS_KEY" --secret --stack "$STACK_NA
 case "${PULUMI_OPERATION:-up}" in
   up)
     pulumi up --stack "$STACK_NAME" --yes --skip-preview
-    UP_SUCCEEDED="1"
     ;;
   refresh)
     pulumi refresh --stack "$STACK_NAME" --yes --skip-preview
-    UP_SUCCEEDED="1"
     ;;
   *)
     echo "unsupported PULUMI_OPERATION: ${PULUMI_OPERATION:-up}" >&2
