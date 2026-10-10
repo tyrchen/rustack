@@ -123,7 +123,7 @@ pub fn parse(xml: &[u8]) -> Result<Node, String> {
                 if let Some(mut done) = stack.pop() {
                     // References and CDATA split text into multiple events;
                     // trim only after reassembling the complete element value.
-                    let trimmed = done.text.trim();
+                    let trimmed = done.text.trim_matches([' ', '\t', '\r', '\n']);
                     if trimmed.len() != done.text.len() {
                         done.text = trimmed.to_owned();
                     }
@@ -248,6 +248,12 @@ mod tests {
     fn test_should_preserve_text_order_and_spaces_across_entities_and_cdata() {
         let node = parse(b"<Name>  a &amp; <![CDATA[b&c]]> &#38; d  </Name>").unwrap();
         assert_eq!(node.text, "a & b&c & d");
+    }
+
+    #[test]
+    fn test_should_preserve_non_xml_unicode_whitespace_in_names() {
+        let node = parse("<Name>\u{a0}my-config\u{a0}</Name>".as_bytes()).unwrap();
+        assert_eq!(node.text, "\u{a0}my-config\u{a0}");
     }
 
     #[test]
