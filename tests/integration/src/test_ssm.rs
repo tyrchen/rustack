@@ -480,7 +480,7 @@ mod tests {
             .send()
             .await
             .expect("label");
-        assert!(resp.invalid_labels().is_empty());
+        assert_eq!(resp.invalid_labels().len(), 0);
         assert_eq!(resp.parameter_version(), 1);
 
         // Get by label selector.

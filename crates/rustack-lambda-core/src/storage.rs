@@ -1728,7 +1728,7 @@ mod tests {
 
         let hash = compute_sha256(b"hello world");
         // Known SHA-256 of "hello world" base64-encoded.
-        assert!(!hash.is_empty());
+        assert_ne!(hash, "");
         // Verify it is base64 by checking it decodes.
         let decoded = base64::engine::general_purpose::STANDARD.decode(&hash);
         assert!(decoded.is_ok());
@@ -1855,7 +1855,7 @@ mod tests {
         // Raw zip is preserved alongside the extracted dir.
         let parent = dir.parent().expect("extracted dir has a parent");
         assert!(parent.join("code.zip").exists());
-        assert!(!sha256.is_empty());
+        assert_ne!(sha256, "");
         assert_eq!(size, zip_data.len() as u64);
 
         store.cleanup_code("test-func").await.unwrap();

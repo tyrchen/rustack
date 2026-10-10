@@ -815,7 +815,7 @@ mod tests {
                 domain: "example.com".to_owned(),
             })
             .unwrap_or_default();
-        assert!(!resp.verification_token.is_empty());
+        assert_ne!(resp.verification_token, "");
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
                 ..SendEmailInput::default()
             })
             .unwrap_or_default();
-        assert!(!resp.message_id.is_empty());
+        assert_ne!(resp.message_id, "");
         let emails = p.emails.query(None, None);
         assert_eq!(emails.len(), 1);
         assert_eq!(emails[0].subject.as_deref(), Some("Test"));
@@ -898,7 +898,7 @@ mod tests {
                 ..SendTemplatedEmailInput::default()
             })
             .unwrap_or_default();
-        assert!(!resp.message_id.is_empty());
+        assert_ne!(resp.message_id, "");
         let emails = p.emails.query(None, None);
         assert_eq!(emails[0].subject.as_deref(), Some("Hello World"));
     }

@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn test_should_compute_crc32_checksum() {
         let b64 = compute_checksum(ChecksumAlgorithm::Crc32, b"hello");
-        assert!(!b64.is_empty());
+        assert_ne!(b64, "");
         // Verify round-trip decode
         let decoded = BASE64_STANDARD.decode(&b64);
         assert!(decoded.is_ok());
@@ -515,13 +515,13 @@ mod tests {
     #[test]
     fn test_should_compute_crc32c_checksum() {
         let b64 = compute_checksum(ChecksumAlgorithm::Crc32c, b"hello");
-        assert!(!b64.is_empty());
+        assert_ne!(b64, "");
     }
 
     #[test]
     fn test_should_compute_crc64nvme_checksum() {
         let b64 = compute_checksum(ChecksumAlgorithm::Crc64Nvme, b"hello");
-        assert!(!b64.is_empty());
+        assert_ne!(b64, "");
         let decoded = BASE64_STANDARD.decode(&b64);
         assert!(decoded.is_ok());
         assert_eq!(decoded.expect("test decode").len(), 8);
@@ -565,7 +565,7 @@ mod tests {
         hasher.update(b"hello");
         let result = hasher.finish();
         assert_eq!(result.md5_hex, "5d41402abc4b2a76b9719d911017c592");
-        assert!(result.checksums.is_empty());
+        assert_eq!(result.checksums.len(), 0);
     }
 
     #[test]

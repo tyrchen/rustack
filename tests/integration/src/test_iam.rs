@@ -210,7 +210,7 @@ async fn test_should_manage_access_keys() {
 
     let key = create_key.access_key().expect("access key");
     assert!(key.access_key_id().starts_with("AKIA"));
-    assert!(!key.secret_access_key().is_empty());
+    assert_ne!(key.secret_access_key(), "");
 
     // List keys
     let list = client
@@ -722,7 +722,7 @@ async fn test_should_create_service_linked_role() {
         .await
         .expect("delete service linked role");
 
-    assert!(!delete.deletion_task_id().is_empty());
+    assert_ne!(delete.deletion_task_id(), "");
 
     // Check deletion status
     let status = client
@@ -831,8 +831,8 @@ async fn test_should_get_account_authorization_details() {
         .await
         .expect("get account authorization details");
 
-    assert!(!result.user_detail_list().is_empty());
-    assert!(!result.role_detail_list().is_empty());
+    assert_ne!(result.user_detail_list(), []);
+    assert_ne!(result.role_detail_list(), []);
 
     // Cleanup
     client

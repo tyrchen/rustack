@@ -17,7 +17,7 @@ mod tests {
             .await
             .unwrap();
         let metadata = resp.key_metadata().unwrap();
-        assert!(!metadata.key_id().is_empty());
+        assert_ne!(metadata.key_id(), "");
         assert!(metadata.arn().is_some());
         assert_eq!(metadata.description(), Some("test key"));
         assert_eq!(
@@ -38,7 +38,7 @@ mod tests {
         let client = kms_client();
         client.create_key().send().await.unwrap();
         let resp = client.list_keys().send().await.unwrap();
-        assert!(!resp.keys().is_empty());
+        assert_ne!(resp.keys(), []);
     }
 
     #[tokio::test]
@@ -574,7 +574,7 @@ mod tests {
             .await
             .unwrap();
         assert!(pk.public_key().is_some());
-        assert!(!pk.public_key().unwrap().as_ref().is_empty());
+        assert_ne!(pk.public_key().unwrap().as_ref().len(), 0);
     }
 
     #[tokio::test]
@@ -628,7 +628,7 @@ mod tests {
         assert!(grant.grant_id().is_some());
 
         let list = client.list_grants().key_id(&key_id).send().await.unwrap();
-        assert!(!list.grants().is_empty());
+        assert_ne!(list.grants(), []);
     }
 
     #[tokio::test]

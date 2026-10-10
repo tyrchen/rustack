@@ -213,7 +213,7 @@ mod tests {
     fn test_should_create_empty_service_state() {
         let state = S3ServiceState::new();
         assert!(!state.bucket_exists("anything"));
-        assert!(state.list_buckets().is_empty());
+        assert_eq!(state.list_buckets().len(), 0);
     }
 
     #[test]
@@ -286,7 +286,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("delete failed: {e}"));
 
         assert!(!state.bucket_exists("deleteme"));
-        assert!(state.list_buckets().is_empty());
+        assert_eq!(state.list_buckets().len(), 0);
     }
 
     #[test]
@@ -406,7 +406,7 @@ mod tests {
 
         assert_eq!(state.list_buckets().len(), 2);
         state.reset();
-        assert!(state.list_buckets().is_empty());
+        assert_eq!(state.list_buckets().len(), 0);
         assert!(!state.bucket_exists("a"));
         assert!(!state.bucket_exists("b"));
     }
@@ -435,6 +435,6 @@ mod tests {
     #[test]
     fn test_should_use_default_trait() {
         let state = S3ServiceState::default();
-        assert!(state.list_buckets().is_empty());
+        assert_eq!(state.list_buckets().len(), 0);
     }
 }

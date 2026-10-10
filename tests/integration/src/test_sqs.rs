@@ -187,7 +187,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.messages().is_empty());
+        assert_eq!(result.messages(), []);
 
         delete_test_queue(&client, &url).await;
     }
@@ -278,7 +278,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(recv2.messages().is_empty());
+        assert_eq!(recv2.messages(), []);
 
         delete_test_queue(&client, &url).await;
     }
@@ -345,7 +345,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(recv.messages().is_empty());
+        assert_eq!(recv.messages(), []);
 
         // Wait for delay.
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -485,7 +485,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.successful().len(), 5);
-        assert!(result.failed().is_empty());
+        assert_eq!(result.failed(), []);
 
         // Receive all messages.
         let recv = client
@@ -562,7 +562,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(recv2.messages().is_empty());
+        assert_eq!(recv2.messages(), []);
 
         delete_test_queue(&client, &url).await;
     }
