@@ -59,7 +59,7 @@ fn throttled() -> LambdaServiceError {
 impl FunctionCapacity {
     fn try_acquire(self: &Arc<Self>, limit: usize) -> Result<FunctionPermit, LambdaServiceError> {
         self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 if count < limit {
                     count.checked_add(1)
                 } else {

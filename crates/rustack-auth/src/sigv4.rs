@@ -19,8 +19,9 @@ use tracing::debug;
 
 use crate::{
     canonical::{
-        build_canonical_query_string, build_canonical_query_string_normalized,
-        build_canonical_request,
+        build_canonical_headers, build_canonical_query_string,
+        build_canonical_query_string_normalized, build_canonical_uri, build_signed_headers_string,
+        validate_query_limits, validate_unique_query_names,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -264,6 +265,11 @@ fn verify_sigv4_with_policy(
     allow_unsigned: bool,
     allow_normalized_fallback: bool,
 ) -> Result<AuthResult, AuthError> {
+    let query = parts.uri.query().unwrap_or("");
+    validate_query_limits(query)?;
+    if allow_normalized_fallback {
+        validate_unique_query_names(query)?;
+    }
     let payload_hash = validated_payload_hash(parts, body_hash, allow_unsigned)?;
     if parts
         .headers
@@ -302,12 +308,14 @@ fn verify_sigv4_with_policy(
 
     // Build the canonical request.
     let method = parts.method.as_str();
-    let uri = parts.uri.path();
-    let query = parts.uri.query().unwrap_or("");
+    let canonical_uri = build_canonical_uri(parts.uri.path());
+    let canonical_query = build_canonical_query_string(query);
 
     // Collect headers that are in the signed headers list.
     let signed_header_refs: Vec<&str> = parsed.signed_headers.iter().map(String::as_str).collect();
     let header_pairs: Vec<(&str, &str)> = collect_signed_headers(parts, &signed_header_refs)?;
+    let canonical_headers = build_canonical_headers(&header_pairs, &signed_header_refs);
+    let signed_headers_str = build_signed_headers_string(&signed_header_refs);
 
     // Build the credential scope and derive the signing key once; both
     // canonicalization attempts below share them.
@@ -321,14 +329,10 @@ fn verify_sigv4_with_policy(
 
     // Check the provided signature against the canonical request built from
     // `query_string`. Returns true on a constant-time match.
+    #[rustfmt::skip]
     let signature_matches = |query_string: &str| -> bool {
-        let canonical_request = build_canonical_request(
-            method,
-            uri,
-            query_string,
-            &header_pairs,
-            &signed_header_refs,
-            payload_hash,
+        let canonical_request = format!(
+            "{method}\n{canonical_uri}\n{query_string}\n{canonical_headers}\n\n{signed_headers_str}\n{payload_hash}"
         );
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
@@ -339,7 +343,7 @@ fn verify_sigv4_with_policy(
     // First attempt: raw query string values preserved as-is. This matches
     // clients that sign whatever encoding appears on the wire (e.g. AWS SDKs
     // with pre-encoded values, minio-java via OkHttp with raw values).
-    if signature_matches(query) {
+    if signature_matches(&canonical_query) {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded");
         return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
@@ -353,9 +357,6 @@ fn verify_sigv4_with_policy(
     // re-encode per spec). This matches spec-compliant clients such as
     // Transmit 5, which sign the encoded form even when the wire carries the
     // raw value (e.g. `prefix=periods/` on the wire, `prefix=periods%2F` signed).
-    // Passing the normalized string through `build_canonical_request` is safe:
-    // it is already sorted and contains no raw `&`/`=`, so the raw sorting pass
-    // is a no-op.
     // This attempt only runs when the caller opted in via
     // `allow_normalized_fallback` — i.e. the serving endpoint, not the
     // request. The normalized form asserts that alternate wire encodings are
@@ -377,7 +378,7 @@ fn verify_sigv4_with_policy(
     let normalized_matches = allow_normalized_fallback
         && !query.contains('+')
         && build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
-            normalized != build_canonical_query_string(query) && signature_matches(&normalized)
+            normalized != canonical_query && signature_matches(&normalized)
         });
     if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded (normalized query string)");
@@ -565,7 +566,10 @@ pub fn hash_payload(payload: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{canonical::build_signed_headers_string, credentials::StaticCredentialProvider};
+    use crate::{
+        canonical::{build_canonical_request, build_signed_headers_string},
+        credentials::StaticCredentialProvider,
+    };
 
     const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
     const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -899,7 +903,7 @@ mod tests {
 
     /// Build request parts for a GET whose Authorization header signs
     /// `signed_query`, while the request line carries `wire_query`.
-    /// Exercises the normalized-fallback path of [`verify_sigv4`].
+    /// Exercises the normalized-fallback path of [`verify_s3_sigv4`].
     fn build_normalized_fallback_request_parts(
         service: &str,
         signed_query: &str,
@@ -944,6 +948,24 @@ mod tests {
             .unwrap()
             .into_parts()
             .0
+    }
+
+    #[test]
+    fn test_should_reject_duplicate_decoded_s3_names_before_signature_attempts() {
+        let provider = test_credential_provider();
+        let empty_hash = hash_payload(b"");
+        for wire in [
+            "list-type=1&list-type=2",
+            "%6cist-type=1&list-type=2",
+            "%6cist-type=2&list-type=1",
+        ] {
+            let parts =
+                build_normalized_fallback_request_parts("s3", "list-type=1&list-type=2", wire);
+            assert!(matches!(
+                verify_s3_sigv4(&parts, &empty_hash, &provider),
+                Err(AuthError::InvalidQueryString)
+            ));
+        }
     }
 
     #[test]
