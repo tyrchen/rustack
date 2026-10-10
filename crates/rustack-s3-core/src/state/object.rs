@@ -431,7 +431,7 @@ mod tests {
     fn test_should_use_default_owner() {
         let owner = Owner::default();
         assert_eq!(owner.display_name, "webfile");
-        assert!(!owner.id.is_empty());
+        assert_ne!(owner.id, "");
     }
 
     #[test]
@@ -528,7 +528,7 @@ mod tests {
         let meta = ObjectMetadata::default();
         assert!(meta.content_type.is_none());
         assert!(meta.user_metadata.is_empty());
-        assert!(meta.tagging.is_empty());
+        assert_eq!(meta.tagging.len(), 0);
         assert_eq!(meta.acl, CannedAcl::Private);
         assert!(meta.object_lock_mode.is_none());
     }

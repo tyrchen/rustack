@@ -213,7 +213,7 @@ mod tests {
     fn test_should_parse_empty_tag_list() {
         let params: Vec<(String, String)> = vec![];
         let tags = parse_tag_list(&params);
-        assert!(tags.is_empty());
+        assert_eq!(tags.len(), 0);
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
     fn test_should_parse_empty_string_list() {
         let params: Vec<(String, String)> = vec![];
         let list = parse_string_list(&params, "Actions");
-        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
     }
 
     #[test]

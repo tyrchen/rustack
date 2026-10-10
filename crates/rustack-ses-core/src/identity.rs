@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(record.identity, "example.com");
         assert_eq!(record.identity_type, IdentityType::Domain);
         assert_eq!(record.verification_status, VerificationStatus::Success);
-        assert!(!token.is_empty());
+        assert_ne!(token, "");
     }
 
     #[test]
@@ -513,6 +513,6 @@ mod tests {
         assert_eq!(policies["my-policy"], r#"{"Version":"2012-10-17"}"#);
         store.delete_policy("test@example.com", "my-policy");
         let names = store.list_policy_names("test@example.com");
-        assert!(names.is_empty());
+        assert_eq!(names.len(), 0);
     }
 }

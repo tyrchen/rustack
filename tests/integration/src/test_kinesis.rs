@@ -191,8 +191,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!put_resp.shard_id().is_empty());
-        assert!(!put_resp.sequence_number().is_empty());
+        assert_ne!(put_resp.shard_id(), "");
+        assert_ne!(put_resp.sequence_number(), "");
 
         // Get shard iterator.
         let iter_resp = client
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].data().as_ref(), b"hello world");
         assert_eq!(records[0].partition_key(), "pk1");
-        assert!(!records[0].sequence_number().is_empty());
+        assert_ne!(records[0].sequence_number(), "");
 
         // Next iterator should return empty.
         let next_iter = get_resp.next_shard_iterator().unwrap();
@@ -228,7 +228,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(get_resp2.records().is_empty());
+        assert_eq!(get_resp2.records(), []);
 
         client
             .delete_stream()
@@ -469,7 +469,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(get_resp.records().is_empty());
+        assert_eq!(get_resp.records(), []);
 
         // Put new record after LATEST.
         client
@@ -531,8 +531,8 @@ mod tests {
         for (i, shard) in shards.iter().enumerate() {
             assert_eq!(shard.shard_id(), format!("shardId-{i:012}"));
             let hkr = shard.hash_key_range().unwrap();
-            assert!(!hkr.starting_hash_key().is_empty());
-            assert!(!hkr.ending_hash_key().is_empty());
+            assert_ne!(hkr.starting_hash_key(), "");
+            assert_ne!(hkr.ending_hash_key(), "");
         }
 
         client
@@ -833,7 +833,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(list_resp.consumers().is_empty());
+        assert_eq!(list_resp.consumers(), []);
 
         client
             .delete_stream()
@@ -958,7 +958,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(get_resp.records().is_empty());
+        assert_eq!(get_resp.records(), []);
         assert!(get_resp.next_shard_iterator().is_some());
 
         client

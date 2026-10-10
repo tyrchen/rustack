@@ -441,7 +441,7 @@ mod tests {
             .send()
             .await
             .expect("list after delete should succeed");
-        assert!(resp.aliases().is_empty());
+        assert_eq!(resp.aliases(), []);
 
         cleanup_function(&client, &name).await;
     }

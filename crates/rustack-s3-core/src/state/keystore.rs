@@ -852,7 +852,7 @@ mod tests {
         // List specific "folder".
         let result = ks.list_objects("photos/2023/", "/", "", 100);
         assert_eq!(result.objects.len(), 2);
-        assert!(result.common_prefixes.is_empty());
+        assert_eq!(result.common_prefixes.len(), 0);
     }
 
     // ---- VersionedKeyStore tests ----

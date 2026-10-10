@@ -1061,7 +1061,7 @@ mod tests {
             .await
             .expect("send_email with HTML should succeed");
 
-        assert!(!result.message_id().is_empty());
+        assert_ne!(result.message_id(), "");
 
         // Cleanup.
         let _ = client.delete_identity().identity(&source).send().await;

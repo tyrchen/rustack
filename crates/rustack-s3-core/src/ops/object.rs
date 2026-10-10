@@ -1191,7 +1191,7 @@ mod tests {
     #[test]
     fn test_should_parse_tagging_header_empty() {
         let tags = parse_tagging_header("");
-        assert!(tags.is_empty());
+        assert_eq!(tags.len(), 0);
     }
 
     #[test]
