@@ -387,6 +387,11 @@ make run
 cargo test -p rustack-integration -- --ignored
 ```
 
+For a fixed set of service behavior assertions, run `make smoke-services`.
+Run `make smoke` to include workspace/native Lambda regressions and Pulumi
+provisioning with cleanup. Both use the running server above. See
+[local smoke tests](docs/smoke-tests.md) for coverage and endpoint overrides.
+
 ## License
 
 MIT. See [LICENSE](LICENSE.md) for details.

@@ -10,21 +10,87 @@
 //! cargo test -p rustack-integration cloudfront -- --ignored --test-threads=1
 //! ```
 //!
-//! Tests exercise the restXml 2020-05-31 wire format directly via `reqwest`
-//! rather than `aws-sdk-cloudfront`, which spares us its rustls bootstrap and
-//! lets us assert on headers and error bodies without SDK smoothing.
+//! Most tests exercise the restXml 2020-05-31 wire format directly via `reqwest`
+//! to assert on headers and error bodies. The geo restriction lifecycle regression
+//! also checks that a read configuration can be reused through the AWS SDK.
 
+use anyhow::{Context, Result, ensure};
 use reqwest::StatusCode;
 
-use crate::cloudfront_helpers::{
-    cf_delete, cf_get, cf_http_client, cf_post, cf_put, create_distribution,
-    disable_and_delete_distribution, distribution_xml, extract_distribution_id, extract_tag,
-    new_caller_ref, response_etag, response_header,
+use crate::{
+    cloudfront_client,
+    cloudfront_helpers::{
+        cf_delete, cf_get, cf_http_client, cf_post, cf_put, create_distribution,
+        disable_and_delete_distribution, distribution_xml, extract_distribution_id, extract_tag,
+        new_caller_ref, response_etag, response_header,
+    },
 };
 
 // ---------------------------------------------------------------------------
 // Phase 0: Distribution
 // ---------------------------------------------------------------------------
+
+/// The configuration must remain valid SDK input for disable-before-delete.
+#[tokio::test]
+#[ignore = "requires running Rustack server"]
+async fn test_should_roundtrip_cloudfront_geo_restrictions_and_disable_distribution() -> Result<()>
+{
+    let http = cf_http_client();
+    let sdk = cloudfront_client();
+    let body = distribution_xml(
+        &new_caller_ref("cf-geo-roundtrip"),
+        "smoke.s3.us-east-1.amazonaws.com",
+        true,
+    );
+    let (id, _) = create_distribution(&http, &body).await;
+    let response = cf_get(&http, &format!("/2020-05-31/distribution/{id}/config")).await;
+    ensure!(
+        response.status() == StatusCode::OK,
+        "get distribution config failed"
+    );
+    let xml = response.text().await.context("read config XML")?;
+    ensure!(
+        xml.contains(
+            "<GeoRestriction><RestrictionType>none</RestrictionType><Quantity>0</Quantity></\
+             GeoRestriction>"
+        ),
+        "GeoRestriction must expose its required Quantity directly, not nested in Items"
+    );
+    let fetched = sdk
+        .get_distribution_config()
+        .id(&id)
+        .send()
+        .await
+        .context("SDK read config")?;
+    let mut config = fetched
+        .distribution_config()
+        .context("missing distribution config")?
+        .clone();
+    let etag = fetched.e_tag().context("missing config ETag")?;
+    config.enabled = false;
+    let updated = sdk
+        .update_distribution()
+        .id(&id)
+        .if_match(etag)
+        .distribution_config(config)
+        .send()
+        .await
+        .context("SDK disable distribution using read config")?;
+    let distribution = updated
+        .distribution()
+        .context("missing updated distribution")?;
+    let config = distribution
+        .distribution_config()
+        .context("missing updated config")?;
+    ensure!(!config.enabled(), "distribution is still enabled");
+    sdk.delete_distribution()
+        .id(&id)
+        .if_match(updated.e_tag().context("missing updated ETag")?)
+        .send()
+        .await
+        .context("SDK delete disabled distribution")?;
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires running Rustack server"]

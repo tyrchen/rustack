@@ -4,7 +4,99 @@
 
 #[cfg(test)]
 mod tests {
+    use anyhow::{Context, Result, ensure};
+    use aws_sdk_kms::{
+        error::ProvideErrorMetadata,
+        primitives::Blob,
+        types::{KeySpec, KeyUsageType, MessageType, SigningAlgorithmSpec},
+    };
+
     use crate::kms_client;
+
+    /// Exercise secp256k1 and digest validation through the actual SDK/HTTP path.
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_sign_secp256k1_and_reject_wrong_length_digest() -> Result<()> {
+        let client = kms_client();
+        let created = client
+            .create_key()
+            .key_spec(KeySpec::EccSecgP256K1)
+            .key_usage(KeyUsageType::SignVerify)
+            .send()
+            .await
+            .context("create secp256k1 key")?;
+        let metadata = created.key_metadata().context("missing key metadata")?;
+        let key_id = metadata.key_id();
+        let message = Blob::new(b"rustack smoke signature");
+        let signed = client
+            .sign()
+            .key_id(key_id)
+            .message(message.clone())
+            .message_type(MessageType::Raw)
+            .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+            .send()
+            .await
+            .context("sign with secp256k1")?;
+        let signature = signed.signature().context("missing signature")?;
+        let verified = client
+            .verify()
+            .key_id(key_id)
+            .message(message)
+            .message_type(MessageType::Raw)
+            .signature(signature.clone())
+            .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+            .send()
+            .await
+            .context("verify secp256k1 signature")?;
+        ensure!(verified.signature_valid(), "signature did not verify");
+
+        for identifier in [key_id, metadata.arn().context("missing key ARN")?] {
+            let invalid = Blob::new(b"short");
+            let sign_error = client
+                .sign()
+                .key_id(identifier)
+                .message(invalid.clone())
+                .message_type(MessageType::Digest)
+                .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+                .send()
+                .await
+                .err()
+                .context("Sign accepted a five-byte SHA-256 digest")?;
+            ensure!(
+                sign_error
+                    .as_service_error()
+                    .and_then(ProvideErrorMetadata::code)
+                    == Some("ValidationException"),
+                "wrong Sign error: {sign_error}"
+            );
+            let verify_error = client
+                .verify()
+                .key_id(identifier)
+                .message(invalid)
+                .message_type(MessageType::Digest)
+                .signature(signature.clone())
+                .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+                .send()
+                .await
+                .err()
+                .context("Verify accepted a five-byte SHA-256 digest")?;
+            ensure!(
+                verify_error
+                    .as_service_error()
+                    .and_then(ProvideErrorMetadata::code)
+                    == Some("ValidationException"),
+                "wrong Verify error: {verify_error}"
+            );
+        }
+        client
+            .schedule_key_deletion()
+            .key_id(key_id)
+            .pending_window_in_days(7)
+            .send()
+            .await
+            .context("schedule smoke key deletion")?;
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore = "requires running server"]

@@ -14,8 +14,10 @@ permissions:
 
 jobs:
   pulumi-smoke:
-    name: Pulumi AWS provider smoke
+    name: Service and Pulumi smoke
     runs-on: ubuntu-latest
+    env:
+      RUSTACK_PID_FILE: ${{ github.workspace }}/rustack-smoke.pid
     steps:
       - uses: actions/checkout@v4
 
@@ -35,5 +37,20 @@ jobs:
           curl -fsSL https://get.pulumi.com | sh -s -- --version 3.243.0
           echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"
 
+      - name: Run recent-change regressions
+        run: make smoke-regressions
+
       - name: Run Pulumi smoke
+        env:
+          RUSTACK_KEEP_RUNNING: "1"
         run: make pulumi-smoke
+
+      - name: Run service functional smoke
+        run: make smoke-services
+
+      - name: Stop smoke server
+        if: always()
+        run: |
+          if [[ -f "$RUSTACK_PID_FILE" ]]; then
+            kill -INT "$(cat "$RUSTACK_PID_FILE")" 2>/dev/null || true
+          fi

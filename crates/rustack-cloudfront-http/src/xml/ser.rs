@@ -382,12 +382,15 @@ fn write_restrictions(w: &mut XmlWriter, cfg: &DistributionConfig) {
             &cfg.restrictions.geo_restriction.restriction_type
         },
     );
-    write_string_list(
-        w,
-        "Items",
-        "Location",
-        &cfg.restrictions.geo_restriction.locations,
-    );
+    let locations = &cfg.restrictions.geo_restriction.locations;
+    w.element_display("Quantity", locations.len());
+    if !locations.is_empty() {
+        w.open("Items");
+        for location in locations {
+            w.element("Location", location);
+        }
+        w.close("Items");
+    }
     w.close("GeoRestriction");
     w.close("Restrictions");
 }
@@ -1315,4 +1318,42 @@ fn write_distribution_config_body(w: &mut XmlWriter, cfg: &DistributionConfig) {
     w.optional_str("HttpVersion", &cfg.http_version);
     w.bool("IsIPV6Enabled", cfg.is_ipv6_enabled);
     w.bool("Staging", cfg.staging);
+}
+
+#[cfg(test)]
+mod tests {
+    use rustack_cloudfront_model::{DistributionConfig, GeoRestriction, Restrictions};
+
+    use super::distribution_config_xml;
+    use crate::xml::de::parse;
+
+    #[test]
+    fn test_should_serialize_geo_restriction_quantity_and_locations_at_correct_depth()
+    -> Result<(), String> {
+        let config = DistributionConfig {
+            restrictions: Restrictions {
+                geo_restriction: GeoRestriction {
+                    restriction_type: "whitelist".to_owned(),
+                    locations: vec!["US".to_owned(), "CA".to_owned()],
+                },
+            },
+            ..DistributionConfig::default()
+        };
+        let root = parse(distribution_config_xml(&config).as_bytes())?;
+        let geo = root
+            .child("Restrictions")
+            .and_then(|node| node.child("GeoRestriction"));
+        assert_eq!(geo.map(|node| node.child_text("Quantity")), Some("2"));
+        let items = geo.and_then(|node| node.child("Items"));
+        assert!(items.is_some());
+        assert!(items.and_then(|node| node.child("Quantity")).is_none());
+        assert!(items.and_then(|node| node.child("Items")).is_none());
+        let countries: Vec<_> = items
+            .into_iter()
+            .flat_map(|node| node.children.iter())
+            .map(|node| node.text.as_str())
+            .collect();
+        assert_eq!(countries, ["US", "CA"]);
+        Ok(())
+    }
 }

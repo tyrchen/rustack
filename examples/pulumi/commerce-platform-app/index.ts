@@ -38,7 +38,8 @@ const rustack = new aws.Provider("rustack", {
   secretKey,
   region,
   endpoints: endpointOverrides,
-  maxRetries: 1,
+  // Retry transient stale keep-alive connections; semantic API errors still fail.
+  maxRetries: 3,
   s3UsePathStyle: true,
   skipCredentialsValidation: true,
   skipMetadataApiCheck: true,

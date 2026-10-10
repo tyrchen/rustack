@@ -5,10 +5,15 @@
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Write as _};
+
+    use anyhow::{Context, Result, ensure};
     use aws_sdk_lambda::{
         primitives::Blob,
         types::{Architecture, Environment, FunctionCode, FunctionUrlAuthType, Runtime},
     };
+    use aws_sdk_s3::primitives::ByteStream;
+    use zip::{ZipWriter, write::SimpleFileOptions};
 
     use crate::lambda_client;
 
@@ -158,6 +163,94 @@ mod tests {
     // ---------------------------------------------------------------------------
     // S3 code packages (issue #34)
     // ---------------------------------------------------------------------------
+
+    /// Updating from S3 must fetch new bytes rather than retain cached metadata.
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_update_function_code_from_s3_and_read_new_metadata() -> Result<()> {
+        let client = lambda_client();
+        let s3 = crate::s3_client();
+        let name = func_name("s3-update");
+        let (bucket, key) = upload_code_to_s3("update").await;
+        let created = client
+            .create_function()
+            .function_name(&name)
+            .runtime(Runtime::Python312)
+            .role("arn:aws:iam::000000000000:role/test-role")
+            .handler("index.handler")
+            .code(
+                FunctionCode::builder()
+                    .s3_bucket(&bucket)
+                    .s3_key(&key)
+                    .build(),
+            )
+            .send()
+            .await
+            .context("create function from S3 code")?;
+        let initial_hash = created.code_sha256().context("missing initial code hash")?;
+
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file("index.py", SimpleFileOptions::default())
+            .context("start updated code archive")?;
+        archive
+            .write_all(b"def handler(event, context):\n    return event\n")
+            .context("write updated code")?;
+        let code = archive
+            .finish()
+            .context("finish updated code archive")?
+            .into_inner();
+        let code_size = i64::try_from(code.len()).context("code size exceeds i64")?;
+        s3.put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(ByteStream::from(code))
+            .send()
+            .await
+            .context("replace S3 code object")?;
+        let updated = client
+            .update_function_code()
+            .function_name(&name)
+            .s3_bucket(&bucket)
+            .s3_key(&key)
+            .send()
+            .await
+            .context("update function from replaced S3 object")?;
+        let updated_hash = updated.code_sha256().context("missing updated code hash")?;
+        ensure!(
+            updated_hash != initial_hash,
+            "S3 update retained old code hash"
+        );
+        ensure!(
+            updated.code_size() == code_size,
+            "S3 update has incorrect code size"
+        );
+        let fetched = client
+            .get_function()
+            .function_name(&name)
+            .send()
+            .await
+            .context("read updated function")?;
+        let configuration = fetched
+            .configuration()
+            .context("missing function configuration")?;
+        ensure!(
+            configuration.code_sha256() == Some(updated_hash),
+            "read returned old code hash"
+        );
+        ensure!(
+            configuration.code_size() == code_size,
+            "read returned old code size"
+        );
+        client
+            .delete_function()
+            .function_name(&name)
+            .send()
+            .await
+            .context("delete smoke function")?;
+        crate::cleanup_bucket(&s3, &bucket).await;
+        Ok(())
+    }
 
     /// Helper: upload a zip blob to S3 and return (bucket, key).
     async fn upload_code_to_s3(prefix: &str) -> (String, String) {
