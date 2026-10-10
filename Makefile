@@ -22,6 +22,18 @@ deny:
 run:
 	@cargo run -p rustack-cli --bin rustack
 
+# Set PUBLISH_PACKAGES to a space-separated release set; defaults to the workspace.
+# Package the set together so unpublished internal dependencies are verified locally.
+PUBLISH_PACKAGES ?=
+
+publish-dry-run:
+	@cargo publish --dry-run --allow-dirty --locked --all-features \
+		$(if $(strip $(PUBLISH_PACKAGES)),$(foreach package,$(PUBLISH_PACKAGES),-p $(package)),--workspace)
+
+publish:
+	@cargo publish --locked --all-features \
+		$(if $(strip $(PUBLISH_PACKAGES)),$(foreach package,$(PUBLISH_PACKAGES),-p $(package)),$(error Set PUBLISH_PACKAGES to the crates to publish))
+
 release:
 	@cargo release tag --execute
 	@git cliff -o CHANGELOG.md
@@ -669,7 +681,7 @@ test-iam-unit:
 test-iam-integration:
 	@cargo test -p rustack-integration -- iam --ignored
 
-.PHONY: build check test fmt clippy audit deny run release update-submodule integration \
+.PHONY: build check test fmt clippy audit deny run publish publish-dry-run release update-submodule integration \
 	codegen codegen-s3 codegen-ssm codegen-events codegen-dynamodb codegen-dynamodbstreams codegen-sqs codegen-sns codegen-lambda \
 	codegen-kms codegen-kinesis codegen-logs codegen-secretsmanager codegen-ses codegen-apigatewayv2 codegen-cloudwatch codegen-iam codegen-download \
 	mint mint-build mint-start mint-run mint-stop \

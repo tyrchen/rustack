@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-apigatewayv2-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3071,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-apigatewayv2-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "http 1.5.0",
@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-auth"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64",
  "chrono",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudfront-dataplane"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3235,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudfront-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64",
  "bytes",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudwatch-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudwatch-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "ciborium",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-dynamodb-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3370,7 +3370,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-dynamodb-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3405,7 +3405,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-dynamodbstreams-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-dynamodbstreams-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-events-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-events-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3517,7 +3517,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-iam-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3539,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-iam-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kinesis-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kinesis-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kms-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -3699,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kms-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3721,7 +3721,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-kms-model"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64",
  "bytes",
@@ -3733,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-lambda-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3778,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-lambda-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "http 1.5.0",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-logs-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-logs-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3862,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3899,7 +3899,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3950,7 +3950,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-secretsmanager-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64",
  "bytes",
@@ -3970,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-secretsmanager-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ses-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4028,7 +4028,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ses-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -4060,7 +4060,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sns-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4086,7 +4086,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sns-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sqs-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4142,7 +4142,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sqs-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -4175,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ssm-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4197,7 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-ssm-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -4228,7 +4228,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sts-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64",
  "bytes",
@@ -4247,7 +4247,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-sts-http"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "form_urlencoded",
