@@ -114,7 +114,7 @@ mod tests {
             .expect("list");
 
         // No direct keys under photos/2024/, only common prefixes.
-        assert!(resp.contents().is_empty());
+        assert_eq!(resp.contents(), []);
 
         let prefixes: Vec<&str> = resp
             .common_prefixes()
@@ -191,7 +191,7 @@ mod tests {
             .expect("list empty");
 
         assert_eq!(resp.key_count(), Some(0));
-        assert!(resp.contents().is_empty());
+        assert_eq!(resp.contents(), []);
 
         cleanup_bucket(&client, &bucket).await;
     }

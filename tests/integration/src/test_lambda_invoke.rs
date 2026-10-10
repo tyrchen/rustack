@@ -362,7 +362,7 @@ mod tests {
         assert!(resp.function_error.is_none());
         let v: serde_json::Value = serde_json::from_slice(&resp.payload).expect("response is JSON");
         assert_eq!(v["echo"]["hello"], "world");
-        assert!(!v["request_id"].as_str().unwrap().is_empty());
+        assert_ne!(v["request_id"].as_str().unwrap(), "");
 
         provider.shutdown().await;
     }

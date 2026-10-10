@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn test_should_parse_empty_query() {
         let params = parse_query_params("");
-        assert!(params.is_empty());
+        assert_eq!(params.len(), 0);
     }
 
     #[test]

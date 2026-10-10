@@ -3429,7 +3429,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.function_name, "my-func");
-        assert!(output.code_signing_config_arn.is_empty());
+        assert_eq!(output.code_signing_config_arn, "");
     }
 
     #[tokio::test]

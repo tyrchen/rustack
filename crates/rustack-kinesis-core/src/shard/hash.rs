@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_should_divide_evenly_zero() {
         let ranges = HashKeyRange::divide_evenly(0);
-        assert!(ranges.is_empty());
+        assert_eq!(ranges.len(), 0);
     }
 
     #[test]
