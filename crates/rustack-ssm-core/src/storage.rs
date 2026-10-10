@@ -1479,7 +1479,7 @@ mod tests {
         let (invalid, version) = store
             .label_parameter_version("/label/param", None, &labels)
             .expect("should label");
-        assert!(invalid.is_empty());
+        assert_eq!(invalid.len(), 0);
         assert_eq!(version, 2);
 
         // Verify label is on version 2.
@@ -1497,7 +1497,7 @@ mod tests {
         let (invalid, version) = store
             .label_parameter_version("/label/param", Some(1), &labels)
             .expect("should label");
-        assert!(invalid.is_empty());
+        assert_eq!(invalid.len(), 0);
         assert_eq!(version, 1);
 
         let record = store.parameters.get("/label/param").expect("exists");

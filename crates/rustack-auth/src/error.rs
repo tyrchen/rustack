@@ -49,4 +49,13 @@ pub enum AuthError {
     /// A required query parameter for presigned URL authentication is missing.
     #[error("Missing required query parameter: {0}")]
     MissingQueryParam(String),
+
+    /// A presigned URL `X-Amz-*` authentication parameter is duplicated or
+    /// percent-encoded instead of literal, or its value is invalid.
+    #[error("Invalid presigned authentication parameter: {0}")]
+    InvalidAuthParam(String),
+
+    /// A query exceeds resource limits or contains invalid UTF-8 or duplicate decoded names.
+    #[error("Invalid query string: exceeds limits or contains ambiguous parameters")]
+    InvalidQueryString,
 }

@@ -825,7 +825,7 @@ mod tests {
                 private_key_der,
                 public_key_der,
             } => {
-                assert!(!private_key_der.is_empty());
+                assert_ne!(private_key_der.len(), 0);
                 // X.509 SubjectPublicKeyInfo DER, per the KMS API contract —
                 // not the raw 65-byte SEC1 point.
                 assert_spki_secp256k1_der(&public_key_der);
@@ -852,7 +852,7 @@ mod tests {
 
         let signature =
             ecdsa_sign(&spec, &private_key_der, message, &algorithm, &message_type).unwrap();
-        assert!(!signature.is_empty());
+        assert_ne!(signature.len(), 0);
 
         let valid = ecdsa_verify(
             &spec,
@@ -1067,7 +1067,7 @@ mod tests {
     fn test_should_generate_secp256k1_data_key_pair() {
         let (private_der, public_der) =
             generate_data_key_pair(&DataKeyPairSpec::EccSecgP256k1).unwrap();
-        assert!(!private_der.is_empty());
+        assert_ne!(private_der.len(), 0);
         // Data key pair public keys follow the same KMS contract: X.509 SPKI.
         assert_spki_secp256k1_der(&public_der);
     }

@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn test_should_load_from_env() {
         let config = S3Config::from_env();
-        assert!(!config.gateway_listen.is_empty());
+        assert_ne!(config.gateway_listen, "");
     }
 
     #[test]

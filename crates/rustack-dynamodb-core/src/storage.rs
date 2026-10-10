@@ -1681,7 +1681,7 @@ mod tests {
         let storage = TableStorage::new(string_key_schema());
         let pk = AttributeValue::S("nonexistent".to_owned());
         let (items, last_key) = storage.query(&pk, None, true, None, None);
-        assert!(items.is_empty());
+        assert_eq!(items.len(), 0);
         assert!(last_key.is_none());
     }
 

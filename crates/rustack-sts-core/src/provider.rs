@@ -566,8 +566,8 @@ mod tests {
         let result = provider.assume_role(Some("test"), &params).unwrap();
         let creds = result.credentials.unwrap();
         assert!(creds.access_key_id.starts_with("ASIA"));
-        assert!(!creds.secret_access_key.is_empty());
-        assert!(!creds.session_token.is_empty());
+        assert_ne!(creds.secret_access_key, "");
+        assert_ne!(creds.session_token, "");
 
         let assumed = result.assumed_role_user.unwrap();
         assert!(assumed.arn.contains("assumed-role/TestRole/test-session"));

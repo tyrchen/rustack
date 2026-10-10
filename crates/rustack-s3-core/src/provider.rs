@@ -97,7 +97,7 @@ mod tests {
     fn test_should_create_provider_with_defaults() {
         let provider = RustackS3::new(S3Config::default());
         assert_eq!(provider.config().gateway_listen, "127.0.0.1:4566");
-        assert!(provider.state().list_buckets().is_empty());
+        assert_eq!(provider.state().list_buckets().len(), 0);
     }
 
     #[test]

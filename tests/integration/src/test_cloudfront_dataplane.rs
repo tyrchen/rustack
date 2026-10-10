@@ -445,7 +445,7 @@ async fn test_dp_should_support_head_method() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(response_header(&resp, "etag").is_some());
     // No body on HEAD.
-    assert!(resp.text().await.unwrap().is_empty());
+    assert_eq!(resp.text().await.unwrap(), "");
 
     disable_and_clean(&client, &id, &etag).await;
 }

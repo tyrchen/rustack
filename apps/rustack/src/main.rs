@@ -1581,7 +1581,7 @@ mod tests {
     fn test_should_parse_services_value_whitespace() {
         // Whitespace-only = all compiled-in services.
         let services = parse_services_value("  ");
-        assert!(!services.is_empty());
+        assert_eq!(services, parse_services_value(""));
     }
 
     #[test]

@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn test_should_compute_sigv2_signature() {
         let sig = compute_sigv2_signature("secret", "data");
-        assert!(!sig.is_empty());
+        assert_ne!(sig, "");
         // Base64(HMAC-SHA1) produces a deterministic output.
         let sig2 = compute_sigv2_signature("secret", "data");
         assert_eq!(sig, sig2);
