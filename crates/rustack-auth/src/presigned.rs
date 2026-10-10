@@ -440,21 +440,25 @@ mod tests {
 
     #[test]
     fn test_should_reject_auth_param_alias_rewrite_in_presigned_url() {
-        // End-to-end: a presigned URL signed in normalized form over
-        // `X-Amz-Expires=60&%58-Amz-Expires=86400` verifies the identical
-        // canonical query after the values are swapped between the raw names
-        // (`X-Amz-Expires=86400&%58-Amz-Expires=60`) — normalization decodes
-        // both names and sorts the values. Without the alias rejection the
-        // rewritten URL would verify while the effective expiry silently
-        // extends from 60 to 86400 seconds.
+        // Swapping expiry values between the literal and encoded auth names
+        // leaves the would-be normalized signature unchanged. Construct that
+        // canonical query independently: the production normalizer must reject
+        // both ambiguous representations instead of emitting an attack oracle.
         let provider = test_credential_provider();
         let now = Utc::now();
         let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date = now.format("%Y%m%d").to_string();
 
         let credential = format!("{TEST_ACCESS_KEY}/{date}/us-east-1/s3/aws4_request");
-        let encoded_credential =
-            percent_encoding::utf8_percent_encode(&credential, percent_encoding::NON_ALPHANUMERIC);
+        // This fixture contains only unreserved bytes and `/`. Preserve `-`
+        // and `_`, which SigV4 leaves literal, so the raw collision oracle
+        // below represents the exact normalized canonical query.
+        let encoded_credential = credential.replace('/', "%2F");
+        let credential_param = format!("X-Amz-Credential={encoded_credential}");
+        assert_eq!(
+            build_canonical_query_string_normalized(&credential_param).unwrap(),
+            credential_param,
+        );
 
         let query_without_sig = format!(
             "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={encoded_credential}&\
@@ -466,6 +470,10 @@ mod tests {
             &query_without_sig.replace("%58-Amz-Expires", "X-Amz-Expires"),
         );
         assert!(canonical_query.contains("X-Amz-Expires=60&X-Amz-Expires=86400"));
+        assert!(matches!(
+            build_canonical_query_string_without_signature_normalized(&query_without_sig),
+            Err(AuthError::InvalidQueryString)
+        ));
 
         #[rustfmt::skip]
         let canonical_request = format!(
@@ -490,6 +498,10 @@ mod tests {
             &rewritten_query.replace("%58-Amz-Expires", "X-Amz-Expires"),
         );
         assert_eq!(rewritten_canonical, canonical_query);
+        assert!(matches!(
+            build_canonical_query_string_without_signature_normalized(&rewritten_query),
+            Err(AuthError::InvalidQueryString)
+        ));
 
         let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{rewritten_query}");
         let (parts, _body) = http::Request::builder()
