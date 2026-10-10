@@ -14,7 +14,7 @@
 //! Each component is normalized according to the AWS specification to ensure
 //! deterministic signature computation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
@@ -121,7 +121,7 @@ pub fn build_canonical_uri(path: &str) -> String {
 /// which is whatever appears in the HTTP request.
 ///
 /// For spec-compliant clients (e.g. Transmit 5) that sign the normalized form,
-/// see [`build_canonical_query_string_normalized`]. Signature verification
+/// see [`build_canonical_query_string_normalized`]. S3 signature verification
 /// tries both forms so that either client style is accepted.
 ///
 /// # Examples
@@ -156,16 +156,36 @@ pub fn build_canonical_query_string(query: &str) -> String {
         .join("&")
 }
 
-/// Maximum number of query parameters the normalized fallback will parse.
-///
-/// Each component becomes a pair of owned strings, so an unbounded parameter
-/// count would let a few input bytes per parameter amplify into large
-/// allocations on every raw-signature miss (unauthenticated requests reach
-/// this path). Queries above the cap fail closed with
-/// [`AuthError::InvalidQueryString`], which verification callers already map
-/// to "skip the fallback". 1024 leaves ample headroom: real S3 query strings
-/// carry a handful of parameters.
-const MAX_NORMALIZED_QUERY_PARAMS: usize = 1024;
+/// Maximum query component count accepted before authentication allocations.
+/// S3 requests normally carry only a handful of parameters.
+const MAX_QUERY_PARAMS: usize = 1024;
+
+/// Bound query parsing before any authentication allocation.
+pub(crate) fn validate_query_limits(query: &str) -> Result<(), AuthError> {
+    const MAX_QUERY_BYTES: usize = 64 * 1024;
+    if query.len() > MAX_QUERY_BYTES
+        || query.bytes().filter(|byte| *byte == b'&').count() >= MAX_QUERY_PARAMS
+    {
+        return Err(AuthError::InvalidQueryString);
+    }
+    Ok(())
+}
+
+/// S3 uses the first decoded name on the wire; sorting must not erase that choice.
+pub(crate) fn validate_unique_query_names(query: &str) -> Result<(), AuthError> {
+    validate_query_limits(query)?;
+    let mut names = HashSet::new();
+    for param in query.split('&').filter(|param| !param.is_empty()) {
+        let (name, _) = param.split_once('=').unwrap_or((param, ""));
+        let decoded = percent_decode_str(name)
+            .decode_utf8()
+            .map_err(|_| AuthError::InvalidQueryString)?;
+        if !names.insert(decoded) {
+            return Err(AuthError::InvalidQueryString);
+        }
+    }
+    Ok(())
+}
 
 /// Build the canonical query string following the AWS SigV4 specification.
 ///
@@ -173,7 +193,8 @@ const MAX_NORMALIZED_QUERY_PARAMS: usize = 1024;
 /// input is not double-encoded) and then re-encoded using the SigV4 encoding
 /// rules: every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`,
 /// `_`, `.`, `~`) is percent-encoded with uppercase hex. Parameters are then
-/// sorted by encoded name, then by encoded value for duplicate names.
+/// sorted by encoded name. Duplicate decoded names are rejected because S3
+/// selects the first wire value, while sorting their values erases that choice.
 ///
 /// This matches what spec-compliant S3 clients (AWS SDKs, Transmit 5, …) sign.
 /// For example, a client sending `?prefix=periods/` on the wire signs the
@@ -216,31 +237,22 @@ const MAX_NORMALIZED_QUERY_PARAMS: usize = 1024;
 /// # Errors
 ///
 /// Returns [`AuthError::InvalidQueryString`] if a parameter name or value is
-/// not valid UTF-8 after percent-decoding, or if the query contains more than
-/// `MAX_NORMALIZED_QUERY_PARAMS` parameters (fail closed before allocating).
+/// not valid UTF-8 after percent-decoding, a decoded name is repeated, or the
+/// query exceeds 64 KiB or 1024 components (fail closed before allocating).
 ///
 /// Note: verification callers only attempt the normalized fallback from
 /// endpoint-specific entry points (e.g. [`crate::sigv4::verify_s3_sigv4`])
 /// whose query decoding has been audited, and skip it when the wire query
 /// contains a raw `+`; see the `+` paragraph above.
 pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, AuthError> {
+    validate_unique_query_names(query)?;
     if query.is_empty() {
         return Ok(String::new());
     }
 
-    // Bound the parameter count before allocating or parsing (see
-    // `MAX_NORMALIZED_QUERY_PARAMS`): each component becomes a pair of owned
-    // strings, so an unbounded count would amplify small inputs on every
-    // raw-signature miss. Fail closed; callers map this to "skip the fallback".
-    let param_count = query.matches('&').count().saturating_add(1);
-    if param_count > MAX_NORMALIZED_QUERY_PARAMS {
-        return Err(AuthError::InvalidQueryString);
-    }
+    let param_count = query.bytes().filter(|byte| *byte == b'&').count() + 1;
 
-    // Size the buffer by parameter count, not byte length: `query.len() / 8`
-    // would let a single long parameter pre-allocate a large number of
-    // entries before any signature check runs (memory amplification on
-    // unauthenticated requests).
+    // Bound storage by the validated component count, not query byte length.
     let mut params: Vec<(String, String)> = Vec::with_capacity(param_count);
     for param in query.split('&').filter(|s| !s.is_empty()) {
         let (name, value) = param.split_once('=').unwrap_or((param, ""));
@@ -252,7 +264,7 @@ pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, Au
         ));
     }
 
-    // Sort by encoded name, then by encoded value, per the SigV4 spec.
+    // Names are unique after decoding, so sorting cannot change S3's first match.
     params.sort_unstable();
 
     Ok(params
@@ -593,11 +605,31 @@ mod tests {
     }
 
     #[test]
-    fn test_should_sort_normalized_query_by_encoded_name_then_value() {
+    fn test_should_sort_normalized_query_by_encoded_name() {
         assert_eq!(
-            build_canonical_query_string_normalized("b=2&a=1&a=0").unwrap(),
-            "a=0&a=1&b=2"
+            build_canonical_query_string_normalized("b=2&a=1&%2F=0").unwrap(),
+            "%2F=0&a=1&b=2"
         );
+    }
+
+    #[test]
+    fn test_should_reject_duplicate_decoded_names_in_normalized_query() {
+        for query in ["a=1&a=2", "%6cist-type=1&list-type=2", "a&a=1"] {
+            assert!(matches!(
+                build_canonical_query_string_normalized(query),
+                Err(AuthError::InvalidQueryString)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_should_bound_query_bytes_before_normalization() {
+        let at_cap = "x".repeat(64 * 1024);
+        assert!(build_canonical_query_string_normalized(&at_cap).is_ok());
+        assert!(matches!(
+            build_canonical_query_string_normalized(&(at_cap + "x")),
+            Err(AuthError::InvalidQueryString)
+        ));
     }
 
     #[test]
@@ -612,11 +644,14 @@ mod tests {
     fn test_should_reject_query_above_param_cap_in_normalized_query() {
         // Each parameter becomes a pair of owned strings, so the parameter
         // count is capped before allocating: fail closed on too many params.
-        let at_cap = "a=1&".repeat(1023) + "a=1";
+        let at_cap = (0..1024)
+            .map(|n| format!("a{n}=1"))
+            .collect::<Vec<_>>()
+            .join("&");
         assert_eq!(at_cap.split('&').count(), 1024);
         assert!(build_canonical_query_string_normalized(&at_cap).is_ok());
 
-        let over_cap = "a=1&".repeat(1024) + "a=1";
+        let over_cap = at_cap + "&extra=1";
         assert_eq!(over_cap.split('&').count(), 1025);
         assert!(matches!(
             build_canonical_query_string_normalized(&over_cap),

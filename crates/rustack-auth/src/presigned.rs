@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{NaiveDateTime, Utc};
+use chrono::{Duration, NaiveDateTime, Utc};
 use percent_encoding::percent_decode_str;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -24,6 +24,7 @@ use crate::{
     canonical::{
         build_canonical_headers, build_canonical_query_string,
         build_canonical_query_string_normalized, build_canonical_uri, build_signed_headers_string,
+        validate_query_limits, validate_unique_query_names,
     },
     credentials::CredentialProvider,
     error::AuthError,
@@ -72,8 +73,10 @@ pub struct ParsedPresignedParams {
 /// [`AuthError::InvalidAuthParam`] if an `X-Amz-*` authentication parameter is
 /// duplicated or percent-encoded instead of literal,
 /// [`AuthError::UnsupportedAlgorithm`] if the algorithm is not `AWS4-HMAC-SHA256`,
-/// or [`AuthError::InvalidCredential`] if the credential format is invalid.
+/// [`AuthError::InvalidCredential`] if the credential format is invalid, or
+/// [`AuthError::InvalidQueryString`] if the query exceeds 64 KiB or 1024 components.
 pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, AuthError> {
+    validate_query_limits(query)?;
     let mut params: HashMap<String, String> = HashMap::new();
     // Decoded `X-Amz-*` names already seen, for duplicate detection.
     let mut seen_auth_params: HashSet<String> = HashSet::new();
@@ -92,7 +95,12 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
                 }
             }
         }
-        params.insert(key.to_owned(), url_decode(value));
+        if key.starts_with("X-Amz-") {
+            let decoded = percent_decode_str(value)
+                .decode_utf8()
+                .map_err(|_| AuthError::InvalidAuthParam(key.to_owned()))?;
+            params.insert(key.to_owned(), decoded.into_owned());
+        }
     }
 
     let algorithm = get_required_param(&params, "X-Amz-Algorithm")?;
@@ -153,6 +161,8 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 ///
 /// Returns an [`AuthError`] if:
 /// - Required query parameters are missing or malformed
+/// - The query exceeds 64 KiB or 1024 components, or repeats a decoded name
+/// - `X-Amz-Expires` is outside S3's valid range of 1 through 604800 seconds
 /// - An `X-Amz-*` authentication parameter is duplicated or percent-encoded
 /// - The URL has expired
 /// - The access key is not found
@@ -164,6 +174,7 @@ pub fn verify_presigned(
 ) -> Result<AuthResult, AuthError> {
     let query = parts.uri.query().unwrap_or("");
     let parsed = parse_presigned_params(query)?;
+    validate_unique_query_names(query)?;
 
     debug!(
         access_key_id = %parsed.access_key_id,
@@ -305,8 +316,16 @@ fn check_expiration(timestamp: &str, expires: u64) -> Result<(), AuthError> {
     let request_time = NaiveDateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%SZ")
         .map_err(|_| AuthError::MissingQueryParam("X-Amz-Date (invalid format)".to_owned()))?;
 
+    // S3 signing keys are valid for at most seven days. Reject oversized
+    // external integers before constructing a duration or adding dates.
+    if !(1..=604_800).contains(&expires) {
+        return Err(AuthError::InvalidAuthParam("X-Amz-Expires".to_owned()));
+    }
+    let seconds = i64::try_from(expires)
+        .map_err(|_| AuthError::InvalidAuthParam("X-Amz-Expires".to_owned()))?;
     let expiry_time = request_time
-        + chrono::Duration::seconds(i64::try_from(expires).map_err(|_| AuthError::RequestExpired)?);
+        .checked_add_signed(Duration::seconds(seconds))
+        .ok_or_else(|| AuthError::InvalidAuthParam("X-Amz-Expires".to_owned()))?;
 
     let now = Utc::now().naive_utc();
     if now > expiry_time {
@@ -336,13 +355,6 @@ fn collect_signed_headers_for_presigned<'a>(
     Ok(result)
 }
 
-/// Perform basic percent-decoding of a URL-encoded string.
-fn url_decode(input: &str) -> String {
-    percent_encoding::percent_decode_str(input)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
 /// Extract a required query parameter, returning an error if missing.
 fn get_required_param(params: &HashMap<String, String>, name: &str) -> Result<String, AuthError> {
     params
@@ -353,6 +365,8 @@ fn get_required_param(params: &HashMap<String, String>, name: &str) -> Result<St
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use super::*;
     use crate::credentials::StaticCredentialProvider;
 
@@ -448,8 +462,9 @@ mod tests {
              X-Amz-SignedHeaders=host"
         );
 
-        let canonical_query =
-            build_canonical_query_string_without_signature_normalized(&query_without_sig).unwrap();
+        let canonical_query = build_canonical_query_string(
+            &query_without_sig.replace("%58-Amz-Expires", "X-Amz-Expires"),
+        );
         assert!(canonical_query.contains("X-Amz-Expires=60&X-Amz-Expires=86400"));
 
         #[rustfmt::skip]
@@ -471,8 +486,9 @@ mod tests {
              X-Amz-Date={timestamp}&X-Amz-Expires=86400&%58-Amz-Expires=60&\
              X-Amz-SignedHeaders=host&X-Amz-Signature={signature}"
         );
-        let rewritten_canonical =
-            build_canonical_query_string_without_signature_normalized(&rewritten_query).unwrap();
+        let rewritten_canonical = build_canonical_query_string_without_signature(
+            &rewritten_query.replace("%58-Amz-Expires", "X-Amz-Expires"),
+        );
         assert_eq!(rewritten_canonical, canonical_query);
 
         let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{rewritten_query}");
@@ -486,6 +502,96 @@ mod tests {
 
         let result = verify_presigned(&parts, &provider);
         assert!(matches!(result, Err(AuthError::InvalidAuthParam(_))));
+    }
+
+    #[test]
+    fn test_should_bound_presigned_parameter_collections_before_parsing() {
+        let mut query = String::from(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKID%2F20130524%2Fus-east-1%2Fs3%\
+             2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=60&X-Amz-SignedHeaders=host&\
+             X-Amz-Signature=abc",
+        );
+        for n in 0..1018 {
+            write!(query, "&X-Amz-Extra{n}=1").unwrap();
+        }
+        assert!(parse_presigned_params(&query).is_ok());
+        query.push_str("&X-Amz-OneTooMany=1");
+        assert!(matches!(
+            parse_presigned_params(&query),
+            Err(AuthError::InvalidQueryString)
+        ));
+        let oversized = "X-Amz-Signature=".to_owned() + &"x".repeat(64 * 1024);
+        assert!(matches!(
+            parse_presigned_params(&oversized),
+            Err(AuthError::InvalidQueryString)
+        ));
+    }
+
+    #[test]
+    fn test_should_reject_invalid_utf8_in_presigned_auth_value() {
+        assert!(matches!(
+            parse_presigned_params("X-Amz-Algorithm=%FF"),
+            Err(AuthError::InvalidAuthParam(_))
+        ));
+    }
+
+    #[test]
+    fn test_should_reject_duplicate_decoded_s3_names_in_presigned_url() {
+        let provider = test_credential_provider();
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = now.format("%Y%m%d").to_string();
+        let query = format!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={TEST_ACCESS_KEY}%2F{date}%\
+             2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date={timestamp}&X-Amz-Expires=60&\
+             X-Amz-SignedHeaders=host&list-type=1&list-type=2"
+        );
+        // A signer sorts the two values, so exchanging wire order keeps this
+        // signature while changing S3's first-match operation selection.
+        let canonical_query = build_canonical_query_string(&query);
+        #[rustfmt::skip]
+        let canonical = format!(
+            "GET\n/test.txt\n{canonical_query}\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
+        );
+        let to_sign = build_string_to_sign(
+            &timestamp,
+            &format!("{date}/us-east-1/s3/aws4_request"),
+            &hex::encode(Sha256::digest(canonical.as_bytes())),
+        );
+        let signature = compute_signature(
+            &derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3"),
+            &to_sign,
+        );
+        for wire_names in [
+            "list-type=1&list-type=2",
+            "%6cist-type=1&list-type=2",
+            "%6cist-type=2&list-type=1",
+        ] {
+            let wire = query.replace("list-type=1&list-type=2", wire_names);
+            let parts = http::Request::builder()
+                .uri(format!("http://examplebucket.s3.amazonaws.com/test.txt?{wire}&X-Amz-Signature={signature}"))
+                .header("host", "examplebucket.s3.amazonaws.com")
+                .body(())
+                .unwrap()
+                .into_parts().0;
+            assert!(matches!(
+                verify_presigned(&parts, &provider),
+                Err(AuthError::InvalidQueryString)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_should_reject_out_of_range_presigned_expiry_without_panicking() {
+        let now = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        for expires in [0, 604_801, i64::MAX as u64, u64::MAX] {
+            assert!(matches!(
+                check_expiration(&now, expires),
+                Err(AuthError::InvalidAuthParam(_))
+            ));
+        }
+        assert!(check_expiration(&now, 1).is_ok());
+        assert!(check_expiration(&now, 604_800).is_ok());
     }
 
     #[test]
