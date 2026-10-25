@@ -59,6 +59,7 @@ use crate::{
         AutoExecutor, Executor, ExecutorBackend, InvokeRequest, NativeExecutor, NoopExecutor,
         PackageType, SquibExecutor,
     },
+    identity::FunctionResourceId,
     resolver::{
         alias_arn, function_arn, function_version_arn, layer_arn, layer_version_arn,
         parse_layer_version_arn, resolve_function_ref, resolve_version,
@@ -505,6 +506,7 @@ impl RustackLambda {
         };
 
         let record = FunctionRecord {
+            resource_id: FunctionResourceId::new(),
             name: name.clone(),
             arn: arn.clone(),
             latest: version_record,
@@ -933,7 +935,7 @@ impl RustackLambda {
         if let Some(path) = &version.code_path {
             self.store.validate_artifact(path).await?;
         }
-        let req = self.build_invoke_request(&record, version, payload);
+        let req = self.build_invoke_request(&record, version, qualifier, payload);
 
         let (response, handle) = self
             .work
@@ -963,18 +965,13 @@ impl RustackLambda {
         &self,
         record: &FunctionRecord,
         version: &VersionRecord,
+        invoked_qualifier: Option<&str>,
         payload: &[u8],
     ) -> InvokeRequest {
-        let function_arn = if version.version == "$LATEST" {
-            record.arn.clone()
-        } else {
-            function_version_arn(
-                &self.config.default_region,
-                &self.config.account_id,
-                &record.name,
-                &version.version,
-            )
-        };
+        let function_arn = invoked_qualifier.map_or_else(
+            || record.arn.clone(),
+            |qualifier| format!("{}:{qualifier}", record.arn),
+        );
         let mut env = version.environment.clone();
         // Always make the rustack region/account visible inside the runtime so
         // SDK calls back to the same rustack instance work without extra setup.
@@ -982,23 +979,27 @@ impl RustackLambda {
             .or_insert_with(|| self.config.default_region.clone());
         env.entry("AWS_DEFAULT_REGION".to_owned())
             .or_insert_with(|| self.config.default_region.clone());
-        InvokeRequest {
-            function_arn,
-            function_name: record.name.clone(),
-            qualifier: version.version.clone(),
-            runtime: version.runtime.clone(),
-            handler: version.handler.clone(),
-            architectures: version.architectures.clone(),
-            package_type: PackageType::from_wire(&version.package_type),
-            code_root: version.code_path.clone(),
-            code_zip: version.zip_bytes.clone(),
-            image_uri: version.image_uri.clone(),
-            environment: env,
-            timeout: Duration::from_secs(u64::from(version.timeout)),
-            memory_mb: version.memory_size,
-            payload: Bytes::copy_from_slice(payload),
-            capture_logs: false,
-        }
+        InvokeRequest::builder()
+            .resource_id(record.resource_id)
+            .revision_id(version.revision_id.clone())
+            .image_config(version.image_config.clone())
+            .ephemeral_storage_mb(version.ephemeral_storage_size)
+            .function_arn(function_arn)
+            .function_name(record.name.clone())
+            .qualifier(version.version.clone())
+            .runtime(version.runtime.clone())
+            .handler(version.handler.clone())
+            .architectures(version.architectures.clone())
+            .package_type(PackageType::from_wire(&version.package_type))
+            .code_root(version.code_path.clone())
+            .code_zip(version.zip_bytes.clone())
+            .image_uri(version.image_uri.clone())
+            .environment(env)
+            .timeout(Duration::from_secs(u64::from(version.timeout)))
+            .memory_mb(version.memory_size)
+            .payload(Bytes::copy_from_slice(payload))
+            .capture_logs(false)
+            .build()
     }
 
     // ---------------------------------------------------------------
@@ -3046,6 +3047,76 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_invoked_alias_separately_from_resolved_version()
+    -> Result<(), LambdaServiceError> {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("qualified"))
+            .await?;
+        provider.publish_version("qualified", &PublishVersionInput::default())?;
+        provider.create_alias(
+            "qualified",
+            CreateAliasInput {
+                name: "prod".into(),
+                function_version: "1".into(),
+                ..CreateAliasInput::default()
+            },
+        )?;
+        let record = provider.get_record("qualified")?;
+        for (qualifier, resolved) in [
+            (None, "$LATEST"),
+            (Some("$LATEST"), "$LATEST"),
+            (Some("prod"), "1"),
+            (Some("1"), "1"),
+        ] {
+            let version = resolve_version(&record, qualifier)?;
+            let request = provider.build_invoke_request(&record, version, qualifier, b"{}");
+            let expected_arn =
+                qualifier.map_or_else(|| record.arn.clone(), |q| format!("{}:{q}", record.arn));
+            assert_eq!(request.function_arn, expected_arn);
+            assert_eq!(request.qualifier, resolved);
+            assert_eq!(request.resource_id, record.resource_id);
+            assert_eq!(request.revision_id, version.revision_id);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_capture_image_overrides_and_ephemeral_storage_by_value()
+    -> Result<(), LambdaServiceError> {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("captured"))
+            .await?;
+        let record = provider.get_record("captured")?;
+        let mut version = record.latest.clone();
+        version.ephemeral_storage_size = 2048;
+        version.image_config = Some(rustack_lambda_model::types::ImageConfig {
+            entry_point: Some(vec!["/custom/entrypoint".into()]),
+            command: Some(vec![]),
+            working_directory: Some("/function".into()),
+        });
+        let request = provider.build_invoke_request(&record, &version, None, b"{\"value\":1}");
+        version.ephemeral_storage_size = 4096;
+        version.image_config = None;
+        assert_eq!(request.ephemeral_storage_mb, 2048);
+        let image = request
+            .image_config
+            .as_ref()
+            .ok_or_else(|| invalid_parameter("Image configuration was lost"))?;
+        assert_eq!(
+            image.entry_point.as_deref(),
+            Some(["/custom/entrypoint".to_owned()].as_slice())
+        );
+        assert_eq!(image.command.as_deref(), Some([].as_slice()));
+        assert_eq!(image.working_directory.as_deref(), Some("/function"));
+        assert_eq!(request.payload, Bytes::from_static(b"{\"value\":1}"));
+        assert_ne!(request.ephemeral_storage_mb, version.ephemeral_storage_size);
+        assert!(version.image_config.is_none());
+        Ok(())
     }
 
     #[tokio::test]

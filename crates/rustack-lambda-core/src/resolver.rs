@@ -339,6 +339,7 @@ mod tests {
         );
 
         FunctionRecord {
+            resource_id: crate::identity::FunctionResourceId::default(),
             name: "my-func".to_owned(),
             arn: "arn:aws:lambda:us-east-1:000000000000:function:my-func".to_owned(),
             latest: make_version("$LATEST"),

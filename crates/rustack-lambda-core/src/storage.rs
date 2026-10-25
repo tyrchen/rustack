@@ -5,7 +5,7 @@
 //! SHA-256 hashes computed on ingestion.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::ErrorKind,
     path::{Path, PathBuf},
 };
@@ -20,7 +20,7 @@ use rustack_lambda_model::types::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::LambdaServiceError;
+use crate::{error::LambdaServiceError, identity::FunctionResourceId};
 
 /// In-memory store for Lambda functions.
 #[derive(Debug)]
@@ -67,6 +67,8 @@ impl Drop for Artifact {
 /// Complete record for a Lambda function.
 #[derive(Debug, Clone)]
 pub struct FunctionRecord {
+    /// Stable identity for this resource's lifetime, independent of its name.
+    pub resource_id: FunctionResourceId,
     /// Function name.
     pub name: String,
     /// Function ARN.
@@ -601,6 +603,9 @@ pub struct FunctionStoreSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionRecordSnapshot {
+    /// Stable identity; older snapshots allocate one when first decoded.
+    #[serde(default)]
+    pub resource_id: FunctionResourceId,
     /// Function name.
     pub name: String,
     /// Function ARN.
@@ -688,6 +693,7 @@ pub struct VersionRecordSnapshot {
 impl FunctionRecordSnapshot {
     fn from_record(record: FunctionRecord) -> Self {
         Self {
+            resource_id: record.resource_id,
             name: record.name,
             arn: record.arn,
             latest: VersionRecordSnapshot::from_record(record.latest),
@@ -719,6 +725,7 @@ impl FunctionRecordSnapshot {
             versions.insert(version, record.into_record(store, &name).await?);
         }
         Ok(FunctionRecord {
+            resource_id: self.resource_id,
             name,
             arn: self.arn,
             latest,
@@ -985,7 +992,7 @@ impl FunctionStore {
                 }
                 let mut candidate = entry.value().clone();
                 let result = f(&mut candidate);
-                if candidate.name != name {
+                if candidate.name != name || candidate.resource_id != entry.resource_id {
                     return Err(LambdaServiceError::InvalidParameter {
                         message: "Function identity is immutable".into(),
                     });
@@ -1054,7 +1061,13 @@ impl FunctionStore {
     ) -> Result<(), LambdaServiceError> {
         self.validate_root().await?;
         let mut staged = BTreeMap::new();
+        let mut identities = HashSet::new();
         for function in snapshot.functions {
+            if !identities.insert(function.resource_id) {
+                return Err(LambdaServiceError::InvalidParameter {
+                    message: "Duplicate snapshot function resource identity".into(),
+                });
+            }
             crate::resolver::FunctionName::parse(&function.name)?;
             let (name, qualifier) = crate::resolver::resolve_function_ref(&function.arn)?;
             if name != function.name || qualifier.is_some() {
@@ -1631,6 +1644,7 @@ mod tests {
 
     fn sample_record(name: &str) -> FunctionRecord {
         FunctionRecord {
+            resource_id: FunctionResourceId::default(),
             name: name.to_owned(),
             arn: format!("arn:aws:lambda:us-east-1:000000000000:function:{name}"),
             latest: sample_version(),
@@ -1645,6 +1659,95 @@ mod tests {
             event_invoke_configs: HashMap::new(),
             created_at: "2024-01-01T00:00:00.000+0000".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_function_resource_identity_through_snapshot_and_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = test_store();
+        let record = sample_record("identity");
+        let identity = record.resource_id;
+        store.insert(record)?;
+        store.update("identity", |record| {
+            record.latest.description = "changed".into();
+        })?;
+        let saved = serde_json::to_vec(&store.export_snapshot())?;
+        let snapshot: FunctionStoreSnapshot = serde_json::from_slice(&saved)?;
+        assert_eq!(
+            snapshot.functions.first().map(|record| record.resource_id),
+            Some(identity)
+        );
+        let restored = test_store();
+        restored.import_snapshot(snapshot).await?;
+        assert_eq!(
+            restored.get("identity")?.map(|record| record.resource_id),
+            Some(identity)
+        );
+        let result = restored.update("identity", |record| {
+            record.resource_id = FunctionResourceId::default();
+        });
+        assert!(matches!(
+            result,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        assert_eq!(
+            restored.get("identity")?.map(|record| record.resource_id),
+            Some(identity)
+        );
+        restored.remove("identity")?;
+        restored.insert(sample_record("identity"))?;
+        assert_ne!(
+            restored.get("identity")?.map(|record| record.resource_id),
+            Some(identity)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_duplicate_snapshot_identities_without_replacing_live_store()
+    -> Result<(), LambdaServiceError> {
+        let store = test_store();
+        store.insert(sample_record("live"))?;
+        let mut first = sample_record("first");
+        let second = sample_record("second");
+        first.resource_id = second.resource_id;
+        let snapshot = FunctionStoreSnapshot {
+            functions: vec![
+                FunctionRecordSnapshot::from_record(first),
+                FunctionRecordSnapshot::from_record(second),
+            ],
+        };
+        assert!(matches!(
+            store.import_snapshot(snapshot).await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        assert!(store.contains("live")?);
+        assert_eq!(store.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_assign_identity_only_when_legacy_snapshot_omits_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = FunctionRecordSnapshot::from_record(sample_record("legacy"));
+        let mut value = serde_json::to_value(snapshot)?;
+        let fields = value.as_object_mut().ok_or("snapshot must be an object")?;
+        fields.remove("resourceId");
+        let restored: FunctionRecordSnapshot = serde_json::from_value(value.clone())?;
+        let saved = serde_json::to_value(&restored)?;
+        assert_eq!(
+            serde_json::from_value::<FunctionRecordSnapshot>(saved)?.resource_id,
+            restored.resource_id
+        );
+        value
+            .as_object_mut()
+            .ok_or("snapshot must be an object")?
+            .insert(
+                "resourceId".into(),
+                "00000000-0000-0000-0000-000000000000".into(),
+            );
+        assert!(serde_json::from_value::<FunctionRecordSnapshot>(value).is_err());
+        Ok(())
     }
 
     #[test]

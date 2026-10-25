@@ -68,6 +68,10 @@ mod tests {
 
     fn request(package_type: PackageType) -> InvokeRequest {
         InvokeRequest {
+            resource_id: crate::identity::FunctionResourceId::default(),
+            revision_id: "test-revision".into(),
+            image_config: None,
+            ephemeral_storage_mb: 512,
             function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo".to_owned(),
             function_name: "echo".to_owned(),
             qualifier: "$LATEST".to_owned(),

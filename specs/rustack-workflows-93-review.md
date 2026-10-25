@@ -27,12 +27,17 @@ All six changes preserve the intended scope. No review finding has been dismisse
 
 The independent final recheck confirmed W07–W09 addressed, queried both daemon run labels and found zero containers, and reported no further in-P0 correctness issue. Production consumers remain subject to W01–W06.
 
+## P1 task1.1 foundation slice review
+
+The independent read-only review against commit `955267f` found no new in-slice correctness, security or compatibility defect. It verified strict resource UUID deserialization, immutable lifetime identity, legacy and current snapshot behavior, duplicate identity rejection, complete configuration capture, alias metadata versus resolved version, warm-key isolation and request/result diagnostic redaction. Ten new regression tests pass within 154 Lambda core tests. This approval covers the capture foundation only; artifact enums, cooperative cancellation and Docker execution remain required in P1. Standard workspace build/test/Clippy/rustdoc and two identity doctests pass; the native target validates six native/DryRun cases (its separately gated Squib case is not execution evidence). Baseline advisory remediation B01 and strict-lint remediation B03 remain open.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |
 |---|---|---|---|
 | B01 | P1; `Cargo.lock:1462`, `:1474`, `:4308`, `:5893` | Baseline cargo audit finds 16 advisories across crypto-bigint 0.5.5/0.7.5, ctutils, quinn-proto, rustls/webpki roots and ZIP 8.6.0. cargo-deny fails its advisory gate; bans/licenses/sources pass. Standalone probe audit is clean | P1 dependency work: upgrade affected dependencies, including ZIP major and the SDK's SigV4a chain; rerun meaningful regressions and audit/deny. Do not add ignores to make the gate green |
 | B02 | P2; `crates/rustack-kms-model/src/epoch_seconds.rs:39` | Existing optional epoch helper truncates negative fractional seconds and casts a negative fraction to u32; it is unsuitable as the generator's new codec | Do not reuse it in P2. Existing KMS correction is outside this workflow feature; retain as a repository follow-up without claiming it fixed |
+| B03 | P2; `crates/rustack-lambda-core/src/executor/native.rs:334`, `src/resolver.rs:271`, `src/storage.rs:1292` and existing provider Errors docs | Strict production boundary Clippy on lambda-core reports 66 existing findings: 56 missing Errors sections, four documentation-format findings and six indexing/slicing sites. The unfiltered dependency run additionally fails existing rustack-auth/core/model findings. The new identity/request/pool code has no finding in the strict core run; standard workspace Clippy passes | P1 quality work: fix the affected production boundaries and documentation, then rerun strict checks without lint ignores; standard checks alone do not close this gate |
 
 The P0 record distinguishes unchanged workspace advisory failures from the clean probe dependency graph; it never reports a fully green security baseline.
 

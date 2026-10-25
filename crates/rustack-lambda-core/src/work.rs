@@ -243,6 +243,10 @@ mod tests {
     }
     fn request(name: &str) -> InvokeRequest {
         InvokeRequest {
+            resource_id: crate::identity::FunctionResourceId::default(),
+            revision_id: "test-revision".into(),
+            image_config: None,
+            ephemeral_storage_mb: 512,
             function_name: name.into(),
             function_arn: "arn".into(),
             qualifier: "$LATEST".into(),

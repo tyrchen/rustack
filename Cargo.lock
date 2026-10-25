@@ -3758,6 +3758,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "typed-builder",
  "uuid",
  "zip",
 ]

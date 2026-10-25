@@ -701,6 +701,10 @@ mod tests {
     #[test]
     fn test_should_encode_request_payload_base64() {
         let req = InvokeRequest {
+            resource_id: crate::identity::FunctionResourceId::default(),
+            revision_id: "test-revision".into(),
+            image_config: None,
+            ephemeral_storage_mb: 512,
             function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo".to_owned(),
             function_name: "echo".to_owned(),
             qualifier: "$LATEST".to_owned(),
@@ -786,6 +790,10 @@ mod tests {
     #[test]
     fn test_should_reject_non_arm64_request() {
         let req = InvokeRequest {
+            resource_id: crate::identity::FunctionResourceId::default(),
+            revision_id: "test-revision".into(),
+            image_config: None,
+            ephemeral_storage_mb: 512,
             function_arn: String::new(),
             function_name: "echo".to_owned(),
             qualifier: "$LATEST".to_owned(),

@@ -1,6 +1,6 @@
 # Workflows 90: Dependency-Ordered Implementation Plan
 
-Status: P0 complete; P1 next; complete M0–M4 implementation objective remains active · Date: 2026-10-25
+Status: P0 complete; P1 in progress; complete M0–M4 implementation objective remains active · Date: 2026-10-25
 
 ## 1. Readiness and dependencies
 
@@ -123,7 +123,7 @@ Add `verify-workflows` and extend existing snapshot/smoke targets rather than in
 
 Cancellation/revision contracts precede both the Docker executor and workflow bridge; otherwise stopping a Task leaks resources or reuses mutable code. Compiler and history semantics precede Parallel/Map so branch machinery has one data/error contract. Child subscription/admission rules precede `.sync` so fast completion cannot be missed and parents cannot block child capacity. Snapshot integration follows fully settled lifecycle semantics, avoiding archives that appear resumable while silently replaying side effects.
 
-For implementation, invoke the repository's impl workflow one phase at a time and its independent review requirement; this specification task itself performs no production implementation or runtime acceptance.
+Implement phases with the repository's impl workflow and its independent review requirement. Specification publication and P0 feasibility evidence alone do not establish production runtime acceptance.
 
 ## 10. Cross-references
 
@@ -138,8 +138,9 @@ The complete implementation objective includes P0–P5. This ledger records evid
 |---|---|---|
 | 0.1 | Evidence complete | Real official RIC image execution, warm reuse, handler failures, cgroup/nonroot/rootfs checks, busy-handler cancellation, attach EOF comparison and label reconciliation passed on arm64 VZ and Linux amd64/QEMU. Native x86/Desktop/rootless qualification remains M4. |
 | 0.2 | Evidence complete | 48 independent semantic/protocol expectations; four offline SDK serializer/parser checks; pinned AWS-validated nested shapes and error corrections. No interpreter/cloud-differential execution is claimed. |
-| 0.3 | Evidence complete | Model commit/hash and37 operations pinned; six generated files compile in the standalone experiment. Numeric timestamp failure independently reproduced and mandatory generator remediation assigned task2.1. Rust updated to current stable1.99.1. |
+| 0.3 | Evidence complete | Model commit/hash and 37 operations pinned; six generated files compile in the standalone experiment. Numeric timestamp failure independently reproduced and mandatory generator remediation assigned task 2.1. Rust updated to current stable 1.99.1. |
 | 0.4 | Complete | Independent final recheck confirms W07–W09 fixed, zero owned containers on both daemons, and no further P0 correctness finding. W01–W06 contracts are corrected; production consumers remain in their assigned phases. Full workspace build/test/fmt/Clippy/rustdoc pass; unchanged baseline audit/deny advisory failures are B01 and must be fixed in P1 dependency work. |
-| P1–P5 | Pending | Remain required; no runtime implementation or acceptance is claimed yet. |
+| 1.1 | In progress | Captured resource identity, requested qualifier, ImageConfig/ephemeral propagation and diagnostic redaction are implemented and independently reviewed. Standard workspace checks, 154 Lambda core tests, two doctests and six native/DryRun cases pass; artifact enum and cooperative cancellation remain required before task 1.1 closes. Baseline security/strict-lint gates B01/B03 remain open. |
+| 1.2–1.4, P2–P5 | Pending | Remain required; no Docker executor or workflow-engine acceptance is claimed yet. |
 
-P0 measurements validate architecture feasibility, not production throughput or reduced delivery estimates. Keep the existing P1–P5 estimates until an implemented executor/engine provides calibration. The next production task is P1 task1.1; P0 does not advertise Docker execution as available in Rustack.
+P0 measurements validate architecture feasibility, not production throughput or reduced delivery estimates. Keep the existing P1–P5 estimates until an implemented executor/engine provides calibration. The next production task is P1 task 1.1; P0 does not advertise Docker execution as available in Rustack.

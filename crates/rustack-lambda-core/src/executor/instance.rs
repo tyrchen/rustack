@@ -123,15 +123,12 @@ impl InstancePool {
         let identity = format!(
             "{:?}",
             (
-                &req.qualifier,
-                &req.code_root,
-                &req.image_uri,
-                &req.runtime,
-                &req.handler,
-                &req.architectures,
+                (req.resource_id, &req.revision_id, &req.qualifier),
+                (&req.code_root, &req.image_uri),
+                (&req.runtime, &req.handler, &req.architectures),
                 environment,
-                req.timeout,
-                req.memory_mb
+                (req.timeout, req.memory_mb, req.ephemeral_storage_mb),
+                &req.image_config,
             )
         );
         (
@@ -312,4 +309,53 @@ pub(crate) fn spawn_reaper(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use rustack_lambda_model::types::ImageConfig;
+
+    use super::*;
+
+    #[test]
+    fn test_should_key_warm_environment_by_resource_and_captured_configuration() {
+        let request = InvokeRequest::fixture();
+        let original = InstancePool::key(&request);
+        let mut alias = request.clone();
+        alias.function_arn.push_str(":prod");
+        assert_eq!(InstancePool::key(&alias), original);
+
+        let mut recreated = request.clone();
+        recreated.resource_id = crate::identity::FunctionResourceId::default();
+        assert_ne!(InstancePool::key(&recreated), original);
+        let mut updated = request.clone();
+        updated.revision_id = "new-revision".into();
+        assert_ne!(InstancePool::key(&updated), original);
+        let mut storage = request.clone();
+        storage.ephemeral_storage_mb = 1024;
+        assert_ne!(InstancePool::key(&storage), original);
+        let mut image = request.clone();
+        image.image_config = Some(ImageConfig {
+            command: Some(vec![]),
+            ..ImageConfig::default()
+        });
+        assert_ne!(InstancePool::key(&image), original);
+        let explicitly_empty = InstancePool::key(&image);
+        image.image_config = Some(ImageConfig::default());
+        assert_ne!(InstancePool::key(&image), explicitly_empty);
+    }
+
+    #[test]
+    fn test_should_fingerprint_environment_independently_of_hashmap_iteration_order() {
+        let mut first = InvokeRequest::fixture();
+        first.environment.insert("FIRST".into(), "one".into());
+        first.environment.insert("SECOND".into(), "two".into());
+        let mut second = first.clone();
+        second.environment.clear();
+        second.environment.insert("SECOND".into(), "two".into());
+        second.environment.insert("FIRST".into(), "one".into());
+        assert_eq!(InstancePool::key(&first), InstancePool::key(&second));
+        second.environment.insert("SECOND".into(), "changed".into());
+        assert_ne!(InstancePool::key(&first), InstancePool::key(&second));
+    }
 }

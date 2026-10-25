@@ -84,6 +84,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [runtime spike](../docs/research/spike-lambda-container-relay.md), [semantic evidence](../docs/research/spike-stepfunctions-semantic-oracle.md), [required review fixes](./rustack-workflows-93-review.md).
 - Date:2026-10-25. These amendments refine D2/D6/D9 without changing the complete M0–M4 scope.
 
+## D12 — Separate resource, resolved revision and invoked reference
+
+- Alternatives: identify warm environments by function name/alias; use configuration RevisionId as the resource lifetime; reconstruct the invoked ARN from the resolved version.
+- Decision: allocate a stable nonnil resource UUID, capture resolved execution configuration by value, and preserve the caller's qualifier separately for Runtime API metadata.
+- Why: a recreated name must never acquire a deleted resource's environment, aliases can move without rewriting handler metadata, and snapshots must preserve the same resource identity. Importing legacy snapshots assigns an identity once; invalid or duplicate saved identities reject restore.
+- Pinned by: [invocation capture](./rustack-workflows-20-lambda-runtime-design.md#24-invocation-capture-and-resource-identity).
+- Date: 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

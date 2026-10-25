@@ -1,6 +1,6 @@
 # Workflows 20: Docker Lambda Execution Environments
 
-Status: implementation contract; relay composition requires P0 validation · Depends on: [PRD](./rustack-workflows-00-prd.md), [Lambda hardening](./rustack-lambda-hardening-design.md)
+Status: implementation contract; relay feasibility validated with platform qualifications · Depends on: [PRD](./rustack-workflows-00-prd.md), [Lambda hardening](./rustack-lambda-hardening-design.md)
 
 ## 1. Ownership and execution contract
 
@@ -61,6 +61,14 @@ Tag movement never changes deployed code. Published versions are immutable; alia
 Map x86_64 to linux/amd64 and arm64 to linux/arm64. Guarantee native architecture only. Reject cross-architecture calls unless the operator explicitly enables emulation; do not promise emulation performance/parity. Registry manifest lists select exactly one matching platform and pin its child manifest digest. Inspect local image architecture rather than trusting the declaration.
 
 Inherit Dockerfile ENTRYPOINT, CMD and WORKDIR, then override only explicitly supplied ImageConfig fields. Missing and explicitly empty arrays differ. WorkingDirectory is an image-internal absolute path≤1,000 bytes, not a host path. Each argv list has≤1,500 elements, each≤4,096 bytes and total≤64 KiB locally. Pass JSON argv directly, never sh -c. Do not force CMD=bootstrap. P0 must prove official Lambda images enter their RIC path when AWS_LAMBDA_RUNTIME_API is set.
+
+### 2.4 Invocation capture and resource identity
+
+A function receives a nonnil random FunctionResourceId on creation, independent of its name, version and configuration RevisionId. Updates and publication preserve that resource identity; deletion followed by recreation receives a new one. Store mutation cannot change it. Snapshots preserve it; importing an older snapshot without this field assigns an identity once for the restored resource, never once per invocation. An explicitly malformed or nil saved identity rejects restore.
+
+The provider captures the resource identity, resolved revision, complete ImageConfig (including omitted versus empty argv) and ephemeral storage before submitting work. The Runtime API invoked ARN is the function's canonical ARN with the caller's requested qualifier, if any. Alias invocation therefore reports `:prod` to the handler while ExecutedVersion reports the resolved numeric version. An unqualified request reports an unqualified ARN; explicit `:$LATEST` remains explicit. Pool reuse uses resource and resolved execution configuration, never the invoked alias. Requests' Debug representations redact environment values, payload, archive bytes and image argv; fingerprints may consume those values internally but must not be logged.
+
+P1 task1.1 lands this capture contract before the artifact-enum and cooperative-cancellation consumers. Its regression tests cover delete/recreate isolation, snapshot identity preservation and rejection, alias versus resolved version, configuration capture and redacted diagnostics. These foundation checks alone do not close M0.
 
 ## 3. Runtime API and relay transport
 
