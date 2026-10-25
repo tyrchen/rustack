@@ -1,6 +1,42 @@
 build:
 	@cargo build
 
+# P0 evidence tooling is isolated from the production workspace/runtime.
+WORKFLOWS_SPIKE_DIR ?= /tmp/rustack-spikes
+WORKFLOWS_DOCKER_SOCKET ?= /var/run/docker.sock
+WORKFLOWS_ARCH ?= $(if $(filter arm64 aarch64,$(shell uname -m)),arm64,amd64)
+WORKFLOWS_IMAGE_BUILDER ?= docker buildx
+
+workflows-model-check:
+	@python3 -c 'import hashlib,json,pathlib; p=pathlib.Path("codegen/smithy-model"); m=json.loads((p/"stepfunctions.provenance.json").read_text()); raw=(p/"stepfunctions.json").read_bytes(); assert len(raw)==m["bytes"] and hashlib.sha256(raw).hexdigest()==m["sha256"], "SFN source hash mismatch"; s=json.loads(raw)["shapes"][m["service"]]; assert s["version"]=="2016-11-23" and "aws.protocols#awsJson1_0" in s["traits"] and s["traits"]["aws.auth#sigv4"]["name"]=="states"; print("Pinned SFN model verified:",len(s["operations"]),"operations")'
+
+workflows-fixture-check: workflows-model-check
+	@python3 -c 'import json,pathlib; p=pathlib.Path("tests/workflows"); f=json.loads((p/"semantic-cases.json").read_text()); m=json.loads((p/"provenance.json").read_text()); source=json.loads(pathlib.Path("codegen/smithy-model/stepfunctions.provenance.json").read_text()); ids=[c["id"] for c in f["cases"]]; assert f["schemaVersion"]==1 and len(ids)==len(set(ids)) and all(c["source"] in f["sources"] for c in f["cases"]); assert m["awsModelCommit"]==source["commit"] and m["awsModelSha256"]==source["sha256"]; print("Fixture catalog structure/provenance verified:",len(ids),"cases; interpreter execution is not claimed")'
+
+workflows-wire-probe:
+	@PYTHONDONTWRITEBYTECODE=1 uv run --no-project --python 3.13 --with-requirements tests/workflows/requirements.txt python -m unittest discover -s tests/workflows -p 'test_botocore_wire.py' -v
+
+workflows-codegen-spike: workflows-model-check
+	@cargo run --manifest-path codegen/Cargo.toml -- --config codegen/services/stepfunctions.toml --model codegen/smithy-model/stepfunctions.json --output "$(WORKFLOWS_SPIKE_DIR)/stepfunctions-generated/src"
+
+test-workflows-spikes:
+	@cargo test --manifest-path tools/workflows-spikes/Cargo.toml
+	@cargo clippy --manifest-path tools/workflows-spikes/Cargo.toml --all-targets -- -D warnings
+
+workflows-relay-spike-build:
+	@case "$(WORKFLOWS_ARCH)" in arm64|amd64) ;; *) echo "WORKFLOWS_ARCH must be arm64 or amd64" >&2; exit 1;; esac
+	@cargo lambda build --manifest-path tools/workflows-spikes/Cargo.toml --bin relay --target "$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu" --release --lambda-dir "$(WORKFLOWS_SPIKE_DIR)/$(WORKFLOWS_ARCH)"
+
+workflows-relay-spike-images: workflows-relay-spike-build
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --platform "linux/$(WORKFLOWS_ARCH)" --file tools/workflows-spikes/Relay.Dockerfile --tag "rustack-p0-relay:$(WORKFLOWS_ARCH)" "$(WORKFLOWS_SPIKE_DIR)/$(WORKFLOWS_ARCH)/relay"
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --platform "linux/$(WORKFLOWS_ARCH)" --file tools/workflows-spikes/Handler.Dockerfile --tag "rustack-p0-handler:$(WORKFLOWS_ARCH)" tools/workflows-spikes
+
+workflows-relay-spike: workflows-relay-spike-images
+	@cargo run --manifest-path tools/workflows-spikes/Cargo.toml --bin driver -- "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_ARCH)"
+
+.PHONY: workflows-model-check workflows-fixture-check workflows-wire-probe workflows-codegen-spike \
+	test-workflows-spikes workflows-relay-spike-build workflows-relay-spike-images workflows-relay-spike
+
 check:
 	@cargo check --all-targets --all-features
 

@@ -1,5 +1,7 @@
 # Rustack Lambda: Invoke-Focused Native Rust Implementation Design
 
+> Current execution target: [Workflows Lambda runtime](./rustack-workflows-20-lambda-runtime-design.md) supersedes this document's RIE-forwarding/Docker execution architecture. Retain unaffected control-plane details and [Lambda hardening](./rustack-lambda-hardening-design.md). This is a design update, not a claim that Docker execution is implemented.
+
 **Date:** 2026-03-06
 **Status:** Draft / RFC
 **Depends on:** [smithy-s3-redesign-design.md](./smithy-s3-redesign-design.md), [rustack-dynamodb-design.md](./rustack-dynamodb-design.md), [rustack-sqs-design.md](./rustack-sqs-design.md)

@@ -1,5 +1,7 @@
 # Rustack Lambda: Real Function Execution (Native + Docker Backends)
 
+> Current execution target: [Workflows Lambda runtime](./rustack-workflows-20-lambda-runtime-design.md) supersedes the historical Docker networking, dependency versions and cleanup plan below. Preserve the applicable Native/Runtime API contracts and [Lambda hardening](./rustack-lambda-hardening-design.md). Docker remains unimplemented until the new phase gates pass.
+
 **Date:** 2026-04-19
 **Status:** Draft / Implementation Plan
 **Depends on:** [ruststack-lambda-design.md](./ruststack-lambda-design.md)

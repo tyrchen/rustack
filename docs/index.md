@@ -6,6 +6,9 @@
 
 ## Research
 
+- [Container Lambda Relay Spike](./research/spike-lambda-container-relay.md) - Actual binary attach/shared-netns/official-RIC execution on arm64 and emulated amd64, with reproducible probes and explicit qualification limits.
+- [Step Functions Semantic Oracle Spike](./research/spike-stepfunctions-semantic-oracle.md) - Pinned Smithy/SDK/fixture evidence, independently reproduced numeric timestamp gap, callback errors and AWS-validated nested result shapes.
+- [Step Functions and Container Lambda Survey](./research/survey-stepfunctions-lambda-container-runtime.md) - Official ASL/integration/image/runtime contracts, inspected Rustack gaps, current dependency APIs and the experiments required before implementation.
 - [LocalStack S3 Implementation Research](./research/localstack-s3-research.md) - Comprehensive analysis of what a Rust-based LocalStack S3 service needs to support for feature parity.
 - [s3s Crate Ecosystem Research](./research/s3s-crate-research.md) - Comprehensive analysis of the s3s Rust crate for building S3-compatible services.
 - [LocalStack Container & CI Research](./research/localstack-container-ci-research.md) - How LocalStack's Docker container works, gateway routing through port 4566, health endpoints, and the official GitHub Action for CI.

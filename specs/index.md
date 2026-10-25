@@ -2,6 +2,43 @@
 
 本文件是 specs 的导航入口；文件中的 Draft / Implemented 状态以各原文为准，不代表经过本次运行验收。
 
+## Step Functions and Lambda Runtime — new specification set
+
+Status: implementation contract dated 2026-10-25; no new runtime implementation is claimed. All documents in this set are in English. Start here for the requested ASL engine and actual Docker image Lambda execution.
+
+| Order | Specification | Type / purpose |
+|---|---|---|
+| 00 | [Workflows PRD](./rustack-workflows-00-prd.md) | Product goals, compatibility profile and complete M0–M4 scope |
+| 10 | [API and data model](./rustack-workflows-10-api-design.md) | Smithy protocol, resource/revision identity, idempotency and execution history |
+| 20 | [Lambda runtime](./rustack-workflows-20-lambda-runtime-design.md) | Image resolution, Docker relay/runtime, immutable revisions, pooling and cleanup |
+| 30 | [ASL engine](./rustack-workflows-30-asl-design.md) | Compiler, JSONPath data flow, eight state types, retries and deadlines |
+| 40 | [Task integrations](./rustack-workflows-40-integrations-design.md) | Real Lambda invocation, nested `.sync`/`.sync:2`, callbacks and heartbeats |
+| 60 | [Operations](./rustack-workflows-60-operations-design.md) | YAML configuration, budgets, topology, shutdown and snapshots |
+| 70 | [Verification plan](./rustack-workflows-70-verification-plan.md) | Acceptance matrix, security boundaries, SDK/platform coverage and performance budgets |
+| 80 | [Roadmap](./rustack-workflows-80-roadmap.md) | User-visible M0–M4 outcomes and calendar assumptions |
+| 90 | [Implementation plan](./rustack-workflows-90-impl-plan.md) | P0 evidence gate and dependency-ordered P1–P5 tasks/exit criteria |
+| 93 | [Implementation review](./rustack-workflows-93-review.md) | Independent findings, corrections and required phase/security follow-ups |
+| 99 | [Key decisions and glossary](./rustack-workflows-99-decisions.md) | Alternatives, rationale, ownership and overloaded terms |
+
+Read 00 → 10 → 20 → 30 → 40; apply 60/70 throughout. Read 80 for delivery planning and 90 for the next engineering step. The [supporting survey](../docs/research/survey-stepfunctions-lambda-container-runtime.md) records source verification and remaining runtime experiments.
+
+```text
+┌─ P0: runtime experiment + semantic fixtures + pinned sources ───────┐
+└─────────────────────────────┬──────────────────────────────────────┘
+                              ▼
+┌─ M0 / P1: image Lambda ──────┐   ┌─ M1 / P2: API + ASL spine ─────┐
+│ actual code + owned cleanup  │──▶│ real Lambda tasks + history      │
+└─────────────────────────────┘   └──────────────┬───────────────────┘
+                                                ▼
+┌─ M2 / P3: Parallel/Map + nested .sync ──────────────────────────────┐
+└─────────────────────────────┬──────────────────────────────────────┘
+                              ▼ M3 / P4: callbacks + heartbeat
+┌─ M4 / P5: ZIP + snapshots + consuming-project CI qualification ─────┐
+└───────────────────────────────────────────────────────────────────┘
+```
+
+The new set supersedes conflicting historical Docker plans while preserving the hardening contracts. Ordinary Lambda invocation already waits for its result; `.sync` is implemented for nested Step Functions, not an invalid `lambda:invoke.sync` resource.
+
 ## 推荐阅读顺序
 
 1. [系统审查与改进 spec](./rustack-system-review.md)：安全、正确性、架构及开发者体验；按 R01–R18 定位问题，按 M0–M4 安排修复。
@@ -42,7 +79,8 @@
 | SQS | [设计](./ruststack-sqs-design.md)、[Long-poll / DashMap safety fix](./fixes/sqs-longpoll-dashmap-safety.md) |
 | SSM | [Parameter Store](./ruststack-ssm-design.md) |
 | SNS | [设计](./ruststack-sns-design.md) |
-| Lambda | [服务设计](./ruststack-lambda-design.md)、[Executor](./ruststack-lambda-executor-design.md)、[Squib runtime](./ruststack-lambda-squib-runtime-design.md)、[S3 code packages](./ruststack-lambda-s3-code-design.md) |
+| Lambda | [Current runtime target](./rustack-workflows-20-lambda-runtime-design.md)、[Hardening](./rustack-lambda-hardening-design.md)、[服务设计](./ruststack-lambda-design.md)、[Executor](./ruststack-lambda-executor-design.md)、[Squib runtime](./ruststack-lambda-squib-runtime-design.md)、[S3 code packages](./ruststack-lambda-s3-code-design.md) |
+| Step Functions | [PRD](./rustack-workflows-00-prd.md), [ASL engine](./rustack-workflows-30-asl-design.md), [integrations](./rustack-workflows-40-integrations-design.md), [implementation plan](./rustack-workflows-90-impl-plan.md) |
 | EventBridge | [设计](./ruststack-events-design.md) |
 | CloudWatch | [Metrics](./ruststack-cloudwatch-design.md)、[Logs](./ruststack-logs-design.md) |
 | KMS | [设计](./ruststack-kms-design.md) |
