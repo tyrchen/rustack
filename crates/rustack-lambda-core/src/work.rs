@@ -224,13 +224,10 @@ async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use async_trait::async_trait;
-    use bytes::Bytes;
 
     use super::*;
-    use crate::executor::{ExecutorError, PackageType};
+    use crate::executor::ExecutorError;
 
     #[derive(Debug)]
     struct WaitingExecutor;
@@ -242,27 +239,10 @@ mod tests {
         async fn shutdown(&self) {}
     }
     fn request(name: &str) -> InvokeRequest {
-        InvokeRequest {
-            resource_id: crate::identity::FunctionResourceId::default(),
-            revision_id: "test-revision".into(),
-            image_config: None,
-            ephemeral_storage_mb: 512,
-            function_name: name.into(),
-            function_arn: "arn".into(),
-            qualifier: "$LATEST".into(),
-            runtime: None,
-            handler: None,
-            architectures: vec![],
-            package_type: PackageType::Zip,
-            code_root: None,
-            code_zip: None,
-            image_uri: None,
-            environment: HashMap::new(),
-            timeout: Duration::from_mins(1),
-            memory_mb: 128,
-            payload: Bytes::new(),
-            capture_logs: false,
-        }
+        let mut request = InvokeRequest::fixture();
+        request.function_name = name.into();
+        request.timeout = Duration::from_mins(1);
+        request
     }
     #[tokio::test]
     async fn test_should_bound_event_set_before_accepting_and_release_on_cancel() {

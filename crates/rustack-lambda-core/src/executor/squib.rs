@@ -19,7 +19,8 @@ use tokio::{sync::Mutex, time::Instant};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse, PackageType};
+use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse};
+use crate::artifact::{Architecture, DeploymentArtifact};
 
 const DEFAULT_INSTANCE_ID: &str = "rustack_lambda";
 const DEFAULT_STAGE_PORT: u32 = 5003;
@@ -351,10 +352,11 @@ struct SquibControlRequestWire {
 
 impl SquibInvokeRequestWire {
     fn from_request(req: &InvokeRequest) -> Result<Self, ExecutorError> {
-        let code_zip = req
-            .code_zip
-            .as_ref()
-            .ok_or_else(|| ExecutorError::InvalidCode("missing code zip".to_owned()))?;
+        let DeploymentArtifact::Zip(artifact) = &req.artifact else {
+            return Err(ExecutorError::Unsupported(
+                "Squib backend only supports Zip packages".into(),
+            ));
+        };
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4().to_string(),
@@ -363,12 +365,9 @@ impl SquibInvokeRequestWire {
             qualifier: req.qualifier.clone(),
             runtime: req.runtime.clone(),
             handler: req.handler.clone(),
-            architectures: req.architectures.clone(),
-            code_root: req
-                .code_root
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            code_zip_base64: STANDARD.encode(code_zip.as_ref()),
+            architectures: vec![req.architecture.as_str().into()],
+            code_root: Some(artifact.code_root().display().to_string()),
+            code_zip_base64: STANDARD.encode(artifact.zip_bytes()),
             environment: req.environment.clone(),
             timeout_ms: duration_millis(req.timeout),
             memory_mb: req.memory_mb,
@@ -393,18 +392,15 @@ struct SquibInvokeResponseWire {
 }
 
 fn validate_request(req: &InvokeRequest) -> Result<(), ExecutorError> {
-    if req.package_type != PackageType::Zip {
+    if !matches!(req.artifact, DeploymentArtifact::Zip(_)) {
         return Err(ExecutorError::Unsupported(
             "Squib backend only supports Zip packages".to_owned(),
         ));
     }
-    if !req.architectures.iter().any(|arch| arch == "arm64") {
+    if req.architecture != Architecture::Arm64 {
         return Err(ExecutorError::Unsupported(
             "Squib backend requires an arm64 Lambda function".to_owned(),
         ));
-    }
-    if req.code_zip.is_none() {
-        return Err(ExecutorError::InvalidCode("missing code zip".to_owned()));
     }
     Ok(())
 }
@@ -700,33 +696,23 @@ mod tests {
 
     #[test]
     fn test_should_encode_request_payload_base64() {
-        let req = InvokeRequest {
-            resource_id: crate::identity::FunctionResourceId::default(),
-            revision_id: "test-revision".into(),
-            image_config: None,
-            ephemeral_storage_mb: 512,
-            function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo".to_owned(),
-            function_name: "echo".to_owned(),
-            qualifier: "$LATEST".to_owned(),
-            runtime: Some("provided.al2023".to_owned()),
-            handler: Some("bootstrap".to_owned()),
-            architectures: vec!["arm64".to_owned()],
-            package_type: PackageType::Zip,
-            code_root: Some(PathBuf::from("/tmp/code")),
-            code_zip: Some(Bytes::from_static(b"PK\x03\x04zip")),
-            image_uri: None,
-            environment: HashMap::from([("KEY".to_owned(), "VALUE".to_owned())]),
-            timeout: Duration::from_secs(3),
-            memory_mb: 128,
-            payload: Bytes::from_static(b"{}"),
-            capture_logs: true,
-        };
-
+        let mut req = InvokeRequest::fixture();
+        req.payload = Bytes::from_static(b"{}");
+        req.capture_logs = true;
         let wire = SquibInvokeRequestWire::from_request(&req).unwrap();
 
         assert_eq!(wire.protocol_version, PROTOCOL_VERSION);
-        assert_eq!(wire.code_root.as_deref(), Some("/tmp/code"));
-        assert_eq!(wire.code_zip_base64, "UEsDBHppcA==");
+        let DeploymentArtifact::Zip(artifact) = &req.artifact else {
+            panic!("unit fixture is ZIP");
+        };
+        assert_eq!(
+            wire.code_root,
+            Some(artifact.code_root().display().to_string())
+        );
+        assert_eq!(
+            STANDARD.decode(&wire.code_zip_base64).unwrap(),
+            *artifact.zip_bytes()
+        );
         assert_eq!(wire.timeout_ms, 3000);
         assert_eq!(wire.payload_base64, "e30=");
     }
@@ -789,27 +775,8 @@ mod tests {
 
     #[test]
     fn test_should_reject_non_arm64_request() {
-        let req = InvokeRequest {
-            resource_id: crate::identity::FunctionResourceId::default(),
-            revision_id: "test-revision".into(),
-            image_config: None,
-            ephemeral_storage_mb: 512,
-            function_arn: String::new(),
-            function_name: "echo".to_owned(),
-            qualifier: "$LATEST".to_owned(),
-            runtime: None,
-            handler: None,
-            architectures: vec!["x86_64".to_owned()],
-            package_type: PackageType::Zip,
-            code_root: Some(PathBuf::from("/tmp/code")),
-            code_zip: Some(Bytes::from_static(b"PK\x03\x04zip")),
-            image_uri: None,
-            environment: HashMap::new(),
-            timeout: Duration::from_secs(1),
-            memory_mb: 128,
-            payload: Bytes::new(),
-            capture_logs: false,
-        };
+        let mut req = InvokeRequest::fixture();
+        req.architecture = Architecture::X86_64;
 
         assert!(matches!(
             validate_request(&req),

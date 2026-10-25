@@ -5,7 +5,7 @@
 //! implemented; later phases (versions, aliases, permissions, tags, URLs)
 //! return appropriate errors until implemented.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,9 @@ const MAX_ZIP_SIZE: u64 = 50 * 1024 * 1024;
 
 /// Maximum synchronous invoke payload size (6 MB, per Appendix C).
 const MAX_SYNC_PAYLOAD: usize = 6 * 1024 * 1024;
+
+/// Hard upper bound for one code-source fetch before any artifact is staged.
+const CODE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum S3 bucket name length (per S3 naming rules).
 const MAX_S3_BUCKET_LEN: usize = 63;
@@ -51,13 +54,16 @@ use rustack_lambda_model::{
     },
 };
 
+#[cfg(test)]
+use crate::artifact::Architecture;
 use crate::{
+    artifact::{DeploymentArtifact, ImageReference},
     code::{S3CodeFetchError, S3CodeFetcher, UnavailableS3CodeFetcher},
     config::LambdaConfig,
     error::LambdaServiceError,
     executor::{
         AutoExecutor, Executor, ExecutorBackend, InvokeRequest, NativeExecutor, NoopExecutor,
-        PackageType, SquibExecutor,
+        SquibExecutor,
     },
     identity::FunctionResourceId,
     resolver::{
@@ -68,7 +74,7 @@ use crate::{
         AliasRecord, EventInvokeConfigRecord, EventSourceMappingRecord, EventSourceMappingStore,
         EventSourceMappingStoreSnapshot, FunctionRecord, FunctionStore, FunctionStoreSnapshot,
         FunctionUrlConfigRecord, LayerStore, LayerStoreSnapshot, LayerVersionRecord,
-        PolicyDocument, PolicyStatement, VersionRecord, compute_sha256,
+        PolicyDocument, PolicyStatement, StagedArtifact, VersionRecord, compute_sha256,
     },
 };
 
@@ -164,6 +170,42 @@ struct CodeSource<'a> {
     s3_object_version: Option<&'a str>,
     /// Container image URI.
     image_uri: Option<&'a str>,
+}
+
+#[derive(Debug)]
+enum ProcessedCode<'a> {
+    Zip(StagedArtifact<'a>),
+    Image(ImageReference),
+}
+
+impl ProcessedCode<'_> {
+    fn parts(&self) -> (String, u64, Option<Bytes>, Option<PathBuf>, Option<String>) {
+        match self {
+            Self::Zip(staged) => {
+                let artifact = staged.artifact();
+                (
+                    artifact.sha256().to_owned(),
+                    artifact.zip_bytes().len() as u64,
+                    Some(artifact.zip_bytes().clone()),
+                    Some(artifact.code_root().to_path_buf()),
+                    None,
+                )
+            }
+            Self::Image(reference) => (
+                compute_sha256(reference.as_str().as_bytes()),
+                0,
+                None,
+                None,
+                Some(reference.as_str().into()),
+            ),
+        }
+    }
+
+    fn commit(self) {
+        if let Self::Zip(staged) = self {
+            staged.commit();
+        }
+    }
 }
 
 impl RustackLambda {
@@ -459,9 +501,9 @@ impl RustackLambda {
             }
         }
 
-        // Process code.
-        let (code_sha256, code_size, zip_bytes, code_path, image_uri) =
-            self.process_code(name, "$LATEST", code_source).await?;
+        crate::function_config::validate_create_settings(&input)?;
+        let processed = self.process_code(name, "$LATEST", code_source).await?;
+        let (code_sha256, code_size, zip_bytes, code_path, image_uri) = processed.parts();
 
         let timeout = input.timeout.unwrap_or(3);
         let memory_size = input.memory_size.unwrap_or(128);
@@ -488,6 +530,7 @@ impl RustackLambda {
             package_type: package_type.clone(),
             code_path,
             image_uri,
+            resolved_image: None,
             zip_bytes,
             state: "Active".to_owned(),
             last_modified: now.clone(),
@@ -524,6 +567,7 @@ impl RustackLambda {
 
         let should_publish = input.publish.unwrap_or(false);
         self.store.insert(record)?;
+        processed.commit();
 
         // If publish=true, publish version 1 immediately.
         let config = if should_publish {
@@ -637,6 +681,11 @@ impl RustackLambda {
         let (name, _) = resolve_function_ref(function_ref)?;
         let should_publish = input.publish.unwrap_or(false);
         let before = self.get_record(&name)?;
+        if (before.latest.package_type == "Zip" && code_source.image_uri.is_some())
+            || (before.latest.package_type == "Image" && code_source.image_uri.is_none())
+        {
+            return Err(invalid_parameter("Deployment package type cannot change"));
+        }
         if input.architectures.as_ref().is_some_and(|architectures| {
             architectures.len() != 1
                 || architectures
@@ -648,8 +697,8 @@ impl RustackLambda {
             ));
         }
 
-        let (code_sha256, code_size, zip_bytes, code_path, image_uri) =
-            self.process_code(&name, "$LATEST", code_source).await?;
+        let processed = self.process_code(&name, "$LATEST", code_source).await?;
+        let (code_sha256, code_size, zip_bytes, code_path, image_uri) = processed.parts();
 
         let config =
             self.store
@@ -660,6 +709,7 @@ impl RustackLambda {
                     record.latest.zip_bytes = zip_bytes;
                     record.latest.code_path = code_path;
                     record.latest.image_uri = image_uri;
+                    record.latest.resolved_image = None;
                     record.latest.last_modified = now;
                     record.latest.revision_id = uuid::Uuid::new_v4().to_string();
 
@@ -679,6 +729,7 @@ impl RustackLambda {
                     }
                 })?;
 
+        processed.commit();
         info!(function_name = %name, "updated Lambda function code");
         Ok(config)
     }
@@ -931,11 +982,9 @@ impl RustackLambda {
                 message: "Docker execution is not implemented in this build".into(),
             });
         }
-        self.store.validate_root().await?;
-        if let Some(path) = &version.code_path {
-            self.store.validate_artifact(path).await?;
-        }
-        let req = self.build_invoke_request(&record, version, qualifier, payload);
+        let req = self
+            .build_invoke_request(&record, version, qualifier, payload)
+            .await?;
 
         let (response, handle) = self
             .work
@@ -961,13 +1010,55 @@ impl RustackLambda {
     }
 
     /// Build the executor request from a resolved function/version record.
-    fn build_invoke_request(
+    async fn build_invoke_request(
         &self,
         record: &FunctionRecord,
         version: &VersionRecord,
         invoked_qualifier: Option<&str>,
         payload: &[u8],
-    ) -> InvokeRequest {
+    ) -> Result<InvokeRequest, LambdaServiceError> {
+        let architecture = crate::function_config::validate_execution_settings(version)?;
+        if version.state != "Active" {
+            return Err(LambdaServiceError::ResourceNotReady {
+                message: "Function revision is not Active".into(),
+            });
+        }
+        let artifact = match version.package_type.as_str() {
+            "Zip" => {
+                let path = version
+                    .code_path
+                    .as_ref()
+                    .ok_or_else(|| invalid_parameter("ZIP code has not been staged"))?;
+                let artifact = self.store.capture_artifact(path).await?;
+                if artifact.sha256() != version.code_sha256
+                    || artifact.zip_bytes().len() as u64 != version.code_size
+                {
+                    return Err(invalid_parameter(
+                        "Captured ZIP metadata does not match the revision",
+                    ));
+                }
+                DeploymentArtifact::Zip(artifact)
+            }
+            "Image" => {
+                let image = version.resolved_image.as_ref().ok_or_else(|| {
+                    LambdaServiceError::ResourceNotReady {
+                        message: "Image deployment has not been resolved".into(),
+                    }
+                })?;
+                if image.metadata().architecture != architecture
+                    || version.image_uri.as_deref()
+                        != Some(image.metadata().requested_reference.as_str())
+                    || version.runtime.is_some()
+                    || version.handler.is_some()
+                {
+                    return Err(invalid_parameter(
+                        "Image metadata does not match the captured revision",
+                    ));
+                }
+                DeploymentArtifact::Image(image.clone())
+            }
+            _ => return Err(invalid_parameter("Unsupported deployment package type")),
+        };
         let function_arn = invoked_qualifier.map_or_else(
             || record.arn.clone(),
             |qualifier| format!("{}:{qualifier}", record.arn),
@@ -979,7 +1070,7 @@ impl RustackLambda {
             .or_insert_with(|| self.config.default_region.clone());
         env.entry("AWS_DEFAULT_REGION".to_owned())
             .or_insert_with(|| self.config.default_region.clone());
-        InvokeRequest::builder()
+        Ok(InvokeRequest::builder()
             .resource_id(record.resource_id)
             .revision_id(version.revision_id.clone())
             .image_config(version.image_config.clone())
@@ -989,17 +1080,14 @@ impl RustackLambda {
             .qualifier(version.version.clone())
             .runtime(version.runtime.clone())
             .handler(version.handler.clone())
-            .architectures(version.architectures.clone())
-            .package_type(PackageType::from_wire(&version.package_type))
-            .code_root(version.code_path.clone())
-            .code_zip(version.zip_bytes.clone())
-            .image_uri(version.image_uri.clone())
+            .architecture(architecture)
+            .artifact(artifact)
             .environment(env)
             .timeout(Duration::from_secs(u64::from(version.timeout)))
             .memory_mb(version.memory_size)
             .payload(Bytes::copy_from_slice(payload))
             .capture_logs(false)
-            .build()
+            .build())
     }
 
     // ---------------------------------------------------------------
@@ -2685,73 +2773,48 @@ impl RustackLambda {
     /// S3 packages are downloaded through the configured [`S3CodeFetcher`] and
     /// stored via the same path as inline `ZipFile`, so downstream validation,
     /// checksum computation, and executor behavior are identical.
-    async fn process_code(
-        &self,
+    async fn process_code<'a>(
+        &'a self,
         function_name: &str,
         version: &str,
         source: CodeSource<'_>,
-    ) -> Result<
-        (
-            String,
-            u64,
-            Option<Bytes>,
-            Option<std::path::PathBuf>,
-            Option<String>,
-        ),
-        LambdaServiceError,
-    > {
-        if let Some(b64) = source.zip_file_b64 {
+    ) -> Result<ProcessedCode<'a>, LambdaServiceError> {
+        let zip_bytes = if let Some(b64) = source.zip_file_b64 {
             use base64::Engine;
-            let zip_bytes = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map_err(|e| LambdaServiceError::InvalidZipFile {
-                    message: format!("Invalid base64 encoding: {e}"),
-                })?;
-            // Fail fast on oversized packages before any storage or
-            // extraction happens.
-            check_code_size(zip_bytes.len())?;
-
-            let (code_path, sha256, size) = self
-                .store
-                .store_zip_code(function_name, version, &zip_bytes)
-                .await?;
-
-            Ok((
-                sha256,
-                size,
-                Some(Bytes::from(zip_bytes)),
-                Some(code_path),
-                None,
-            ))
+            Bytes::from(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|error| LambdaServiceError::InvalidZipFile {
+                        message: format!("Invalid base64 encoding: {error}"),
+                    })?,
+            )
         } else if let Some(bucket) = source.s3_bucket {
-            let key = source
-                .s3_key
-                .ok_or_else(|| LambdaServiceError::InvalidParameter {
-                    message: "Code.S3Key is required when Code.S3Bucket is provided".to_owned(),
-                })?;
-            let zip_bytes = self
-                .code_fetcher
-                .fetch_code(bucket, key, source.s3_object_version)
-                .await
-                .map_err(map_s3_code_fetch_error)?;
-            // Fail fast on oversized packages before any storage or
-            // extraction happens.
-            check_code_size(zip_bytes.len())?;
-
-            let (code_path, sha256, size) = self
-                .store
-                .store_zip_code(function_name, version, &zip_bytes)
-                .await?;
-
-            Ok((sha256, size, Some(zip_bytes), Some(code_path), None))
-        } else if let Some(uri) = source.image_uri {
-            let sha256 = compute_sha256(uri.as_bytes());
-            Ok((sha256, 0, None, None, Some(uri.to_owned())))
+            let key = source.s3_key.ok_or_else(|| {
+                invalid_parameter("Code.S3Key is required when Code.S3Bucket is provided")
+            })?;
+            tokio::time::timeout(
+                CODE_FETCH_TIMEOUT,
+                self.code_fetcher
+                    .fetch_code(bucket, key, source.s3_object_version),
+            )
+            .await
+            .map_err(|_| LambdaServiceError::ResourceNotReady {
+                message: "Code source fetch deadline exceeded".into(),
+            })?
+            .map_err(map_s3_code_fetch_error)?
+        } else if let Some(reference) = source.image_uri {
+            return reference
+                .parse()
+                .map(ProcessedCode::Image)
+                .map_err(|_| invalid_parameter("Invalid ImageUri"));
         } else {
-            // No code provided - use empty hash.
-            let sha256 = compute_sha256(b"");
-            Ok((sha256, 0, None, None, None))
-        }
+            return Err(invalid_parameter("Deployment code is required"));
+        };
+        check_code_size(zip_bytes.len())?;
+        self.store
+            .stage_zip_code(function_name, version, &zip_bytes)
+            .await
+            .map(ProcessedCode::Zip)
     }
 
     /// Build a `FunctionConfiguration` from internal records.
@@ -3025,6 +3088,112 @@ fn map_s3_code_fetch_error(err: S3CodeFetchError) -> LambdaServiceError {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct DelayedFetcher {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl S3CodeFetcher for DelayedFetcher {
+        async fn fetch_code(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _version: Option<&str>,
+        ) -> Result<Bytes, S3CodeFetchError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Bytes::from(crate::test_zip::minimal_zip(
+                b"conflicting-update",
+            )))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_should_bound_a_stalled_code_fetch_without_creating_an_artifact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let fetcher = Arc::new(DelayedFetcher {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let provider =
+            RustackLambda::with_store(FunctionStore::new(root.path()), LambdaConfig::default())
+                .with_code_fetcher(fetcher);
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            provider
+                .create_function(s3_code_input("fetch-timeout"))
+                .await,
+            Err(LambdaServiceError::ResourceNotReady { .. })
+        ));
+        assert!(started.elapsed() >= CODE_FETCH_TIMEOUT);
+        assert!(provider.store.is_empty());
+        assert!(
+            tokio::fs::read_dir(root.path())
+                .await?
+                .next_entry()
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_rollback_staged_code_after_a_real_revision_compare_and_swap_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let fetcher = Arc::new(DelayedFetcher {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let provider = Arc::new(
+            RustackLambda::with_store(FunctionStore::new(root.path()), LambdaConfig::default())
+                .with_code_fetcher(fetcher.clone()),
+        );
+        provider
+            .create_function(sample_create_input("conflict"))
+            .await?;
+        let original = provider.get_record("conflict")?.latest;
+        let updating = Arc::clone(&provider);
+        let task = tokio::spawn(async move {
+            updating
+                .update_function_code(
+                    "conflict",
+                    UpdateFunctionCodeInput {
+                        s3_bucket: Some("code-bucket".into()),
+                        s3_key: Some("new.zip".into()),
+                        ..UpdateFunctionCodeInput::default()
+                    },
+                )
+                .await
+        });
+        let _cancel = crate::work::CancelOnDrop(task.abort_handle());
+        tokio::time::timeout(Duration::from_secs(5), fetcher.started.notified()).await?;
+        provider.update_function_configuration(
+            "conflict",
+            &UpdateFunctionConfigurationInput {
+                description: Some("newer configuration".into()),
+                ..UpdateFunctionConfigurationInput::default()
+            },
+        )?;
+        fetcher.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), task).await??;
+        assert!(matches!(
+            result,
+            Err(LambdaServiceError::ResourceConflict { .. })
+        ));
+        let current = provider.get_record("conflict")?.latest;
+        assert_eq!(current.code_sha256, original.code_sha256);
+        assert_eq!(current.code_path, original.code_path);
+        assert_eq!(current.description, "newer configuration");
+        let mut entries = tokio::fs::read_dir(root.path()).await?;
+        assert!(entries.next_entry().await?.is_some());
+        assert!(entries.next_entry().await?.is_none());
+        Ok(())
+    }
+
     fn test_provider() -> RustackLambda {
         let tmp = tempfile::tempdir().unwrap();
         let store = FunctionStore::new(tmp.path());
@@ -3047,6 +3216,44 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_invalid_settings_before_fetching_or_staging_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let provider =
+            RustackLambda::with_store(FunctionStore::new(root.path()), LambdaConfig::default());
+        let mut input = sample_create_input("invalid-env");
+        input.environment = Some(rustack_lambda_model::types::Environment {
+            variables: Some(HashMap::from([("AWS_REGION".into(), "us-east-1".into())])),
+        });
+        assert!(matches!(
+            provider.create_function(input).await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        let mut input = sample_create_input("invalid-image-config");
+        input.image_config = Some(rustack_lambda_model::types::ImageConfig::default());
+        assert!(matches!(
+            provider.create_function(input).await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        let mut input = s3_code_input("invalid-s3-settings");
+        input.timeout = Some(901);
+        // The default fetcher is unavailable; InvalidParameter proves it was not called.
+        assert!(matches!(
+            provider.create_function(input).await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        assert!(provider.store.is_empty());
+        assert!(
+            tokio::fs::read_dir(root.path())
+                .await?
+                .next_entry()
+                .await?
+                .is_none()
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -3073,7 +3280,9 @@ mod tests {
             (Some("1"), "1"),
         ] {
             let version = resolve_version(&record, qualifier)?;
-            let request = provider.build_invoke_request(&record, version, qualifier, b"{}");
+            let request = provider
+                .build_invoke_request(&record, version, qualifier, b"{}")
+                .await?;
             let expected_arn =
                 qualifier.map_or_else(|| record.arn.clone(), |q| format!("{}:{q}", record.arn));
             assert_eq!(request.function_arn, expected_arn);
@@ -3094,12 +3303,22 @@ mod tests {
         let record = provider.get_record("captured")?;
         let mut version = record.latest.clone();
         version.ephemeral_storage_size = 2048;
+        version.package_type = "Image".into();
+        version.runtime = None;
+        version.handler = None;
+        version.code_path = None;
+        version.zip_bytes = None;
+        let resolved = crate::artifact::ResolvedImage::fixture(Architecture::X86_64);
+        version.image_uri = Some(resolved.metadata().requested_reference.as_str().into());
+        version.resolved_image = Some(resolved);
         version.image_config = Some(rustack_lambda_model::types::ImageConfig {
             entry_point: Some(vec!["/custom/entrypoint".into()]),
             command: Some(vec![]),
             working_directory: Some("/function".into()),
         });
-        let request = provider.build_invoke_request(&record, &version, None, b"{\"value\":1}");
+        let request = provider
+            .build_invoke_request(&record, &version, None, b"{\"value\":1}")
+            .await?;
         version.ephemeral_storage_size = 4096;
         version.image_config = None;
         assert_eq!(request.ephemeral_storage_mb, 2048);
@@ -3116,6 +3335,47 @@ mod tests {
         assert_eq!(request.payload, Bytes::from_static(b"{\"value\":1}"));
         assert_ne!(request.ephemeral_storage_mb, version.ephemeral_storage_size);
         assert!(version.image_config.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_unresolved_or_inconsistent_artifacts_before_work_admission()
+    -> Result<(), LambdaServiceError> {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("artifact-capture"))
+            .await?;
+        let record = provider.get_record("artifact-capture")?;
+        let mut invalid_zip = record.latest.clone();
+        invalid_zip.code_sha256 = "different".into();
+        assert!(matches!(
+            provider
+                .build_invoke_request(&record, &invalid_zip, None, b"{}")
+                .await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        let mut image = record.latest.clone();
+        image.package_type = "Image".into();
+        image.runtime = None;
+        image.handler = None;
+        image.zip_bytes = None;
+        image.code_path = None;
+        let resolved = crate::artifact::ResolvedImage::fixture(Architecture::X86_64);
+        image.image_uri = Some(resolved.metadata().requested_reference.as_str().into());
+        assert!(matches!(
+            provider
+                .build_invoke_request(&record, &image, None, b"{}")
+                .await,
+            Err(LambdaServiceError::ResourceNotReady { .. })
+        ));
+        image.resolved_image = Some(resolved);
+        image.architectures = vec!["arm64".into()];
+        assert!(matches!(
+            provider
+                .build_invoke_request(&record, &image, None, b"{}")
+                .await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
         Ok(())
     }
 

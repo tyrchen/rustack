@@ -31,7 +31,7 @@ pub use error::ExecutorError;
 pub use native::NativeExecutor;
 pub use noop::NoopExecutor;
 pub use squib::{SquibExecutor, SquibExecutorConfig};
-pub use types::{ExecutorBackend, InvokeRequest, InvokeResponse, PackageType};
+pub use types::{ExecutorBackend, InvokeRequest, InvokeResponse};
 
 /// Backend that turns an [`InvokeRequest`] into an [`InvokeResponse`].
 #[async_trait]

@@ -1,12 +1,17 @@
 //! Shared executor request/response/config types.
 
-use std::{collections::HashMap, fmt, path::PathBuf, str::FromStr, time::Duration};
+use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 
 use bytes::Bytes;
 use rustack_lambda_model::types::ImageConfig;
 use typed_builder::TypedBuilder;
 
-use crate::identity::FunctionResourceId;
+#[cfg(test)]
+use crate::artifact::ValidatedArtifact;
+use crate::{
+    artifact::{Architecture, DeploymentArtifact},
+    identity::FunctionResourceId,
+};
 
 /// Selects which execution backend the provider should construct at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,27 +45,6 @@ impl FromStr for ExecutorBackend {
     }
 }
 
-/// Deployment package kind, mirroring the Lambda API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackageType {
-    /// Unzipped function code on the local filesystem.
-    Zip,
-    /// Container image referenced by URI.
-    Image,
-}
-
-impl PackageType {
-    /// Parse from the wire string used by the Lambda model.
-    #[must_use]
-    pub fn from_wire(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("Image") {
-            Self::Image
-        } else {
-            Self::Zip
-        }
-    }
-}
-
 /// Everything an executor needs to run one invocation.
 #[derive(Clone, TypedBuilder)]
 #[non_exhaustive]
@@ -83,16 +67,10 @@ pub struct InvokeRequest {
     pub runtime: Option<String>,
     /// Handler string from the function config.
     pub handler: Option<String>,
-    /// Architectures the function was created with, e.g. `["x86_64"]`.
-    pub architectures: Vec<String>,
-    /// Package type — Zip uses `code_root`, Image uses `image_uri`.
-    pub package_type: PackageType,
-    /// Filesystem path to the unzipped code root (for Zip packages).
-    pub code_root: Option<PathBuf>,
-    /// Raw uploaded Zip bytes (for microVM staging).
-    pub code_zip: Option<Bytes>,
-    /// Image URI (for Image packages).
-    pub image_uri: Option<String>,
+    /// Validated single Lambda architecture.
+    pub architecture: Architecture,
+    /// Exactly one immutable deployment artifact, with lifetime ownership.
+    pub artifact: DeploymentArtifact,
     /// User-supplied environment variables.
     pub environment: HashMap<String, String>,
     /// Function timeout. Excess => `Sandbox.Timedout`.
@@ -112,11 +90,10 @@ impl fmt::Debug for InvokeRequest {
             .field("revision_id", &self.revision_id)
             .field("function_arn", &self.function_arn)
             .field("qualifier", &self.qualifier)
-            .field("package_type", &self.package_type)
-            .field("architectures", &self.architectures)
+            .field("artifact", &self.artifact)
+            .field("architecture", &self.architecture)
             .field("environment", &"[REDACTED]")
             .field("image_config", &"[REDACTED]")
-            .field("code_zip", &"[REDACTED]")
             .field("payload", &"[REDACTED]")
             .field("timeout", &self.timeout)
             .field("memory_mb", &self.memory_mb)
@@ -139,11 +116,8 @@ impl InvokeRequest {
             .qualifier("$LATEST".into())
             .runtime(Some("provided.al2023".into()))
             .handler(Some("bootstrap".into()))
-            .architectures(vec!["arm64".into()])
-            .package_type(PackageType::Zip)
-            .code_root(Some(PathBuf::from("/fixture/code")))
-            .code_zip(Some(Bytes::from_static(b"fixture-archive")))
-            .image_uri(None)
+            .architecture(Architecture::Arm64)
+            .artifact(DeploymentArtifact::Zip(ValidatedArtifact::fixture()))
             .environment(HashMap::new())
             .timeout(Duration::from_secs(3))
             .memory_mb(128)
@@ -205,7 +179,6 @@ mod tests {
         let mut request = InvokeRequest::fixture();
         request.environment.insert("SECRET".into(), secret.into());
         request.payload = Bytes::from(secret);
-        request.code_zip = Some(Bytes::from(secret));
         request.image_config = Some(ImageConfig {
             entry_point: Some(vec![secret.into()]),
             command: Some(vec![secret.into()]),
@@ -247,14 +220,5 @@ mod tests {
             ExecutorBackend::Squib
         );
         assert!("nope".parse::<ExecutorBackend>().is_err());
-    }
-
-    #[test]
-    fn test_should_parse_package_type_from_wire() {
-        assert_eq!(PackageType::from_wire("Image"), PackageType::Image);
-        assert_eq!(PackageType::from_wire("image"), PackageType::Image);
-        assert_eq!(PackageType::from_wire("Zip"), PackageType::Zip);
-        // Anything unrecognized falls back to Zip — matches the provider default.
-        assert_eq!(PackageType::from_wire(""), PackageType::Zip);
     }
 }

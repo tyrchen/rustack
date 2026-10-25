@@ -10,9 +10,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{
-    Executor, ExecutorError, InvokeRequest, InvokeResponse, NativeExecutor, PackageType,
-    SquibExecutor, SquibExecutorConfig,
+    Executor, ExecutorError, InvokeRequest, InvokeResponse, NativeExecutor, SquibExecutor,
+    SquibExecutorConfig,
 };
+use crate::artifact::DeploymentArtifact;
 
 /// Executor that chooses the concrete backend for each invocation.
 #[derive(Debug)]
@@ -38,7 +39,7 @@ impl AutoExecutor {
     }
 
     fn should_use_squib(req: &InvokeRequest) -> bool {
-        cfg!(target_os = "macos") && req.package_type == PackageType::Zip
+        cfg!(target_os = "macos") && matches!(req.artifact, DeploymentArtifact::Zip(_))
     }
 }
 
@@ -60,48 +61,21 @@ impl Executor for AutoExecutor {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf, time::Duration};
-
-    use bytes::Bytes;
-
     use super::*;
-
-    fn request(package_type: PackageType) -> InvokeRequest {
-        InvokeRequest {
-            resource_id: crate::identity::FunctionResourceId::default(),
-            revision_id: "test-revision".into(),
-            image_config: None,
-            ephemeral_storage_mb: 512,
-            function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo".to_owned(),
-            function_name: "echo".to_owned(),
-            qualifier: "$LATEST".to_owned(),
-            runtime: Some("provided.al2023".to_owned()),
-            handler: Some("bootstrap".to_owned()),
-            architectures: vec!["arm64".to_owned()],
-            package_type,
-            code_root: Some(PathBuf::from("/tmp/code")),
-            code_zip: Some(Bytes::from_static(b"PK\x03\x04")),
-            image_uri: None,
-            environment: HashMap::new(),
-            timeout: Duration::from_secs(1),
-            memory_mb: 128,
-            payload: Bytes::new(),
-            capture_logs: false,
-        }
-    }
+    use crate::artifact::{Architecture, ResolvedImage};
 
     #[test]
     fn test_should_default_macos_zip_to_squib() {
         assert_eq!(
-            AutoExecutor::should_use_squib(&request(PackageType::Zip)),
+            AutoExecutor::should_use_squib(&InvokeRequest::fixture()),
             cfg!(target_os = "macos")
         );
     }
 
     #[test]
     fn test_should_not_use_squib_for_image_package() {
-        assert!(!AutoExecutor::should_use_squib(&request(
-            PackageType::Image
-        )));
+        let mut request = InvokeRequest::fixture();
+        request.artifact = DeploymentArtifact::Image(ResolvedImage::fixture(Architecture::Arm64));
+        assert!(!AutoExecutor::should_use_squib(&request));
     }
 }

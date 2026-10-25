@@ -60,7 +60,7 @@ Tag movement never changes deployed code. Published versions are immutable; alia
 
 Map x86_64 to linux/amd64 and arm64 to linux/arm64. Guarantee native architecture only. Reject cross-architecture calls unless the operator explicitly enables emulation; do not promise emulation performance/parity. Registry manifest lists select exactly one matching platform and pin its child manifest digest. Inspect local image architecture rather than trusting the declaration.
 
-Inherit Dockerfile ENTRYPOINT, CMD and WORKDIR, then override only explicitly supplied ImageConfig fields. Missing and explicitly empty arrays differ. WorkingDirectory is an image-internal absolute path≤1,000 bytes, not a host path. Each argv list has≤1,500 elements, each≤4,096 bytes and total≤64 KiB locally. Pass JSON argv directly, never sh -c. Do not force CMD=bootstrap. P0 must prove official Lambda images enter their RIC path when AWS_LAMBDA_RUNTIME_API is set.
+Inherit Dockerfile ENTRYPOINT, CMD and WORKDIR, then override only explicitly supplied ImageConfig fields. Missing and explicitly empty arrays differ. WorkingDirectory is an image-internal absolute path≤1,000 bytes, not a host path. Each argv list has≤1,500 elements, each≤4,096 bytes and the combined argv bytes≤64 KiB locally. Pass JSON argv directly, never sh -c. Do not force CMD=bootstrap. P0 must prove official Lambda images enter their RIC path when AWS_LAMBDA_RUNTIME_API is set.
 
 ### 2.4 Invocation capture and resource identity
 
@@ -70,11 +70,34 @@ The provider captures the resource identity, resolved revision, complete ImageCo
 
 P1 task1.1 lands this capture contract before the artifact-enum and cooperative-cancellation consumers. Its regression tests cover delete/recreate isolation, snapshot identity preservation and rejection, alias versus resolved version, configuration capture and redacted diagnostics. These foundation checks alone do not close M0.
 
+### 2.5 Captured artifact representation
+
+InvokeRequest carries one DeploymentArtifact instead of independent package-kind/path/archive/image options. A Zip variant owns a cloneable ValidatedArtifact lease: its extracted root, raw Bytes and content hash refer to the same successfully staged archive. Only FunctionStore issues leases after ownership and filesystem validation. The last store/invocation lease owns directory cleanup, so dropping the store cannot remove code still used by an invocation. Staging shares Bytes instead of retaining a second archive allocation.
+
+Validate each revision's normalized settings before downloading or staging its code. A code-source fetch has a hard 30-second deadline before staging; a paused-clock regression verifies stalled fetches leave no artifact. A newly registered ZIP belongs to an unpublished-artifact guard until the resource insertion or revision compare-and-swap succeeds. Failure, conflict or cancellation drops the guard, unregisters that new artifact and releases its directory; committed artifacts are unaffected. Snapshot restoration holds all new guards until the entire candidate store validates and commits. A rejected restore releases its new code without changing live resources. Hashing runs on the staging worker, not under a store mutation lock. Native's child supervisor retains an artifact lease until the child exit is reaped, including after the requesting store is dropped.
+
+```text
+Provider / restore          Store + staging worker            Artifact ownership
+ │ 1. validate settings            │                                  │
+ │ 2. stage shared Bytes ─────────▶│ private directory + digest         │
+ │◀── unpublished guard ──────────│─────────────────────────────────▶│
+ │ 3. validate record + insert/CAS │                                  │
+ │── failure/conflict/cancel ──────┼── drop guard → unregister → remove │
+ │── success → commit guard ──────▶│ store retains artifact lease       │
+ │ 4. capture invocation ─────────▶│ clone validated lease ────────────▶│
+ │                                │ native child also retains lease   │
+ │ 5. store/request release        │ child exit → last lease → remove  │
+```
+
+An Image variant carries ResolvedImage, never a mutable tag alone. Its validated metadata contains the requested ImageReference, daemon SHA-256 content ID, optional repository/manifest reference, Linux architecture, inspection SHA-256 and inspected size. Digests use exactly 64 lowercase hexadecimal digits; inspected image size is bounded to 10 GiB locally. ImageReference accepts bounded Docker repository components, tags, SHA-256 digest suffixes and explicit DNS/IPv4/bracketed-IPv6 registry ports; URLs, userinfo, controls, invalid separators and empty components reject. Repository names are≤255 bytes and the whole reference≤1,024 bytes. Registry DNS labels are≤63 bytes; explicit ports use at most five decimal digits in1..65,535, an advertised local restriction. Bracketed IPv6 uses hexadecimal/colon syntax, excluding zone identifiers and dotted mapped forms. Follow the [distribution reference grammar](https://github.com/distribution/reference/blob/main/regexp.go), implemented with the pinned winnow parser rather than shell parsing. References are parsed again on deserialization. Missing resolution metadata cannot become an executable image; an existing metadata-only image record fails invocation explicitly until its deployment is resolved.
+
+Artifact replacement does not change public AWS wire shapes. Native and Squib accept only Zip and consume its lease; Docker accepts Image in M0 and adds Zip in M4. The resolved architecture is a closed x86_64/arm64 enum, not an unchecked list. Capture validates numeric settings and full image overrides before work admission. No per-invoke image inspection or pulling is introduced by this contract.
+
 ## 3. Runtime API and relay transport
 
 Implement the four basic 2018-06-01 routes: GET invocation/next, POST invocation/{requestId}/response, POST invocation/{requestId}/error and POST init/error. Each environment processes one invocation at a time. Managed Instances concurrency, extensions, streaming and SnapStart restore are excluded.
 
-Inject `AWS_LAMBDA_RUNTIME_API=127.0.0.1:9001` and revision-derived Lambda name/version/memory/region/log/task-root metadata. Reject reserved-variable overrides. User environment totals≤4 KiB with Lambda key grammar. Inject only explicitly configured local test credentials; do not inherit host AWS secret variables.
+Inject `AWS_LAMBDA_RUNTIME_API=127.0.0.1:9001` and revision-derived Lambda name/version/memory/region/log/task-root metadata. Reject reserved-variable overrides. User environment totals≤4 KiB with Lambda key grammar. Reject NUL values and the [reserved Lambda environment keys](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html#configuration-envvars-runtime), plus the local AWS_LAMBDA_FUNCTION_TIMEOUT injection. PATH, TZ and AWS_ENDPOINT_URL remain configurable. Inject only explicitly configured local test credentials; do not inherit host AWS secret variables.
 
 Control frames are 4-byte big-endian length plus CBOR envelope, protocol version 1. Maximum frame is 6 MiB+64 KiB, with metadata≤64 KiB and payload encoded as CBOR bytes rather than base64. Message variants are Hello, Ready, BootstrapReady, Invoke, InvocationResult, InitError, Cancel, Close and Ack. Include environment UUID and invocation-attempt UUID. Hello advertises protocol version and architecture; mismatch retires the environment. EOF, malformed frames or attach failure invalidate it. Never reconnect and silently replay an invocation. Relay stdout carries frames only; stderr carries bounded redacted diagnostics. Collect function stdout/stderr separately from its own container. Enforce an independent subscriber filter that rejects all Bollard events more verbose than INFO regardless of RUST_LOG; the selected dependency logs HTTP request/response bodies and trailing attach bytes at trace/debug. Test secret-bearing create requests and truncated attach frames under RUST_LOG=trace. Application-level redacted Debug alone is insufficient.
 

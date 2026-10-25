@@ -10,10 +10,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod artifact;
 pub mod code;
 pub mod config;
 pub mod error;
 pub mod executor;
+mod function_config;
 pub mod handler;
 pub mod identity;
 pub mod provider;

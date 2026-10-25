@@ -171,9 +171,11 @@ mime = "0.3"
 futures = "0.3"
 pin-project-lite = "0.2"
 typed-builder = "0.23"
+winnow = { version = "1.0", default-features = false, features = ["std", "parser"] }
 form_urlencoded = "1.2"
 
 # Testing
+rstest = { version = "0.28", default-features = false }
 tokio-test = "0.4"
 aws-config = { version = "1.12", default-features = false, features = [
   "credentials-process",

@@ -18,9 +18,10 @@ use tokio::{
 use tracing::{debug, warn};
 
 use super::{
-    Executor, ExecutorError, InvokeRequest, InvokeResponse, PackageType,
+    Executor, ExecutorError, InvokeRequest, InvokeResponse,
     instance::{BackendHandle, BackendHandleObj, InstanceBackend, InstancePool, spawn_reaper},
 };
+use crate::artifact::{Architecture, DeploymentArtifact};
 
 /// Native process executor.
 #[derive(Debug)]
@@ -70,18 +71,15 @@ impl NativeExecutor {
 #[async_trait]
 impl Executor for NativeExecutor {
     async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
-        if req.package_type != PackageType::Zip {
+        let DeploymentArtifact::Zip(artifact) = &req.artifact else {
             return Err(ExecutorError::Unsupported(
-                "native backend only supports Zip packages".to_owned(),
+                "native backend only supports Zip packages".into(),
             ));
-        }
-        let code_root = req
-            .code_root
-            .as_ref()
-            .ok_or_else(|| ExecutorError::InvalidCode("missing code root".to_owned()))?;
+        };
+        let code_root = artifact.code_root();
         let bootstrap = code_root.join("bootstrap");
         ensure_executable(&bootstrap).await?;
-        if !bootstrap_runs_on_host(&bootstrap, &req.architectures).await? {
+        if !bootstrap_runs_on_host(&bootstrap, req.architecture).await? {
             return Err(ExecutorError::Unsupported(format!(
                 "bootstrap {} cannot run on host {}/{}; use docker backend",
                 bootstrap.display(),
@@ -126,14 +124,16 @@ impl InstanceBackend for NativeBackend {
         req: &InvokeRequest,
         runtime_api_addr: SocketAddr,
     ) -> Result<BackendHandle, ExecutorError> {
-        let code_root = req
-            .code_root
-            .clone()
-            .ok_or_else(|| ExecutorError::InvalidCode("missing code root".to_owned()))?;
+        let DeploymentArtifact::Zip(artifact) = &req.artifact else {
+            return Err(ExecutorError::Unsupported(
+                "native backend only supports Zip packages".into(),
+            ));
+        };
+        let code_root = artifact.code_root();
         let bootstrap = code_root.join("bootstrap");
 
         let mut cmd = Command::new(&bootstrap);
-        cmd.current_dir(&code_root)
+        cmd.current_dir(code_root)
             .env_clear()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -157,6 +157,7 @@ impl InstanceBackend for NativeBackend {
             logs.spawn(drain_to_buf(stderr, log_buf, "stderr"));
         }
         let (cancel, cancelled) = oneshot::channel();
+        let artifact_lease = artifact.clone();
         let mut processes = self.processes.lock();
         while let Some(result) = processes.try_join_next() {
             if let Err(error) = result {
@@ -164,6 +165,8 @@ impl InstanceBackend for NativeBackend {
             }
         }
         processes.spawn(async move {
+            // Keep code and resources alive until the child exit has been reaped.
+            let _artifact_lease = artifact_lease;
             tokio::select! {
                 _ = cancelled => { if let Err(error) = child.kill().await { warn!(%error, "Lambda process cancellation failed"); } },
                 result = child.wait() => { if let Err(error) = result { warn!(%error, "Lambda process wait failed"); } },
@@ -201,7 +204,7 @@ impl Drop for NativeHandle {
 /// Check declared architecture and executable format with fallible asynchronous IO.
 async fn bootstrap_runs_on_host(
     path: &Path,
-    declared_archs: &[String],
+    architecture: Architecture,
 ) -> Result<bool, ExecutorError> {
     // Architecture check first — declared `architectures` must include the
     // host arch.
@@ -210,7 +213,7 @@ async fn bootstrap_runs_on_host(
         "aarch64" => "arm64",
         other => other,
     };
-    if !declared_archs.iter().any(|a| a == host_arch) {
+    if architecture.as_str() != host_arch {
         return Ok(false);
     }
     let mut file = tokio::fs::File::open(path)
@@ -252,11 +255,10 @@ async fn ensure_executable(_path: &Path) -> Result<(), ExecutorError> {
 
 fn lambda_env_vars(req: &InvokeRequest, runtime_api: SocketAddr) -> Vec<(String, String)> {
     let mut env = Vec::with_capacity(16 + req.environment.len());
-    let task_root = req
-        .code_root
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let task_root = match &req.artifact {
+        DeploymentArtifact::Zip(artifact) => artifact.code_root().display().to_string(),
+        DeploymentArtifact::Image(_) => String::new(),
+    };
     env.push(("AWS_LAMBDA_RUNTIME_API".into(), runtime_api.to_string()));
     env.push(("AWS_LAMBDA_FUNCTION_NAME".into(), req.function_name.clone()));
     env.push(("AWS_LAMBDA_FUNCTION_VERSION".into(), req.qualifier.clone()));

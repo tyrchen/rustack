@@ -304,6 +304,7 @@ mod tests {
             package_type: "Zip".to_owned(),
             code_path: None,
             image_uri: None,
+            resolved_image: None,
             zip_bytes: None,
             state: "Active".to_owned(),
             last_modified: "2024-01-01T00:00:00.000+0000".to_owned(),

@@ -21,6 +21,7 @@ use super::{
     runtime_api::{self, Job, RuntimeApiHandle, RuntimeResult},
     types::{InvokeRequest, InvokeResponse},
 };
+use crate::artifact::DeploymentArtifact;
 
 /// Identifier for the pool slot — a function/version pair.
 pub(crate) type PoolKey = (String, String);
@@ -120,12 +121,16 @@ impl InstancePool {
     pub(crate) fn key(req: &InvokeRequest) -> PoolKey {
         let mut environment: Vec<_> = req.environment.iter().collect();
         environment.sort();
+        let code_root = match &req.artifact {
+            DeploymentArtifact::Zip(artifact) => Some(artifact.code_root()),
+            DeploymentArtifact::Image(_) => None,
+        };
         let identity = format!(
             "{:?}",
             (
                 (req.resource_id, &req.revision_id, &req.qualifier),
-                (&req.code_root, &req.image_uri),
-                (&req.runtime, &req.handler, &req.architectures),
+                (&req.artifact, code_root),
+                (&req.runtime, &req.handler, req.architecture),
                 environment,
                 (req.timeout, req.memory_mb, req.ephemeral_storage_mb),
                 &req.image_config,
@@ -331,6 +336,10 @@ mod tests {
         let mut updated = request.clone();
         updated.revision_id = "new-revision".into();
         assert_ne!(InstancePool::key(&updated), original);
+        let mut rehydrated = request.clone();
+        rehydrated.artifact =
+            DeploymentArtifact::Zip(crate::artifact::ValidatedArtifact::fixture());
+        assert_ne!(InstancePool::key(&rehydrated), original);
         let mut storage = request.clone();
         storage.ephemeral_storage_mb = 1024;
         assert_ne!(InstancePool::key(&storage), original);

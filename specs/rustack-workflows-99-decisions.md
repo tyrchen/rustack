@@ -92,6 +92,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [invocation capture](./rustack-workflows-20-lambda-runtime-design.md#24-invocation-capture-and-resource-identity).
 - Date: 2026-10-25.
 
+## D13 — Own code through staging, publication and invocation cleanup
+
+- Alternatives: pass independent ZIP paths/bytes/image options; retain every rejected staging result until shutdown; drop extracted code with its function store.
+- Decision: use a closed artifact enum, shared ZIP leases, validated immutable image metadata and a rollback guard for unpublished ZIPs. Validate normalized settings before source IO; commit new ownership only after insertion/CAS or full restore validation.
+- Why: request cancellation must not delete live code or retain rejected uploads. The archive, extracted root and hash must describe the same staged data, and restoring a candidate must not leak its new artifacts on failure. Native process supervision retains its lease through child exit.
+- Pinned by: [artifact representation and ownership sequence](./rustack-workflows-20-lambda-runtime-design.md#25-captured-artifact-representation).
+- Date: 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |
