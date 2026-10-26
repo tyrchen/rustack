@@ -4,6 +4,7 @@
 //! on bounded blocking workers; lease clones perform no IO and retain the lock.
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
+mod journal;
 use std::{
     ffi::OsString,
     fmt,
@@ -18,6 +19,7 @@ use std::{
     time::Duration,
 };
 
+pub(super) use journal::ContainerRecord;
 use nix::{
     errno::Errno,
     fcntl::{OFlag, open, openat, renameat},
@@ -93,15 +95,19 @@ pub struct DirectoryLease(Arc<Lease>);
 struct Lease {
     owner: Uuid,
     run: Uuid,
-    _guard: LeaseGuard,
+    transaction: Arc<Semaphore>,
+    guard: LeaseGuard,
 }
 enum LeaseGuard {
     Held {
-        _directory: File,
+        directory: File,
         _lock: File,
     },
     #[cfg(test)]
-    Testing,
+    Testing {
+        directory: File,
+        _root: tempfile::TempDir,
+    },
 }
 impl fmt::Debug for DirectoryLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -168,7 +174,15 @@ impl DirectoryLease {
         Self(Arc::new(Lease {
             owner,
             run,
-            _guard: LeaseGuard::Testing,
+            transaction: Arc::new(Semaphore::new(1)),
+            guard: {
+                let root = tempfile::tempdir().unwrap();
+                let directory = File::open(root.path()).unwrap();
+                LeaseGuard::Testing {
+                    directory,
+                    _root: root,
+                }
+            },
         }))
     }
 }
@@ -303,8 +317,9 @@ fn acquire(
     Ok(DirectoryLease(Arc::new(Lease {
         owner,
         run: Uuid::new_v4(),
-        _guard: LeaseGuard::Held {
-            _directory: namespace,
+        transaction: Arc::new(Semaphore::new(1)),
+        guard: LeaseGuard::Held {
+            directory: namespace,
             _lock: lock,
         },
     })))

@@ -451,6 +451,19 @@ Each retained Engine29.5.2 daemon passes17 explicitly selected actual cases with
 
 Production startup still requires historical uncertain-effect reconciliation, allowed pulls, function-visible endpoint reachability, final configuration/capability publication and complete platform qualification. Neither proof opens readiness by itself. M0 and P2–P5/ASL remain required by the full objective.
 
+## P1 durable container intent and restart recovery review
+
+§4.8/D38 adds descriptor-relative bounded atomic snapshots, environment create/cleanup integration and resumable prior-run container retirement. Unknown absence remains unresolved; exact positive identity and durable full ID precede destructive requests. This is the container portion of historical reconciliation and does not grant production readiness. Independent final source review finds no remaining in-slice issue.
+
+| Finding | Priority / source | Correction | Verification |
+|---|---|---|---|
+| W95 | P2; independent review, `crates/rustack-lambda-core/src/docker/ownership/journal.rs:144` | Reject positive budgets above60s before waiting for the transaction permit; retain worker-side postqueue checks | Deterministic held-permit test requires immediate Configuration instead of waiting |
+| W96 | P2; independent review, `crates/rustack-lambda-core/src/docker/recovery/tests.rs:277` | Capture reacquisition/recovery errors before propagation, retain TempDir on every post-intent failure and always attempt wire shutdown | Final-source independent review confirms the failure-path preservation; actual historical pair recovery passes on both retained daemons |
+
+Twenty-four new unit/scripted cases cover11 journal transactions/codecs/filesystem cases,12 historical recovery cases and one composed environment durable-erase barrier. Docker module332 tests pass; the actual restart case is separately gated. Final workspace build/test/fmt/Clippy/rustdoc pass with2,394 tests/zero failed/412 separately gated cases. Core670 units/150 doctests; strict six-library boundary978 units+218 doctests (1,196 total)/18 gated pass without new ignores. Audit scans474 locked crates with no vulnerabilities; deny passes all four checks with the existing policy notices.
+
+Each retained Engine29.5.2 daemon (arm64 VZ and amd64/QEMU) explicitly passes11 distinct actual cases: recovery1, owner/pool7, boto3/HTTP/provider/executor1 and wire2, all with zero ignored. The recovery fixture leaves a real stopped function and running relay across directory reacquisition, then verifies ordered retirement and durable erasure. Scoped owner-container and private-image-alias queries are empty after the suites. QEMU is not native x86 qualification. The existing network/kernel/shared-runtime evidence remains separately scoped; this change does not grant startup readiness or cover historical private image aliases, allowed pulls, endpoint/configuration coordination or P2–P5. The12 feature/index documents resolve265 local references.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

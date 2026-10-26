@@ -97,6 +97,14 @@ Startup must use [runtime §4.7](./rustack-workflows-20-lambda-runtime-design.md
 
 Current actual execution evidence is on cgroup-v2 arm64 VZ and amd64/QEMU daemons. v1 normalization/private namespace behavior has parser and allocation-body coverage; an actual v1 daemon lane is still unmeasured. Network/resource receipts are implemented components; historical uncertain effects, registry pulls, endpoint reachability and the production startup coordinator remain mandatory before CLI Docker enablement.
 
+### 1.5 Historical container records
+
+[Runtime §4.8](./rustack-workflows-20-lambda-runtime-design.md#48-durable-container-intents-and-restart-reconciliation) defines the bounded containers.v1 snapshot and its safe staging file. Environment creation durably records identity before daemon issuance; known IDs are persisted before deletion. Failed durable erasure retains allocation capacity even when Docker returned a no-effect status or the container is absent. Never remove these files to bypass an unresolved startup: unknown absence can precede a late create.
+
+Before ordinary admission, call reconcile_containers under the same DirectoryLease. It processes historical functions before their relays, leaves current-run records untouched and returns remaining/settled counts. Unknown404 remains unresolved; a positive exact identity is pinned durably before ID-only retirement. Repeating a cancelled/failed pass resumes the saved state. Foreign identity or corrupt/unsafe files fail closed. This operation covers recorded environment containers; private image aliases, other mutation classes, allowed pulls and the complete coordinator remain required before production readiness.
+
+`make test-lambda-recovery` covers bounded/corrupt files, restart transactions, cancellation, foreign resources and delayed commits. `make test-lambda-recovery-docker WORKFLOWS_DOCKER_SOCKET=<socket-path> WORKFLOWS_ARCH=arm64` provisions actual owned containers, releases/reacquires the directory under a new run and retires the historical pair. Failed actual qualification preserves durable ownership evidence rather than deleting the temporary data root.
+
 ## 2. Deployment topology and readiness
 
 | Topology | Control path | Handler SDK path | Required test |

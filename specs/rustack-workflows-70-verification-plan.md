@@ -156,3 +156,9 @@ Do not introduce a benchmark crate early. First measure these integration worklo
 - ← [all component contracts](./rustack-workflows-00-prd.md#7-reading-order-and-cross-references)
 - → [roadmap exits](./rustack-workflows-80-roadmap.md), [implementation gates](./rustack-workflows-90-impl-plan.md)
 - ↔ [operations](./rustack-workflows-60-operations-design.md), [decisions](./rustack-workflows-99-decisions.md)
+
+## Durable container restart qualification
+
+The §4.8/D38 container journal must be exercised through the real EnvironmentManager create/cleanup path: a published intent exists when the first create arrives; failed durable erase retains the allocation until repaired. Transaction abandonment retains its lease/serial permit until its blocking worker completes. Reject overlong budgets before waiting for that permit. Verify maximum64 records/7,353 bytes, corruption/checksum/owner/UUID/duplicate identity, unsafe staging/published inodes, torn safe staging and authoritative-state preservation.
+
+Scripted restart cases require unknown404 plus blocked relay, later positive commit and exact function-before-relay cleanup; known-ID404; separately mutated name/ID/image and every authoritative label; current-run nonmutation; and an aborted recovery waiter leaving a durable known identity for the next pass. `make test-lambda-recovery` runs these independently of Docker. The explicit `test-lambda-recovery-docker` target requires socket/architecture/image, leaves two real journaled containers across directory reacquisition, then verifies both durable records are settled. Actual recovery tests preserve evidence and close the wire on every post-intent failure. Requalify actual pool/provider/HTTP/wire suites after integration. This is container historical-recovery evidence, not image-alias reconciliation, production startup or complete platform acceptance.

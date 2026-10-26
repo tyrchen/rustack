@@ -185,6 +185,12 @@ impl fmt::Debug for EnvironmentPlan {
     }
 }
 impl EnvironmentPlan {
+    pub(super) fn image_id(&self, role: ContainerRole) -> &str {
+        match role {
+            ContainerRole::Relay => self.relay.resolved().metadata().image_id.as_str(),
+            ContainerRole::Function => self.bodies.function.image.as_deref().unwrap_or_default(),
+        }
+    }
     pub(super) fn warm_key(&self) -> &str {
         &self.warm_key
     }

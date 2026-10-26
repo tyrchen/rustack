@@ -17,6 +17,7 @@ mod pin;
 mod plan;
 mod pool;
 mod probe;
+mod recovery;
 mod types;
 
 use std::{
@@ -61,6 +62,7 @@ pub use probe::{
     EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, ProbeFailure, ProbeSettings,
     probe_environment,
 };
+pub use recovery::{ContainerRecovery, reconcile_containers};
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};

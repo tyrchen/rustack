@@ -114,6 +114,9 @@ pub enum EnvironmentError {
     /// A worker/root/cleanup supervisor failed.
     #[error("environment supervision failed")]
     Worker,
+    /// Persistent container ownership could not be read or durably settled.
+    #[error("persistent container ownership failed")]
+    Ownership(#[source] Arc<super::DirectoryLeaseError>),
     /// Function reported a bounded initialization error.
     #[error("function initialization failed")]
     Initialization(Payload),
@@ -131,6 +134,11 @@ pub enum EnvironmentError {
     /// Ordered relay session failure.
     #[error(transparent)]
     Relay(#[from] RelayError),
+}
+impl From<super::DirectoryLeaseError> for EnvironmentError {
+    fn from(error: super::DirectoryLeaseError) -> Self {
+        Self::Ownership(Arc::new(error))
+    }
 }
 
 /// Current ownership/lifecycle state, independent of external API readiness.

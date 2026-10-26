@@ -656,3 +656,45 @@ async fn test_should_retire_ready_reply_only_when_its_waiter_is_abandoned(#[case
         "only abandoned replies retire the environment"
     );
 }
+
+#[tokio::test]
+async fn test_should_publish_intent_before_create_and_retain_reservation_until_durable_erase() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let directory = DirectoryLease::acquire(root.path().into(), deadline())
+        .await
+        .unwrap();
+    let mut daemon = Daemon::new();
+    let mut wire = daemon.wire().await;
+    let mut manager =
+        EnvironmentManager::start(wire.port(), directory.clone(), EnvironmentConfig::default())
+            .unwrap();
+    let mut handle = manager.port().spawn(plan(&directory), deadline()).unwrap();
+    let create = daemon.next().await;
+    assert!(create.head.starts_with("POST "));
+    assert_eq!(
+        directory.container_records(deadline()).await.unwrap().len(),
+        1
+    );
+    let staging = root
+        .path()
+        .join(".rustack-lambda-docker/containers.pending");
+    let outside = root.path().join("outside");
+    tokio::fs::write(&outside, b"keep").await.unwrap();
+    symlink(&outside, &staging).unwrap();
+    create.reply(400, b"{}").await;
+    quarantined(&handle).await;
+    assert_eq!(manager.port().status().allocated, 1);
+    tokio::fs::remove_file(staging).await.unwrap();
+    assert_eq!(
+        directory.container_records(deadline()).await.unwrap().len(),
+        1
+    );
+    handle.shutdown(deadline()).await.unwrap();
+    assert_eq!(manager.port().status().allocated, 0);
+    assert_eq!(directory.container_records(deadline()).await.unwrap(), []);
+    assert_eq!(tokio::fs::read(outside).await.unwrap(), b"keep");
+    manager.shutdown(deadline()).await.unwrap();
+    wire.shutdown().await.unwrap();
+    daemon.close().await;
+}

@@ -920,6 +920,17 @@ test-lambda-probes-docker: lambda-runtime-image lambda-runtime-fixture-image
 
 .PHONY: test-lambda-probes test-lambda-probes-docker
 
+# Durable container identities, uncertain absence and actual restart recovery.
+test-lambda-recovery:
+	@cargo test -p rustack-lambda-core --lib docker::ownership::journal::tests
+	@cargo test -p rustack-lambda-core --lib docker::recovery::tests
+	@cargo test -p rustack-lambda-core --lib docker::environment::tests::test_should_publish_intent_before_create_and_retain_reservation_until_durable_erase
+
+test-lambda-recovery-docker: lambda-runtime-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --lib docker::recovery::tests::test_should_reconcile_real_previous_run_containers_from_durable_intents -- --ignored --test-threads=1
+
+.PHONY: test-lambda-recovery test-lambda-recovery-docker
+
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:
 	@cargo test -p rustack-lambda-runtime --lib

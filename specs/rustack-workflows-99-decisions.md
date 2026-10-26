@@ -338,3 +338,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: probes consume the same policy/runtime path they qualify and retain existing cleanup ownership. Resource and network proofs remain independent from historical mutation reconciliation and cannot open readiness by themselves.
 - **Pinned by**: [runtime §4.7](./rustack-workflows-20-lambda-runtime-design.md#47-startup-network-qualification-and-actual-resource-probe), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Promote the already-resolved runtime serde_json dev dependency to a normal workspace dependency for bounded typed report serialization; no new library/version is introduced.
+
+## D38 — Persist container intent before possible creation and identity before deletion
+
+- **Context**: in-memory uncertain-create receipts do not survive process death; an absent name cannot exclude a late daemon commit.
+- **Alternatives considered**: label-only scans miss pending creation; negative lookup as proof loses ownership; always rejecting dirty restarts cannot reclaim positively identified resources; an unbounded append log adds retention and replay complexity.
+- **Decision**: use a bounded atomic directory snapshot of container identities, publish before create, persist a positively verified full ID before removal, and erase only after defensible settlement. Historical unknown absence remains unresolved and blocks its relay.
+- **Why**: the same retained directory capability protects filesystem transactions and daemon ownership; interrupted recovery is repeatable without replaying create or touching foreign resources. This is a container-specific part of full reconciliation, not production readiness.
+- **Pinned by**: [runtime §4.8](./rustack-workflows-20-lambda-runtime-design.md#48-durable-container-intents-and-restart-reconciliation), [implementation plan](./rustack-workflows-90-impl-plan.md).
+- **Date**: 2026-10-26. Reuse existing nix/sha2/hex dependencies and the bounded ownership worker pool.

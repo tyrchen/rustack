@@ -20,7 +20,7 @@ use super::{
 use crate::{
     docker::{
         DockerError, DockerKey, DockerPort, EnvironmentPlan, models::ContainerInspectResponse,
-        mutation::MutationReceipt, plan::ContainerRole,
+        mutation::MutationReceipt, ownership::ContainerRecord, plan::ContainerRole,
     },
     invocation::CleanupTask,
 };
@@ -68,15 +68,30 @@ pub(super) struct Cleaner {
     pub(super) signals: Signals,
 }
 impl Cleaner {
+    async fn settled(&self, role: ContainerRole) -> bool {
+        let Ok(record) = ContainerRecord::from_plan(&self.plan, role) else {
+            return false;
+        };
+        if self
+            .plan
+            .directory
+            .settle_container(record, self.config.deadline())
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        self.progress.phase(role).send_replace(Phase::Clean);
+        true
+    }
     pub(super) async fn container(&self, role: ContainerRole) -> bool {
         let phase = self.progress.phase(role).borrow().clone();
         let id = match phase {
-            Phase::Unissued | Phase::Clean => return true,
+            Phase::Unissued | Phase::Clean => return self.settled(role).await,
             Phase::Known(id) => id,
             Phase::Uncertain(receipt) => {
                 if receipt.definitely_unissued() {
-                    self.progress.phase(role).send_replace(Phase::Clean);
-                    return true;
+                    return self.settled(role).await;
                 }
 
                 let Ok(inspected) = self
@@ -89,6 +104,18 @@ impl Cleaner {
                 let Ok(id) = self.plan.owned(role, &inspected) else {
                     return false;
                 };
+                let Ok(record) = ContainerRecord::from_plan(&self.plan, role) else {
+                    return false;
+                };
+                if self
+                    .plan
+                    .directory
+                    .know_container(record, id.clone(), self.config.deadline())
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
                 self.progress
                     .phase(role)
                     .send_replace(Phase::Known(id.clone()));
@@ -104,8 +131,7 @@ impl Cleaner {
             .await
         {
             Err(DockerError::Status(StatusCode::NOT_FOUND)) => {
-                self.progress.phase(role).send_replace(Phase::Clean);
-                return true;
+                return self.settled(role).await;
             }
             Ok(inspected) => inspected,
             Err(_) => return false,
@@ -145,8 +171,7 @@ impl Cleaner {
                 .await,
             Err(DockerError::Status(StatusCode::NOT_FOUND))
         ) {
-            self.progress.phase(role).send_replace(Phase::Clean);
-            true
+            self.settled(role).await
         } else {
             false
         }

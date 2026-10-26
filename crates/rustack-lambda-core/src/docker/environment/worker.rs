@@ -26,7 +26,7 @@ use crate::{
     artifact::Architecture,
     docker::{
         DockerError, DockerKey, DockerPort, EnvironmentPlan, connection::stopped as wait_for_stop,
-        mutation::MutationGuard, plan::ContainerRole,
+        mutation::MutationGuard, ownership::ContainerRecord, plan::ContainerRole,
     },
     invocation::CleanupTask,
 };
@@ -141,6 +141,11 @@ impl Worker {
         self.progress
             .phase(role)
             .send_replace(Phase::Uncertain(mutation.receipt()));
+        let record = ContainerRecord::from_plan(&self.plan, role)?;
+        self.plan
+            .directory
+            .prepare_container(record.clone(), self.config.deadline())
+            .await?;
         let created = self
             .plan
             .create_tracked(role, &self.docker, self.config.deadline(), mutation)
@@ -161,6 +166,10 @@ impl Worker {
         if id.as_str() != created.id {
             return Err(DockerError::Protocol.into());
         }
+        self.plan
+            .directory
+            .know_container(record, id.clone(), self.config.deadline())
+            .await?;
         self.progress
             .phase(role)
             .send_replace(Phase::Known(id.clone()));
