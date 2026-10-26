@@ -53,6 +53,7 @@ rustack-lambda-http = { version = "0.11.0", path = "crates/rustack-lambda-http" 
 rustack-lambda-core = { version = "0.11.0", path = "crates/rustack-lambda-core" }
 rustack-lambda-runtime = { version = "0.9.0", path = "crates/rustack-lambda-runtime" }
 rustack-stepfunctions-model = { version = "0.9.0", path = "crates/rustack-stepfunctions-model" }
+rustack-stepfunctions-http = { version = "0.9.0", path = "crates/rustack-stepfunctions-http" }
 rustack-events-model = { version = "0.10.0", path = "crates/rustack-events-model" }
 rustack-logs-model = { version = "0.9.0", path = "crates/rustack-logs-model" }
 rustack-logs-http = { version = "0.11.0", path = "crates/rustack-logs-http" }

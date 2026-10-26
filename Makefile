@@ -144,6 +144,15 @@ test-stepfunctions-model: check-stepfunctions-codegen
 
 .PHONY: codegen-stepfunctions check-stepfunctions-codegen test-stepfunctions-model
 
+test-stepfunctions-http:
+	@cargo test -p rustack-stepfunctions-http
+	@cargo clippy -p rustack-stepfunctions-http --lib --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+test-stepfunctions-http-sdk:
+	@cargo test -p rustack-stepfunctions-http --test network test_should_exchange_signed_boto3_requests_with_typed_transport -- --ignored --test-threads=1
+
+.PHONY: test-stepfunctions-http test-stepfunctions-http-sdk
+
 audit-codegen:
 	@cargo audit --file codegen/Cargo.lock
 

@@ -52,7 +52,7 @@ all = [
 ]
 
 [errors.custom]
-UnknownOperationException = { status = 400, message = "Unknown Step Functions operation" }
+UnknownOperationException = { status = 404, message = "Unknown Step Functions operation" }
 UnsupportedOperation = { status = 400, message = "Operation is outside the supported Step Functions profile" }
 
 [output]

@@ -357,3 +357,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: SDK wire dates are numeric and exact at the promised precision, including negative/exponent/range edges, while other protocols retain their bindings. Oversized exponents are classified with bounded work. Serde-disabled output gets neither duplicate Debug nor unused codec modules.
 - **Pinned by**: [API §1.1](./rustack-workflows-10-api-design.md#11-executable-timestampmodel-generation-contract), [verification](./rustack-workflows-70-verification-plan.md), [implementation plan](./rustack-workflows-90-impl-plan.md).
 - **Date**: 2026-10-26. The model reuses workspace serde/chrono/typed-builder; the excluded developer generator adds the already-workspace [Tokio1.54.1](https://docs.rs/tokio/1.54.1/tokio/attr.main.html) with explicit local-IO features and independent audit/deny. No Step Functions endpoint or engine is advertised by the model alone.
+
+## D41 — Terminate HTTP ambiguity before typed registry dispatch
+
+- **Context**: the new workflow service needs AWS JSON1.0 routing, scope/authentication and bounded typed IO before the registry/ASL engine can consume it.
+- **Alternatives considered**: raw-JSON handler ports repeat parsing/limits; a default handler creates misleading service availability; suffix-based routing can leak unknown actions to S3; serializing an unchecked handler response can return a wrong operation or unbounded history.
+- **Decision**: expose typed18-action transport ports with explicit validated scope/auth configuration, source-level budgets and operation-correlated bounded responses. Couple main-program registration to the real core adapter. Preserve accepted command ownership beyond HTTP cancellation.
+- **Why**: protocol qualification is independently testable without claiming workflow execution; core keeps domain/compiler semantics and cleanup ownership. Encoded page budgets prevent successful responses from relying on unbounded allocation.
+- **Pinned by**: [API §1.2](./rustack-workflows-10-api-design.md#12-typed-http-boundary-before-registry-wiring), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse existing HTTP/auth/JSON/Tokio/async-trait dependencies. Unknown-action404 follows the current official common-error reference; no AWS error-precedence execution is claimed.

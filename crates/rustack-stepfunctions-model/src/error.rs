@@ -164,11 +164,10 @@ impl StepFunctionsErrorCode {
             | Self::TaskDoesNotExist
             | Self::TaskTimedOut
             | Self::TooManyTags
-            | Self::UnknownOperationException
             | Self::UnsupportedOperation
             | Self::ValidationException => http::StatusCode::BAD_REQUEST,
             Self::ServiceQuotaExceededException => http::StatusCode::INTERNAL_SERVER_ERROR,
-            Self::ResourceNotFound => http::StatusCode::NOT_FOUND,
+            Self::ResourceNotFound | Self::UnknownOperationException => http::StatusCode::NOT_FOUND,
             Self::ConflictException => http::StatusCode::CONFLICT,
         }
     }

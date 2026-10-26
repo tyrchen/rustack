@@ -477,6 +477,19 @@ API§1.1/D40 lands the official model and protocol-aware numeric serde generatio
 
 Final focused evidence:5 generator tests,34 generated-model cases and1 executed doctest; formatted regeneration and strict tool/model checks pass. Final workspace build/test/fmt/Clippy/rustdoc pass with2,447 tests/414 gated, including retained deferred Docker changes. Audit scans475 workspace/29 standalone-tool dependencies without vulnerabilities; both deny graphs pass with existing unmatched/duplicate-policy notices and no new ignores. The developer tool uses bounded ordinary-file Tokio IO, validates Smithy2.0 and no longer retains unused trait/phase data. This does not close P2, M1 or final real-image/platform requirements.
 
+## P2 typed HTTP independent review
+
+The production transport implements API§1.2/D41 without a default handler or premature gateway registration. The independent read-only reviewer rechecked all four findings and reported no remaining in-slice findings.
+
+| ID | Priority / source | Closed correction | Verification |
+|---|---|---|---|
+| W101 | P2; `crates/rustack-stepfunctions-http/src/body.rs` | Reject every trailer frame through a local body adapter before shared collection/typed dispatch | Small/oversized generic trailer frames and an actual chunked Hyper request |
+| W102 | P2; `crates/rustack-stepfunctions-http/src/validation.rs` | Give traceHeader its0–256 ASCII text contract, including empty/spaces | Exact limits plus Unicode/oversize rejection; ordinary SDK sends empty trace |
+| W103 | P3; `crates/rustack-stepfunctions-http/src/protocol.rs` | Validate nonempty ASCII decimal Content-Length before numeric conversion | `+2`, `-0` and empty values reject before handler |
+| W104 | P3; `crates/rustack-stepfunctions-http/tests/network.rs` | Retain the same server root JoinHandle after a cleanup waiter expires; resume joining rather than aborting ownership | Paused expiry/resume test verifies task identity and joined child |
+
+Focused evidence:56 unit tests, two nongated network tests and eight doctests pass; strict production HTTP Clippy passes. The separately gated real signed boto3 fixture passes four calls against a controlled typed handler. This qualifies transport only; registry, compiler, execution engine and real Lambda/image workflow acceptance remain required. Final current-worktree standard build/test/fmt/Clippy/rustdoc pass with2,505 tests/415 gated (including the deferred Docker checkpoint). Workspace476/tool29 dependency audits and both deny graphs pass.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |
