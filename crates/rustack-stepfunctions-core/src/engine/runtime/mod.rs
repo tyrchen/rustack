@@ -243,6 +243,15 @@ impl ExecutionSupervisor {
             Err(ExecutionError::Quarantined)
         }
     }
+    /// Read cleanup supervisor health independently of admission capacity.
+    ///
+    /// ```
+    /// # fn inspect(owner:&rustack_stepfunctions_core::ExecutionSupervisor){let ready=owner.is_ready();}
+    /// ```
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.state.accepting && self.state.quarantine.is_empty()
+    }
     /// Read all unsettled jobs/quarantine slots; terminal observers do not release them.
     ///
     /// ```

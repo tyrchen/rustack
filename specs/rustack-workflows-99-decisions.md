@@ -464,3 +464,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Refinements**: count actual Vec capacity, preserve typed diagnostics and final deadline checks, and keep RegistrySupervisor alive independently of its command senders. Capture revision publication time for DescribeStateMachineForExecution. Generated common statuses preserve402/408; tag-specific errors follow the current action contract.
 - **Pinned by**: [API§1.3](./rustack-workflows-10-api-design.md#13-retained-real-api-adapter-and-preparation), [API§6.1](./rustack-workflows-10-api-design.md#61-owned-stable-pagination-and-reverse-history).
 - **Date**: 2026-10-26. Main/settings/capability composition, both ordinary SDKs and final image/platform qualification remain required; Docker image work remains deferred.
+
+## D53 — Keep composite workflow controllers unique and let transport own modeled timeouts
+
+- **Context**: gateway health shares RuntimeWorkers, while child controllers require unique mutable resumable joins and Lambda must outlive accepted workflows.
+- **Decision**: main retains WorkflowSupervisor outside the shared health view. Register the real opt-in target-family router ahead of heuristic routers, validate supported YAML quotas, and select Lambda support from an actual matching provider. Quiesce API→grace→registry→bridge before Lambda; final cleanup skips grace and signals retained controllers on observation expiry. The bounded Step Functions transport owns the request deadline and AWS timeout envelope.
+- **Why**: a mutex would obscure unique shutdown ownership; generic gateway timers can preempt modeled408 responses; historical invocation diagnostics are not supervisor failures.
+- **Pinned by**: [operations§1.6](./rustack-workflows-60-operations-design.md#16-executable-m1-gateway-composition), [shutdown](./rustack-workflows-60-operations-design.md#3-shutdown-cancellation-and-snapshots).
+- **Date**: 2026-10-26. Ordinary Rust SDK/boto3 real service acceptance and later workflow milestones remain required; Docker work remains deferred by user priority.

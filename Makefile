@@ -175,6 +175,17 @@ test-stepfunctions-api: test-stepfunctions-bridge
 
 .PHONY: test-stepfunctions-bridge test-stepfunctions-bridge-native test-stepfunctions-api
 
+# Actual main composition and both minimal/runtime feature shapes.
+test-stepfunctions-runtime: test-stepfunctions-api
+	@cargo test -p rustack-cli --bin rustack --features stepfunctions
+	@cargo test -p rustack-cli --bin rustack --no-default-features --features stepfunctions
+	@cargo clippy -p rustack-cli --all-targets --no-default-features --features stepfunctions -- -D warnings
+
+	@cargo clippy -p rustack-cli --bin rustack --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+	@cargo clippy -p rustack-cli --bin rustack --no-default-features --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: test-stepfunctions-runtime
+
 audit-codegen:
 	@cargo audit --file codegen/Cargo.lock
 

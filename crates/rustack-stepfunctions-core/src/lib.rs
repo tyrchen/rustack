@@ -41,8 +41,8 @@ pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
 pub use registry::{
     DefinitionRevision, ExecutionArn, ExecutionName, ExecutionSnapshot, MachineSnapshot,
     MachineStatus, PreparedDefinition, Registry, RegistryCapacities, RegistryCommand,
-    RegistryError, RegistryLimits, RegistryReceipt, RegistryResult, RegistrySupervisor, RoleArn,
-    StateMachineArn, StateMachineName, StopReason, Tags,
+    RegistryError, RegistryLimits, RegistryReceipt, RegistryResult, RegistryStatus,
+    RegistrySupervisor, RoleArn, StateMachineArn, StateMachineName, StopReason, Tags,
 };
 pub use task::{
     LambdaTaskCommand, LambdaTaskPort, QuarantinedTask, TaskCall, TaskChannelError, TaskEvent,

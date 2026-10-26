@@ -25,6 +25,7 @@ struct NativeFixture {
     provider: Arc<RustackLambda>,
     owner: ExecutionSupervisor,
     bridge: LambdaBridgeSupervisor,
+    port: Arc<StepFunctionsLambdaBridge>,
     directory: Option<TempDir>,
     bootstrap: Bytes,
 }
@@ -62,11 +63,22 @@ impl NativeFixture {
         .unwrap();
         Self {
             provider,
-            owner: executions(port),
+            owner: executions(port.clone()),
+            port,
             bridge,
             directory: Some(directory),
             bootstrap,
         }
+    }
+    async fn ready_after_calls(&self) -> bool {
+        timeout_at(deadline(), async {
+            while self.bridge.owned_calls() != 0 {
+                sleep(Duration::from_millis(1)).await;
+            }
+            self.port.is_ready()
+        })
+        .await
+        .unwrap_or(false)
     }
     async fn cleanup(&mut self) {
         self.cleanup_at(Instant::now() + Duration::from_secs(15))
@@ -341,7 +353,9 @@ async fn native_e2e_should_cancel_actual_process_on_stop_and_task_timeout() {
         } else {
             handle.wait(deadline()).await
         };
+        let ready = fixture.ready_after_calls().await;
         fixture.cleanup().await;
+        assert!(ready, "settled Task timeout/Stop poisoned bridge readiness");
         let marker = started.unwrap().unwrap();
         let pid = marker.get("pid").and_then(Value::as_u64).unwrap();
         assert!(pid > 1 && pid != u64::from(process::id()));
@@ -443,7 +457,9 @@ async fn native_e2e_should_preserve_function_timeout_class_for_asl_catch() {
         .start(driver(&definition, &json!({})))
         .unwrap();
     let result = handle.wait(deadline()).await;
+    let ready = fixture.ready_after_calls().await;
     fixture.cleanup().await;
+    assert!(ready, "settled function timeout poisoned bridge readiness");
     let view = result.unwrap();
     assert_eq!(
         output(view.outcome().unwrap()).get("Error"),

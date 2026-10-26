@@ -43,6 +43,8 @@ mod service;
 mod snapshot;
 #[cfg(feature = "sns")]
 mod sns_bridge;
+#[cfg(feature = "stepfunctions")]
+mod workflows;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -196,6 +198,10 @@ use rustack_ssm_core::handler::RustackSsmHandler;
 use rustack_ssm_core::provider::RustackSsm;
 #[cfg(feature = "ssm")]
 use rustack_ssm_http::service::{SsmHttpConfig, SsmHttpService};
+#[cfg(feature = "stepfunctions")]
+use rustack_stepfunctions_core::TenantScope;
+#[cfg(feature = "stepfunctions")]
+use rustack_stepfunctions_http::{RequestScope, StepFunctionsHttpConfig, StepFunctionsHttpService};
 #[cfg(feature = "sts")]
 use rustack_sts_core::config::StsConfig;
 #[cfg(feature = "sts")]
@@ -212,6 +218,8 @@ use tracing_subscriber::EnvFilter;
 use crate::events_bridge::LocalTargetDelivery;
 #[cfg(feature = "sns")]
 use crate::sns_bridge::RustackSqsPublisher;
+#[cfg(feature = "stepfunctions")]
+use crate::workflows::{WorkflowRuntime, WorkflowSupervisor};
 use crate::{
     gateway::GatewayService,
     runtime::RuntimeWorkers,
@@ -604,7 +612,7 @@ fn build_sts_http_config(config: &StsConfig) -> StsHttpConfig {
 }
 
 /// Build a credential provider from `ACCESS_KEY` / `SECRET_KEY` environment
-/// variables (used by MinIO Mint and other test harnesses).
+/// variables (used by `MinIO` Mint and other test harnesses).
 #[cfg(any(
     feature = "s3",
     feature = "dynamodb",
@@ -612,6 +620,7 @@ fn build_sts_http_config(config: &StsConfig) -> StsHttpConfig {
     feature = "ssm",
     feature = "sns",
     feature = "lambda",
+    feature = "stepfunctions",
     feature = "events",
     feature = "logs",
     feature = "kms",
@@ -725,6 +734,7 @@ fn is_compiled_in(name: &str) -> bool {
         || (name == "ssm" && cfg!(feature = "ssm"))
         || (name == "sns" && cfg!(feature = "sns"))
         || (name == "lambda" && cfg!(feature = "lambda"))
+        || (name == "stepfunctions" && cfg!(feature = "stepfunctions"))
         || (name == "events" && cfg!(feature = "events"))
         || (name == "logs" && cfg!(feature = "logs"))
         || (name == "kms" && cfg!(feature = "kms"))
@@ -769,6 +779,9 @@ fn parse_services_value(raw: &str) -> Vec<String> {
         }
         if cfg!(feature = "sns") {
             all.push("sns".to_string());
+        }
+        if cfg!(feature = "stepfunctions") {
+            all.push("stepfunctions".to_owned());
         }
         if cfg!(feature = "lambda") {
             all.push("lambda".to_string());
@@ -890,7 +903,7 @@ async fn run_health_check(addr: &str) -> Result<()> {
 /// Read the gateway listen address from the environment.
 ///
 /// Checks `GATEWAY_LISTEN` (the canonical var) and falls back to the
-/// S3Config default when S3 is compiled in.
+/// `S3Config` default when S3 is compiled in.
 fn gateway_listen_addr() -> String {
     settings::var("GATEWAY_LISTEN").unwrap_or_else(|_| "127.0.0.1:4566".to_string())
 }
@@ -905,13 +918,28 @@ struct Runtime {
     services: Vec<Box<dyn ServiceRouter>>,
     providers: RuntimeProviders,
     workers: RuntimeWorkers,
+    #[cfg(feature = "stepfunctions")]
+    workflows: Option<WorkflowSupervisor>,
 }
 
 /// Build all enabled service routers based on environment configuration.
 #[allow(clippy::too_many_lines)]
 fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
-    let mut providers = RuntimeProviders::default();
+    let providers = RuntimeProviders::default();
+    #[cfg(any(
+        feature = "s3",
+        feature = "dynamodb",
+        feature = "dynamodbstreams",
+        feature = "sqs",
+        feature = "ssm",
+        feature = "iam",
+        feature = "lambda",
+        feature = "apigatewayv2",
+        feature = "cloudfront",
+        feature = "cloudfront-dataplane"
+    ))]
+    let mut providers = providers;
     let mut workers = RuntimeWorkers::default();
 
     // ----- DynamoDB + DynamoDB Streams (register before S3: S3 is the catch-all) -----
@@ -1264,6 +1292,33 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
         services.push(Box::new(service::LambdaServiceRouter::new(lambda_service)));
     }
 
+    #[cfg(feature = "stepfunctions")]
+    let workflows = if is_enabled("stepfunctions") {
+        let region = settings::var("DEFAULT_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        let account =
+            settings::var("DEFAULT_ACCOUNT_ID").unwrap_or_else(|_| "000000000000".to_owned());
+        let scope = TenantScope::new("aws", &region, &account)?;
+        let skip = settings::var("STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION")
+            .map_or(true, |value| value == "true");
+        let config = StepFunctionsHttpConfig::new(
+            RequestScope::new("aws".to_owned(), region, account)?,
+            skip,
+            build_credential_provider(),
+        )?;
+        let workflow = WorkflowRuntime::new(
+            scope,
+            settings::budgets(),
+            #[cfg(feature = "lambda")]
+            workers.lambda.clone(),
+        )?;
+        workers.workflows = Some(workflow.status);
+        let http = StepFunctionsHttpService::new(workflow.api, config);
+        services.insert(0, Box::new(service::StepFunctionsServiceRouter::new(http)));
+        Some(workflow.owner)
+    } else {
+        None
+    };
+
     // ----- CloudFront (management + data plane, register before S3 catch-all) -----
     #[cfg(feature = "cloudfront")]
     if is_enabled("cloudfront") {
@@ -1312,6 +1367,8 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
         services,
         providers,
         workers,
+        #[cfg(feature = "stepfunctions")]
+        workflows,
     })
 }
 
@@ -1414,6 +1471,8 @@ async fn run() -> Result<()> {
         services,
         providers,
         workers,
+        #[cfg(feature = "stepfunctions")]
+        mut workflows,
     } = runtime;
     let workers = Arc::new(workers);
     let gateway = GatewayService::new(services).with_workers(Arc::clone(&workers));
@@ -1444,9 +1503,12 @@ async fn run() -> Result<()> {
     let work_deadline = deadline - shutdown_cleanup_reserve();
     let save_result = async {
         serve_result?;
-        workers
-            .quiesce(work_deadline.saturating_duration_since(Instant::now()))
-            .await?;
+        workers.quiesce_producers(work_deadline).await?;
+        #[cfg(feature = "stepfunctions")]
+        if let Some(workflows) = &mut workflows {
+            workflows.quiesce(work_deadline).await?;
+        }
+        workers.quiesce_consumers(work_deadline).await?;
         if let Some(config) = snapshot_config.as_ref() {
             tokio::time::timeout_at(work_deadline, config.save(&providers, VERSION))
                 .await
@@ -1456,14 +1518,21 @@ async fn run() -> Result<()> {
     }
     .await;
     let stop_result = async {
-        match tokio::time::timeout_at(deadline, workers.shutdown()).await {
-            Ok(result) => result.context("runtime shutdown failed")?,
-            Err(_) => anyhow::bail!(
+        #[cfg(feature = "stepfunctions")]
+        let workflow_result = match &mut workflows {
+            Some(workflows) => workflows.shutdown(deadline).await,
+            None => Ok(()),
+        };
+        let worker_result = match tokio::time::timeout_at(deadline, workers.shutdown()).await {
+            Ok(result) => result.context("runtime shutdown failed"),
+            Err(_) => Err(anyhow::anyhow!(
                 "resource cleanup incomplete: shutdown deadline exceeded; dropping providers now \
                  (kill_on_drop reaps remaining children)"
-            ),
-        }
-        Result::<()>::Ok(())
+            )),
+        };
+        #[cfg(feature = "stepfunctions")]
+        workflow_result?;
+        worker_result
     }
     .await;
     save_result?;
@@ -1473,7 +1542,16 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "stepfunctions")]
+    use std::num::NonZeroU64;
+
+    #[cfg(feature = "stepfunctions")]
+    use hyper::server::conn::http1;
+    #[cfg(feature = "stepfunctions")]
+    use rustack_core::http::BodyBudget;
     use tokio::io::AsyncWriteExt;
+    #[cfg(feature = "stepfunctions")]
+    use tokio::{io::AsyncReadExt, net::TcpStream};
 
     use super::*;
 
@@ -1495,6 +1573,235 @@ mod tests {
             joined??;
         }
         Ok(result)
+    }
+
+    #[cfg(feature = "stepfunctions")]
+    async fn gateway_exchange(gateway: GatewayService, wire: String) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let server = async {
+            let (stream, _) = listener.accept().await?;
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), gateway)
+                .await?;
+            Result::<()>::Ok(())
+        };
+        let client = async {
+            let mut stream = TcpStream::connect(address).await?;
+            stream.write_all(wire.as_bytes()).await?;
+            let mut response = Vec::new();
+            stream.take(32_769).read_to_end(&mut response).await?;
+            anyhow::ensure!(response.len() <= 32_768, "fixture response exceeded cap");
+            Result::<String>::Ok(String::from_utf8(response)?)
+        };
+        let (server, client) = tokio::join!(
+            tokio::time::timeout_at(deadline, server),
+            tokio::time::timeout_at(deadline, client)
+        );
+        server??;
+        client?
+    }
+
+    #[cfg(feature = "stepfunctions")]
+    #[tokio::test]
+    async fn test_should_prioritize_workflow_target_over_conflicting_path_and_signing_scope()
+    -> Result<()> {
+        let runtime = build_services(|name| {
+            ["stepfunctions", "lambda", "sns", "sqs", "s3", "dynamodb"].contains(&name)
+        })?;
+        let Runtime {
+            services,
+            workers,
+            mut workflows,
+            ..
+        } = runtime;
+        assert_eq!(
+            services.first().map(|service| service.name()),
+            Some("stepfunctions")
+        );
+        let workers = Arc::new(workers);
+        let gateway = GatewayService::new(services).with_workers(workers.clone());
+        let result = async {
+            for (path, headers) in [
+                (
+                    "/2015-03-31/functions/Fn/invocations",
+                    "X-Amz-Target: AWSStepFunctions.ListStateMachines\r\nContent-Type: \
+                     application/x-amz-json-1.0\r\n",
+                ),
+                (
+                    "/",
+                    "X-Amz-Target: AWSStepFunctions.ListStateMachines\r\nContent-Type: \
+                     application/x-www-form-urlencoded\r\nAuthorization: AWS4-HMAC-SHA256 \
+                     Credential=local/date/us-east-1/sns/aws4_request\r\n",
+                ),
+                (
+                    "/",
+                    "X-Amz-Target: DynamoDB_20120810.ListTables\r\nX-Amz-Target: \
+                     AWSStepFunctions.ListStateMachines\r\nContent-Type: \
+                     application/x-amz-json-1.0\r\n",
+                ),
+            ] {
+                let wire = format!(
+                    "POST {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: \
+                     2\r\nConnection: close\r\n\r\n{{}}"
+                );
+                let response = gateway_exchange(gateway.clone(), wire).await?;
+                anyhow::ensure!(
+                    response.starts_with("HTTP/1.1 400"),
+                    "wrong route response: {response}"
+                );
+                let (_, body) = response.split_once("\r\n\r\n").context("error body")?;
+                let error: serde_json::Value = serde_json::from_str(body)?;
+                assert_eq!(error["__type"], "ValidationException");
+                assert_eq!(error["message"], "Invalid HTTP request envelope");
+            }
+            Result::<()>::Ok(())
+        }
+        .await;
+        workflows
+            .as_mut()
+            .context("workflow owner")?
+            .shutdown(Instant::now() + Duration::from_secs(5))
+            .await?;
+        workers.shutdown().await?;
+        result
+    }
+
+    #[cfg(feature = "stepfunctions")]
+    #[tokio::test]
+    async fn test_should_preserve_modeled_timeout_envelope_through_actual_gateway() -> Result<()> {
+        let runtime = WorkflowRuntime::new(
+            TenantScope::default(),
+            settings::RuntimeBudgets::default(),
+            #[cfg(feature = "lambda")]
+            None,
+        )?;
+        let scope = RequestScope::new("aws".into(), "us-east-1".into(), "000000000000".into())?;
+        let total = Duration::from_secs(1);
+        let body = BodyBudget::new(2 * 1024 * 1024, total, total)?;
+        let config = StepFunctionsHttpConfig::new(scope, true, None)?.with_budgets(body, total)?;
+        let router = service::StepFunctionsServiceRouter::new(StepFunctionsHttpService::new(
+            runtime.api,
+            config,
+        ));
+        let gateway = GatewayService::new(vec![Box::new(router)])
+            .with_request_seconds(NonZeroU64::new(1).context("request duration")?);
+        let mut owner = runtime.owner;
+        let response = gateway_exchange(
+            gateway,
+            "POST / HTTP/1.1\r\nHost: localhost\r\nX-Amz-Target: \
+             AWSStepFunctions.ListStateMachines\r\nContent-Type: \
+             application/x-amz-json-1.0\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{"
+                .to_owned(),
+        )
+        .await;
+        owner
+            .quiesce(Instant::now() + Duration::from_secs(5))
+            .await?;
+        let response = response?;
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        assert!(
+            response.to_ascii_lowercase().contains("x-amzn-requestid:"),
+            "{response}"
+        );
+        let (_, body) = response.split_once("\r\n\r\n").context("timeout body")?;
+        let error: serde_json::Value = serde_json::from_str(body)?;
+        assert_eq!(error["__type"], "RequestTimeoutException");
+        Ok(())
+    }
+
+    #[cfg(feature = "stepfunctions")]
+    #[tokio::test]
+    async fn test_should_route_actual_socket_requests_to_real_workflow_and_capabilities()
+    -> Result<()> {
+        let runtime = build_services(|name| name == "stepfunctions")?;
+        let Runtime {
+            services,
+            workers,
+            mut workflows,
+            ..
+        } = runtime;
+        let gateway = GatewayService::new(services).with_workers(Arc::new(workers));
+        let result = async {
+            let response = gateway_exchange(
+                gateway.clone(),
+                "POST / HTTP/1.1\r\nHost: localhost\r\nX-Amz-Target: \
+                 AWSStepFunctions.ListStateMachines\r\nContent-Type: \
+                 application/x-amz-json-1.0\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                    .to_owned(),
+            )
+            .await?;
+            anyhow::ensure!(
+                response.starts_with("HTTP/1.1 200"),
+                "workflow route did not succeed"
+            );
+            anyhow::ensure!(
+                response.contains("\"stateMachines\":[]"),
+                "real empty registry response missing"
+            );
+            let response = gateway_exchange(
+                gateway,
+                "GET /_rustack/capabilities HTTP/1.1\r\nHost: localhost\r\nConnection: \
+                 close\r\n\r\n"
+                    .to_owned(),
+            )
+            .await?;
+            let (_, body) = response.split_once("\r\n\r\n").context("capability body")?;
+            let capabilities: serde_json::Value = serde_json::from_str(body)?;
+            anyhow::ensure!(capabilities["ready"] == true, "workflow gateway not ready");
+            anyhow::ensure!(
+                capabilities["workflows"]["lambdaRequestResponse"] == false,
+                "pure service advertised Lambda"
+            );
+            anyhow::ensure!(
+                capabilities["workflows"]["snapshot"] == "unsupported",
+                "snapshot coverage was overstated"
+            );
+            Result::<()>::Ok(())
+        }
+        .await;
+        let cleanup = workflows
+            .as_mut()
+            .context("workflow owner")?
+            .quiesce(Instant::now() + Duration::from_secs(5))
+            .await;
+        cleanup?;
+        result
+    }
+
+    #[cfg(feature = "stepfunctions")]
+    #[tokio::test]
+    async fn test_should_register_real_workflow_service_and_shared_health() -> Result<()> {
+        let mut runtime = build_services(|name| name == "stepfunctions" || name == "s3")?;
+        let workflow = runtime
+            .services
+            .iter()
+            .position(|service| service.name() == "stepfunctions")
+            .context("workflow router")?;
+        if let Some(s3) = runtime
+            .services
+            .iter()
+            .position(|service| service.name() == "s3")
+        {
+            assert!(workflow < s3);
+        }
+        assert!(is_compiled_in("stepfunctions"));
+        assert!(
+            parse_services_value("")
+                .iter()
+                .any(|name| name == "stepfunctions")
+        );
+        assert!(runtime.workers.diagnostics().ready);
+        assert!(runtime.workers.workflow_capabilities().is_some());
+        runtime
+            .workflows
+            .as_mut()
+            .context("workflow owner")?
+            .quiesce(Instant::now() + Duration::from_secs(5))
+            .await?;
+        assert!(!runtime.workers.diagnostics().ready);
+        Ok(())
     }
 
     #[tokio::test]

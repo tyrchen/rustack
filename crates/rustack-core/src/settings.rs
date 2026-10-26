@@ -22,6 +22,7 @@ const SERVICE_NAMES: &[&str] = &[
     "SSM",
     "SNS",
     "LAMBDA",
+    "STEPFUNCTIONS",
     "EVENTS",
     "LOGS",
     "KMS",
@@ -101,6 +102,46 @@ static SETTINGS: OnceLock<ValidatedSettings> = OnceLock::new();
 #[non_exhaustive]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeBudgets {
+    /// Accepted workflow API requests, including ready replies.
+    pub workflow_api_accepted: usize,
+    /// Retained workflow API preparation/response CPU workers.
+    pub workflow_api_workers: usize,
+    /// Incremental workflow pagination capture bytes.
+    pub workflow_pagination_bytes: usize,
+    /// Live immutable workflow continuation handles.
+    pub workflow_pagination_tokens: usize,
+    /// Current workflow state machines.
+    pub workflow_registry_machines: usize,
+    /// Retained workflow definition and tag versions, independently.
+    pub workflow_registry_versions: usize,
+    /// Retained workflow execution records.
+    pub workflow_registry_records: usize,
+    /// Accepted workflow registry commands.
+    pub workflow_registry_commands: usize,
+    /// Workflow execution name claims retained for ninety days.
+    pub workflow_name_tombstones: usize,
+    /// Terminal workflow record retention in seconds.
+    pub workflow_retention_seconds: u64,
+    /// Live and unsettled workflow executions.
+    pub workflow_open_executions: usize,
+    /// Retained workflow runtime CPU workers.
+    pub workflow_evaluations: usize,
+    /// Concurrent workflow Task dispatches.
+    pub workflow_dispatches: usize,
+    /// Independent workflow execution duration ceiling.
+    pub workflow_max_duration_seconds: u64,
+    /// Maximum transitions per workflow execution.
+    pub workflow_transitions: u32,
+    /// Retained history bytes per workflow execution.
+    pub workflow_history_bytes: usize,
+    /// Global retained workflow history bytes.
+    pub workflow_total_history_bytes: usize,
+    /// Accepted and quarantined workflow Lambda bridge calls.
+    pub workflow_lambda_accepted_calls: usize,
+    /// Initial workflow Lambda cleanup observation budget.
+    pub workflow_lambda_cleanup_seconds: u64,
+    /// Grace interval before cancelling remaining workflows.
+    pub workflow_drain_seconds: u64,
     /// Maximum live HTTP connections.
     pub connections: usize,
     /// Maximum concurrently active business requests, including response bodies.
@@ -132,6 +173,26 @@ pub struct RuntimeBudgets {
 impl Default for RuntimeBudgets {
     fn default() -> Self {
         Self {
+            workflow_api_accepted: 32,
+            workflow_api_workers: 8,
+            workflow_pagination_bytes: 67_108_864,
+            workflow_pagination_tokens: 10_000,
+            workflow_registry_machines: 256,
+            workflow_registry_versions: 1024,
+            workflow_registry_records: 10_000,
+            workflow_registry_commands: 128,
+            workflow_name_tombstones: 100_000,
+            workflow_retention_seconds: 86_400,
+            workflow_open_executions: 128,
+            workflow_evaluations: 8,
+            workflow_dispatches: 32,
+            workflow_max_duration_seconds: 3600,
+            workflow_transitions: 100_000,
+            workflow_history_bytes: 33_554_432,
+            workflow_total_history_bytes: 268_435_456,
+            workflow_lambda_accepted_calls: 128,
+            workflow_lambda_cleanup_seconds: 10,
+            workflow_drain_seconds: 5,
             connections: 256,
             requests: 128,
             header_seconds: 5,
@@ -155,6 +216,20 @@ impl RuntimeBudgets {
     /// # Errors
     /// Rejects zero, excessive, or inconsistent resource deadlines and sizes.
     pub fn validate(&self) -> Result<(), SettingsError> {
+        self.validate_workflow_api()?;
+        self.validate_workflow_execution()?;
+        if self.workflow_api_workers > self.workflow_api_accepted {
+            return Err(invalid(
+                "budgets.workflowApiWorkers",
+                "must not exceed accepted requests",
+            ));
+        }
+        if self.workflow_history_bytes > self.workflow_total_history_bytes {
+            return Err(invalid(
+                "budgets.workflowHistoryBytes",
+                "must not exceed total history bytes",
+            ));
+        }
         for (key, value, max) in [
             ("budgets.connections", self.connections as u64, 65_536),
             ("budgets.requests", self.requests as u64, 65_536),
@@ -205,6 +280,144 @@ impl RuntimeBudgets {
                 "budgets.bodyIdleSeconds",
                 "idle deadline must not exceed total deadline",
             ));
+        }
+        Ok(())
+    }
+    fn validate_workflow_api(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            (
+                "budgets.workflowApiAccepted",
+                self.workflow_api_accepted as u64,
+                1,
+                128,
+            ),
+            (
+                "budgets.workflowApiWorkers",
+                self.workflow_api_workers as u64,
+                1,
+                32,
+            ),
+            (
+                "budgets.workflowPaginationBytes",
+                self.workflow_pagination_bytes as u64,
+                8_388_608,
+                1_073_741_824,
+            ),
+            (
+                "budgets.workflowPaginationTokens",
+                self.workflow_pagination_tokens as u64,
+                1,
+                100_000,
+            ),
+            (
+                "budgets.workflowRegistryMachines",
+                self.workflow_registry_machines as u64,
+                1,
+                4096,
+            ),
+            (
+                "budgets.workflowRegistryVersions",
+                self.workflow_registry_versions as u64,
+                1,
+                4096,
+            ),
+            (
+                "budgets.workflowRegistryRecords",
+                self.workflow_registry_records as u64,
+                1,
+                100_000,
+            ),
+            (
+                "budgets.workflowRegistryCommands",
+                self.workflow_registry_commands as u64,
+                1,
+                1024,
+            ),
+            (
+                "budgets.workflowNameTombstones",
+                self.workflow_name_tombstones as u64,
+                1,
+                1_000_000,
+            ),
+            (
+                "budgets.workflowRetentionSeconds",
+                self.workflow_retention_seconds,
+                60,
+                7_776_000,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(key, "outside supported workflow range"));
+            }
+        }
+        Ok(())
+    }
+    fn validate_workflow_execution(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            (
+                "budgets.workflowOpenExecutions",
+                self.workflow_open_executions as u64,
+                1,
+                4096,
+            ),
+            (
+                "budgets.workflowEvaluations",
+                self.workflow_evaluations as u64,
+                1,
+                128,
+            ),
+            (
+                "budgets.workflowDispatches",
+                self.workflow_dispatches as u64,
+                1,
+                1024,
+            ),
+            (
+                "budgets.workflowMaxDurationSeconds",
+                self.workflow_max_duration_seconds,
+                1,
+                31_536_000,
+            ),
+            (
+                "budgets.workflowTransitions",
+                u64::from(self.workflow_transitions),
+                1,
+                1_000_000,
+            ),
+            (
+                "budgets.workflowHistoryBytes",
+                self.workflow_history_bytes as u64,
+                1_048_576,
+                268_435_456,
+            ),
+            (
+                "budgets.workflowTotalHistoryBytes",
+                self.workflow_total_history_bytes as u64,
+                8_388_608,
+                4_294_967_296,
+            ),
+            (
+                "budgets.workflowLambdaAcceptedCalls",
+                self.workflow_lambda_accepted_calls as u64,
+                1,
+                1024,
+            ),
+            (
+                "budgets.workflowLambdaCleanupSeconds",
+                self.workflow_lambda_cleanup_seconds,
+                1,
+                60,
+            ),
+            (
+                "budgets.workflowDrainSeconds",
+                self.workflow_drain_seconds,
+                0,
+                60,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(key, "outside supported workflow range"));
+            }
         }
         Ok(())
     }
@@ -656,6 +869,52 @@ pub fn advertised_endpoint() -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_should_validate_workflow_budgets_and_strict_credentials() -> Result<(), SettingsError> {
+        let config = ValidatedSettings::parse(
+            "environment:\n  STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION: false\nbudgets:\n  \
+             workflowDrainSeconds: 0\n  workflowApiAccepted: 2\n  workflowApiWorkers: 1",
+            &BTreeMap::new(),
+        )?;
+        assert!(
+            config
+                .validate_credentials(&["stepfunctions".to_owned()])
+                .is_err()
+        );
+        assert_eq!(config.budgets().workflow_drain_seconds, 0);
+        for setting in [
+            "workflowApiAccepted: 0",
+            "workflowApiWorkers: 33",
+            "workflowPaginationBytes: 8388607",
+            "workflowPaginationTokens: 100001",
+            "workflowRegistryMachines: 4097",
+            "workflowRegistryVersions: 0",
+            "workflowRegistryRecords: 100001",
+            "workflowRegistryCommands: 1025",
+            "workflowNameTombstones: 0",
+            "workflowRetentionSeconds: 59",
+            "workflowOpenExecutions: 0",
+            "workflowEvaluations: 129",
+            "workflowDispatches: 1025",
+            "workflowMaxDurationSeconds: 0",
+            "workflowTransitions: 1000001",
+            "workflowHistoryBytes: 1048575",
+            "workflowTotalHistoryBytes: 4294967297",
+            "workflowLambdaAcceptedCalls: 0",
+            "workflowLambdaCleanupSeconds: 61",
+            "workflowDrainSeconds: 61",
+            "workflowApiAccepted: 1\n  workflowApiWorkers: 2",
+            "workflowHistoryBytes: 33554432\n  workflowTotalHistoryBytes: 8388608",
+        ] {
+            assert!(
+                ValidatedSettings::parse(&format!("budgets:\n  {setting}"), &BTreeMap::new())
+                    .is_err(),
+                "{setting}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_should_apply_environment_over_yaml_and_derive_ipv6_endpoint()

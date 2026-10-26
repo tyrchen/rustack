@@ -17,7 +17,7 @@ use tokio::{
 use super::{
     DefinitionRevision, Envelope, ExecutionArn, ExecutionName, ExecutionSnapshot, MachineSnapshot,
     MachineStatus, PreparedDefinition, RegistryCommand, RegistryError, RegistryLimits,
-    RegistryResult, Reply, RoleArn, StateMachineArn, TenantScope,
+    RegistryResult, RegistryStatus, Reply, RoleArn, StateMachineArn, TenantScope,
     types::{ExecutionIdentity, ExecutionRecord, MachineIdentity, RevisionData, TagAllocation},
 };
 use crate::{
@@ -46,6 +46,7 @@ struct Executions {
 struct Io {
     receiver: mpsc::Receiver<Envelope>,
     closing: watch::Sender<bool>,
+    status: watch::Sender<RegistryStatus>,
     pending: Option<Envelope>,
     ready: VecDeque<String>,
     #[cfg(test)]
@@ -69,6 +70,7 @@ impl Owner {
         execution: ExecutionLimits,
         receiver: mpsc::Receiver<Envelope>,
         closing: watch::Sender<bool>,
+        status: watch::Sender<RegistryStatus>,
     ) -> Self {
         Self {
             state: Some(State {
@@ -89,6 +91,7 @@ impl Owner {
                 io: Io {
                     receiver,
                     closing,
+                    status,
                     pending: None,
                     ready: VecDeque::new(),
                     #[cfg(test)]
@@ -456,6 +459,10 @@ impl State {
     }
     fn maintain(&mut self, now: Instant) {
         self.runtime.reap_ready();
+        self.io.status.send_replace(RegistryStatus {
+            ready: self.runtime.is_ready(),
+            owned_executions: self.runtime.owned_executions(),
+        });
         for (arn, entry) in &mut self.executions.records {
             if entry.closed.is_none() && entry.record.handle.snapshot().outcome().is_some() {
                 entry.closed = Some(now);
@@ -572,6 +579,11 @@ mod clock_tests {
             ExecutionLimits::default(),
             receiver,
             closing,
+            watch::channel(RegistryStatus {
+                ready: true,
+                owned_executions: 0,
+            })
+            .0,
         )
     }
     fn create(state: &mut State, definition: PreparedDefinition) -> StateMachineArn {

@@ -91,6 +91,12 @@ impl GatewayService {
         self
     }
 
+    #[cfg(all(test, feature = "stepfunctions"))]
+    pub(crate) fn with_request_seconds(mut self, seconds: std::num::NonZeroU64) -> Self {
+        self.budgets.request_seconds = seconds.get();
+        self
+    }
+
     pub(crate) fn service_names(&self) -> Vec<&'static str> {
         self.services.iter().map(|service| service.name()).collect()
     }
@@ -130,7 +136,7 @@ impl GatewayService {
                 .collect();
             json_response(
                 status,
-                &serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "ready": ready, "services": capabilities, "workers": workers, "localEndpoints": {"apiGateway": "/_aws/execute-api/{apiId}/{stage}", "lambda": "/lambda-url/{functionName}/", "cloudFront": "/_aws/cloudfront/{distributionId}/"}, "limitations": ["No multi-tenant isolation or production IAM enforcement", "Snapshot resources-only services do not retain messages", "routed does not imply complete operation semantics"]}),
+                &serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "ready": ready, "services": capabilities, "workers": workers, "workflows": self.state.workers.workflow_capabilities(), "localEndpoints": {"apiGateway": "/_aws/execute-api/{apiId}/{stage}", "lambda": "/lambda-url/{functionName}/", "cloudFront": "/_aws/cloudfront/{distributionId}/"}, "limitations": ["No multi-tenant isolation or production IAM enforcement", "Snapshot resources-only services do not retain messages", "routed does not imply complete operation semantics"]}),
             )
         } else {
             let services: std::collections::BTreeMap<_, _> = self
@@ -186,10 +192,15 @@ impl Service<http::Request<Incoming>> for GatewayService {
             }
             _ => self.budgets.request_seconds,
         };
+        let owns_deadline = selected.is_some_and(|service| service.owns_request_deadline());
         let service_future = selected.map(|service| service.call(req));
         let budget = self.budgets.clone();
         Box::pin(async move {
             let response = match service_future {
+                Some(future) if owns_deadline => match future.await {
+                    Ok(response) => response,
+                    Err(never) => match never {},
+                },
                 Some(future) => {
                     match tokio::time::timeout(Duration::from_secs(request_seconds), future).await {
                         Ok(Ok(response)) => response,
@@ -264,6 +275,9 @@ fn capability(name: &'static str) -> Capability {
     let snapshot = crate::snapshot::snapshot_coverage(name);
     let execution = match name {
         "lambda" => "explicit backend required; native is trusted-code-only",
+        "stepfunctions" => {
+            "M1 STANDARD JSONPath; actual integrations and limits in workflows capability"
+        }
         "sns" | "events" => "SQS targets only; target availability validated",
         _ => "partial AWS compatibility; see service capability documentation",
     };

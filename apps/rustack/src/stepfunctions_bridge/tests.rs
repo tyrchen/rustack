@@ -571,3 +571,34 @@ async fn test_should_preserve_root_admission_permit_after_manager_abort() {
     provider.quiesce(Duration::from_secs(10)).await.unwrap();
     assert_eq!(bridge.owned_calls(), 1);
 }
+
+#[tokio::test]
+async fn test_should_keep_bridge_ready_after_settled_missing_function_diagnostic() {
+    let exec = executor();
+    let (provider, _directory) = provider(exec.clone());
+    let (port, mut bridge) = StepFunctionsLambdaBridge::new(
+        provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let mut owner = executions(port.clone());
+    let mut handle = owner.start(driver(&direct(), &json!({}))).unwrap();
+    let outcome = handle.wait(deadline()).await;
+    let settled = timeout(Duration::from_secs(5), async {
+        while bridge.owned_calls() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let ready = port.is_ready();
+    let diagnostic = bridge.diagnostic();
+    clean(&mut owner, &mut bridge, &provider).await;
+    assert!(settled.is_ok());
+    assert!(
+        matches!(outcome.unwrap().outcome().unwrap().as_ref(),ExecutionOutcome::Failed(f) if f.error()==Some("Lambda.ResourceNotFoundException"))
+    );
+    assert!(diagnostic.is_some());
+    assert!(ready, "historical diagnostic is not owner failure");
+    assert_eq!(exec.calls.load(Ordering::SeqCst), 0);
+}

@@ -114,6 +114,27 @@ Before ordinary admission, call reconcile_containers under the same DirectoryLea
 
 `make test-lambda-recovery` covers bounded/corrupt files, restart transactions, cancellation, foreign resources and delayed commits. `make test-lambda-recovery-docker WORKFLOWS_DOCKER_SOCKET=<socket-path> WORKFLOWS_ARCH=arm64` provisions actual owned containers, releases/reacquires the directory under a new run and retires the historical pair. Failed actual qualification preserves durable ownership evidence rather than deleting the temporary data root.
 
+### 1.6 Executable M1 gateway composition
+
+The opt-in `stepfunctions` binary feature registers the real typed HTTP target-family router before all heuristic path/signing-scope routers and the S3 catch-all. `SERVICES=stepfunctions` also works without the Lambda feature/service. Conflicting paths, duplicate targets and query-protocol content/signing headers still reach Step Functions envelope validation; no fallback into another service is allowed. It uses the validated default region/account, partition `aws`, and `STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION` (default true, the existing local-development policy). Strict mode requires the existing static credential provider before listening. Lambda Tasks are enabled only when the actual registered Lambda provider has an explicitly selected non-disabled executor and its scope matches. Otherwise compilation rejects Lambda Tasks while pure workflows remain available. No implicit code-execution selection is introduced. Shared gateway routing must pass strict production boundary lints: consolidate repeated SigV4 service classification into a borrowed iterator parser, and remove unchecked indexing/allocation from Lambda date-prefix classification while preserving existing route matches. Exercise malformed credentials and supported/rejected Lambda prefixes; this is gateway integration boundary closure, with no authentication-policy change.
+
+Implement the M1-supported budgets from §1.2 in the existing root `budgets` mapping: workflowApiAccepted, workflowApiWorkers, workflowPaginationBytes, workflowPaginationTokens, workflowRegistryMachines, workflowRegistryVersions, workflowRegistryRecords, workflowRegistryCommands, workflowNameTombstones, workflowRetentionSeconds, workflowOpenExecutions, workflowEvaluations, workflowDispatches, workflowMaxDurationSeconds, workflowTransitions, workflowHistoryBytes, workflowTotalHistoryBytes, workflowLambdaAcceptedCalls, workflowLambdaCleanupSeconds and workflowDrainSeconds. Validate their ranges/relationships before allocation; execution history still has the static25,000-event ceiling. Future frame/callback/completed-record budgets remain proposed until their respective owners exist. No ignored configuration field may pretend to enforce a quota.
+
+```text
+validated YAML/scope ──► main composition ◄── actual registered Lambda provider
+                              │                    (optional, explicit executor)
+                              ▼
+gateway: exact SFN target first → bounded typed HTTP → retained API/registry
+                                                        │ captured revision
+                                                        ▼
+                                                execution supervisor
+                                                        │ actual Task port only
+                                                        ▼
+                                                Lambda bridge → provider
+```
+
+The gateway capability response reports the actual M1 JSONPath/six-state profile, whether the actual Lambda port is installed, effective local limits, and no workflow snapshot coverage. Available integration is distinct from final Docker qualification. The Step Functions transport owns its full modeled request deadline; the gateway must not race it with an earlier generic504 timer. Actual socket slow-body timeout qualification must assert the AWS JSON error and request-ID header. Readiness reads API state, registry worker/cleanup status and installed bridge status without submitting a business command. Registry status is updated on command/maintenance boundaries (at most a one-second maintenance interval), and root loss closes readiness immediately. Last ordinary Lambda diagnostics (missing function, business failure, handler timeout or Stop) do not poison readiness after cleanup settles; permanent worker failure/uncertainty does. Manual Docker provider injection requires image_available readiness; the ordinary CLI still rejects unsupported Docker selection before listening.
+
 ## 2. Deployment topology and readiness
 
 | Topology | Control path | Handler SDK path | Required test |
@@ -146,17 +167,36 @@ Expose capability fields for workflow type/query profile/state types/integration
 └───────────────────────────────────────────────────────────────────┘
 ```
 
+The binary keeps the unique composite WorkflowSupervisor outside the shared RuntimeWorkers health view. It directly retains ApiSupervisor, RegistrySupervisor and the optional LambdaBridgeSupervisor; no Mutex or additional unowned task is needed. Cancellation of an observing quiesce future retains those exact controllers and its shutdown phase. Final cleanup uses a separate shutdown entry point: skip grace, retain the same API/registry/bridge joins, and synchronously signal all remaining controllers if the observer deadline expires before joining. A resumed final observer does not re-enter grace; uncertainty still forbids a successful consistency cut. One drain cutoff is captured on first quiesce; a resumed waiter never restarts the grace interval.
+
+```text
+main (unique mutable ownership)        gateway (shared read-only handles)
+  WorkflowSupervisor                    WorkflowStatus
+    ├─ ApiSupervisor     ◄────────────    API readiness
+    ├─ RegistrySupervisor◄────────────    registry status watch
+    └─ LambdaBridgeSupervisor             actual port readiness
+       │
+       ▼ one resumable shutdown phase
+  API join → grace cutoff → registry cancel/join → bridge join
+  final stop: skip grace; expiry → close retained owners, no successful cut
+       │ clean only
+       ▼
+  Lambda quiesce → snapshot decision → final worker shutdown
+```
+
+Producer quiescence precedes the composite. Failure of HTTP drain or producer quiescence still enters final workflow cleanup before provider destruction. Cleanup failure is propagated, and the other providers still receive their final cleanup attempt under the global deadline. Dropping the composite closes all child controllers; their existing retained roots remain responsible for accepted work. Workflow resources/history are not added to the current snapshot format by M1 registration; capabilities and startup coverage must state this explicitly.
+
 The workflow drain interval permits already accepted executions to finish. Then cancel remaining executions with ABORTED and error=Rustack.Shutdown, preserving terminal history. This is deliberate local shutdown behavior, not cloud-style pause/resume. Revoke callback tokens, cancel owned children and await Lambda cleanup before Lambda itself quiesces. Quarantine or unfinished cleanup prevents publishing a successful consistency snapshot. Quiescence must be idempotent and share one global absolute deadline, not restart a full timeout per worker.
 
 The host and pinned relay image must implement control protocol version2 together (§3.8 of the runtime design). An older version1 relay is incompatible and fails initialization before function allocation. Rebuild/re-pin the relay on protocol upgrades; do not silently omit handler-timeout enforcement to accept an older image. Caller absolute budgets include queue/startup/execution; the captured function handler budget arms only at consumed Runtime API delivery. Cleanup remains independently owned if the caller budget expires.
 
 LogType=Tail uses the invocation's bounded observed log window; environment-wide diagnostic tails remain separate. Window boundaries follow actor-observed completed chunks across independent stdout/stderr and control streams. Buffered/background output can arrive in a later window; this local runtime does not claim a causal producer flush barrier. A silent invocation never copies the prior collected diagnostic tail. Lost capabilities or unconsumed/expired mutation receipts invalidate capture and require environment retirement. No flush sleeps or extra Docker log replay are used.
 
-The real binary API adapter uses [API§1.3/§6.1](./rustack-workflows-10-api-design.md#13-retained-real-api-adapter-and-preparation) constructor limits until main YAML/routing composition lands. Its root owns request workers and PageStore; token entries are count-bounded and share a separately byte-charged read capture. Charge vector capacity, not filtered length. Stop API admission and join its same workers before registry shutdown. Loss of API/Registry command handles alone does not cancel accepted executions while the unique registry supervisor remains alive. API health distinguishes a closed intake or retained worker failure, with typed diagnostics preserved through shutdown.
+The real binary API adapter uses [API§1.3/§6.1](./rustack-workflows-10-api-design.md#13-retained-real-api-adapter-and-preparation) the supported validated YAML limits from §1.6. Its root owns request workers and PageStore; token entries are count-bounded and share a separately byte-charged read capture. Charge vector capacity, not filtered length. Stop API admission and join its same workers before registry shutdown. Loss of API/Registry command handles alone does not cancel accepted executions while the unique registry supervisor remains alive. API health distinguishes a closed intake or retained worker failure, with typed diagnostics preserved through shutdown.
 
-Registry constructor limits implement [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle); YAML/main wiring remains required. One retained blocking worker acquires secure IDs while its pending command stays owned above the await. Source fingerprints/compilation are prepared by the embedding caller's bounded CPU owner. Record and name TTLs never release uncertain cleanup; deletion may remove mutable tags while the captured revision/resource identity remains retained. Immutable tag versions have independent allocation accounting, and cloned list snapshots share those allocations. Close the registry and observe the same joined shutdown before closing its Lambda bridge. Root failure synchronously signals the execution owner and preserves the bounded graph instead of inferring cleanup.
+Registry constructor limits implement [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle); §1.6 wires its supported YAML fields. One retained blocking worker acquires secure IDs while its pending command stays owned above the await. Source fingerprints/compilation are prepared by the embedding caller's bounded CPU owner. Record and name TTLs never release uncertain cleanup; deletion may remove mutable tags while the captured revision/resource identity remains retained. Immutable tag versions have independent allocation accounting, and cloned list snapshots share those allocations. Close the registry and observe the same joined shutdown before closing its Lambda bridge. Root failure synchronously signals the execution owner and preserves the bounded graph instead of inferring cleanup.
 
-The Step Functions Lambda bridge closes and joins before provider quiescence. Its supervisor retains one manager join across deadline expiry or a dropped shutdown waiter; unresolved Lambda handles and bridge slots remain charged, and the same cleanup observer can later settle the receipt without a second business outcome. See [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge). These bridge budgets are validated constructor settings until the main YAML/service composition is implemented.
+The Step Functions Lambda bridge closes and joins before provider quiescence. Its supervisor retains one manager join across deadline expiry or a dropped shutdown waiter; unresolved Lambda handles and bridge slots remain charged, and the same cleanup observer can later settle the receipt without a second business outcome. See [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge). The main composition supplies these validated budgets from the supported YAML fields in §1.6.
 
 Within Lambda, stop deployment/invocation producers before retiring the pool/environment consumers. Join EnvironmentPool before EnvironmentManager, then join EnvironmentManager before revoking image leases, and join image cleanup before DockerWire shutdown. Environment count and aggregate function+relay memory remain reserved through allocating, idle, busy and quarantined states; a timed-out shutdown waiter leaves that ownership intact. A removed environment's business failure is distinct from failed supervision: known protocol/handler errors may retire cleanly, while Worker failure remains cached even after physical recovery. The lower-level owner alone is not a startup readiness receipt; historical uncertain effects and daemon/network/resource probes remain separate required gates.
 

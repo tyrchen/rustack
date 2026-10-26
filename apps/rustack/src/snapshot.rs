@@ -35,7 +35,20 @@ use rustack_s3_core::{RustackS3, snapshot::S3Snapshot};
 use rustack_sqs_core::provider::{RustackSqs, SqsSnapshot};
 #[cfg(feature = "ssm")]
 use rustack_ssm_core::{provider::RustackSsm, storage::ParameterStoreSnapshot};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(any(
+    feature = "s3",
+    feature = "dynamodb",
+    feature = "dynamodbstreams",
+    feature = "sqs",
+    feature = "ssm",
+    feature = "iam",
+    feature = "lambda",
+    feature = "apigatewayv2",
+    feature = "cloudfront",
+    feature = "cloudfront-dataplane"
+))]
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt as _, sync::Semaphore, task::JoinSet};
 use tracing::{info, warn};
 
@@ -110,6 +123,18 @@ impl RuntimeProviders {
         self.register(CloudFrontCacheSnapshotService { plane });
     }
 
+    #[cfg(any(
+        feature = "s3",
+        feature = "dynamodb",
+        feature = "dynamodbstreams",
+        feature = "sqs",
+        feature = "ssm",
+        feature = "iam",
+        feature = "lambda",
+        feature = "apigatewayv2",
+        feature = "cloudfront",
+        feature = "cloudfront-dataplane"
+    ))]
     fn register<T>(&mut self, service: T)
     where
         T: SnapshotService + 'static,
@@ -805,6 +830,18 @@ async fn load_service_snapshot(
     Ok(())
 }
 
+#[cfg(any(
+    feature = "s3",
+    feature = "dynamodb",
+    feature = "dynamodbstreams",
+    feature = "sqs",
+    feature = "ssm",
+    feature = "iam",
+    feature = "lambda",
+    feature = "apigatewayv2",
+    feature = "cloudfront",
+    feature = "cloudfront-dataplane"
+))]
 fn encode_state<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize,
@@ -812,6 +849,18 @@ where
     to_cbor(value)
 }
 
+#[cfg(any(
+    feature = "s3",
+    feature = "dynamodb",
+    feature = "dynamodbstreams",
+    feature = "sqs",
+    feature = "ssm",
+    feature = "iam",
+    feature = "lambda",
+    feature = "apigatewayv2",
+    feature = "cloudfront",
+    feature = "cloudfront-dataplane"
+))]
 fn decode_state<T>(bytes: &[u8]) -> Result<T>
 where
     T: DeserializeOwned,

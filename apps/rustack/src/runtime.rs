@@ -1,13 +1,35 @@
 //! Runtime worker ownership independent of snapshot participation.
 
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+#[cfg(not(all(
+    any(feature = "events", feature = "sns", feature = "dynamodb"),
+    any(feature = "lambda", feature = "sqs")
+)))]
+use std::future::{Ready, ready};
+#[cfg(any(
+    feature = "dynamodb",
+    feature = "events",
+    feature = "sns",
+    feature = "lambda",
+    feature = "sqs"
+))]
+use std::sync::Arc;
+use std::{collections::BTreeMap, fmt};
 
-use anyhow::{Context, Result};
+#[cfg(any(
+    feature = "events",
+    feature = "sns",
+    feature = "dynamodb",
+    feature = "sqs"
+))]
+use anyhow::Context;
+use anyhow::Result;
 use serde::Serialize;
 
 /// Handles retained until quiescence, snapshot publication, and final shutdown.
 #[derive(Default)]
 pub(crate) struct RuntimeWorkers {
+    #[cfg(feature = "stepfunctions")]
+    pub(crate) workflows: Option<crate::workflows::WorkflowStatus>,
     #[cfg(feature = "dynamodb")]
     pub(crate) dynamodb: Option<Arc<rustack_dynamodb_core::provider::RustackDynamoDB>>,
     #[cfg(feature = "events")]
@@ -49,6 +71,10 @@ impl RuntimeWorkers {
     /// Report live supervisor state, independently of historical delivery failures.
     pub(crate) fn diagnostics(&self) -> WorkerDiagnostics {
         let readiness: &[Option<(&'static str, bool)>] = &[
+            #[cfg(feature = "stepfunctions")]
+            self.workflows
+                .as_ref()
+                .map(|workflow| ("stepfunctions", workflow.is_ready())),
             #[cfg(feature = "events")]
             self.events
                 .as_ref()
@@ -105,9 +131,20 @@ impl RuntimeWorkers {
         }
     }
 
-    /// Stop new cross-service work before collecting the supported snapshot state.
-    pub(crate) async fn quiesce(&self, remaining: Duration) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + remaining;
+    pub(crate) fn workflow_capabilities(&self) -> Option<serde_json::Value> {
+        #[cfg(feature = "stepfunctions")]
+        return self
+            .workflows
+            .as_ref()
+            .map(crate::workflows::WorkflowStatus::capabilities);
+        #[cfg(not(feature = "stepfunctions"))]
+        None
+    }
+
+    /// Quiesce producers before the unique workflow supervisor drains.
+    #[cfg(any(feature = "events", feature = "sns", feature = "dynamodb"))]
+    pub(crate) async fn quiesce_producers(&self, deadline: tokio::time::Instant) -> Result<()> {
+        check_deadline(deadline)?;
         #[cfg(feature = "events")]
         if let Some(events) = &self.events {
             tokio::time::timeout_at(deadline, events.quiesce())
@@ -126,6 +163,13 @@ impl RuntimeWorkers {
                 .await
                 .context("DynamoDB quiesce deadline exceeded")??;
         }
+        Ok(())
+    }
+
+    /// Downstream consumers stay available until workflow cleanup joins.
+    #[cfg(any(feature = "lambda", feature = "sqs"))]
+    pub(crate) async fn quiesce_consumers(&self, deadline: tokio::time::Instant) -> Result<()> {
+        check_deadline(deadline)?;
         #[cfg(feature = "lambda")]
         if let Some(lambda) = &self.lambda {
             lambda
@@ -139,6 +183,17 @@ impl RuntimeWorkers {
                 .context("SQS quiesce deadline exceeded")??;
         }
         Ok(())
+    }
+
+    #[cfg(not(any(feature = "events", feature = "sns", feature = "dynamodb")))]
+    pub(crate) fn quiesce_producers(&self, deadline: tokio::time::Instant) -> Ready<Result<()>> {
+        tracing::debug!(workers = ?self.diagnostics(), "No producer services require quiescence");
+        ready(check_deadline(deadline))
+    }
+    #[cfg(not(any(feature = "lambda", feature = "sqs")))]
+    pub(crate) fn quiesce_consumers(&self, deadline: tokio::time::Instant) -> Ready<Result<()>> {
+        tracing::debug!(workers = ?self.diagnostics(), "No consumer services require quiescence");
+        ready(check_deadline(deadline))
     }
 
     /// Final resource destruction. Call only after the snapshot decision.
@@ -174,4 +229,12 @@ impl RuntimeWorkers {
         );
         events_result
     }
+}
+
+fn check_deadline(deadline: tokio::time::Instant) -> Result<()> {
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "runtime quiescence deadline exceeded"
+    );
+    Ok(())
 }

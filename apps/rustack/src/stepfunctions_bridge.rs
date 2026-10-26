@@ -88,6 +88,7 @@ impl fmt::Debug for Context {
 struct Shared {
     context: Context,
     accepting: AtomicBool,
+    unhealthy: AtomicBool,
     capacity: Arc<Semaphore>,
     diagnostic: watch::Sender<Option<Arc<BridgeError>>>,
 }
@@ -143,6 +144,16 @@ pub struct LambdaBridgeSupervisor {
     joined: Option<Result<(), Arc<BridgeError>>>,
 }
 impl StepFunctionsLambdaBridge {
+    /// Read actual port readiness without acquiring task admission.
+    ///
+    /// ```
+    /// # fn inspect(port:&rustack_cli::stepfunctions_bridge::StepFunctionsLambdaBridge){let ready=port.is_ready();}
+    /// ```
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.shared.accepting.load(Ordering::Acquire)
+            && !self.shared.unhealthy.load(Ordering::Acquire)
+    }
     /// Start one retained manager before exposing the task port.
     ///
     /// The caller injects an actual provider and its trusted tenant scope. This
@@ -170,6 +181,8 @@ impl StepFunctionsLambdaBridge {
             scope.account()
         );
         if config.executor == ExecutorBackend::Disabled
+            || (config.executor == ExecutorBackend::Docker
+                && provider.executor().image_available().is_err())
             || !function_arn(
                 &config.default_region,
                 &config.account_id,
@@ -190,6 +203,7 @@ impl StepFunctionsLambdaBridge {
                 limits,
             },
             accepting: AtomicBool::new(true),
+            unhealthy: AtomicBool::new(false),
             capacity: Arc::new(Semaphore::new(limits.accepted)),
             diagnostic,
         });
@@ -372,6 +386,7 @@ impl ManagerOwner {
                 }
                 if let Some(permit) = self.state.active.remove(&id) {
                     if let Some(resource) = exit.uncertain {
+                        self.shared.unhealthy.store(true, Ordering::Release);
                         self.state.quarantine.push(Retained {
                             _permit: permit,
                             _resource: Some(resource),
@@ -380,6 +395,7 @@ impl ManagerOwner {
                 }
             }
             Err(error) => {
+                self.shared.unhealthy.store(true, Ordering::Release);
                 let id = error.id();
                 self.shared
                     .diagnostic

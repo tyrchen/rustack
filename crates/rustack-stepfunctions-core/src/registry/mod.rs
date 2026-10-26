@@ -99,11 +99,21 @@ struct Shared {
     sender: mpsc::Sender<Envelope>,
     capacity: Arc<Semaphore>,
     closing: watch::Sender<bool>,
+    status: watch::Sender<RegistryStatus>,
 }
 impl fmt::Debug for Shared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("RegistryShared(<redacted>)")
     }
+}
+/// Admission-independent registry supervisor observation.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct RegistryStatus {
+    /// False after close/root loss or quarantined execution cleanup.
+    pub ready: bool,
+    /// All live or quarantined execution owners, including terminal cleanup.
+    pub owned_executions: usize,
 }
 /// Cloneable bounded command handle; caller loss never rolls back acceptance.
 #[derive(Debug, Clone)]
@@ -167,14 +177,27 @@ impl Registry {
         Handle::try_current().map_err(|_| RegistryError::Unavailable)?;
         let (sender, receiver) = mpsc::channel(limits.commands);
         let (closing, stop) = watch::channel(false);
+        let (status, _) = watch::channel(RegistryStatus {
+            ready: true,
+            owned_executions: 0,
+        });
         let shared = Arc::new(Shared {
             scope: scope.clone(),
             sender,
             capacity: Arc::new(Semaphore::new(limits.commands)),
             closing: closing.clone(),
+            status: status.clone(),
         });
         // Install Drop protection before spawn: an unpolled root still owns data.
-        let owner = actor::Owner::new(scope, limits, runtime, execution, receiver, closing.clone());
+        let owner = actor::Owner::new(
+            scope,
+            limits,
+            runtime,
+            execution,
+            receiver,
+            closing.clone(),
+            status,
+        );
         let join = tokio::spawn(owner.run(stop));
         Ok((
             Self { shared },
@@ -184,6 +207,49 @@ impl Registry {
                 result: None,
             },
         ))
+    }
+    /// Read readiness/owned execution counts without using command admission.
+    ///
+    /// ```
+    /// # fn inspect(registry:&rustack_stepfunctions_core::Registry){let state=registry.status();}
+    /// ```
+    #[must_use]
+    pub fn status(&self) -> RegistryStatus {
+        let mut status = *self.shared.status.borrow();
+        status.ready &= !*self.shared.closing.borrow();
+        status
+    }
+    /// Wait for retained execution owners to settle through a grace cutoff.
+    ///
+    /// This does not close intake; the caller must first join external API intake.
+    ///
+    /// # Errors
+    /// Returns Deadline while executions remain, or Unavailable after root failure.
+    ///
+    /// ```no_run
+    /// # async fn grace(registry:&rustack_stepfunctions_core::Registry,deadline:tokio::time::Instant){let result=registry.wait_idle(deadline).await;}
+    /// ```
+    pub async fn wait_idle(&self, deadline: Instant) -> Result<(), RegistryError> {
+        let mut status = self.shared.status.subscribe();
+        let mut closing = self.shared.closing.subscribe();
+        loop {
+            let value = *status.borrow_and_update();
+            if !value.ready || *self.shared.closing.borrow() {
+                return Err(RegistryError::Unavailable);
+            }
+            if value.owned_executions == 0 {
+                return Ok(());
+            }
+            timeout_at(deadline, async {
+                tokio::select! {
+                    result = status.changed() => result,
+                    result = closing.changed() => result,
+                }
+            })
+            .await
+            .map_err(|_| RegistryError::Deadline)?
+            .map_err(|_| RegistryError::Unavailable)?;
+        }
     }
     /// Read the immutable trusted scope of this registry.
     ///
