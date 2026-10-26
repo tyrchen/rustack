@@ -324,6 +324,7 @@ async fn test_should_bound_request_serialization_and_redact_request_debug() {
         ..Default::default()
     };
     let request = RawRequest {
+        mutation: None,
         operation: Operation::Create,
         method: Method::POST,
         target: "/secret-target".into(),
@@ -421,6 +422,7 @@ async fn test_should_keep_cleanup_capacity_while_business_calls_and_mailbox_are_
             .business
             .try_send(Envelope {
                 request: RawRequest {
+                    mutation: None,
                     operation: Operation::Info,
                     method: Method::GET,
                     target: "/v1.53/info".into(),

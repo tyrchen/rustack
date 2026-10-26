@@ -91,7 +91,7 @@ impl FunctionLogs {
         Self::start_reader(reader, ring_bytes)
     }
 
-    fn start_reader<R: AsyncRead + Unpin + Send + 'static>(
+    pub(super) fn start_reader<R: AsyncRead + Unpin + Send + 'static>(
         reader: DockerOutputReader<R>,
         ring_bytes: usize,
     ) -> Result<Self, DockerError> {

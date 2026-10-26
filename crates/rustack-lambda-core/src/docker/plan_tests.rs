@@ -16,7 +16,7 @@ use crate::{
 fn directory() -> DirectoryLease {
     DirectoryLease::testing(Uuid::new_v4(), Uuid::new_v4())
 }
-fn policy() -> ContainerPolicy {
+pub(in crate::docker) fn policy() -> ContainerPolicy {
     ContainerPolicy::new(
         "none".parse().unwrap(),
         1000,
@@ -26,7 +26,7 @@ fn policy() -> ContainerPolicy {
     )
     .unwrap()
 }
-fn image_with(user: &str, environment: Vec<String>) -> PinnedImage {
+pub(in crate::docker) fn image_with(user: &str, environment: Vec<String>) -> PinnedImage {
     let mut metadata = ResolvedImage::fixture(Architecture::Arm64)
         .metadata()
         .clone();
@@ -49,7 +49,7 @@ fn image_with(user: &str, environment: Vec<String>) -> PinnedImage {
     .unwrap();
     PinnedImage::fixture(metadata.try_into().unwrap())
 }
-fn revision() -> ExecutionRevision {
+pub(in crate::docker) fn revision() -> ExecutionRevision {
     ExecutionRevision::builder()
         .resource_id(FunctionResourceId::new())
         .revision_id(Uuid::new_v4().to_string())

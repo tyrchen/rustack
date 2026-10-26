@@ -17,7 +17,7 @@ use crate::{
     },
     relay::RelayError,
     session::{Invocation, RuntimeResult},
-    transport::{InputEnd, Settings, Transport, after},
+    transport::{InputEnd, Settings, Transport, after, preserve_worker_failure},
 };
 
 /// Validated host identity, expected architecture and control IO budget.
@@ -344,7 +344,7 @@ impl ControlClient {
         }
         .await;
         let io = self.transport.shutdown().await;
-        let outcome = outcome.and(io);
+        let outcome = preserve_worker_failure(outcome, io);
         self.settlement = Some(outcome.clone());
         outcome
     }

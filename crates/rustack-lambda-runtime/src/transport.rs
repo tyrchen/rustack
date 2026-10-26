@@ -18,6 +18,17 @@ use crate::{
 
 const MAILBOX_CAPACITY: usize = 2;
 
+pub(crate) fn preserve_worker_failure(
+    primary: Result<(), RelayError>,
+    joined: Result<(), RelayError>,
+) -> Result<(), RelayError> {
+    if matches!(&primary, Err(RelayError::Worker)) || matches!(&joined, Err(RelayError::Worker)) {
+        Err(RelayError::Worker)
+    } else {
+        primary.and(joined)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InputEnd {
     Close,
@@ -73,6 +84,13 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
+    #[cfg(test)]
+    pub(crate) fn abort_owner(&self) {
+        if let Some(task) = &self.owner.task {
+            task.abort();
+        }
+    }
+
     pub(crate) fn start<R, W>(reader: R, writer: W, settings: Settings) -> Result<Self, RelayError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -213,7 +231,7 @@ impl Owner {
                 Err(error) if error.is_cancelled() => Ok(()),
                 Ok(Ok(WorkerExit::OutputClosed)) | Err(_) => Err(RelayError::Worker),
             };
-            outcome = outcome.and(result);
+            outcome = preserve_worker_failure(outcome, result);
         }
         self.status.send_replace(Some(outcome.clone()));
         outcome

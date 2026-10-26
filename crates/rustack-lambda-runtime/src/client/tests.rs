@@ -590,3 +590,39 @@ fn test_should_validate_client_io_budget() {
         assert!(ClientConfig::new(EnvironmentId::default(), Architecture::Arm64, budget).is_err());
     }
 }
+
+#[tokio::test]
+async fn test_should_preserve_transport_worker_failure_after_a_prior_scope_error() {
+    let environment = EnvironmentId::default();
+    let (reader, mut peer) = duplex(4096);
+    let mut client = ControlClient::start(
+        ClientConfig::new(environment, Architecture::Arm64, Duration::from_secs(1)).unwrap(),
+        reader,
+        tokio::io::sink(),
+    )
+    .unwrap();
+    peer.write_all(
+        &encode(&Frame::new(
+            EnvironmentId::default(),
+            Message::Hello {
+                architecture: Architecture::Arm64,
+            },
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        client.next(deadline()).await,
+        Err(RelayError::Scope)
+    ));
+    client.transport.abort_owner();
+    assert!(matches!(
+        client.shutdown(deadline()).await,
+        Err(RelayError::Worker)
+    ));
+    assert!(matches!(
+        client.shutdown(deadline()).await,
+        Err(RelayError::Worker)
+    ));
+}

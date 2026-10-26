@@ -4,9 +4,9 @@
 
 ## Step Functions and Lambda Runtime — new specification set
 
-Status: P0 evidence complete; P1 runtime foundations are implemented and independently reviewed. Qualified components include shared RuntimeSession/HTTP/relay/client, bounded Docker wire, immutable image/default resolution, pin/deployment owners and provider control-plane settlement, persistent directory leases, independent function logs and immutable allocation plans. B01 dependency security, B03 strict production boundaries and B04 deployment validation are closed. See the [implementation ledger](./rustack-workflows-90-impl-plan.md#11-implementation-execution-record) and [review](./rustack-workflows-93-review.md) for exact evidence.
+Status: P0 evidence complete; P1 runtime foundations are implemented and independently reviewed. Qualified components include shared RuntimeSession/HTTP/relay/client, bounded Docker wire, immutable image/default resolution, pin/deployment owners and provider control-plane settlement, persistent directory leases, independent function logs, immutable allocation plans and retained environment lifecycle ownership. B01 dependency security, B03 strict production boundaries and B04 deployment validation are closed. See the [implementation ledger](./rustack-workflows-90-impl-plan.md#11-implementation-execution-record) and [review](./rustack-workflows-93-review.md) for exact evidence.
 
-Production Docker selection remains unavailable until environment/pool lifecycle, historical reconciliation, allowed pulls, network/probes and final wiring pass M0. The ASL engine and P2–P5 remain pending. The complete requested scope remains M0–M4. All feature documents below are in English; start here for the owned ASL engine and actual Docker image Lambda execution.
+Production Docker selection remains unavailable until pool/executor integration, historical reconciliation, allowed pulls, network/probes and final wiring pass M0. The ASL engine and P2–P5 remain pending. The complete requested scope remains M0–M4. All feature documents below are in English; start here for the owned ASL engine and actual Docker image Lambda execution.
 
 | Order | Specification | Type / purpose |
 |---|---|---|

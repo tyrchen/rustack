@@ -123,6 +123,8 @@ Expose capability fields for workflow type/query profile/state types/integration
 
 The workflow drain interval permits already accepted executions to finish. Then cancel remaining executions with ABORTED and error=Rustack.Shutdown, preserving terminal history. This is deliberate local shutdown behavior, not cloud-style pause/resume. Revoke callback tokens, cancel owned children and await Lambda cleanup before Lambda itself quiesces. Quarantine or unfinished cleanup prevents publishing a successful consistency snapshot. Quiescence must be idempotent and share one global absolute deadline, not restart a full timeout per worker.
 
+Within Lambda, stop deployment/invocation producers before retiring the pool/environment consumers. Join EnvironmentManager before revoking image leases, and join image cleanup before DockerWire shutdown. Environment count and aggregate function+relay memory remain reserved through allocating, idle, busy and quarantined states; a timed-out shutdown waiter leaves that ownership intact. A removed environment's business failure is distinct from failed supervision: known protocol/handler errors may retire cleanly, while Worker failure remains cached even after physical recovery. The lower-level owner alone is not a startup readiness receipt; historical uncertain effects and daemon/network/resource probes remain separate required gates.
+
 Snapshot coverage:
 
 | Resource | Persist | Restore behavior |

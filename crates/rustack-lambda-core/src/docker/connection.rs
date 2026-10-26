@@ -68,6 +68,7 @@ pub(super) async fn exchange(
         .with_subscriber(runtime_dispatch()),
     );
     let operation = async {
+        let mut mutation = request.mutation;
         let mut builder = Request::builder()
             .method(request.method)
             .uri(request.target)
@@ -83,6 +84,9 @@ pub(super) async fn exchange(
         let request = builder
             .body(Full::new(request.body))
             .map_err(|_| DockerError::Protocol)?;
+        if let Some(mutation) = &mut mutation {
+            mutation.issued();
+        }
         let response = sender.send_request(request).await?;
         read_response(response, expected, deadline).await
     };

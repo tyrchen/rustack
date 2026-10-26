@@ -876,3 +876,16 @@ test-iam-integration:
 	test-iam-unit test-iam-integration
 
 .PHONY: smoke smoke-services smoke-regressions
+
+# Explicit real two-container environment lifecycle qualification.
+test-lambda-environments-docker: lambda-runtime-image lambda-runtime-fixture-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --test docker_environment -- --ignored --test-threads=1
+
+.PHONY: test-lambda-environments-docker
+
+# Pure ownership/failure regressions plus transport failure precedence.
+test-lambda-environments:
+	@cargo test -p rustack-lambda-core --lib docker::environment::tests
+	@cargo test -p rustack-lambda-runtime --lib test_should_preserve_transport_worker_failure_after_a_prior_scope_error
+
+.PHONY: test-lambda-environments

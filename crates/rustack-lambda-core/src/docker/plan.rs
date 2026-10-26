@@ -16,9 +16,10 @@ use uuid::Uuid;
 use super::{
     DirectoryLease, DockerError, DockerKey, DockerPort,
     models::{
-        ContainerCreateBody, ContainerCreateResponse, HealthConfig, HostConfig,
-        HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
+        ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, HealthConfig,
+        HostConfig, HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
     },
+    mutation::MutationGuard,
 };
 use crate::{
     artifact::{DeploymentArtifact, PinnedImage},
@@ -28,6 +29,12 @@ use crate::{
 
 const MIB: u64 = 1024 * 1024;
 const RELAY_MEMORY: u64 = 64 * MIB;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ContainerRole {
+    Relay,
+    Function,
+}
 
 /// Operator network selection; a bridge still requires daemon startup validation.
 #[derive(Clone)]
@@ -154,7 +161,7 @@ struct Bodies {
 /// Fixed create requests retaining revision, image availability and namespace leases.
 #[non_exhaustive]
 pub struct EnvironmentPlan {
-    _directory: DirectoryLease,
+    pub(super) directory: DirectoryLease,
     relay: PinnedImage,
     revision: Arc<ExecutionRevision>,
     identity: Identity,
@@ -170,6 +177,46 @@ impl fmt::Debug for EnvironmentPlan {
     }
 }
 impl EnvironmentPlan {
+    pub(super) fn same_scope(&self, directory: &DirectoryLease) -> bool {
+        self.directory.owner_id() == directory.owner_id()
+            && self.directory.run_id() == directory.run_id()
+    }
+    pub(super) fn revision(&self) -> &ExecutionRevision {
+        &self.revision
+    }
+    pub(super) fn key(&self, role: ContainerRole) -> &DockerKey {
+        match role {
+            ContainerRole::Relay => self.relay_key(),
+            ContainerRole::Function => self.function_key(),
+        }
+    }
+    pub(super) fn owned(
+        &self,
+        role: ContainerRole,
+        inspected: &ContainerInspectResponse,
+    ) -> Result<DockerKey, DockerError> {
+        let body = match role {
+            ContainerRole::Relay => &self.bodies.relay,
+            ContainerRole::Function => &self.bodies.function,
+        };
+        let config = inspected.config.as_ref().ok_or(DockerError::Protocol)?;
+        let expected = body.labels.as_ref().ok_or(DockerError::Configuration)?;
+        let actual = config.labels.as_ref().ok_or(DockerError::Quarantined)?;
+        let id = inspected.id.as_deref().ok_or(DockerError::Protocol)?;
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || inspected.name.as_deref() != Some(format!("/{}", self.key(role).as_str()).as_str())
+            || config.image != body.image
+            || !expected
+                .iter()
+                .all(|(key, value)| actual.get(key) == Some(value))
+        {
+            return Err(DockerError::Quarantined);
+        }
+        id.parse()
+    }
     /// Allocate identities and validate both immutable create bodies before IO.
     ///
     /// # Errors
@@ -271,7 +318,7 @@ impl EnvironmentPlan {
             .checked_add(RELAY_MEMORY)
             .ok_or(DockerError::Configuration)?;
         Ok(Self {
-            _directory: directory,
+            directory,
             relay,
             revision,
             identity,
@@ -379,6 +426,27 @@ impl EnvironmentPlan {
             &self.bodies.function,
             self.revision.architecture,
             deadline,
+        )
+        .await
+    }
+    pub(super) async fn create_tracked(
+        &self,
+        role: ContainerRole,
+        port: &DockerPort,
+        deadline: Instant,
+        mutation: MutationGuard,
+    ) -> Result<ContainerCreateResponse, DockerError> {
+        self.live()?;
+        let body = match role {
+            ContainerRole::Relay => &self.bodies.relay,
+            ContainerRole::Function => &self.bodies.function,
+        };
+        port.create_container_inner(
+            self.key(role),
+            body,
+            Some(self.revision.architecture),
+            deadline,
+            Some(mutation),
         )
         .await
     }
@@ -604,4 +672,4 @@ fn function_environment(
 
 #[cfg(test)]
 #[path = "plan_tests.rs"]
-mod tests;
+pub(super) mod tests;

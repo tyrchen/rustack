@@ -4,10 +4,12 @@
 //! retain preallocated identities and reservations through reconciliation.
 
 mod connection;
+mod environment;
 mod framing;
 mod image;
 mod lease;
 mod logs;
+mod mutation;
 mod ownership;
 mod pin;
 mod plan;
@@ -25,6 +27,11 @@ use std::{
 pub use bollard_stubs::models;
 use bytes::Bytes;
 use connection::exchange;
+pub use environment::{
+    EnvironmentCapacity, EnvironmentConfig, EnvironmentError, EnvironmentHandle,
+    EnvironmentManager, EnvironmentPhase, EnvironmentPort, EnvironmentResponse,
+    EnvironmentSettings, EnvironmentStatus,
+};
 pub use framing::{DockerOutputReader, MAX_DOCKER_RECORD, OutputChannel, OutputChunk};
 use http::{Method, StatusCode};
 use hyper::upgrade::Upgraded;
@@ -90,6 +97,7 @@ impl Operation {
 }
 
 struct RawRequest {
+    mutation: Option<mutation::MutationGuard>,
     operation: Operation,
     method: Method,
     target: String,
@@ -374,7 +382,7 @@ impl DockerPort {
         body: &ContainerCreateBody,
         deadline: Instant,
     ) -> Result<ContainerCreateResponse, DockerError> {
-        self.create_container_inner(name, body, None, deadline)
+        self.create_container_inner(name, body, None, deadline, None)
             .await
     }
 
@@ -398,7 +406,7 @@ impl DockerPort {
         architecture: Architecture,
         deadline: Instant,
     ) -> Result<ContainerCreateResponse, DockerError> {
-        self.create_container_inner(name, body, Some(architecture), deadline)
+        self.create_container_inner(name, body, Some(architecture), deadline, None)
             .await
     }
 
@@ -408,6 +416,7 @@ impl DockerPort {
         body: &ContainerCreateBody,
         architecture: Option<Architecture>,
         deadline: Instant,
+        mutation: Option<mutation::MutationGuard>,
     ) -> Result<ContainerCreateResponse, DockerError> {
         let query = {
             let mut query = form_urlencoded::Serializer::new(String::new());
@@ -418,15 +427,19 @@ impl DockerPort {
             query.finish()
         };
         decode(
-            self.call(
-                Operation::Create,
-                Method::POST,
-                format!("/containers/create?{query}"),
-                encode(body)?,
-                StatusCode::CREATED,
-                deadline,
-            )
-            .await?,
+            self.raw
+                .request(
+                    RawRequest {
+                        mutation,
+                        operation: Operation::Create,
+                        method: Method::POST,
+                        target: format!("/v{}/containers/create?{query}", self.version),
+                        body: encode(body)?,
+                        expected: StatusCode::CREATED,
+                    },
+                    deadline,
+                )
+                .await?,
             deadline,
         )
     }
@@ -581,6 +594,7 @@ impl DockerPort {
         self.raw
             .request(
                 RawRequest {
+                    mutation: None,
                     operation,
                     method,
                     target,
@@ -624,6 +638,7 @@ impl DockerWire {
             let response = raw
                 .request(
                     RawRequest {
+                        mutation: None,
                         operation: Operation::Version,
                         method: Method::GET,
                         target: "/version".into(),
