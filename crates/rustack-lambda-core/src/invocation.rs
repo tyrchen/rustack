@@ -3,7 +3,11 @@
 //! Cancellation signals do not drop backend futures. The work supervisor owns
 //! those futures until their resources are settled.
 
-use std::{fmt, future::Future, sync::Arc};
+use std::{
+    fmt,
+    future::{Future, pending},
+    sync::Arc,
+};
 
 use parking_lot::Mutex as OwnerMutex;
 use tokio::{
@@ -14,7 +18,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::executor::{ExecutorError, InvokeResponse};
+use crate::{
+    error::LambdaServiceError,
+    executor::{ExecutorError, InvokeResponse},
+};
 
 /// Why an invocation must stop accepting a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,10 +48,19 @@ pub struct InvocationContext {
     id: Uuid,
     deadline: Instant,
     cancellation: watch::Receiver<bool>,
+    external: Option<watch::Receiver<bool>>,
 }
 
 impl InvocationContext {
+    #[cfg(test)]
     pub(crate) fn channel(deadline: Instant) -> (watch::Sender<bool>, Self) {
+        Self::channel_with_cancellation(deadline, None)
+    }
+
+    pub(crate) fn channel_with_cancellation(
+        deadline: Instant,
+        external: Option<watch::Receiver<bool>>,
+    ) -> (watch::Sender<bool>, Self) {
         let (sender, cancellation) = watch::channel(false);
         (
             sender,
@@ -52,6 +68,7 @@ impl InvocationContext {
                 id: Uuid::new_v4(),
                 deadline,
                 cancellation,
+                external,
             },
         )
     }
@@ -94,7 +111,13 @@ impl InvocationContext {
         if Instant::now() >= self.deadline {
             return Err(ExecutorError::DeadlineExceeded);
         }
-        if *self.cancellation.borrow() || self.cancellation.has_changed().is_err() {
+        if *self.cancellation.borrow()
+            || self.cancellation.has_changed().is_err()
+            || self
+                .external
+                .as_ref()
+                .is_some_and(|signal| *signal.borrow() || signal.has_changed().is_err())
+        {
             return Err(ExecutorError::Cancelled);
         }
         Ok(())
@@ -108,12 +131,12 @@ impl InvocationContext {
     /// # }
     /// ```
     pub async fn cancelled(&self) -> CancellationReason {
-        if Instant::now() >= self.deadline {
-            return CancellationReason::Deadline;
-        }
         let mut cancellation = self.cancellation.clone();
-        if *cancellation.borrow() {
-            return CancellationReason::Requested;
+        let mut external = self.external.clone();
+        match self.check() {
+            Err(ExecutorError::DeadlineExceeded) => return CancellationReason::Deadline,
+            Err(_) => return CancellationReason::Requested,
+            Ok(()) => {}
         }
         tokio::select! {
             biased;
@@ -121,7 +144,18 @@ impl InvocationContext {
             _ = cancellation.wait_for(|cancelled| *cancelled) => {
                 if Instant::now() >= self.deadline { CancellationReason::Deadline } else { CancellationReason::Requested }
             }
+            () = external_cancelled(&mut external) => {
+                if Instant::now() >= self.deadline { CancellationReason::Deadline } else { CancellationReason::Requested }
+            }
         }
+    }
+}
+
+async fn external_cancelled(external: &mut Option<watch::Receiver<bool>>) {
+    if let Some(signal) = external {
+        let _ = signal.wait_for(|cancelled| *cancelled).await;
+    } else {
+        pending::<()>().await;
     }
 }
 
@@ -137,7 +171,7 @@ pub(crate) enum Settlement {
 pub struct InvocationHandle {
     context: InvocationContext,
     cancellation: watch::Sender<bool>,
-    response: oneshot::Receiver<Result<InvokeResponse, ExecutorError>>,
+    response: Option<oneshot::Receiver<Result<InvokeResponse, ExecutorError>>>,
     settlement: watch::Receiver<Settlement>,
     cancel_on_drop: bool,
 }
@@ -162,7 +196,7 @@ impl InvocationHandle {
         Self {
             context,
             cancellation,
-            response,
+            response: Some(response),
             settlement,
             cancel_on_drop: true,
         }
@@ -203,20 +237,95 @@ impl InvocationHandle {
     /// # }
     /// ```
     pub async fn wait(mut self) -> Result<InvokeResponse, ExecutorError> {
-        self.context.check()?;
+        let result = self.wait_response().await;
+        if self.response.is_none() {
+            self.cancel_on_drop = false;
+        }
+        result
+    }
+
+    /// Read the business response while retaining the same cleanup handle.
+    ///
+    /// A dropped waiter can resume. A consumed result cannot be read twice.
+    ///
+    /// # Errors
+    /// Returns cancellation/deadline/backend failure, lost owner or consumed result.
+    ///
+    /// ```no_run
+    /// # async fn read(handle:&mut rustack_lambda_core::invocation::InvocationHandle) {
+    /// let response=handle.wait_response().await;
+    /// # }
+    /// ```
+    pub async fn wait_response(&mut self) -> Result<InvokeResponse, ExecutorError> {
+        if let Err(error) = self.context.check() {
+            self.cancel();
+            return Err(error);
+        }
+        let Some(receiver) = &mut self.response else {
+            return Err(ExecutorError::CleanupFailed(
+                "Invocation response already consumed".into(),
+            ));
+        };
         let response = tokio::select! {
             biased;
-            reason = self.context.cancelled() => return Err(reason.error()),
-            result = &mut self.response => result,
+            reason=self.context.cancelled()=>{self.cancel();return Err(reason.error());},
+            result=receiver=>result,
         };
-        self.context.check()?;
-        match response {
-            Ok(result) => {
+        self.response = None;
+        if let Err(error) = self.context.check() {
+            self.cancel();
+            return Err(error);
+        }
+        response.map_err(|_| {
+            ExecutorError::CleanupFailed("Invocation worker terminated without settlement".into())
+        })?
+    }
+
+    /// Await confirmed cleanup independently of response/deadline/cancellation.
+    ///
+    /// Expiry or dropping this waiter leaves the handle resumable and owned.
+    ///
+    /// # Errors
+    /// Returns `CleanupFailed` on expiry, uncertainty or a closed settlement channel.
+    ///
+    /// ```no_run
+    /// # async fn join(handle:&mut rustack_lambda_core::invocation::InvocationHandle,deadline:tokio::time::Instant) {
+    /// let cleanup=handle.wait_settlement(deadline).await;
+    /// # }
+    /// ```
+    pub async fn wait_settlement(&mut self, deadline: Instant) -> Result<(), ExecutorError> {
+        timeout_at(deadline, self.wait_cleanup())
+            .await
+            .map_err(|_| {
+                ExecutorError::CleanupFailed("Invocation cleanup observer expired".into())
+            })?
+    }
+
+    /// Retain ownership while joining cleanup without an observation deadline.
+    ///
+    /// This waits only on the supervisor's state channel; backend IO retains its
+    /// own deadlines. Use `wait_settlement` for a bounded observer of the same work.
+    ///
+    /// # Errors
+    /// Returns `CleanupFailed` if the owner closes or reports uncertain settlement.
+    ///
+    /// ```no_run
+    /// # async fn join(handle:&mut rustack_lambda_core::invocation::InvocationHandle) {
+    /// let settled=handle.wait_cleanup().await;
+    /// # }
+    /// ```
+    pub async fn wait_cleanup(&mut self) -> Result<(), ExecutorError> {
+        match self
+            .settlement
+            .wait_for(|state| *state != Settlement::Pending)
+            .await
+        {
+            Ok(state) if *state == Settlement::Clean => {
                 self.cancel_on_drop = false;
-                result
+                Ok(())
             }
-            Err(_) => Err(ExecutorError::CleanupFailed(
-                "Invocation worker terminated without settlement".into(),
+            _ => Err(ExecutorError::CleanupFailed(
+                "Invocation cleanup is not confirmed".into(),
             )),
         }
     }
@@ -235,21 +344,7 @@ impl InvocationHandle {
     /// ```
     pub async fn cancel_and_wait(mut self, deadline: Instant) -> Result<(), ExecutorError> {
         self.cancel();
-        let state = timeout_at(
-            deadline,
-            self.settlement
-                .wait_for(|state| *state != Settlement::Pending),
-        )
-        .await;
-        match state {
-            Ok(Ok(state)) if *state == Settlement::Clean => {
-                self.cancel_on_drop = false;
-                Ok(())
-            }
-            _ => Err(ExecutorError::CleanupFailed(
-                "Invocation cleanup is not confirmed".into(),
-            )),
-        }
+        self.wait_settlement(deadline).await
     }
 
     /// Transfer Event invocation ownership to the supervisor after successful admission.
@@ -269,6 +364,92 @@ impl Drop for InvocationHandle {
         if self.cancel_on_drop {
             self.cancel();
         }
+    }
+}
+
+/// Owned queued submission, retaining cleanup even when admission observation fails.
+#[non_exhaustive]
+pub struct InvocationSubmission {
+    handle: InvocationHandle,
+    accepted: Option<oneshot::Receiver<Result<(), LambdaServiceError>>>,
+    admitted: bool,
+}
+impl fmt::Debug for InvocationSubmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InvocationSubmission")
+            .field("handle", &self.handle)
+            .field("admitted", &self.admitted)
+            .finish_non_exhaustive()
+    }
+}
+impl InvocationSubmission {
+    pub(crate) fn new(
+        handle: InvocationHandle,
+        accepted: oneshot::Receiver<Result<(), LambdaServiceError>>,
+    ) -> Self {
+        Self {
+            handle,
+            accepted: Some(accepted),
+            admitted: false,
+        }
+    }
+    /// Await execution admission while keeping the cleanup receipt on every path.
+    ///
+    /// # Errors
+    /// Returns service rejection, cancellation/deadline or a lost admission owner.
+    /// Dropping this waiter does not drop the submission or restart admission.
+    ///
+    /// ```no_run
+    /// # async fn accepted(submission:&mut rustack_lambda_core::invocation::InvocationSubmission) {
+    /// let result=submission.admitted().await;
+    /// # }
+    /// ```
+    pub async fn admitted(&mut self) -> Result<(), LambdaServiceError> {
+        if self.admitted {
+            return Ok(());
+        }
+        let Some(receiver) = &mut self.accepted else {
+            return Err(admission_error(
+                "Invocation admission result already consumed",
+            ));
+        };
+        let result = tokio::select! {
+            biased;
+            reason=self.handle.context.cancelled()=>{self.handle.cancel();return Err(reason.error().into());},
+            result=receiver=>result,
+        };
+        self.accepted = None;
+        result.map_err(|_| admission_error("Invocation admission owner lost"))??;
+        self.handle
+            .context
+            .check()
+            .map_err(LambdaServiceError::from)?;
+        self.admitted = true;
+        Ok(())
+    }
+    /// Signal cancellation before admission completes without consuming ownership.
+    ///
+    /// ```
+    /// # fn cancel(submission:&rustack_lambda_core::invocation::InvocationSubmission) {submission.cancel();}
+    /// ```
+    pub fn cancel(&self) {
+        self.handle.cancel();
+    }
+    /// Transfer the invocation handle even after admission rejection or timeout.
+    ///
+    /// ```
+    /// # fn transfer(submission:rustack_lambda_core::invocation::InvocationSubmission) {
+    /// let retained=submission.into_handle();
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn into_handle(self) -> InvocationHandle {
+        self.handle
+    }
+}
+fn admission_error(message: &str) -> LambdaServiceError {
+    LambdaServiceError::ResourceNotReady {
+        message: message.into(),
     }
 }
 
@@ -464,6 +645,109 @@ mod tests {
         for _ in 0..2 {
             assert!(matches!(
                 cleanup.wait().await,
+                Err(ExecutorError::CleanupFailed(_))
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod submission_tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn test_should_propagate_external_cancellation_and_keep_deadline_precedence() {
+        let (external, signal) = watch::channel(false);
+        let (_own, context) = InvocationContext::channel_with_cancellation(
+            Instant::now() + Duration::from_secs(1),
+            Some(signal),
+        );
+        external.send_replace(true);
+        assert_eq!(context.cancelled().await, CancellationReason::Requested);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(context.cancelled().await, CancellationReason::Deadline);
+        let (external, signal) = watch::channel(false);
+        let (_own, context) = InvocationContext::channel_with_cancellation(
+            Instant::now() + Duration::from_secs(1),
+            Some(signal),
+        );
+        drop(external);
+        assert!(matches!(context.check(), Err(ExecutorError::Cancelled)));
+        assert_eq!(context.cancelled().await, CancellationReason::Requested);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn test_should_keep_cleanup_receipt_after_rejected_admission_and_waiter_timeout() {
+        let (cancel, context) =
+            InvocationContext::channel(Instant::now() + Duration::from_secs(10));
+        let (_response, receiver) = oneshot::channel();
+        let (settlement, settled) = watch::channel(Settlement::Pending);
+        let handle = InvocationHandle::new(context, cancel, receiver, settled);
+        let (admitted, accepted) = oneshot::channel();
+        let mut submission = InvocationSubmission::new(handle, accepted);
+        admitted
+            .send(Err(LambdaServiceError::TooManyRequests))
+            .unwrap();
+        assert!(matches!(
+            submission.admitted().await,
+            Err(LambdaServiceError::TooManyRequests)
+        ));
+        let mut handle = submission.into_handle();
+        assert!(
+            handle
+                .wait_settlement(Instant::now() + Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        settlement.send_replace(Settlement::Clean);
+        handle.wait_cleanup().await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn test_should_resume_response_wait_and_reject_second_consumption_without_panic() {
+        let (cancel, context) =
+            InvocationContext::channel(Instant::now() + Duration::from_secs(10));
+        let (response, receiver) = oneshot::channel();
+        let (settlement, settled) = watch::channel(Settlement::Pending);
+        let mut handle = InvocationHandle::new(context, cancel.clone(), receiver, settled);
+        assert!(
+            timeout_at(
+                Instant::now() + Duration::from_secs(1),
+                handle.wait_response()
+            )
+            .await
+            .is_err()
+        );
+        assert!(!*cancel.borrow());
+        response
+            .send(Ok(InvokeResponse::success(
+                Bytes::from_static(b"5"),
+                "$LATEST".into(),
+            )))
+            .unwrap();
+        assert_eq!(
+            handle.wait_response().await.unwrap().payload,
+            Bytes::from_static(b"5")
+        );
+        assert!(matches!(
+            handle.wait_response().await,
+            Err(ExecutorError::CleanupFailed(_))
+        ));
+        settlement.send_replace(Settlement::Clean);
+        handle.wait_cleanup().await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn test_should_not_certify_uncertain_or_lost_cleanup_from_owned_submission() {
+        for state in [Settlement::Pending, Settlement::Uncertain] {
+            let (cancel, context) =
+                InvocationContext::channel(Instant::now() + Duration::from_secs(10));
+            let (_response, receiver) = oneshot::channel();
+            let (settlement, settled) = watch::channel(state);
+            let mut handle = InvocationHandle::new(context, cancel, receiver, settled);
+            drop(settlement);
+            assert!(matches!(
+                handle.wait_cleanup().await,
                 Err(ExecutorError::CleanupFailed(_))
             ));
         }

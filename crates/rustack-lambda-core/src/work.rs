@@ -19,7 +19,7 @@ use typed_builder::TypedBuilder;
 use crate::{
     error::LambdaServiceError,
     executor::{Executor, ExecutorError, InvokeRequest, InvokeResponse},
-    invocation::{InvocationContext, InvocationHandle, Settlement},
+    invocation::{InvocationContext, InvocationHandle, InvocationSubmission, Settlement},
 };
 
 const ACCEPTED_LIMIT: u32 = 128;
@@ -170,6 +170,7 @@ impl WorkManager {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit(
         &self,
         executor: Arc<dyn Executor>,
@@ -178,6 +179,27 @@ impl WorkManager {
         asynchronous: bool,
         caller_deadline: Option<Instant>,
     ) -> Result<InvocationHandle, LambdaServiceError> {
+        let mut submission = self.submit_owned(
+            executor,
+            request,
+            reserved,
+            asynchronous,
+            caller_deadline,
+            None,
+        )?;
+        submission.admitted().await?;
+        Ok(submission.into_handle())
+    }
+
+    pub(crate) fn submit_owned(
+        &self,
+        executor: Arc<dyn Executor>,
+        request: InvokeRequest,
+        reserved: Option<i32>,
+        asynchronous: bool,
+        caller_deadline: Option<Instant>,
+        external: Option<watch::Receiver<bool>>,
+    ) -> Result<InvocationSubmission, LambdaServiceError> {
         executor.available(&request)?;
         if !self.accepting.load(Ordering::Acquire) {
             return Err(unavailable("Lambda is quiescing"));
@@ -198,7 +220,8 @@ impl WorkManager {
             .checked_add(total)
             .ok_or_else(|| unavailable("Invalid invocation budget"))?;
         let deadline = caller_deadline.map_or(deadline, |caller| caller.min(deadline));
-        let (cancellation, context) = InvocationContext::channel(deadline);
+        let (cancellation, context) =
+            InvocationContext::channel_with_cancellation(deadline, external);
         context.check()?;
         let (admitted, accepted) = oneshot::channel();
         let (response, receiver) = oneshot::channel();
@@ -224,14 +247,7 @@ impl WorkManager {
                 mpsc::error::TrySendError::Full(_) => LambdaServiceError::TooManyRequests,
                 mpsc::error::TrySendError::Closed(_) => unavailable("Lambda supervisor stopped"),
             })?;
-        tokio::select! {
-            biased;
-            reason = context.cancelled() => Err(LambdaServiceError::from(reason.error())),
-            result = accepted => {
-                result.map_err(|_| unavailable("Lambda admission supervisor stopped"))??;
-                Ok(handle)
-            }
-        }
+        Ok(InvocationSubmission::new(handle, accepted))
     }
 
     pub(crate) fn cancel_all(&self) {

@@ -160,6 +160,18 @@ test-stepfunctions-core:
 
 .PHONY: test-stepfunctions-core
 
+test-stepfunctions-bridge:
+	@cargo test -p rustack-cli --lib --features stepfunctions
+	@cargo test -p rustack-cli --doc --features stepfunctions
+	@cargo clippy -p rustack-cli --all-targets --features stepfunctions -- -D warnings
+	@cargo clippy -p rustack-cli --lib --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+test-stepfunctions-bridge-native:
+	@cargo build -p rustack-lambda-echo-bootstrap
+	@RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test -p rustack-cli --lib --features stepfunctions native_e2e -- --ignored --test-threads=1
+
+.PHONY: test-stepfunctions-bridge test-stepfunctions-bridge-native
+
 audit-codegen:
 	@cargo audit --file codegen/Cargo.lock
 

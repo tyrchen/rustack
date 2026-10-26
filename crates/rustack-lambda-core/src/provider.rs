@@ -54,7 +54,7 @@ use rustack_lambda_model::{
     },
 };
 use tokio::{
-    sync::SemaphorePermit,
+    sync::{SemaphorePermit, watch},
     time::{Instant, timeout_at},
 };
 
@@ -65,11 +65,11 @@ use crate::{
     deployment::{DeploymentState, check_revision},
     error::LambdaServiceError,
     executor::{
-        AutoExecutor, ExecutionRevision, Executor, ExecutorBackend, InvokeRequest, NativeExecutor,
-        NoopExecutor, SquibExecutor,
+        AutoExecutor, ExecutionRevision, Executor, ExecutorBackend, ExecutorError, InvokeRequest,
+        NativeExecutor, NoopExecutor, SquibExecutor,
     },
     identity::FunctionResourceId,
-    invocation::InvocationHandle,
+    invocation::{InvocationHandle, InvocationSubmission},
     resolver::{
         alias_arn, function_arn, function_version_arn, layer_arn, layer_version_arn,
         parse_layer_version_arn, resolve_function_ref, resolve_version,
@@ -216,6 +216,23 @@ impl ProcessedCode<'_> {
         if let Self::Zip(staged) = self {
             staged.commit();
         }
+    }
+}
+
+#[derive(Debug)]
+struct InvocationOptions {
+    asynchronous: bool,
+    deadline: Option<Instant>,
+    capture_logs: bool,
+    cancellation: Option<watch::Receiver<bool>>,
+}
+fn check_external_cancellation(
+    signal: Option<&watch::Receiver<bool>>,
+) -> Result<(), LambdaServiceError> {
+    if signal.is_some_and(|signal| *signal.borrow() || signal.has_changed().is_err()) {
+        Err(ExecutorError::Cancelled.into())
+    } else {
+        Ok(())
     }
 }
 
@@ -1210,11 +1227,65 @@ impl RustackLambda {
         .await
     }
 
+    /// Capture and queue an invocation, returning ownership before admission waits.
+    ///
+    /// An error means no call was queued. After success, retain the submission or
+    /// its handle through cleanup even if `admitted()` fails or the caller stops.
+    /// External cancellation is checked across capture, queueing and execution.
+    ///
+    /// # Errors
+    /// Rejects invalid input/scope/revision, capture failure, cancellation or full queue.
+    ///
+    /// ```no_run
+    /// # async fn begin(provider:&rustack_lambda_core::provider::RustackLambda,signal:tokio::sync::watch::Receiver<bool>) -> Result<(),Box<dyn std::error::Error>> {
+    /// let mut submission=provider.start_invocation_owned("worker",None,b"{}",None,signal).await?;
+    /// let admitted=submission.admitted().await;
+    /// let handle=submission.into_handle();
+    /// # Ok(()) }
+    /// ```
+    pub async fn start_invocation_owned(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+        payload: &[u8],
+        deadline: Option<Instant>,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<InvocationSubmission, LambdaServiceError> {
+        validate_invoke_payload(payload, MAX_SYNC_PAYLOAD)?;
+        check_external_cancellation(Some(&cancellation))?;
+        let (record, qualifier) = self.resolve_invocation(function_ref, qualifier)?;
+        self.prepare_invocation(
+            &record,
+            qualifier.as_deref(),
+            payload,
+            InvocationOptions {
+                asynchronous: false,
+                deadline,
+                capture_logs: false,
+                cancellation: Some(cancellation),
+            },
+        )
+        .await
+    }
+
     fn resolve_invocation(
         &self,
         reference: &str,
         qualifier: Option<&str>,
     ) -> Result<(FunctionRecord, Option<String>), LambdaServiceError> {
+        if reference
+            .split_once(':')
+            .is_some_and(|(account, resource)| {
+                account.len() == 12
+                    && account.bytes().all(|b| b.is_ascii_digit())
+                    && resource.starts_with("function:")
+                    && account != self.config.account_id
+            })
+        {
+            return Err(invalid_parameter(
+                "Invocation partial ARN does not match this Lambda scope",
+            ));
+        }
         let (name, embedded) = resolve_function_ref(reference)?;
         if qualifier
             .zip(embedded.as_deref())
@@ -1250,6 +1321,37 @@ impl RustackLambda {
         deadline: Option<Instant>,
         capture_logs: bool,
     ) -> Result<InvocationHandle, LambdaServiceError> {
+        let mut submission = self
+            .prepare_invocation(
+                record,
+                qualifier,
+                payload,
+                InvocationOptions {
+                    asynchronous,
+                    deadline,
+                    capture_logs,
+                    cancellation: None,
+                },
+            )
+            .await?;
+        submission.admitted().await?;
+        Ok(submission.into_handle())
+    }
+
+    async fn prepare_invocation(
+        &self,
+        record: &FunctionRecord,
+        qualifier: Option<&str>,
+        payload: &[u8],
+        options: InvocationOptions,
+    ) -> Result<InvocationSubmission, LambdaServiceError> {
+        let InvocationOptions {
+            asynchronous,
+            deadline,
+            capture_logs,
+            cancellation,
+        } = options;
+        check_external_cancellation(cancellation.as_ref())?;
         let version = resolve_version(record, qualifier)?;
         let capture = self.build_invoke_request(record, version, qualifier, payload);
         let mut request = if let Some(deadline) = deadline {
@@ -1260,15 +1362,15 @@ impl RustackLambda {
             capture.await?
         };
         request.capture_logs = capture_logs;
-        self.work
-            .submit(
-                Arc::clone(&self.executor),
-                request,
-                record.reserved_concurrent_executions,
-                asynchronous,
-                deadline,
-            )
-            .await
+        check_external_cancellation(cancellation.as_ref())?;
+        self.work.submit_owned(
+            Arc::clone(&self.executor),
+            request,
+            record.reserved_concurrent_executions,
+            asynchronous,
+            deadline,
+            cancellation,
+        )
     }
 
     /// Build the executor request from a resolved function/version record.
@@ -3794,6 +3896,28 @@ mod tests {
         assert!(entries.next_entry().await?.is_some());
         assert!(entries.next_entry().await?.is_none());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_partial_invocation_account_before_local_resolution() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("scoped"))
+            .await
+            .unwrap();
+        assert!(
+            provider
+                .resolve_invocation("000000000000:function:scoped", None)
+                .is_ok()
+        );
+        assert!(matches!(
+            provider.resolve_invocation("999999999999:function:scoped", None),
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            provider.resolve_invocation("999999999999:function:scoped:1", None),
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
     }
 
     fn test_provider() -> RustackLambda {

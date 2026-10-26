@@ -19,10 +19,45 @@ Add a shared internal invocation-handle API to Lambda provider; HTTP Invoke dele
 │    └─ cancellation / generation validation                   │     │
 └──────────────────────────────────────────────────────────────┼─────┘
 ┌─ binary composition root ────────────────────────────────────▼─────┐
-│ StepFunctionsLambdaBridge → Lambda provider.start_invocation      │
+│ StepFunctionsLambdaBridge → Lambda provider.start_invocation_owned│
 │                            version resolution + same admission   │
 └───────────────────────────────────────────────┬───────────────────┘
                                       Executor → actual runtime
+```
+
+### 1.1 Owned admission receipts and the binary Lambda bridge
+
+Add `InvocationSubmission` to the shared Lambda API. `start_invocation_owned(reference, qualifier, payload, deadline, cancellation)` validates/resolves/captures a revision, then synchronously queues owned work and returns the submission before waiting for execution admission. An error before this return means no function call was queued. The submission retains its InvocationHandle independently of the admission result: `admitted(&mut self)` is cancellation-safe and `into_handle(self)` transfers the cleanup receipt even after admission rejection/expiry. Existing start_invocation/HTTP paths await admission through this receipt and retain their wire semantics. Dropping their old waiter still requests cancellation while the existing work supervisor owns cleanup.
+
+InvocationHandle adds borrowed `wait_response`, `wait_cleanup` and `wait_settlement(deadline)` methods. The unbounded cleanup observer waits only on the retained supervisor state, not on IO; the bridge bounds its first observation and resumes the same handle after observer expiry. Consuming a response does not consume cleanup ownership. A second response read returns a typed error rather than repolling a completed oneshot. Settlement waiters can expire/be dropped and resume the same handle; Pending, Uncertain or closed channels never imply Clean. Retain the existing consuming wait/cancel_and_wait conveniences. Optional external cancellation is validated before/after artifact capture, before queueing and by InvocationContext before allocation/during execution. A bridge relay combines Step Functions cancellation and bridge shutdown; it stays alive through physical settlement. The bridge retains a pending start future until it returns a receipt or a prequeue error, even when its ASL caller has stopped.
+
+`apps/rustack/src/stepfunctions_bridge.rs` implements LambdaTaskPort in a feature-gated public binary-support library. This is reusable composition code, not main-service registration. Construction requires an active Tokio runtime and an actual injected provider/scope. It returns an Arc port plus a supervisor controller. Synchronous start checks scope/deadline/accepting state, reserves bounded accepted-work capacity and queues before returning TaskCall. Defaults128 accepted calls, cleanup wait10s; validate1..1,024 and1..60s. The manager owns submissions, invocation worker JoinSet and per-call admission slots above worker lifetime. Never invoke Noop/echo as a production fallback. Construction rejects a disabled backend and mismatched provider partition/region/account; the future main composition root must install it only for an explicitly selected real backend.
+
+The controller's shutdown uses one absolute deadline and retains the same manager JoinHandle after timeout or waiter cancellation. It stops admission and signals active workers before the Lambda provider itself quiesces. A worker panic retains its root slot and publishes no clean completion. Expired cleanup observation quarantines the business result while retaining the actual Lambda handle, QuarantinedTask receipt and admission slot. Resume the same cleanup observer: eventual Clean settles only the receipt, without publishing a second business result; terminal Uncertain/closed retains the unresolved graph. Drop transfers/drains ownership independently of public handles; an abort/runtime-loss guard preserves unresolved state as process-lifetime quarantine. Normal clean shutdown releases all reservations. Raw requests/responses, payloads, host errors and credentials never appear in Debug/logs; typed sources remain in redacted internal diagnostics.
+
+At each attempt, decode direct Resource or optimized prepared Parameters, then call the same provider's owned API. Revalidate optimized object fields, FunctionName string≤256 bytes, optional Qualifier1..128 bytes and RequestResponse-only InvocationType after template evaluation. The bridge accepts only a plain function name or complete same-scope ARN; reject partial ARNs and name:qualifier forms after dynamic evaluation as well as static compilation. Let the provider's ordinary resolver validate name/ARN/qualifier existence/conflicts and capture the revision. Ordinary Lambda Invoke retains supported same-account partial ARNs but rejects mismatched partial-ARN accounts before local resolution. Omitted optimized Payload uses `{}` as the selected local default; explicit null/scalar/array/object payloads preserve their JSON type. Strings are JSON values, not pre-serialized input. No alias/revision pinning across retries and no adapter-added business retries.
+
+On admission success, report Started once. Read response while retaining the Lambda handle; signal cancellation on ASL/manager stop and join settlement independently of the attempt deadline. Map business response under bounded retained CPU work. Direct success is the parsed JSON itself; optimized success is Payload, StatusCode=200, ExecutedVersion, SdkHttpMetadata.HttpStatusCode=200 and SdkResponseMetadata.RequestId from the actual admitted Lambda UUID. Do not synthesize cloud trace headers. Enforce256KiB on raw JSON and final envelope; quota failures are States.DataLimitExceeded, invalid JSON/UTF-8 or evaluated parameter shape are States.Runtime. Non200 executor responses are Lambda.ServiceException.
+
+FunctionError alone selects the failure path; ordinary success keys named error/FunctionError/statusCode are business data. Parse a bounded errorType; empty/control-containing/over256-byte/reserved States.* values become Lambda.Unknown. Cause is valid raw error JSON, capped at32,768 bytes on a UTF-8 boundary with an explicit truncation marker; malformed error output uses a static safe cause. Runtime timeouts map Sandbox.Timedout, entrypoint/init failures Runtime.InvalidEntrypoint, runtime exits Runtime.ExitError, and known service exceptions Lambda.<code>. Unknown/IO/uncertain errors map Lambda.ServiceException with static public causes and retained internal sources. Core owns ASL States.Timeout and rejects late results. Only confirmed settlement calls TaskResponder.finish; an uncertain result uses quarantine and remains charged.
+
+Qualify direct/optimized actual Native bootstrap execution, dynamic parameter rejection, FunctionError/Catch, retries, version/alias re-resolution, cancellation/timeout, function-owned Sandbox.Timedout and distinct metadata IDs before returning to image work. Cancellation/ASL-timeout fixtures must first observe a handler-written PID/request-ID marker after Runtime API event consumption, then assert that PID is absent after joined cleanup; Started alone proves admission, not handler execution. Controlled provider/executor fixtures separately exercise admission/cleanup races; they do not replace actual process execution. SDK/main-service and final real-image/platform acceptance remain required.
+
+```text
+┌─ Step Functions actor ──────────────────────────────────────────────┐
+│ TaskCall ← synchronous bounded port.start(command)                  │
+└────────────────────────────┬───────────────────────────────────────┘
+                             ▼ manager owns queue / root slots / jobs
+┌─ binary Lambda bridge worker ───────────────────────────────────────┐
+│ retained start future → InvocationSubmission → admitted → Started  │
+│                    │                 │                             │
+│ cancellation relay └→ InvocationHandle.wait_response                │
+│                         ↓ bounded result mapping                   │
+│ retained handle.wait_settlement → Clean / owned quarantine         │
+│                   TaskResponder.finish / QuarantinedTask            │
+└────────────────────────────┬───────────────────────────────────────┘
+                             ▼ same provider resolution and quotas
+                 actual Native / Squib / ready Docker executor
 ```
 
 ## 2. Integration allowlist

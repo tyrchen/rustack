@@ -437,3 +437,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: neither dropping a waiter nor a closed response lane establishes cleanup; copied full histories scale quadratically; independent outcome/history writes expose inconsistent termination.
 - **Pinned by**: [ASL§3.2](./rustack-workflows-30-asl-design.md#32-supervised-sequential-runtime-and-history-publication), [integrations§1](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction), [API§6](./rustack-workflows-10-api-design.md#6-history-and-pagination).
 - **Date**: 2026-10-26. Reuse resolved Tokio/model dependencies; main registration, registry, real bridge and final image acceptance remain required.
+
+## D50 — Return an owned Lambda submission before awaiting admission
+
+- **Context**: an async admission waiter may fail after queue ownership transfers; absence of a returned handle is not cleanup proof for Step Functions.
+- **Decision**: split prequeue capture/submission from admission observation, retain the invocation handle through result and settlement, and propagate external cancellation into the shared invocation context. The binary bridge queues synchronously, owns start/result/cleanup workers independently of ASL observers and preserves uncertain handles plus capacity.
+- **Why**: the bridge must distinguish prequeue errors, business completion and resource settlement without hidden retries or disabled-runtime fallbacks. Ordinary Invoke keeps its public behavior through the same receipt.
+- **Pinned by**: [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge), [ASL§3.2](./rustack-workflows-30-asl-design.md#32-supervised-sequential-runtime-and-history-publication).
+- **Compatibility**: the bridge profile accepts plain names and complete same-scope ARNs; ordinary Invoke keeps same-account partial references with an explicit account guard. Cleanup observer expiry retains the same invocation handle until Clean or permanent quarantine.
+- **Date**: 2026-10-26. Qualify actual Native workflow calls before the deferred Docker image work; main registration and full milestone gates remain required.

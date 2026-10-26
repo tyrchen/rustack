@@ -59,6 +59,8 @@ All budgets are validated once; limits below are local defaults and safe configu
 | workflowOpenExecutions |128|1..4,096, including children |
 | workflowEvaluations |8|1..128; retained blocking evaluation/entropy workers |
 | workflowDispatches |32|1..1,024; released while waiting on child/callback |
+| workflowLambdaAcceptedCalls |128|1..1,024; separate binary-bridge queue/running/quarantine ownership budget |
+| workflowLambdaCleanupSeconds |10|1..60; initial cleanup observation only, never releases an unresolved invocation |
 | workflowFrames / workflowFramesPerExecution |4,096 /512|1..65,536 /1..4,096; per-execution≤global |
 | workflowMaxDurationSeconds |3,600|1..31,536,000; independent local ceiling even without ASL TimeoutSeconds |
 | workflowTransitions |100,000|1..1,000,000; history may exhaust first |
@@ -143,6 +145,8 @@ The workflow drain interval permits already accepted executions to finish. Then 
 The host and pinned relay image must implement control protocol version2 together (§3.8 of the runtime design). An older version1 relay is incompatible and fails initialization before function allocation. Rebuild/re-pin the relay on protocol upgrades; do not silently omit handler-timeout enforcement to accept an older image. Caller absolute budgets include queue/startup/execution; the captured function handler budget arms only at consumed Runtime API delivery. Cleanup remains independently owned if the caller budget expires.
 
 LogType=Tail uses the invocation's bounded observed log window; environment-wide diagnostic tails remain separate. Window boundaries follow actor-observed completed chunks across independent stdout/stderr and control streams. Buffered/background output can arrive in a later window; this local runtime does not claim a causal producer flush barrier. A silent invocation never copies the prior collected diagnostic tail. Lost capabilities or unconsumed/expired mutation receipts invalidate capture and require environment retirement. No flush sleeps or extra Docker log replay are used.
+
+The Step Functions Lambda bridge closes and joins before provider quiescence. Its supervisor retains one manager join across deadline expiry or a dropped shutdown waiter; unresolved Lambda handles and bridge slots remain charged, and the same cleanup observer can later settle the receipt without a second business outcome. See [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge). These bridge budgets are validated constructor settings until the main YAML/service composition is implemented.
 
 Within Lambda, stop deployment/invocation producers before retiring the pool/environment consumers. Join EnvironmentPool before EnvironmentManager, then join EnvironmentManager before revoking image leases, and join image cleanup before DockerWire shutdown. Environment count and aggregate function+relay memory remain reserved through allocating, idle, busy and quarantined states; a timed-out shutdown waiter leaves that ownership intact. A removed environment's business failure is distinct from failed supervision: known protocol/handler errors may retire cleanly, while Worker failure remains cached even after physical recovery. The lower-level owner alone is not a startup readiness receipt; historical uncertain effects and daemon/network/resource probes remain separate required gates.
 

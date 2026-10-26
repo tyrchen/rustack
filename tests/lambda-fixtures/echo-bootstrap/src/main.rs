@@ -4,6 +4,8 @@
 //!
 //! - default → echo `{"echo": <body>, "request_id": <id>}`
 //! - `FAIL_MODE=panic` → POST `/error` with a known JSON shape
+//! - `WORKFLOW_MODE=1` → checked computation; optional `WORKFLOW_FAIL_ONCE=1`
+//! - `INVOCATION_FILE=path` → per-event PID/request-ID marker after body receipt
 //! - `SLEEP_SECS=N` → sleep N seconds before responding (for timeout tests)
 //!
 //! Uses synchronous `ureq` to keep the binary tiny and free of an async
@@ -35,6 +37,8 @@ fn main() {
         }
     };
     let config_marker = std::env::var("CONFIG_MARKER").ok();
+    let workflow_mode = std::env::var("WORKFLOW_MODE").is_ok_and(|value| value == "1");
+    let workflow_fail_once = std::env::var("WORKFLOW_FAIL_ONCE").is_ok_and(|value| value == "1");
     if let Ok(path) = std::env::var("STARTED_FILE") {
         if let Err(error) = std::fs::write(path, std::process::id().to_string()) {
             eprintln!("Write start marker: {error}");
@@ -77,6 +81,13 @@ fn main() {
             return;
         }
 
+        if let Ok(path) = std::env::var("INVOCATION_FILE") {
+            let marker = serde_json::json!({"pid":std::process::id(),"request_id":request_id});
+            if let Err(error) = std::fs::write(path, marker.to_string()) {
+                eprintln!("Write invocation marker: {error}");
+                return;
+            }
+        }
         if sleep_secs > 0 {
             std::thread::sleep(Duration::from_secs(sleep_secs));
         }
@@ -92,18 +103,67 @@ fn main() {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-        let echo = serde_json::json!({
-            "echo": parsed,
-            "request_id": request_id,
-            "codeMarker": code_marker,
-            "configMarker": config_marker,
-            "pid": std::process::id(),
-            "runtimeApi": api,
-        });
+        let (kind, response) = invocation_response(
+            &parsed,
+            workflow_mode,
+            workflow_fail_once,
+            &request_id,
+            code_marker.as_deref(),
+            config_marker.as_deref(),
+            &api,
+        );
         let _ = agent
             .post(&format!(
-                "http://{api}/2018-06-01/runtime/invocation/{request_id}/response"
+                "http://{api}/2018-06-01/runtime/invocation/{request_id}/{kind}"
             ))
-            .send_string(&echo.to_string());
+            .send_string(&response.to_string());
     }
+}
+
+fn compute_workflow(
+    input: &serde_json::Value,
+    fail_once: bool,
+    code_marker: Option<&str>,
+    request_id: &str,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let retry = input
+        .get("retryCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if fail_once && retry == 0 {
+        return Err(
+            serde_json::json!({"errorMessage":"retry requested","errorType":"WorkflowTransient"}),
+        );
+    }
+    let value = input
+        .get("n")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(
+            || serde_json::json!({"errorMessage":"invalid input","errorType":"WorkflowInputError"}),
+        )?;
+    Ok(
+        serde_json::json!({"computed":value,"retryCount":retry,"request_id":request_id,"codeMarker":code_marker,"pid":std::process::id()}),
+    )
+}
+
+fn invocation_response(
+    input: &serde_json::Value,
+    workflow: bool,
+    fail_once: bool,
+    request_id: &str,
+    code_marker: Option<&str>,
+    config_marker: Option<&str>,
+    api: &str,
+) -> (&'static str, serde_json::Value) {
+    if workflow {
+        return match compute_workflow(input, fail_once, code_marker, request_id) {
+            Ok(body) => ("response", body),
+            Err(error) => ("error", error),
+        };
+    }
+    (
+        "response",
+        serde_json::json!({"echo":input,"request_id":request_id,"codeMarker":code_marker,"configMarker":config_marker,"pid":std::process::id(),"runtimeApi":api}),
+    )
 }

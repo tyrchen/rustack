@@ -122,6 +122,41 @@ impl fmt::Debug for TaskFailure {
     }
 }
 impl TaskFailure {
+    /// Read bounded failure fields without exposing mutable construction.
+    ///
+    /// ```
+    /// let failure=rustack_stepfunctions_core::TaskFailure::new("BusinessError",None)?;
+    /// assert_eq!(failure.details().error(),Some("BusinessError"));
+    /// # Ok::<(),rustack_stepfunctions_core::AslError>(())
+    /// ```
+    #[must_use]
+    pub fn details(&self) -> &ExecutionFailure {
+        &self.0
+    }
+    /// Build a bounded standard service failure for task-port admission/ownership.
+    ///
+    /// ```
+    /// let failure=rustack_stepfunctions_core::TaskFailure::service_exception();
+    /// ```
+    #[must_use]
+    pub fn service_exception() -> Self {
+        Self(ExecutionFailure::named(
+            "Lambda.ServiceException",
+            "Lambda task service unavailable",
+        ))
+    }
+    /// Build a bounded standard concurrency rejection without fallible user fields.
+    ///
+    /// ```
+    /// let failure=rustack_stepfunctions_core::TaskFailure::throttled();
+    /// ```
+    #[must_use]
+    pub fn throttled() -> Self {
+        Self(ExecutionFailure::named(
+            "Lambda.TooManyRequestsException",
+            "Lambda task capacity exhausted",
+        ))
+    }
     /// Validate a nonempty256-byte/control-free name and optional32,768-byte cause.
     ///
     /// # Errors
