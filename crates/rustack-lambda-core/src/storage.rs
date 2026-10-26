@@ -20,6 +20,7 @@ use rustack_lambda_model::types::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use crate::{
     artifact::{ImageArtifact, ResolvedImage, ValidatedArtifact},
@@ -38,6 +39,7 @@ pub struct FunctionStore {
     /// Own completed artifacts until the store is dropped; in-flight revisions remain readable.
     artifacts: DashMap<PathBuf, ValidatedArtifact>,
     staging: std::sync::Arc<tokio::sync::Semaphore>,
+    changes: watch::Sender<()>,
 }
 
 /// Rolls back a newly registered artifact unless its record mutation commits.
@@ -956,7 +958,13 @@ impl FunctionStore {
             code_dir: code_dir.into(),
             artifacts: DashMap::new(),
             staging: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+            changes: watch::channel(()).0,
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
+        self.changes.subscribe()
     }
 
     /// Returns a reference to the code directory path.
@@ -979,6 +987,7 @@ impl FunctionStore {
             }),
             Entry::Vacant(entry) => {
                 entry.insert(record);
+                self.changes.send_replace(());
                 Ok(())
             }
         }
@@ -1066,6 +1075,7 @@ impl FunctionStore {
                 }
                 self.validate_record(&candidate)?;
                 *entry = candidate;
+                self.changes.send_replace(());
                 Ok(result)
             }
             None => Err(LambdaServiceError::FunctionNotFound {
@@ -1079,7 +1089,11 @@ impl FunctionStore {
     /// Returns the removed record, or `None` if it did not exist.
     pub fn remove(&self, name: &str) -> Result<Option<FunctionRecord>, LambdaServiceError> {
         crate::resolver::FunctionName::parse(name)?;
-        Ok(self.functions.remove(name).map(|(_, v)| v))
+        let removed = self.functions.remove(name).map(|(_, v)| v);
+        if removed.is_some() {
+            self.changes.send_replace(());
+        }
+        Ok(removed)
     }
 
     /// List all function records.
@@ -1163,6 +1177,7 @@ impl FunctionStore {
         for artifact in artifacts {
             artifact.commit();
         }
+        self.changes.send_replace(());
         Ok(())
     }
 

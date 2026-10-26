@@ -3,8 +3,12 @@
 //! A retained worker owns each candidate until settlement. Store keys bind resource
 //! lifetime, original revision and deployment generation; metadata is never a live lease.
 
+#[cfg(unix)]
+mod manager;
 use std::fmt;
 
+#[cfg(unix)]
+pub use manager::{ImageDeploymentConfig, ImageDeploymentManager, ImageDeploymentStatus};
 use rustack_lambda_model::types::ImageConfig;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
@@ -308,6 +312,14 @@ impl ImageDeployment {
         self.candidate.image_config.as_ref()
     }
 
+    #[cfg(unix)]
+    pub(crate) fn is_current(&self, store: &FunctionStore) -> Result<bool, LambdaServiceError> {
+        Ok(store
+            .get(&self.name)?
+            .as_ref()
+            .is_some_and(|record| self.matches(record)))
+    }
+
     fn matches(&self, record: &FunctionRecord) -> bool {
         let state = if self.initial {
             DeploymentState::Creating(self.generation)
@@ -333,8 +345,15 @@ impl FunctionStore {
     /// ```
     pub fn insert_image_deployment(
         &self,
-        mut record: FunctionRecord,
+        record: FunctionRecord,
     ) -> Result<ImageDeployment, LambdaServiceError> {
+        self.reserve_image_create(record).map(|(job, _)| job)
+    }
+
+    pub(crate) fn reserve_image_create(
+        &self,
+        mut record: FunctionRecord,
+    ) -> Result<(ImageDeployment, FunctionRecord), LambdaServiceError> {
         if record.latest.package_type != "Image"
             || !matches!(record.latest.image, ImageArtifact::Unresolved)
             || record.latest.deployment != DeploymentState::Ready
@@ -348,8 +367,8 @@ impl FunctionStore {
         record.latest.code_size = 0;
         let job = ImageDeployment::new(&record, record.latest.clone(), true)?;
         record.latest.deployment = DeploymentState::Creating(job.generation);
-        self.insert(record)?;
-        Ok(job)
+        self.insert(record.clone())?;
+        Ok((job, record))
     }
 
     /// Reserve an image update while preserving the previous usable revision.
@@ -372,8 +391,22 @@ impl FunctionStore {
         reference: ImageReference,
         architecture: Architecture,
     ) -> Result<ImageDeployment, LambdaServiceError> {
-        self.try_update_if_revision(name, Some(expected), |record| {
-            if record.resource_id != resource {
+        self.reserve_image_update(name, resource, expected, reference, architecture, None)
+            .map(|(job, _)| job)
+    }
+
+    pub(crate) fn reserve_image_update(
+        &self,
+        name: &str,
+        resource: FunctionResourceId,
+        expected: &str,
+        reference: ImageReference,
+        architecture: Architecture,
+        requested: Option<&str>,
+    ) -> Result<(ImageDeployment, FunctionRecord), LambdaServiceError> {
+        self.try_update_if_revision(name, None, |record| {
+            check_revision(requested, &record.latest.revision_id)?;
+            if record.resource_id != resource || record.latest.revision_id != expected {
                 return Err(conflict("Function resource changed"));
             }
             record.latest.deployment.ensure_mutable()?;
@@ -397,7 +430,7 @@ impl FunctionStore {
             } else {
                 DeploymentState::Updating(job.generation)
             };
-            Ok(job)
+            Ok((job, record.clone()))
         })
     }
 
@@ -475,6 +508,26 @@ impl FunctionStore {
             result => result,
         }
     }
+}
+
+pub(crate) fn check_revision(
+    requested: Option<&str>,
+    actual: &str,
+) -> Result<(), LambdaServiceError> {
+    if let Some(requested) = requested {
+        if requested.is_empty()
+            || requested.len() > 100
+            || !requested
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        {
+            return Err(invalid("Invalid RevisionId"));
+        }
+        if requested != actual {
+            return Err(LambdaServiceError::PreconditionFailed);
+        }
+    }
+    Ok(())
 }
 
 fn invalid(message: &str) -> LambdaServiceError {

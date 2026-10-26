@@ -48,7 +48,7 @@ fn image(
     );
     (image, released, stop)
 }
-fn record() -> FunctionRecord {
+pub(super) fn record() -> FunctionRecord {
     FunctionRecord {
         resource_id: FunctionResourceId::new(),
         name: "worker".into(),

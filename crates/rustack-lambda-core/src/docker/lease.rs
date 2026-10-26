@@ -34,6 +34,17 @@ use crate::{
     invocation::CleanupTask,
 };
 
+fn check_preparation_deadline(deadline: Instant) -> Result<(), DockerError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero())
+        .ok_or(DockerError::Deadline)?;
+    if remaining > Duration::from_secs(3600) {
+        return Err(DockerError::Configuration);
+    }
+    Ok(())
+}
+
 /// Validated image-preparation and live-pin admission/IO budgets.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
@@ -190,13 +201,17 @@ pub struct ImageLeasePort {
     config: ImageLeaseConfig,
 }
 impl ImageLeasePort {
-    fn available(&self) -> Result<(), DockerError> {
+    pub(crate) fn available(&self) -> Result<(), DockerError> {
         self.health.check()?;
         if *self.stop.borrow() {
             return Err(DockerError::Stopped);
         }
         Ok(())
     }
+    pub(crate) fn preparation_jobs(&self) -> u8 {
+        self.config.jobs
+    }
+
     /// Prepare a live pinned artifact; dropping this future signals cancellation.
     ///
     /// # Errors
@@ -218,7 +233,7 @@ impl ImageLeasePort {
         deadline: Instant,
     ) -> Result<PinnedImage, DockerError> {
         self.available()?;
-        check_deadline(deadline)?;
+        check_preparation_deadline(deadline)?;
         if let Some(config) = overrides {
             validate_image_config(config).map_err(|_| DockerError::Configuration)?;
         }
@@ -821,7 +836,7 @@ impl Worker {
         self.check(deadline, cancel)?;
         let resolver = ImageResolver::new(self.docker.clone());
         let mut stop = self.control.subscribe();
-        let image = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.resolve_local(reference,architecture,overrides,deadline)=>result?,};
+        let image = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.resolve_local(reference,architecture,overrides,deadline.min(self.config.deadline()))=>result?,};
         self.check(deadline, cancel)?;
         let expected = image.metadata().image_id.clone();
         self.progress
@@ -843,11 +858,11 @@ impl Worker {
             .phase
             .send_replace(Phase::Known(expected.clone()));
         self.check(deadline, cancel)?;
-        let actual = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(self.pin.reference(),deadline)=>result?,};
+        let actual = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(self.pin.reference(),deadline.min(self.config.deadline()))=>result?,};
         if actual.id.as_deref() != Some(expected.as_str()) {
             return Err(DockerError::Quarantined);
         }
-        let size = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.unpacked_size(&image,deadline)=>result?,};
+        let size = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.unpacked_size(&image,deadline.min(self.config.deadline()))=>result?,};
         self.check(deadline, cancel)?;
         Ok((image, size))
     }
@@ -904,4 +919,4 @@ impl Worker {
 
 #[cfg(test)]
 #[path = "lease_tests.rs"]
-mod tests;
+pub(crate) mod tests;

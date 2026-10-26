@@ -38,6 +38,24 @@ use crate::invocation::InvocationContext;
 /// Backend that turns an [`InvokeRequest`] into an [`InvokeResponse`].
 #[async_trait]
 pub trait Executor: std::fmt::Debug + Send + Sync + 'static {
+    /// Verify image execution readiness before admitting asynchronous deployment.
+    ///
+    /// Backends must explicitly opt in after their Docker runtime probes succeed.
+    ///
+    /// # Errors
+    /// The default rejects image deployment for unsupported or disabled backends.
+    ///
+    /// ```
+    /// # fn check(executor: &dyn rustack_lambda_core::executor::Executor) {
+    /// let ready = executor.image_available().is_ok();
+    /// # }
+    /// ```
+    fn image_available(&self) -> Result<(), ExecutorError> {
+        Err(ExecutorError::Unsupported(
+            "Image execution is unavailable".into(),
+        ))
+    }
+
     /// Check whether execution is enabled before accepting asynchronous work.
     ///
     /// # Errors

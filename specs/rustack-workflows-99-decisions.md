@@ -187,6 +187,16 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Pinned by:** [runtime §2.10](./rustack-workflows-20-lambda-runtime-design.md#210-deployment-state-and-atomic-settlement), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date:** 2026-10-25.
 
+## D24 — Retained deployment admission with atomic response receipts
+
+- **Context:** provider requests may disappear after metadata mutation; deletion, shutdown and actor failure must not orphan Pending records or release capacity before worker join.
+- **Alternatives considered:** spawning from the request loses joins on cancellation; reserving only a mailbox does not bound accepted workers; re-reading metadata after enqueue can return a concurrently recreated resource or a falsely Active acceptance response; forwarding the total deployment budget to every RPC violates the wire's shorter IO limits.
+- **Decision:** reserve both accepted-work and owned-mailbox capacity before mutation, capture the response receipt in the same store transaction, register guards/permits above JoinSet children, and retain root/emergency joins through waiter cancellation. Store-change notifications cancel stale candidates without replaying preparation; ready results outrank unrelated notifications after deadline/cancel. Each Docker read is bounded independently of the total deployment budget.
+- **Why:** request lifetime cannot own accepted asynchronous work. Stale results remain harmless, failed updates preserve old code, and failure/Drop outside the entered runtime still settles keyed records. Executor image readiness defaults to unavailable, so qualified preparation alone cannot enable a nonexistent production backend.
+- **Compatibility:** explicit stale RevisionId/CodeSha256 preconditions return412; in-progress operations and implicit staging conflicts remain409. The Native fixture target bypasses SDK/HTTP and is provider execution evidence; separate live SDK wire tests establish protocol evidence.
+- **Pinned by:** [runtime §2.11](./rustack-workflows-20-lambda-runtime-design.md#211-retained-deployment-supervisor-and-provider-admission), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

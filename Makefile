@@ -214,6 +214,7 @@ SERVICE_SMOKE_TESTS := \
 	test_sts::tests::test_should_get_caller_identity_root \
 	test_lambda::tests::test_should_create_and_get_function \
 	test_lambda::tests::test_should_invoke_dry_run \
+	test_lambda::tests::test_should_enforce_revision_preconditions_through_the_sdk_wire \
 	test_lambda::tests::test_should_create_function_with_s3_code \
 	test_lambda::tests::test_should_update_function_code_from_s3_and_read_new_metadata \
 	test_lambda::tests::test_should_fail_create_function_with_missing_s3_bucket \
@@ -260,6 +261,18 @@ test-json-boundaries:
 		-D warnings -W clippy::pedantic -W clippy::missing_errors_doc \
 		-W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used \
 		-W clippy::indexing_slicing -W clippy::panic
+
+# Requires a running Lambda HTTP service at SMOKE_ENDPOINT; executes actual AWS SDK IO.
+test-lambda-revision-wire:
+	@S3_ENDPOINT_URL="$(SMOKE_ENDPOINT)" cargo test -p rustack-integration --lib test_lambda::tests::test_should_enforce_revision_preconditions_through_the_sdk_wire -- --ignored --exact --test-threads=1
+
+.PHONY: test-lambda-revision-wire
+
+# Deployment state, retained image preparation ownership and provider control-plane tests.
+test-lambda-deployments:
+	@cargo test -p rustack-lambda-core --lib deployment
+
+.PHONY: test-lambda-deployments
 
 test-lambda-runtime:
 	@cargo test -p rustack-lambda-runtime

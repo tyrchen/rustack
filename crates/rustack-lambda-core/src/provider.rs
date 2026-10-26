@@ -53,14 +53,13 @@ use rustack_lambda_model::{
         TracingConfigResponse, VpcConfigResponse,
     },
 };
+use tokio::time::{Instant, timeout_at};
 
-#[cfg(test)]
-use crate::artifact::Architecture;
 use crate::{
-    artifact::{DeploymentArtifact, ImageArtifact, ImageReference},
+    artifact::{Architecture, DeploymentArtifact, ImageArtifact, ImageReference},
     code::{S3CodeFetchError, S3CodeFetcher, UnavailableS3CodeFetcher},
     config::LambdaConfig,
-    deployment::DeploymentState,
+    deployment::{DeploymentState, check_revision},
     error::LambdaServiceError,
     executor::{
         AutoExecutor, ExecutionRevision, Executor, ExecutorBackend, InvokeRequest, NativeExecutor,
@@ -78,6 +77,11 @@ use crate::{
         FunctionUrlConfigRecord, LayerStore, LayerStoreSnapshot, LayerVersionRecord,
         PolicyDocument, PolicyStatement, StagedArtifact, VersionRecord, compute_sha256,
     },
+};
+#[cfg(unix)]
+use crate::{
+    deployment::{ImageDeploymentConfig, ImageDeploymentManager},
+    docker::ImageLeasePort,
 };
 
 /// Selects the AWS `Invoke` invocation type.
@@ -135,13 +139,15 @@ pub enum InvokeOutcome {
 /// All operations are implemented as methods that return domain types or errors.
 #[derive(Debug)]
 pub struct RustackLambda {
-    store: FunctionStore,
+    store: Arc<FunctionStore>,
     layer_store: LayerStore,
     esm_store: EventSourceMappingStore,
     config: LambdaConfig,
     executor: Arc<dyn Executor>,
     code_fetcher: Arc<dyn S3CodeFetcher>,
     work: crate::work::WorkManager,
+    #[cfg(unix)]
+    deployments: Option<ImageDeploymentManager>,
 }
 
 /// Serializable Lambda provider snapshot.
@@ -194,7 +200,7 @@ impl ProcessedCode<'_> {
                 )
             }
             Self::Image(reference) => (
-                compute_sha256(reference.as_str().as_bytes()),
+                String::new(),
                 0,
                 None,
                 None,
@@ -218,13 +224,15 @@ impl RustackLambda {
     pub fn with_store(store: FunctionStore, config: LambdaConfig) -> Self {
         let executor = build_executor(&config);
         Self {
-            store,
+            store: Arc::new(store),
             layer_store: LayerStore::new(),
             esm_store: EventSourceMappingStore::new(),
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
             work: crate::work::WorkManager::new(),
+            #[cfg(unix)]
+            deployments: None,
         }
     }
 
@@ -235,13 +243,15 @@ impl RustackLambda {
         let store = FunctionStore::new(code_dir);
         let executor = build_executor(&config);
         Self {
-            store,
+            store: Arc::new(store),
             layer_store: LayerStore::new(),
             esm_store: EventSourceMappingStore::new(),
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
             work: crate::work::WorkManager::new(),
+            #[cfg(unix)]
+            deployments: None,
         }
     }
 
@@ -254,13 +264,15 @@ impl RustackLambda {
         executor: Arc<dyn Executor>,
     ) -> Self {
         Self {
-            store,
+            store: Arc::new(store),
             layer_store: LayerStore::new(),
             esm_store: EventSourceMappingStore::new(),
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
             work: crate::work::WorkManager::new(),
+            #[cfg(unix)]
+            deployments: None,
         }
     }
 
@@ -274,6 +286,89 @@ impl RustackLambda {
         self
     }
 
+    /// Attach qualified image preparation after executor readiness probes succeed.
+    ///
+    /// # Errors
+    /// Rejects non-Docker/unavailable executors, duplicate attachment or invalid owner
+    /// configuration. The runtime must retain the image owner until all deployment/execution
+    /// consumers settle.
+    ///
+    /// ```no_run
+    /// # fn attach(provider:rustack_lambda_core::provider::RustackLambda, port:rustack_lambda_core::docker::ImageLeasePort) -> Result<(),rustack_lambda_core::error::LambdaServiceError> {
+    /// let provider = provider.with_image_preparation(port, rustack_lambda_core::deployment::ImageDeploymentConfig::default())?;
+    /// # Ok(()) }
+    /// ```
+    #[cfg(unix)]
+    pub fn with_image_preparation(
+        mut self,
+        port: ImageLeasePort,
+        config: ImageDeploymentConfig,
+    ) -> Result<Self, LambdaServiceError> {
+        if self.config.executor != ExecutorBackend::Docker
+            || self.executor.image_available().is_err()
+            || self.deployments.is_some()
+        {
+            return Err(LambdaServiceError::DockerNotAvailable);
+        }
+        self.deployments = Some(ImageDeploymentManager::start(
+            self.store.clone(),
+            port,
+            config,
+        )?);
+        Ok(self)
+    }
+
+    #[cfg(unix)]
+    fn image_deployments(&self) -> Result<&ImageDeploymentManager, LambdaServiceError> {
+        if self.config.executor != ExecutorBackend::Docker
+            || self.executor.image_available().is_err()
+        {
+            return Err(LambdaServiceError::DockerNotAvailable);
+        }
+        self.deployments
+            .as_ref()
+            .ok_or(LambdaServiceError::DockerNotAvailable)
+    }
+
+    fn create_image_deployment(
+        &self,
+        record: FunctionRecord,
+    ) -> Result<FunctionRecord, LambdaServiceError> {
+        #[cfg(unix)]
+        {
+            self.image_deployments()?.create(record)
+        }
+        #[cfg(not(unix))]
+        {
+            drop(record);
+            Err(LambdaServiceError::DockerNotAvailable)
+        }
+    }
+
+    fn update_image_deployment(
+        &self,
+        before: &FunctionRecord,
+        reference: ImageReference,
+        architecture: Architecture,
+        requested: Option<&str>,
+    ) -> Result<FunctionConfiguration, LambdaServiceError> {
+        #[cfg(unix)]
+        {
+            let accepted = self.image_deployments()?.update_with_revision(
+                before,
+                reference,
+                architecture,
+                requested,
+            )?;
+            Ok(self.build_function_configuration(&accepted, &accepted.latest))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (before, reference, architecture, requested);
+            Err(LambdaServiceError::DockerNotAvailable)
+        }
+    }
+
     /// Borrow the executor (e.g. for tests asserting backend behavior).
     #[must_use]
     pub fn executor(&self) -> &Arc<dyn Executor> {
@@ -283,11 +378,25 @@ impl RustackLambda {
     /// Stop all warm executor instances. Wired into the rustack server's
     /// graceful shutdown path.
     pub async fn shutdown(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        #[cfg(unix)]
+        if let Some(owner) = &self.deployments {
+            if owner.shutdown(deadline).await.is_err() {
+                tracing::error!("Lambda deployment shutdown did not settle");
+            }
+        }
         self.work.cancel_all();
-        if let Err(error) = self.work.quiesce(Duration::from_secs(10)).await {
+        if let Err(error) = self
+            .work
+            .quiesce(deadline.saturating_duration_since(Instant::now()))
+            .await
+        {
             tracing::error!(%error, "Lambda shutdown cancelled unfinished work");
         }
-        if self.executor.shutdown().await.is_err() {
+        if !matches!(
+            timeout_at(deadline, self.executor.shutdown()).await,
+            Ok(Ok(()))
+        ) {
             tracing::error!("Lambda executor shutdown did not confirm cleanup");
         }
     }
@@ -297,17 +406,26 @@ impl RustackLambda {
     /// # Errors
     /// Returns an error after cancelling remaining tasks when the deadline expires.
     pub async fn quiesce(&self, timeout: Duration) -> Result<(), LambdaServiceError> {
-        let deadline = tokio::time::Instant::now()
+        let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| invalid_parameter("Invalid Lambda quiesce budget"))?;
-        let cleanup_budget = (timeout / 10).min(Duration::from_secs(1));
+        #[cfg(unix)]
+        if let Some(owner) = &self.deployments {
+            if let Err(error) = owner.quiesce(deadline).await {
+                owner.cancel();
+                self.work.cancel_all();
+                return Err(error.into());
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let cleanup_budget = (remaining / 10).min(Duration::from_secs(1));
         let result = self
             .work
-            .quiesce(timeout.saturating_sub(cleanup_budget))
+            .quiesce(remaining.saturating_sub(cleanup_budget))
             .await;
         if result.is_err()
             && !matches!(
-                tokio::time::timeout_at(deadline, self.executor.shutdown()).await,
+                timeout_at(deadline, self.executor.shutdown()).await,
                 Ok(Ok(()))
             )
         {
@@ -574,6 +692,10 @@ impl RustackLambda {
             created_at: now,
         };
 
+        if package_type == "Image" {
+            let accepted = self.create_image_deployment(record)?;
+            return Ok(self.build_function_configuration(&accepted, &accepted.latest));
+        }
         let should_publish = input.publish.unwrap_or(false);
         self.store.insert(record)?;
         processed.commit();
@@ -691,6 +813,7 @@ impl RustackLambda {
         let (name, _) = resolve_function_ref(function_ref)?;
         let should_publish = input.publish.unwrap_or(false);
         let before = self.get_record(&name)?;
+        check_revision(input.revision_id.as_deref(), &before.latest.revision_id)?;
         before.latest.deployment.ensure_mutable()?;
         validate_image_publication(&before.latest.package_type, should_publish)?;
         if (before.latest.package_type == "Zip" && code_source.image_uri.is_some())
@@ -709,42 +832,63 @@ impl RustackLambda {
             ));
         }
 
+        if before.latest.package_type == "Image" {
+            let reference = code_source
+                .image_uri
+                .ok_or_else(|| invalid_parameter("ImageUri is required"))?
+                .parse()
+                .map_err(|_| invalid_parameter("Invalid ImageUri"))?;
+            let architecture = match input
+                .architectures
+                .as_ref()
+                .and_then(|values| values.first())
+            {
+                Some(value) => value
+                    .parse()
+                    .map_err(|_| invalid_parameter("Invalid architecture"))?,
+                None => crate::function_config::validate_execution_settings(&before.latest)?,
+            };
+            return self.update_image_deployment(
+                &before,
+                reference,
+                architecture,
+                input.revision_id.as_deref(),
+            );
+        }
         let processed = self.process_code(&name, "$LATEST", code_source).await?;
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) = processed.parts();
 
-        let config = self.store.try_update_if_revision(
-            &name,
-            Some(&before.latest.revision_id),
-            |record| {
-                record.latest.deployment.ensure_mutable()?;
-                let now = now_iso8601();
-                record.latest.code_sha256 = code_sha256;
-                record.latest.code_size = code_size;
-                record.latest.zip_bytes = zip_bytes;
-                record.latest.code_path = code_path;
-                record.latest.image_uri = image_uri;
-                record.latest.image = ImageArtifact::Unresolved;
-                record.latest.last_modified = now;
-                record.latest.revision_id = uuid::Uuid::new_v4().to_string();
+        let config = self.store.try_update_if_revision(&name, None, |record| {
+            check_revision(input.revision_id.as_deref(), &record.latest.revision_id)?;
+            check_staged_revision(record, &before)?;
+            record.latest.deployment.ensure_mutable()?;
+            let now = now_iso8601();
+            record.latest.code_sha256 = code_sha256;
+            record.latest.code_size = code_size;
+            record.latest.zip_bytes = zip_bytes;
+            record.latest.code_path = code_path;
+            record.latest.image_uri = image_uri;
+            record.latest.image = ImageArtifact::Unresolved;
+            record.latest.last_modified = now;
+            record.latest.revision_id = uuid::Uuid::new_v4().to_string();
 
-                if let Some(archs) = input.architectures.clone() {
-                    record.latest.architectures = archs;
-                }
-                record.latest.deployment = DeploymentState::Ready;
-                let configuration = if should_publish {
-                    let number = record.next_version;
-                    record.next_version = number.saturating_add(1);
-                    let mut published = record.latest.clone();
-                    published.version = number.to_string();
-                    let configuration = self.build_function_configuration(record, &published);
-                    record.versions.insert(number, published);
-                    configuration
-                } else {
-                    self.build_function_configuration(record, &record.latest)
-                };
-                Ok(configuration)
-            },
-        )?;
+            if let Some(archs) = input.architectures.clone() {
+                record.latest.architectures = archs;
+            }
+            record.latest.deployment = DeploymentState::Ready;
+            let configuration = if should_publish {
+                let number = record.next_version;
+                record.next_version = number.saturating_add(1);
+                let mut published = record.latest.clone();
+                published.version = number.to_string();
+                let configuration = self.build_function_configuration(record, &published);
+                record.versions.insert(number, published);
+                configuration
+            } else {
+                self.build_function_configuration(record, &record.latest)
+            };
+            Ok(configuration)
+        })?;
 
         processed.commit();
         info!(function_name = %name, "updated Lambda function code");
@@ -762,77 +906,76 @@ impl RustackLambda {
         validate_configuration_update(input)?;
 
         let before = self.get_record(&name)?;
-        let config = self.store.try_update_if_revision(
-            &name,
-            Some(&before.latest.revision_id),
-            |record| {
-                record.latest.deployment.ensure_mutable()?;
-                let now = now_iso8601();
+        check_revision(input.revision_id.as_deref(), &before.latest.revision_id)?;
+        let config = self.store.try_update_if_revision(&name, None, |record| {
+            check_revision(input.revision_id.as_deref(), &record.latest.revision_id)?;
+            check_staged_revision(record, &before)?;
+            record.latest.deployment.ensure_mutable()?;
+            let now = now_iso8601();
 
-                if let Some(runtime) = &input.runtime {
-                    record.latest.runtime = Some(runtime.clone());
-                }
-                if let Some(role) = &input.role {
-                    record.latest.role.clone_from(role);
-                }
-                if let Some(handler) = &input.handler {
-                    record.latest.handler = Some(handler.clone());
-                }
-                if let Some(description) = &input.description {
-                    record.latest.description.clone_from(description);
-                }
-                if let Some(timeout) = input.timeout {
-                    record.latest.timeout = timeout;
-                }
-                if let Some(memory_size) = input.memory_size {
-                    record.latest.memory_size = memory_size;
-                }
-                if let Some(env) = &input.environment {
-                    record.latest.environment = env.variables.clone().unwrap_or_default();
-                }
-                if let Some(layers) = &input.layers {
-                    record.latest.layers.clone_from(layers);
-                }
-                if let Some(ephemeral) = &input.ephemeral_storage {
-                    record.latest.ephemeral_storage_size = ephemeral.size;
-                }
-                if let Some(vpc) = &input.vpc_config {
-                    record.latest.vpc_config = Some(vpc.clone());
-                }
-                if let Some(dlc) = &input.dead_letter_config {
-                    record.latest.dead_letter_config = Some(dlc.clone());
-                }
-                if let Some(tc) = &input.tracing_config {
-                    record.latest.tracing_config = Some(tc.clone());
-                }
-                if let Some(ic) = &input.image_config {
-                    record.latest.image_config = Some(ic.clone());
-                }
-                if let Some(lc) = &input.logging_config {
-                    record.latest.logging_config = Some(lc.clone());
-                }
-                if let Some(ss) = &input.snap_start {
-                    record.latest.snap_start = Some(ss.clone());
-                }
+            if let Some(runtime) = &input.runtime {
+                record.latest.runtime = Some(runtime.clone());
+            }
+            if let Some(role) = &input.role {
+                record.latest.role.clone_from(role);
+            }
+            if let Some(handler) = &input.handler {
+                record.latest.handler = Some(handler.clone());
+            }
+            if let Some(description) = &input.description {
+                record.latest.description.clone_from(description);
+            }
+            if let Some(timeout) = input.timeout {
+                record.latest.timeout = timeout;
+            }
+            if let Some(memory_size) = input.memory_size {
+                record.latest.memory_size = memory_size;
+            }
+            if let Some(env) = &input.environment {
+                record.latest.environment = env.variables.clone().unwrap_or_default();
+            }
+            if let Some(layers) = &input.layers {
+                record.latest.layers.clone_from(layers);
+            }
+            if let Some(ephemeral) = &input.ephemeral_storage {
+                record.latest.ephemeral_storage_size = ephemeral.size;
+            }
+            if let Some(vpc) = &input.vpc_config {
+                record.latest.vpc_config = Some(vpc.clone());
+            }
+            if let Some(dlc) = &input.dead_letter_config {
+                record.latest.dead_letter_config = Some(dlc.clone());
+            }
+            if let Some(tc) = &input.tracing_config {
+                record.latest.tracing_config = Some(tc.clone());
+            }
+            if let Some(ic) = &input.image_config {
+                record.latest.image_config = Some(ic.clone());
+            }
+            if let Some(lc) = &input.logging_config {
+                record.latest.logging_config = Some(lc.clone());
+            }
+            if let Some(ss) = &input.snap_start {
+                record.latest.snap_start = Some(ss.clone());
+            }
 
-                record.latest.last_modified = now;
-                record.latest.revision_id = uuid::Uuid::new_v4().to_string();
+            record.latest.last_modified = now;
+            record.latest.revision_id = uuid::Uuid::new_v4().to_string();
 
-                if matches!(record.latest.deployment, DeploymentState::UpdateFailed(_)) {
-                    record.latest.deployment = DeploymentState::Ready;
-                }
-                if let Some(image) = record.latest.image.resolved() {
-                    image
-                        .metadata()
-                        .execution
-                        .plan(record.latest.image_config.as_ref())
-                        .map_err(|_| {
-                            invalid_parameter("Invalid effective image entry configuration")
-                        })?;
-                }
-                Ok(self.build_function_configuration(record, &record.latest))
-            },
-        )?;
+            if matches!(record.latest.deployment, DeploymentState::UpdateFailed(_)) {
+                record.latest.deployment = DeploymentState::Ready;
+            }
+            if let Some(image) = record.latest.image.resolved() {
+                image
+                    .metadata()
+                    .execution
+                    .plan(record.latest.image_config.as_ref())
+                    .map_err(|_| {
+                        invalid_parameter("Invalid effective image entry configuration")
+                    })?;
+            }
+            Ok(self.build_function_configuration(record, &record.latest))
+        })?;
 
         info!(function_name = %name, "updated Lambda function configuration");
         Ok(config)
@@ -986,7 +1129,7 @@ impl RustackLambda {
         function_ref: &str,
         qualifier: Option<&str>,
         payload: &[u8],
-        deadline: Option<tokio::time::Instant>,
+        deadline: Option<Instant>,
     ) -> Result<InvocationHandle, LambdaServiceError> {
         validate_invoke_payload(payload, MAX_SYNC_PAYLOAD)?;
         let (record, qualifier) = self.resolve_invocation(function_ref, qualifier)?;
@@ -1031,16 +1174,14 @@ impl RustackLambda {
         qualifier: Option<&str>,
         payload: &[u8],
         asynchronous: bool,
-        deadline: Option<tokio::time::Instant>,
+        deadline: Option<Instant>,
     ) -> Result<InvocationHandle, LambdaServiceError> {
         let version = resolve_version(record, qualifier)?;
         let capture = self.build_invoke_request(record, version, qualifier, payload);
         let request = if let Some(deadline) = deadline {
-            tokio::time::timeout_at(deadline, capture)
-                .await
-                .map_err(|_| {
-                    LambdaServiceError::from(crate::executor::ExecutorError::DeadlineExceeded)
-                })??
+            timeout_at(deadline, capture).await.map_err(|_| {
+                LambdaServiceError::from(crate::executor::ExecutorError::DeadlineExceeded)
+            })??
         } else {
             capture.await?
         };
@@ -1165,51 +1306,46 @@ impl RustackLambda {
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
         let (name, _) = resolve_function_ref(function_ref)?;
 
-        let config =
-            self.store
-                .try_update_if_revision(&name, input.revision_id.as_deref(), |record| {
-                    if record.latest.deployment != DeploymentState::Ready {
-                        return Err(LambdaServiceError::ResourceConflict {
-                            message: "Function deployment must be successful before publication"
-                                .into(),
-                        });
-                    }
-                    if record.latest.package_type == "Image"
-                        && record
-                            .latest
-                            .image
-                            .pinned()
-                            .is_none_or(|image| !image.is_live())
-                    {
-                        return Err(LambdaServiceError::ResourceNotReady {
-                            message: "Image availability must be acquired before publication"
-                                .into(),
-                        });
-                    }
-                    if input
-                        .code_sha256
-                        .as_ref()
-                        .is_some_and(|hash| hash != &record.latest.code_sha256)
-                    {
-                        return Err(invalid_parameter(
-                            "CodeSha256 does not match the latest revision",
-                        ));
-                    }
-                    let version_num = record.next_version;
-                    record.next_version += 1;
+        let config = self.store.try_update_if_revision(&name, None, |record| {
+            check_revision(input.revision_id.as_deref(), &record.latest.revision_id)?;
+            if record.latest.deployment != DeploymentState::Ready {
+                return Err(LambdaServiceError::ResourceConflict {
+                    message: "Function deployment must be successful before publication".into(),
+                });
+            }
+            if record.latest.package_type == "Image"
+                && record
+                    .latest
+                    .image
+                    .pinned()
+                    .is_none_or(|image| !image.is_live())
+            {
+                return Err(LambdaServiceError::ResourceNotReady {
+                    message: "Image availability must be acquired before publication".into(),
+                });
+            }
+            if input
+                .code_sha256
+                .as_ref()
+                .is_some_and(|hash| hash != &record.latest.code_sha256)
+            {
+                return Err(LambdaServiceError::PreconditionFailed);
+            }
+            let version_num = record.next_version;
+            record.next_version += 1;
 
-                    let mut published = record.latest.clone();
-                    published.version = version_num.to_string();
-                    if let Some(desc) = &input.description {
-                        published.description.clone_from(desc);
-                    }
-                    published.revision_id = uuid::Uuid::new_v4().to_string();
-                    published.last_modified = now_iso8601();
+            let mut published = record.latest.clone();
+            published.version = version_num.to_string();
+            if let Some(desc) = &input.description {
+                published.description.clone_from(desc);
+            }
+            published.revision_id = uuid::Uuid::new_v4().to_string();
+            published.last_modified = now_iso8601();
 
-                    let config = self.build_function_configuration(record, &published);
-                    record.versions.insert(version_num, published);
-                    Ok(config)
-                })?;
+            let config = self.build_function_configuration(record, &published);
+            record.versions.insert(version_num, published);
+            Ok(config)
+        })?;
 
         info!(function_name = %name, "published Lambda function version");
         Ok(config)
@@ -3036,6 +3172,20 @@ impl RustackLambda {
 }
 
 /// Reject publication before asynchronous image preparation can begin.
+fn check_staged_revision(
+    record: &FunctionRecord,
+    before: &FunctionRecord,
+) -> Result<(), LambdaServiceError> {
+    if record.resource_id != before.resource_id
+        || record.latest.revision_id != before.latest.revision_id
+    {
+        return Err(LambdaServiceError::ResourceConflict {
+            message: "Function changed while deployment was staged".into(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_image_publication(package_type: &str, publish: bool) -> Result<(), LambdaServiceError> {
     if package_type == "Image" && publish {
         return Err(invalid_parameter(
@@ -3296,7 +3446,7 @@ mod tests {
         let provider =
             RustackLambda::with_store(FunctionStore::new(root.path()), LambdaConfig::default())
                 .with_code_fetcher(fetcher);
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         assert!(matches!(
             provider
                 .create_function(s3_code_input("fetch-timeout"))

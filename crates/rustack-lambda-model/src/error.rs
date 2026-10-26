@@ -14,6 +14,8 @@ pub enum LambdaErrorCode {
     ResourceNotFoundException,
     /// Resource already exists.
     ResourceConflictException,
+    /// An optimistic update precondition did not match.
+    PreconditionFailedException,
     /// Request payload too large.
     RequestTooLargeException,
     /// Unsupported media type.
@@ -39,6 +41,7 @@ impl LambdaErrorCode {
             Self::InvalidRequestContentException => "InvalidRequestContentException",
             Self::ResourceNotFoundException => "ResourceNotFoundException",
             Self::ResourceConflictException => "ResourceConflictException",
+            Self::PreconditionFailedException => "PreconditionFailedException",
             Self::RequestTooLargeException => "RequestTooLargeException",
             Self::UnsupportedMediaTypeException => "UnsupportedMediaTypeException",
             Self::InvalidRuntimeException => "InvalidRuntimeException",
@@ -57,6 +60,7 @@ impl LambdaErrorCode {
             }
             Self::ResourceNotFoundException => http::StatusCode::NOT_FOUND,
             Self::ResourceConflictException => http::StatusCode::CONFLICT,
+            Self::PreconditionFailedException => http::StatusCode::PRECONDITION_FAILED,
             Self::RequestTooLargeException => http::StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnsupportedMediaTypeException => http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::InvalidRuntimeException | Self::ResourceNotReadyException => {

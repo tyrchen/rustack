@@ -83,6 +83,9 @@ pub struct CreateFunctionInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpdateFunctionCodeInput {
+    /// Revision ID precondition for an optimistic update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     /// Base64-encoded zip file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zip_file: Option<String>,
@@ -113,6 +116,9 @@ pub struct UpdateFunctionCodeInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpdateFunctionConfigurationInput {
+    /// Revision ID precondition for an optimistic update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     /// Runtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -423,4 +429,23 @@ pub struct EventInvokeConfigInput {
     /// Destination configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_config: Option<DestinationConfig>,
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::{UpdateFunctionCodeInput, UpdateFunctionConfigurationInput};
+
+    #[test]
+    fn test_should_preserve_explicit_revision_preconditions_in_both_update_wire_shapes() {
+        let json = r#"{"RevisionId":"expected-revision"}"#;
+        let code: UpdateFunctionCodeInput = serde_json::from_str(json).unwrap();
+        let configuration: UpdateFunctionConfigurationInput = serde_json::from_str(json).unwrap();
+        assert_eq!(code.revision_id.as_deref(), Some("expected-revision"));
+        assert_eq!(
+            configuration.revision_id.as_deref(),
+            Some("expected-revision")
+        );
+        assert_eq!(serde_json::to_string(&code).unwrap(), json);
+        assert_eq!(serde_json::to_string(&configuration).unwrap(), json);
+    }
 }

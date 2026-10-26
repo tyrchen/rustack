@@ -52,15 +52,15 @@ fn manifests(parent: &str, zero: bool) -> Value {
 }
 
 #[derive(Debug, Default)]
-struct Stats {
-    tags: AtomicUsize,
-    deletes: AtomicUsize,
-    absent: AtomicUsize,
-    aliases: AtomicUsize,
+pub(crate) struct Stats {
+    pub(crate) tags: AtomicUsize,
+    pub(crate) deletes: AtomicUsize,
+    pub(crate) absent: AtomicUsize,
+    pub(crate) aliases: AtomicUsize,
     changed: Notify,
 }
 impl Stats {
-    async fn until(&self, condition: impl Fn() -> bool) {
+    pub(crate) async fn until(&self, condition: impl Fn() -> bool) {
         timeout(Duration::from_secs(10), async {
             loop {
                 let changed = self.changed.notified();
@@ -78,7 +78,7 @@ impl Stats {
     }
 }
 #[derive(Debug, Clone, Copy)]
-enum Mode {
+pub(crate) enum Mode {
     Normal,
     Reject400,
     Reject404,
@@ -92,7 +92,7 @@ enum Mode {
     LostDelete,
     HoldDelete,
 }
-enum Command {
+pub(crate) enum Command {
     Retarget,
     Repair,
     Commit,
@@ -276,15 +276,15 @@ impl Script {
     }
 }
 
-struct FakePins {
-    wire: DockerWire,
+pub(crate) struct FakePins {
+    pub(crate) wire: DockerWire,
     stop: watch::Sender<bool>,
-    commands: mpsc::Sender<Command>,
+    pub(crate) commands: mpsc::Sender<Command>,
     task: Option<JoinHandle<()>>,
-    stats: Arc<Stats>,
+    pub(crate) stats: Arc<Stats>,
 }
 impl FakePins {
-    async fn new(mode: Mode) -> Self {
+    pub(crate) async fn new(mode: Mode) -> Self {
         let daemon = Daemon::new();
         let wire = daemon.wire().await;
         let (stop, stopping) = watch::channel(false);
@@ -305,10 +305,10 @@ impl FakePins {
             stats,
         }
     }
-    fn owner(&self, pins: u16, jobs: u8) -> ImageLeaseManager {
+    pub(crate) fn owner(&self, pins: u16, jobs: u8) -> ImageLeaseManager {
         ImageLeaseManager::start(self.wire.port(), scope(), config(pins, jobs)).unwrap()
     }
-    async fn close(mut self) {
+    pub(crate) async fn close(mut self) {
         self.wire.shutdown().await.unwrap();
         self.stop.send_replace(true);
         self.task.take().unwrap().await.unwrap();

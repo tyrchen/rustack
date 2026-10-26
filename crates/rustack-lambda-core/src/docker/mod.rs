@@ -891,3 +891,6 @@ fn encode(value: &impl Serialize) -> Result<Bytes, DockerError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use lease::tests as image_fixture;

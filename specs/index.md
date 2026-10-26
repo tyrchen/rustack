@@ -4,7 +4,7 @@
 
 ## Step Functions and Lambda Runtime — new specification set
 
-Status: implementation contract dated 2026-10-25; P0 evidence and P1 invocation/artifact/cancellation plus shared Native/relay/client runtime contracts are implemented. Bounded Docker management/attach IO, platform-aware local resolution and owned image preparation/leases are also implemented and qualified against real RIC images. Typed deployment settlement and leased invocation capture are implemented; retained provider deployment ownership/API wiring, the Docker executor and the ASL engine remain pending; see the implementation ledger for verified scope. All documents in this set are in English. Start here for the requested ASL engine and actual Docker image Lambda execution.
+Status: implementation contract dated 2026-10-25; P0 evidence and P1 invocation/artifact/cancellation plus shared Native/relay/client runtime contracts are implemented. Bounded Docker management/attach IO, platform-aware local resolution and owned image preparation/leases are also implemented and qualified against real RIC images. Typed deployment settlement, leased invocation capture and retained provider deployment ownership/API wiring are implemented. Provider control-plane tests use an explicit test executor capability; production Docker remains unavailable until the Docker executor/probes land. The ASL engine also remains pending; see the implementation ledger for verified scope. All documents in this set are in English. Start here for the requested ASL engine and actual Docker image Lambda execution.
 
 | Order | Specification | Type / purpose |
 |---|---|---|

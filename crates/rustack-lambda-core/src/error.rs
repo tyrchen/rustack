@@ -50,6 +50,10 @@ pub enum LambdaServiceError {
         message: String,
     },
 
+    /// An explicit optimistic-update precondition did not match.
+    #[error("The supplied precondition does not match the current function revision")]
+    PreconditionFailed,
+
     /// Invalid parameter value.
     #[error("Invalid parameter: {message}")]
     InvalidParameter {
@@ -152,6 +156,10 @@ impl From<LambdaServiceError> for LambdaError {
             LambdaServiceError::ResourceConflict { ref message } => {
                 LambdaError::resource_conflict(message)
             }
+            LambdaServiceError::PreconditionFailed => LambdaError::new(
+                LambdaErrorCode::PreconditionFailedException,
+                "The supplied precondition does not match the current function revision",
+            ),
             LambdaServiceError::InvalidParameter { ref message } => {
                 LambdaError::invalid_parameter(message)
             }
@@ -233,6 +241,21 @@ mod tests {
         assert_eq!(
             lambda_err.code,
             LambdaErrorCode::InvalidParameterValueException
+        );
+    }
+}
+
+#[cfg(test)]
+mod precondition_tests {
+    use super::*;
+
+    #[test]
+    fn test_should_encode_stale_revision_as_http_412_with_the_aws_error_code() {
+        let error: LambdaError = LambdaServiceError::PreconditionFailed.into();
+        assert_eq!(error.code.as_str(), "PreconditionFailedException");
+        assert_eq!(
+            error.code.status_code(),
+            http::StatusCode::PRECONDITION_FAILED
         );
     }
 }

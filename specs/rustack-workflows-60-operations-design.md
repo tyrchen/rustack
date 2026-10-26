@@ -69,7 +69,8 @@ All budgets are validated once; limits below are local defaults and safe configu
 | workflowCallbackTokens / workflowCallbackTombstones |4,096 /100,000|1..65,536 /1..1,000,000; closed-token TTL follows execution retention |
 | lambdaDockerEnvironments |32|1..32 initially, including busy/idle/quarantined environments |
 | lambdaDockerMemoryBytes |8 GiB|256 MiB..1 TiB; includes relay caps and all allocated environments |
-| lambdaDockerDeploymentJobs |8|1..32; queued plus running deployments;≤image pin budget |
+| lambdaDockerDeploymentJobs |8|1..32; queued plus running deployments;≤image preparation capacity and pin budget |
+| lambdaDockerDeploymentSeconds |300|1..3,600; absolute queue plus preparation deadline |
 | lambdaDockerImagePins |1024|1..8,192; preparations, live revisions/captures and quarantined aliases |
 | lambdaDockerIoSeconds |5|1..60; independent bounded management/mutation and partial-control IO budget |
 | lambdaDockerPullSeconds / lambdaDockerStartSeconds |120 /15|1..600 /1..60 |

@@ -9,6 +9,13 @@ mod tests {
 
     use anyhow::{Context, Result, ensure};
     use aws_sdk_lambda::{
+        operation::{
+            publish_version::PublishVersionError,
+            update_function_code::UpdateFunctionCodeError,
+            update_function_configuration::{
+                UpdateFunctionConfigurationError, UpdateFunctionConfigurationOutput,
+            },
+        },
         primitives::Blob,
         types::{Architecture, Environment, FunctionCode, FunctionUrlAuthType, Runtime},
     };
@@ -158,6 +165,179 @@ mod tests {
         assert!(updated.code_size() > 0);
 
         cleanup_function(&client, &name).await;
+    }
+
+    async fn check_stale_update_requests(
+        client: &aws_sdk_lambda::Client,
+        name: &str,
+        revision: &str,
+    ) -> Result<()> {
+        let error = client
+            .update_function_configuration()
+            .function_name(name)
+            .revision_id(revision)
+            .description("must not commit")
+            .send()
+            .await
+            .err()
+            .context("Stale configuration update unexpectedly succeeded")?;
+        ensure!(
+            error
+                .as_service_error()
+                .is_some_and(UpdateFunctionConfigurationError::is_precondition_failed_exception),
+            "Wrong configuration error type"
+        );
+        ensure!(
+            error
+                .raw_response()
+                .is_some_and(|response| response.status().as_u16() == 412),
+            "Wrong configuration HTTP status"
+        );
+        let error = client
+            .update_function_code()
+            .function_name(name)
+            .revision_id(revision)
+            .zip_file(dummy_zip_blob())
+            .send()
+            .await
+            .err()
+            .context("Stale code update unexpectedly succeeded")?;
+        ensure!(
+            error
+                .as_service_error()
+                .is_some_and(UpdateFunctionCodeError::is_precondition_failed_exception),
+            "Wrong code error type"
+        );
+        ensure!(
+            error
+                .raw_response()
+                .is_some_and(|response| response.status().as_u16() == 412),
+            "Wrong code HTTP status"
+        );
+        Ok(())
+    }
+
+    async fn check_rejected_update_preserved_metadata(
+        client: &aws_sdk_lambda::Client,
+        name: &str,
+        expected: &UpdateFunctionConfigurationOutput,
+    ) -> Result<()> {
+        let current = client
+            .get_function_configuration()
+            .function_name(name)
+            .send()
+            .await?;
+        ensure!(
+            current.revision_id() == expected.revision_id(),
+            "Rejected update changed revision"
+        );
+        ensure!(
+            current.code_sha256() == expected.code_sha256(),
+            "Rejected update changed hash"
+        );
+        ensure!(
+            current.code_size() == expected.code_size(),
+            "Rejected update changed size"
+        );
+        ensure!(
+            current.description() == expected.description(),
+            "Rejected update changed description"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_enforce_revision_preconditions_through_the_sdk_wire() -> Result<()> {
+        let client = lambda_client();
+        let name = create_test_function(&client, "revision-cas").await;
+        let result = async {
+            let initial = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            let original = initial.revision_id().context("Missing initial revision")?;
+            let updated = client
+                .update_function_configuration()
+                .function_name(&name)
+                .revision_id(original)
+                .description("new configuration")
+                .send()
+                .await?;
+            let updated_revision = updated
+                .revision_id()
+                .filter(|value| !value.is_empty())
+                .context("Missing updated revision")?;
+            ensure!(
+                updated_revision != original,
+                "Configuration revision did not advance"
+            );
+            check_stale_update_requests(&client, &name, original).await?;
+            check_rejected_update_preserved_metadata(&client, &name, &updated).await?;
+            let code = client
+                .update_function_code()
+                .function_name(&name)
+                .revision_id(updated_revision)
+                .zip_file(dummy_zip_blob())
+                .send()
+                .await?;
+            let code_revision = code
+                .revision_id()
+                .filter(|value| !value.is_empty())
+                .context("Missing code revision")?;
+            ensure!(
+                code_revision != updated_revision,
+                "Code revision did not advance"
+            );
+            let error = client
+                .publish_version()
+                .function_name(&name)
+                .revision_id(original)
+                .send()
+                .await
+                .err()
+                .context("Stale publication unexpectedly succeeded")?;
+            ensure!(
+                error
+                    .as_service_error()
+                    .is_some_and(PublishVersionError::is_precondition_failed_exception),
+                "Wrong publication error type"
+            );
+            ensure!(
+                error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 412),
+                "Wrong publication HTTP status"
+            );
+            let current = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            ensure!(
+                current.description() == Some("new configuration"),
+                "Rejected mutation changed configuration"
+            );
+            ensure!(
+                current.revision_id() == code.revision_id(),
+                "Rejected mutation changed code revision"
+            );
+            let published = client
+                .publish_version()
+                .function_name(&name)
+                .revision_id(code_revision)
+                .send()
+                .await?;
+            ensure!(
+                published.version() == Some("1"),
+                "Valid publication did not succeed"
+            );
+            Ok(())
+        }
+        .await;
+        cleanup_function(&client, &name).await;
+        result
     }
 
     // ---------------------------------------------------------------------------
