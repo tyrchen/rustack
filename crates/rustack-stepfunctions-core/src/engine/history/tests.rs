@@ -191,3 +191,55 @@ fn test_should_reverse_fixed_history_without_changing_causal_ids_or_splitting_ev
             .is_empty()
     );
 }
+
+#[test]
+fn test_should_reject_future_causal_predecessor_before_mutating_history_or_charges() {
+    let (mut journal, capacity) = journal(4, 1024 * 1024);
+    journal.append_causal(event(), 0, false).unwrap();
+    let charged = capacity.used();
+    let bytes = journal.view.charged;
+    assert!(matches!(
+        journal.append_causal(event(), 2, false),
+        Err(ExecutionError::Invalid)
+    ));
+    assert_eq!(journal.view.len(), 1);
+    assert_eq!(journal.view.charged, bytes);
+    assert_eq!(capacity.used(), charged);
+    journal.append_causal(event(), 1, false).unwrap();
+    journal.append_causal(event(), 1, false).unwrap();
+    assert!(matches!(
+        journal.append_causal(event(), 2, false),
+        Err(ExecutionError::Capacity)
+    ));
+    journal
+        .append_causal(
+            events::terminal(&ExecutionOutcome::TimedOut, Utc::now()).unwrap(),
+            3,
+            true,
+        )
+        .unwrap();
+    let forward = journal.view.page(1, 100, true).unwrap();
+    let reverse = journal.view.page_reverse(4, 100, false).unwrap();
+    let expected = [(1, Some(0)), (2, Some(1)), (3, Some(1)), (4, Some(3))];
+    assert_eq!(
+        forward
+            .events()
+            .iter()
+            .map(|event| (event.id, event.previous_event_id))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        reverse
+            .events()
+            .iter()
+            .rev()
+            .map(|event| (event.id, event.previous_event_id))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    drop(forward);
+    drop(reverse);
+    drop(journal);
+    assert_eq!(capacity.used(), 0);
+}

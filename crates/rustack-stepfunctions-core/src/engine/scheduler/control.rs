@@ -1,6 +1,6 @@
 //! Root control and explicit call-retirement ownership.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{cmp::Reverse, collections::BTreeSet, sync::Arc};
 
 use super::{
     CallState, FrameCallId, FrameError, FrameId, FrameScheduler, FrameUpdate, Notice, Notification,
@@ -52,6 +52,7 @@ impl FrameScheduler {
         self.queued.clear();
         self.blocked.clear();
         let mut calls = Vec::new();
+        let mut notices = Vec::new();
         for (id, frame) in &mut self.frames {
             frame.cancelling = true;
             frame.round = None;
@@ -68,7 +69,7 @@ impl FrameScheduler {
             if frame.notification == Notification::Waiting {
                 if let Some(parent) = frame.parent {
                     if let Some(outcome) = frame.driver.outcome().cloned() {
-                        self.pending.push_back(Notice {
+                        notices.push(Notice {
                             child: *id,
                             parent,
                             outcome,
@@ -82,6 +83,8 @@ impl FrameScheduler {
                 attempt: *attempt,
             }));
         }
+        notices.sort_by_key(|notice| Reverse(notice.child));
+        self.pending.extend(notices);
         self.outcome = Some(outcome);
         for call in calls {
             self.cancel(call);
@@ -223,6 +226,7 @@ impl FrameScheduler {
                 .collect()
         });
         let mut visited = BTreeSet::new();
+        let mut notices = Vec::new();
         while let Some(id) = pending.pop() {
             if !visited.insert(id) {
                 continue;
@@ -242,7 +246,7 @@ impl FrameScheduler {
                 if frame.cancelling && frame.notification == Notification::Waiting {
                     if let Some(parent) = frame.parent {
                         if let Some(outcome) = frame.driver.outcome().cloned() {
-                            self.pending.push_back(Notice {
+                            notices.push(Notice {
                                 child: id,
                                 parent,
                                 outcome,
@@ -267,5 +271,7 @@ impl FrameScheduler {
             }
             self.prune(id);
         }
+        notices.sort_by_key(|notice| Reverse(notice.child));
+        self.pending.extend(notices);
     }
 }

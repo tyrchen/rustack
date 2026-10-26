@@ -354,6 +354,7 @@ impl ExecutionDriver {
             }
             _ => return Err(AslError::InvalidStateId),
         };
+        self.fanout_started = Some(count);
         if count == 0 {
             return self.finish_result(Payload::parse(b"[]"), source);
         }

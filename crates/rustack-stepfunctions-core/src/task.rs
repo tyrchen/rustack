@@ -153,6 +153,10 @@ impl TaskCall {
     pub async fn next(&mut self) -> Result<TaskEvent, TaskChannelError> {
         self.events.recv().await.ok_or(TaskChannelError::OwnerLost)
     }
+    pub(crate) fn cancellation_sender(&self) -> watch::Sender<bool> {
+        self.cancellation.clone()
+    }
+
     /// Signal cancellation while preserving the settlement receipt.
     ///
     /// ```

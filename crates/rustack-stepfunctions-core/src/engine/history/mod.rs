@@ -363,9 +363,20 @@ impl Journal {
     }
     pub(super) fn append(
         &mut self,
-        mut event: HistoryEvent,
+        event: HistoryEvent,
         terminal: bool,
     ) -> Result<(), ExecutionError> {
+        self.append_causal(event, self.view.count, terminal)
+    }
+    pub(super) fn append_causal(
+        &mut self,
+        mut event: HistoryEvent,
+        previous: u32,
+        terminal: bool,
+    ) -> Result<(), ExecutionError> {
+        if previous > self.view.count {
+            return Err(ExecutionError::Invalid);
+        }
         let max_count = if terminal {
             self.limits.events
         } else {
@@ -375,7 +386,7 @@ impl Journal {
             return Err(ExecutionError::Capacity);
         }
         event.id = i64::from(self.view.count.saturating_add(1));
-        event.previous_event_id = Some(i64::from(self.view.count));
+        event.previous_event_id = Some(i64::from(previous));
         let encoded = encode_with_limit(&event, EVENT_BYTES)
             .map_err(ExecutionError::from)?
             .len();

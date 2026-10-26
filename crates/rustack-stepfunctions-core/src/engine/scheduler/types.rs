@@ -56,6 +56,8 @@ pub struct FrameTransition {
     pub(super) exited: Option<Payload>,
     pub(super) timed_out: Option<FrameCallId>,
     pub(super) step: DriverStep,
+    pub(crate) fanout_started: Option<usize>,
+    pub(crate) round_finished: Option<bool>,
 }
 impl fmt::Debug for FrameTransition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

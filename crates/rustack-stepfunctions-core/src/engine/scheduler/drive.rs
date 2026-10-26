@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     AttemptId, ClockSample, DriverStep, ExecutionOutcome, ExecutionSource, FanoutFailure, Payload,
-    TaskFailure, engine::Phase,
+    StateView, TaskFailure, engine::Phase,
 };
 
 #[derive(Debug)]
@@ -183,6 +183,16 @@ impl FrameScheduler {
             _ => None,
         };
         frame.driver.remaining = self.remaining;
+        frame.driver.fanout_started = None;
+        let preparing = matches!(frame.driver.phase, Phase::Ready { .. })
+            && matches!(
+                machine.state(state),
+                Ok(StateView::Map { .. } | StateView::Parallel { .. })
+            );
+        let round_finished = match &operation {
+            Operation::Join(result) => Some(result.is_ok()),
+            _ => None,
+        };
         let update = match operation {
             Operation::Advance => frame.driver.advance(now, source),
             Operation::Complete { attempt, result } => {
@@ -197,6 +207,14 @@ impl FrameScheduler {
             }
         };
         self.remaining = frame.driver.remaining;
+        let fanout_started = frame.driver.fanout_started;
+        let round_finished =
+            round_finished.or(fanout_started.filter(|count| *count == 0).map(|_| true));
+        let round_finished = round_finished.or(if preparing && fanout_started.is_none() {
+            Some(false)
+        } else {
+            None
+        });
         let exited = match &frame.driver.phase {
             Phase::Ready { entry: true } => Some(frame.driver.input.clone()),
             Phase::Terminal(outcome) => match outcome.as_ref() {
@@ -209,40 +227,11 @@ impl FrameScheduler {
         if let Some(attempt) = update.cancel {
             self.cancel(FrameCallId { frame: id, attempt });
         }
-        if let DriverStep::Dispatch(dispatch) = &update.step {
-            if self.calls >= MAX_CALLS {
-                self.safety("Rustack.TaskOwnershipLimitExceeded");
-                return self.terminal_update();
-            }
-            if let Some(frame) = self.frames.get_mut(&id) {
-                frame.calls.insert(dispatch.attempt(), CallState::Active);
-                self.calls += 1;
-            }
-        }
-        if let DriverStep::FanOut(plan) = &update.step {
-            if let Some(frame) = self.frames.get_mut(&id) {
-                frame.round = Some(Round {
-                    plan: plan.clone(),
-                    next: 0,
-                    running: BTreeSet::new(),
-                    outputs: BTreeMap::new(),
-                    bytes: 2,
-                    failure: None,
-                });
-            }
+        if !self.capture_effect(id, &update.step) {
+            return self.terminal_update();
         }
         if let Some(outcome) = terminal {
-            let safety = matches!(outcome.as_ref(),ExecutionOutcome::Failed(failure) if matches!(failure.origin,FailureOrigin::Safety));
-            if id == ROOT || safety {
-                self.terminate(outcome);
-            } else {
-                if let (Some(parent), ExecutionOutcome::Failed(failure)) =
-                    (parent, outcome.as_ref())
-                {
-                    self.fail_round_from(parent.frame, failure.clone().into(), Some(id));
-                }
-                self.enqueue(id, true);
-            }
+            self.settle_frame(id, parent, outcome);
         } else if self.frames.get(&id).is_some_and(|frame| {
             matches!(
                 frame.driver.phase,
@@ -260,6 +249,49 @@ impl FrameScheduler {
             exited,
             timed_out,
             step: update.step,
+            fanout_started,
+            round_finished,
         }))
+    }
+    fn capture_effect(&mut self, id: FrameId, step: &DriverStep) -> bool {
+        if let DriverStep::Dispatch(dispatch) = step {
+            if self.calls >= MAX_CALLS {
+                self.safety("Rustack.TaskOwnershipLimitExceeded");
+                return false;
+            }
+            if let Some(frame) = self.frames.get_mut(&id) {
+                frame.calls.insert(dispatch.attempt(), CallState::Active);
+                self.calls += 1;
+            }
+        }
+        if let DriverStep::FanOut(plan) = step {
+            if let Some(frame) = self.frames.get_mut(&id) {
+                frame.round = Some(Round {
+                    plan: plan.clone(),
+                    next: 0,
+                    running: BTreeSet::new(),
+                    outputs: BTreeMap::new(),
+                    bytes: 2,
+                    failure: None,
+                });
+            }
+        }
+        true
+    }
+    fn settle_frame(
+        &mut self,
+        id: FrameId,
+        parent: Option<super::FrameParent>,
+        outcome: std::sync::Arc<ExecutionOutcome>,
+    ) {
+        let safety = matches!(outcome.as_ref(),ExecutionOutcome::Failed(failure) if matches!(failure.origin,FailureOrigin::Safety));
+        if id == ROOT || safety {
+            self.terminate(outcome);
+        } else {
+            if let (Some(parent), ExecutionOutcome::Failed(failure)) = (parent, outcome.as_ref()) {
+                self.fail_round_from(parent.frame, failure.clone().into(), Some(id));
+            }
+            self.enqueue(id, true);
+        }
     }
 }

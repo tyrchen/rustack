@@ -11,11 +11,15 @@ use tokio::{
 };
 
 use super::history::{HistoryCapacity, HistoryLimits, Journal, TerminalReserve, events};
-use crate::{ExecutionDriver, ExecutionFailure, LambdaTaskPort, TaskFailure};
+use crate::{
+    ExecutionDriver, ExecutionFailure, FrameCapacity, FrameLease, FrameLimits, FrameScheduler,
+    LambdaTaskPort, TaskFailure,
+};
 
 mod actor;
 mod error;
 mod evaluate;
+mod structured;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -37,6 +41,12 @@ struct Shared {
     pools: Pools,
     port: Option<Arc<dyn LambdaTaskPort>>,
     history: HistorySettings,
+    frames: FrameSettings,
+}
+#[derive(Debug)]
+struct FrameSettings {
+    capacity: Arc<FrameCapacity>,
+    limits: FrameLimits,
 }
 #[derive(Debug)]
 struct HistorySettings {
@@ -50,10 +60,12 @@ struct Slot {
     reserve: Arc<TerminalReserve>,
     leases: watch::Receiver<Arc<Vec<Arc<DispatchLease>>>>,
     _permit: OwnedSemaphorePermit,
+    _root_frame: Arc<FrameLease>,
 }
 #[derive(Debug)]
 struct DispatchLease {
     _permit: OwnedSemaphorePermit,
+    _frame: Option<Arc<FrameLease>>,
 }
 #[derive(Debug)]
 struct Retained {
@@ -93,6 +105,32 @@ impl ExecutionSupervisor {
         total_history: usize,
         port: Option<Arc<dyn LambdaTaskPort>>,
     ) -> Result<Self, ExecutionError> {
+        Self::new_with_frames(
+            limits,
+            history,
+            total_history,
+            port,
+            Arc::new(FrameCapacity::default()),
+            FrameLimits::default(),
+        )
+    }
+    /// Construct the resource owner with validated shared/local frame budgets.
+    ///
+    /// # Errors
+    /// Returns the same runtime/history configuration errors as `new`.
+    ///
+    /// ```
+    /// let owner=rustack_stepfunctions_core::ExecutionSupervisor::new_with_frames(rustack_stepfunctions_core::RuntimeLimits::default(),rustack_stepfunctions_core::HistoryLimits::default(),256*1024*1024,None,std::sync::Arc::new(rustack_stepfunctions_core::FrameCapacity::default()),rustack_stepfunctions_core::FrameLimits::default())?;
+    /// # Ok::<(),rustack_stepfunctions_core::ExecutionError>(())
+    /// ```
+    pub fn new_with_frames(
+        limits: RuntimeLimits,
+        history: HistoryLimits,
+        total_history: usize,
+        port: Option<Arc<dyn LambdaTaskPort>>,
+        frame_capacity: Arc<FrameCapacity>,
+        frame_limits: FrameLimits,
+    ) -> Result<Self, ExecutionError> {
         let capacity = HistoryCapacity::new(total_history, history)?;
         Ok(Self {
             shared: Arc::new(Shared {
@@ -104,6 +142,10 @@ impl ExecutionSupervisor {
                     cpu: Arc::new(Semaphore::new(limits.cpu)),
                 },
                 port,
+                frames: FrameSettings {
+                    capacity: frame_capacity,
+                    limits: frame_limits,
+                },
                 history: HistorySettings {
                     limits: history,
                     capacity,
@@ -127,12 +169,35 @@ impl ExecutionSupervisor {
     /// # }
     /// ```
     pub fn start(&mut self, driver: ExecutionDriver) -> Result<ExecutionHandle, ExecutionError> {
+        self.start_owned(driver, false)
+    }
+    /// Start an execution with the installed structured frame/resource owner.
+    ///
+    /// The default API compiler remains independently gated until service acceptance.
+    ///
+    /// # Errors
+    /// Rejects missing adapters, exhausted frame/history/open capacity or a closed owner.
+    ///
+    /// ```no_run
+    /// # fn start(owner:&mut rustack_stepfunctions_core::ExecutionSupervisor,driver:rustack_stepfunctions_core::ExecutionDriver) { let handle=owner.start_structured(driver); }
+    /// ```
+    pub fn start_structured(
+        &mut self,
+        driver: ExecutionDriver,
+    ) -> Result<ExecutionHandle, ExecutionError> {
+        self.start_owned(driver, true)
+    }
+    fn start_owned(
+        &mut self,
+        driver: ExecutionDriver,
+        structured: bool,
+    ) -> Result<ExecutionHandle, ExecutionError> {
         if !self.state.accepting || Handle::try_current().is_err() {
             return Err(ExecutionError::Unavailable);
         }
         self.reap_ready();
         if driver.started
-            || driver.machine().requires_structured_execution()
+            || (!structured && driver.machine().requires_structured_execution())
             || (self.shared.port.is_none() && driver.machine().uses_lambda())
         {
             return Err(ExecutionError::Unavailable);
@@ -144,6 +209,25 @@ impl ExecutionSupervisor {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ExecutionError::Capacity)?;
+        let deadline = Instant::from_std(driver.deadline());
+        let mut graph = if structured {
+            Some(
+                FrameScheduler::new(
+                    driver.clone(),
+                    self.shared.frames.capacity.clone(),
+                    self.shared.frames.limits,
+                )
+                .map_err(|_| ExecutionError::Capacity)?,
+            )
+        } else {
+            None
+        };
+        let root_frame = if let Some(graph) = &graph {
+            graph.root_lease().ok_or(ExecutionError::Invalid)?
+        } else {
+            FrameLease::root(&self.shared.frames.capacity, self.shared.frames.limits)
+                .map_err(|_| ExecutionError::Capacity)?
+        };
         let reserve = TerminalReserve::new(&self.shared.history.capacity)?;
         let mut journal = Journal::new(
             self.shared.history.limits,
@@ -163,15 +247,32 @@ impl ExecutionSupervisor {
         }));
         let (stop, cancelled) = watch::channel(None);
         let (leases, ledger) = watch::channel(Arc::new(Vec::new()));
-        let actor = Actor::new(
-            driver,
-            journal,
-            view.clone(),
-            cancelled,
-            leases,
-            self.shared.clone(),
-        );
-        let task = self.state.jobs.spawn(actor.run());
+        let task = if let Some(graph) = graph.take() {
+            self.state.jobs.spawn(
+                structured::Actor::new(
+                    graph,
+                    deadline,
+                    journal,
+                    view.clone(),
+                    cancelled,
+                    leases,
+                    self.shared.clone(),
+                )
+                .run(),
+            )
+        } else {
+            self.state.jobs.spawn(
+                Actor::new(
+                    driver,
+                    journal,
+                    view.clone(),
+                    cancelled,
+                    leases,
+                    self.shared.clone(),
+                )
+                .run(),
+            )
+        };
         self.state.slots.insert(
             task.id(),
             Slot {
@@ -180,6 +281,7 @@ impl ExecutionSupervisor {
                 reserve,
                 leases: ledger,
                 _permit: permit,
+                _root_frame: root_frame,
             },
         );
         Ok(ExecutionHandle { stop, view: reader })

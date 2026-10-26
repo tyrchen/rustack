@@ -23,7 +23,7 @@ mod tests;
 mod types;
 
 use budget::{Blocked, Slot};
-pub use budget::{FrameCapacity, FrameLimits};
+pub use budget::{FrameCapacity, FrameLease, FrameLimits};
 pub use types::{FrameCallId, FrameError, FrameId, FrameParent, FrameTransition, FrameUpdate};
 
 const ROOT: FrameId = FrameId(0);
@@ -73,7 +73,7 @@ struct Frame {
     calls: BTreeMap<AttemptId, CallState>,
     notification: Notification,
     cancelling: bool,
-    _slot: Slot,
+    lease: Arc<FrameLease>,
 }
 
 /// One execution's bounded frame tree; the caller independently owns IO resources.
@@ -131,7 +131,7 @@ impl FrameScheduler {
             calls: BTreeMap::new(),
             notification: Notification::Waiting,
             cancelling: false,
-            _slot: slot,
+            lease: FrameLease::child(slot, None),
         };
         Ok(Self {
             frames: BTreeMap::from([(ROOT, frame)]),
@@ -150,6 +150,22 @@ impl FrameScheduler {
             calls: 0,
             outcome: None,
         })
+    }
+    /// Retain a frame and all ancestors before issuing accepted external work.
+    ///
+    /// ```
+    /// # fn retain(owner:&rustack_stepfunctions_core::FrameScheduler,id:rustack_stepfunctions_core::FrameId) { let lease=owner.lease(id); }
+    /// ```
+    #[must_use]
+    pub fn lease(&self, id: FrameId) -> Option<Arc<FrameLease>> {
+        self.frames.get(&id).map(|frame| frame.lease.clone())
+    }
+    pub(crate) fn root_lease(&self) -> Option<Arc<FrameLease>> {
+        self.lease(ROOT)
+    }
+    pub(crate) fn supersede_uncommitted(&mut self, outcome: Arc<ExecutionOutcome>) {
+        self.outcome = None;
+        self.terminate(outcome);
     }
     /// Read a live/retiring frame without mutating its interpreter.
     ///

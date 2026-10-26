@@ -999,3 +999,5 @@ async fn test_should_reject_unstarted_success_without_fabricating_start_history(
     );
     owner.drain(deadline()).await.unwrap();
 }
+
+mod structured;

@@ -504,3 +504,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: frame/attempt identities reject stale work, failed joins cannot replay uncertain siblings, and a join-only capacity cycle fails explicitly. Slot byte charges bound intermediate aggregation separately from frame payloads and official history.
 - **Pinned by**: [ASL§3.4](./rustack-workflows-30-asl-design.md#34-bounded-frame-scheduler-and-retirement-protocol), [P3](./rustack-workflows-90-impl-plan.md#6-p3--structured-fan-out-and-nested-jobs-closes-m2).
 - **Date**: 2026-10-26. Actual asynchronous task ownership, concurrent causal history and nested integrations remain required; Docker work remains deferred by user priority.
+
+## D58 — Fence asynchronous scheduler updates and retain frame lineage above accepted IO
+
+- **Context**: moving a unique scheduler into bounded CPU work must not let Stop/deadline lose to speculative success, or let a panic release accepted-call frame capacity. Concurrent history needs per-frame predecessors rather than the global last event.
+- **Decision**: an explicit structured supervisor path owns one scheduler and joined resource watchers. Fresh control checks fence each CPU update; forced control discards speculative effects and drains returned bookkeeping. Accepted calls retain immutable ancestor-frame leases in the supervisor ledger before port admission. Validate causal journal predecessors and project typed round/iteration metadata.
+- **Why**: scheduler cloning and actor mutexes are unnecessary; physical ownership remains independent of business results and CPU observation. Equal branch AttemptIds cannot collide, and a clean watcher join cannot discard its unread completion.
+- **Pinned by**: [ASL§3.5](./rustack-workflows-30-asl-design.md#35-asynchronous-structured-resource-owner-and-commit-fence), [AWS history DTO](https://docs.aws.amazon.com/step-functions/latest/apireference/API_HistoryEvent.html).
+- **Date**: 2026-10-26. Actual consuming-service Native/SDK acceptance and nested integrations remain required; Docker remains deferred by user priority.

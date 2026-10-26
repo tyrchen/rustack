@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Frame, FrameId, FrameParent, FrameScheduler, FrameUpdate, Notification, RESULT_OVERHEAD,
-    ResultSlot, Round, budget::Slot, drive::Operation,
+    Frame, FrameId, FrameLease, FrameParent, FrameScheduler, FrameUpdate, Notification,
+    RESULT_OVERHEAD, ResultSlot, Round, budget::Slot, drive::Operation,
 };
 use crate::{
     AslError, ClockSample, ExecutionDriver, ExecutionOutcome, ExecutionSource, FanoutFailure,
@@ -99,6 +99,7 @@ impl FrameScheduler {
         round.next = round.next.saturating_add(1);
         round.running.insert(child);
         owner.children.insert(child);
+        let lineage = owner.lease.clone();
         self.frames.insert(
             child,
             Frame {
@@ -109,7 +110,7 @@ impl FrameScheduler {
                 calls: BTreeMap::new(),
                 notification: Notification::Waiting,
                 cancelling: false,
-                _slot: slot,
+                lease: FrameLease::child(slot, Some(lineage)),
             },
         );
         self.enqueue(id, false);

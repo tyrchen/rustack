@@ -160,3 +160,28 @@ impl Drop for Slot {
         self.capacity.changed.notify_waiters();
     }
 }
+
+/// An immutable charged frame slot retaining its complete ancestor lineage.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct FrameLease {
+    _slot: Slot,
+    _parent: Option<Arc<FrameLease>>,
+}
+impl FrameLease {
+    pub(super) fn child(slot: Slot, parent: Option<Arc<Self>>) -> Arc<Self> {
+        Arc::new(Self {
+            _slot: slot,
+            _parent: parent,
+        })
+    }
+    pub(crate) fn root(
+        capacity: &Arc<FrameCapacity>,
+        limits: FrameLimits,
+    ) -> Result<Arc<Self>, FrameError> {
+        let local = Arc::new(Semaphore::new(limits.frames));
+        Slot::acquire(capacity, &local)
+            .map(|slot| Self::child(slot, None))
+            .map_err(|_| FrameError::Capacity)
+    }
+}

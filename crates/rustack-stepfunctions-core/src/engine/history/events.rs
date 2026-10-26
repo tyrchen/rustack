@@ -19,7 +19,7 @@ use crate::{
     TaskFailure,
 };
 
-fn event(kind: HistoryEventType, wall: DateTime<Utc>) -> HistoryEvent {
+pub(crate) fn event(kind: HistoryEventType, wall: DateTime<Utc>) -> HistoryEvent {
     HistoryEvent::builder()
         .id(0)
         .timestamp(wall)
@@ -57,9 +57,8 @@ pub(crate) fn entered(
         StateView::Choice { .. } => HistoryEventType::ChoiceStateEntered,
         StateView::Succeed { .. } => HistoryEventType::SucceedStateEntered,
         StateView::Fail { .. } => HistoryEventType::FailStateEntered,
-        StateView::Parallel { .. } | StateView::Map { .. } => {
-            return Err(AslError::StructuredExecutionRequired);
-        }
+        StateView::Parallel { .. } => HistoryEventType::ParallelStateEntered,
+        StateView::Map { .. } => HistoryEventType::MapStateEntered,
     };
     let mut e = event(kind, wall);
     let mut d = StateEnteredEventDetails::default();
@@ -82,9 +81,8 @@ pub(crate) fn exited(
         StateView::Choice { .. } => HistoryEventType::ChoiceStateExited,
         StateView::Succeed { .. } => HistoryEventType::SucceedStateExited,
         StateView::Fail { .. } => return Err(AslError::InvalidStateId),
-        StateView::Parallel { .. } | StateView::Map { .. } => {
-            return Err(AslError::StructuredExecutionRequired);
-        }
+        StateView::Parallel { .. } => HistoryEventType::ParallelStateExited,
+        StateView::Map { .. } => HistoryEventType::MapStateExited,
     };
     let mut e = event(kind, wall);
     let mut d = StateExitedEventDetails::default();

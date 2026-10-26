@@ -7,6 +7,7 @@
 //! - `WORKFLOW_MODE=1` → checked computation; optional `WORKFLOW_FAIL_ONCE=1`
 //! - `PROCESS_MARKER_DIR=path` → per-PID process ownership evidence
 //! - `WORKFLOW_GATE_FILE=path` → bounded consumed-event gate for SDK revision tests
+//! - `WORKFLOW_INVOCATION_DIR=path` → atomic per-request consumed-event markers
 //! - `INVOCATION_FILE=path` → per-event PID/request-ID marker after body receipt
 //! - `SLEEP_SECS=N` → sleep N seconds before responding (for timeout tests)
 //!
@@ -17,7 +18,7 @@
 
 use std::{
     io::{Error as IoError, Read as _},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -58,19 +59,7 @@ fn main() {
             return;
         }
     }
-    if let Some(delay) = std::env::var("INIT_DELAY_MILLIS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        std::thread::sleep(Duration::from_millis(delay));
-    }
-    if std::env::var("INIT_FAIL").is_ok_and(|value| value == "1") {
-        let _ = post_runtime(
-            &agent,
-            &api,
-            "init/error",
-            r#"{"errorMessage":"secret-initialization-value","errorType":"TestInitError"}"#,
-        );
+    if !initialize(&agent, &api) {
         return;
     }
     loop {
@@ -86,6 +75,18 @@ fn main() {
             let marker = serde_json::json!({"pid":std::process::id(),"request_id":request_id});
             if let Err(error) = std::fs::write(path, marker.to_string()) {
                 eprintln!("Write invocation marker: {error}");
+                return;
+            }
+        }
+        if let Ok(directory) = std::env::var("WORKFLOW_INVOCATION_DIR") {
+            let marker = consumed_marker(Path::new(&directory), &request_id).and_then(
+                |(pending, complete, body)| {
+                    std::fs::write(&pending, body)?;
+                    std::fs::rename(pending, complete)
+                },
+            );
+            if let Err(error) = marker {
+                eprintln!("Write consumed invocation marker: {error}");
                 return;
             }
         }
@@ -134,6 +135,48 @@ fn sleep_seconds() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0)
+}
+
+fn initialize(agent: &Agent, api: &str) -> bool {
+    if let Some(delay) = std::env::var("INIT_DELAY_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(delay));
+    }
+    if std::env::var("INIT_FAIL").is_ok_and(|value| value == "1") {
+        let _ = post_runtime(
+            agent,
+            api,
+            "init/error",
+            r#"{"errorMessage":"secret-initialization-value","errorType":"TestInitError"}"#,
+        );
+        return false;
+    }
+    true
+}
+
+fn consumed_marker(
+    directory: &Path,
+    request_id: &str,
+) -> Result<(PathBuf, PathBuf, String), IoError> {
+    let valid = request_id.len() == 36
+        && request_id.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    if !valid {
+        return Err(IoError::other("Invalid invocation marker request ID"));
+    }
+    let marker = serde_json::json!({"pid":std::process::id(),"request_id":request_id});
+    Ok((
+        directory.join(format!("{request_id}.pending")),
+        directory.join(format!("{request_id}.json")),
+        marker.to_string(),
+    ))
 }
 
 fn wait_workflow_gate(path: &Path) -> Result<(), IoError> {

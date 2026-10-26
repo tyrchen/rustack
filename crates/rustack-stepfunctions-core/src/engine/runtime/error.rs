@@ -5,12 +5,15 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 use tokio::task::JoinError;
 
-use crate::AslError;
+use crate::{AslError, FrameError};
 
 /// Runtime admission/control/history errors without payloads or panic text.
 #[derive(Error)]
 #[non_exhaustive]
 pub enum ExecutionError {
+    /// A structured frame protocol or ownership invariant failed.
+    #[error("structured workflow frame failed")]
+    Frame(#[source] FrameError),
     /// Invalid trusted runtime/history settings or page arguments.
     #[error("invalid workflow runtime configuration or page")]
     Invalid,

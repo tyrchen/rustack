@@ -31,8 +31,8 @@ mod types;
 
 pub use fanout::{FanoutBranch, FanoutFailure, FanoutPlan, PropagatedFailure};
 pub use scheduler::{
-    FrameCallId, FrameCapacity, FrameError, FrameId, FrameLimits, FrameParent, FrameScheduler,
-    FrameTransition, FrameUpdate,
+    FrameCallId, FrameCapacity, FrameError, FrameId, FrameLease, FrameLimits, FrameParent,
+    FrameScheduler, FrameTransition, FrameUpdate,
 };
 pub use types::{
     AttemptId, ClockSample, DriverStep, DriverUpdate, ExecutionFailure, ExecutionLimits,
@@ -83,6 +83,7 @@ pub struct ExecutionDriver {
     retry_count: u32,
     remaining: u32,
     diagnostic: Option<Arc<AslError>>,
+    fanout_started: Option<usize>,
 }
 impl fmt::Debug for ExecutionDriver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -186,6 +187,7 @@ impl ExecutionDriver {
             retry_count: 0,
             remaining,
             diagnostic: None,
+            fanout_started: None,
         })
     }
 

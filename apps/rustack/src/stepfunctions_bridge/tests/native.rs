@@ -1,6 +1,13 @@
 //! Actual host process → Runtime API → ASL fixtures. Built by the Makefile gate.
 
-use std::{env, error::Error, process, time::Duration};
+use std::{
+    collections::BTreeSet,
+    env,
+    error::Error,
+    path::Path,
+    process,
+    time::{Duration, SystemTime},
+};
 
 use http::{Request as HttpRequest, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -9,7 +16,7 @@ use rustack_lambda_model::input::{
 };
 use rustack_stepfunctions_core::{
     ExecutionSnapshot, PreparedDefinition, Registry, RegistryCommand, RegistryError,
-    RegistryLimits, RegistryResult, Tags,
+    RegistryLimits, RegistryResult, StateSupport, Tags,
 };
 use rustack_stepfunctions_http::{RequestScope, StepFunctionsHttpConfig, StepFunctionsHttpService};
 use tokio::{
@@ -701,4 +708,132 @@ async fn native_e2e_should_execute_real_lambda_through_typed_http_api_and_pagina
     assert!(
         next["events"][0]["id"].as_i64().unwrap() < history["events"][0]["id"].as_i64().unwrap()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires actual host bootstrap; run make test-stepfunctions-bridge-native"]
+async fn native_e2e_should_execute_overlapping_parallel_functions_through_structured_owner()
+-> Result<(), Box<dyn Error>> {
+    let gate = tempfile::tempdir()?;
+    let release = gate.path().join("release");
+    let release_text = release.to_str().ok_or("invalid gate path")?;
+    let consumed = gate.path().join("consumed");
+    fs::create_dir(&consumed).await?;
+    let consumed_text = consumed.to_str().ok_or("invalid consumed marker path")?;
+    let mut fixture = NativeFixture::new(
+        &[
+            ("WORKFLOW_MODE", "1"),
+            ("WORKFLOW_GATE_FILE", release_text),
+            ("WORKFLOW_INVOCATION_DIR", consumed_text),
+        ],
+        false,
+    )
+    .await;
+    let result = async {
+        let definition = json!({
+            "StartAt": "Parallel",
+            "States": {"Parallel": {
+                "Type": "Parallel",
+                "Branches": [workflow(false), workflow(false)],
+                "End": true
+            }}
+        });
+        let compiled = AslCompiler::new(TenantScope::default(), TaskSupport::Lambda)
+            .with_state_support(StateSupport::Structured)
+            .compile(&serde_json::to_vec(&definition)?)?;
+        let input = Payload::from_value(&json!({"n": 21}))?;
+        let driver = ExecutionDriver::for_structured_owner(
+            compiled.machine().clone(),
+            input.clone(),
+            EvaluationContext::from(&input),
+            ClockSample::new(Instant::now().into_std(), SystemTime::now().into()),
+            ExecutionLimits::default(),
+        )?;
+        let mut handle = fixture.owner.start_structured(driver)?;
+        let markers = timeout_at(deadline(), consumed_invocations(&consumed)).await??;
+        fs::write(&release, b"release").await?;
+        let view = handle.wait(deadline()).await?;
+        Ok::<_, Box<dyn Error>>((view, markers))
+    }
+    .await;
+    let released = fs::write(&release, b"release").await;
+    fixture.cleanup().await;
+    released?;
+    let (view, markers) = result?;
+    let values = output(view.outcome().ok_or("outcome")?)
+        .as_array()
+        .ok_or("expected ordered array")?;
+    assert_eq!(values.len(), 2);
+    let returned: BTreeSet<_> = values
+        .iter()
+        .map(|value| {
+            Ok((
+                value
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .ok_or("missing PID")?,
+                value
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .ok_or("missing request ID")?
+                    .to_owned(),
+            ))
+        })
+        .collect::<Result<_, Box<dyn Error>>>()?;
+    assert_eq!(returned, markers);
+    for value in values {
+        assert_eq!(value.get("computed"), Some(&json!(42)));
+        assert_eq!(value.get("codeMarker"), Some(&json!("native-v1")));
+        assert_ne!(
+            value.get("pid").and_then(Value::as_u64),
+            Some(u64::from(process::id()))
+        );
+    }
+    assert_ne!(
+        values.first().and_then(|v| v.get("request_id")),
+        values.get(1).and_then(|v| v.get("request_id"))
+    );
+    Ok(())
+}
+
+async fn consumed_invocations(directory: &Path) -> Result<BTreeSet<(u64, String)>, Box<dyn Error>> {
+    loop {
+        let mut entries = fs::read_dir(directory).await?;
+        let mut markers = BTreeSet::new();
+        let mut count = 0;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            count += 1;
+            if count > 2 || entry.metadata().await?.len() > 1024 {
+                return Err("unexpected consumed marker count or size".into());
+            }
+            let marker: Value = serde_json::from_slice(&fs::read(entry.path()).await?)?;
+            let pid = marker
+                .get("pid")
+                .and_then(Value::as_u64)
+                .filter(|pid| *pid > 0)
+                .ok_or("invalid consumed PID")?;
+            let request_id = marker
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|id| id.len() == 36)
+                .ok_or("invalid consumed request ID")?;
+            markers.insert((pid, request_id.to_owned()));
+        }
+        if markers.len() == 2 {
+            let pids: BTreeSet<_> = markers.iter().map(|(pid, _)| *pid).collect();
+            let requests: BTreeSet<_> = markers.iter().map(|(_, request)| request).collect();
+            if pids.len() != 2 || requests.len() != 2 {
+                return Err("handlers did not consume distinct concurrent invocations".into());
+            }
+            return Ok(markers);
+        }
+        sleep(Duration::from_millis(1)).await;
+    }
 }

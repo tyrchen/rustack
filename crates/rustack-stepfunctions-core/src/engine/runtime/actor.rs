@@ -30,8 +30,8 @@ use crate::{
 
 #[derive(Debug)]
 pub(super) struct OwnedCall {
-    call: TaskCall,
-    lease: Arc<DispatchLease>,
+    pub(super) call: TaskCall,
+    pub(super) lease: Arc<DispatchLease>,
 }
 #[derive(Debug)]
 struct CurrentCall {
@@ -362,7 +362,10 @@ impl Actor {
         if self.apply_control() || Instant::now().into_std() >= dispatch.deadline() {
             return;
         }
-        let lease = Arc::new(DispatchLease { _permit: permit });
+        let lease = Arc::new(DispatchLease {
+            _permit: permit,
+            _frame: None,
+        });
         self.resources.leases.push(lease.clone());
         self.sync_ledger();
         let command = LambdaTaskCommand::new(self.driver.machine.clone(), dispatch.clone());
