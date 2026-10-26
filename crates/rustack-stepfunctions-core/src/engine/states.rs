@@ -1,4 +1,4 @@
-//! Six compiled state instructions; no resource lifetime is hidden in evaluation.
+//! Compiled frame instructions; no resource lifetime is hidden in evaluation.
 
 use std::time::{Duration, Instant};
 
@@ -16,9 +16,7 @@ impl ExecutionDriver {
     ) -> Result<DriverStep, AslError> {
         let machine = self.machine.clone();
         match machine.state(self.state)? {
-            StateView::Parallel { .. } | StateView::Map { .. } => {
-                Err(AslError::StructuredExecutionRequired)
-            }
+            StateView::Parallel { .. } | StateView::Map { .. } => self.fanout(source),
             StateView::Pass { flow, result, next } => {
                 let prepared = flow.prepare_with_source(&self.input, &self.context, source)?;
                 let result = result

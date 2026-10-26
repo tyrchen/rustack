@@ -69,11 +69,14 @@ impl ExecutionDriver {
         source: &mut S,
     ) -> Result<Recovery, AslError> {
         let machine = self.machine.clone();
-        let StateView::Task { recovery, .. } = machine.state(self.state)? else {
+        let (StateView::Task { recovery, .. }
+        | StateView::Parallel { recovery, .. }
+        | StateView::Map { recovery, .. }) = machine.state(self.state)?
+        else {
             return Err(AslError::InvalidStateId);
         };
         self.retries.resize(recovery.retries().len(), 0);
-        let name = failure.error().ok_or(AslError::InvalidFailure)?;
+        let name = failure.error().unwrap_or("States.TaskFailed");
         for (index, retrier) in recovery.retries().iter().enumerate() {
             if !retrier.matches(name) {
                 continue;

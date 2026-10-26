@@ -1,4 +1,4 @@
-//! Deterministic sequential frame transitions with explicit external effects.
+//! Deterministic frame transitions with explicit external effects.
 //!
 //! No resource is spawned or dropped here. The owning actor must retain accepted
 //! invocations, process cancellation obligations and journal AWS history before
@@ -18,6 +18,7 @@ use crate::{
     AslError, CompiledMachine, EvaluationContext, Payload, StateId, StateView, Transition,
 };
 
+mod fanout;
 mod history;
 mod recovery;
 mod runtime;
@@ -26,6 +27,7 @@ mod states;
 mod tests;
 mod types;
 
+pub use fanout::{FanoutBranch, FanoutFailure, FanoutPlan};
 pub use types::{
     AttemptId, ClockSample, DriverStep, DriverUpdate, ExecutionFailure, ExecutionLimits,
     ExecutionOutcome, ExecutionSource, TaskDispatch, TaskFailure,
@@ -40,6 +42,10 @@ enum Phase {
         attempt: AttemptId,
         deadline: Instant,
     },
+    Joining {
+        attempt: AttemptId,
+        count: usize,
+    },
     Waiting {
         until: Instant,
         continuation: Continuation,
@@ -52,7 +58,7 @@ enum Continuation {
     Wait { output: Payload, next: Transition },
 }
 
-/// One captured machine's sequential frame, with no asynchronous resource owner.
+/// One captured lexical machine's frame interpreter, with no resource owner.
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct ExecutionDriver {
@@ -109,6 +115,32 @@ impl ExecutionDriver {
         if machine.requires_structured_execution() {
             return Err(AslError::StructuredExecutionRequired);
         }
+        Self::for_structured_owner(machine, input, base, started, limits)
+    }
+
+    /// Build a pure frame interpreter for an owner implementing `FanOut` effects.
+    ///
+    /// This constructor performs no scheduling or IO. The current sequential
+    /// supervisor rejects structured artifacts; enabling these effects alone
+    /// cannot enable the service's structured execution profile.
+    ///
+    /// # Errors
+    /// Rejects invalid context or an unrepresentable absolute deadline.
+    ///
+    /// ```
+    /// use rustack_stepfunctions_core::{AslCompiler, ClockSample, EvaluationContext, ExecutionDriver, ExecutionLimits, Payload};
+    /// let compiled = AslCompiler::default().compile(br#"{"StartAt":"Done","States":{"Done":{"Type":"Succeed"}}}"#)?;
+    /// let input = Payload::parse(b"{}")?;
+    /// let driver = ExecutionDriver::for_structured_owner(compiled.machine().clone(), input.clone(), EvaluationContext::from(&input), ClockSample::new(std::time::Instant::now(), chrono::Utc::now()), ExecutionLimits::default())?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn for_structured_owner(
+        machine: Arc<CompiledMachine>,
+        input: Payload,
+        base: EvaluationContext,
+        started: ClockSample,
+        limits: ExecutionLimits,
+    ) -> Result<Self, AslError> {
         if !base.value().is_object() {
             return Err(AslError::InvalidExecution);
         }
@@ -173,6 +205,10 @@ impl ExecutionDriver {
                     update(DriverStep::Park(deadline))
                 }
             }
+            Phase::Joining { attempt, count } => {
+                self.phase = Phase::Joining { attempt, count };
+                update(DriverStep::Park(self.deadline))
+            }
             Phase::Waiting {
                 until,
                 continuation,
@@ -232,23 +268,86 @@ impl ExecutionDriver {
             return self.advance(now, source);
         }
         self.phase = Phase::Ready { entry: false };
-        let step = match result {
+        update(match result {
             Err(failure) => self.recover(failure.0, now, source),
+            Ok(result) => match self.finish_result(Ok(result), source) {
+                Ok(step) => step,
+                Err(error) => self.evaluation_failure(error, now, source, true),
+            },
+        })
+    }
+
+    /// Join the current round only after its owner has joined cancelled siblings.
+    ///
+    /// Stale, duplicate and Lambda-attempt results cannot settle this round.
+    /// Deadline/Stop always preserve the independent cancellation obligation.
+    ///
+    /// ```
+    /// # fn join(driver: &mut rustack_stepfunctions_core::ExecutionDriver, plan: &rustack_stepfunctions_core::FanoutPlan, result: Result<rustack_stepfunctions_core::Payload, rustack_stepfunctions_core::FanoutFailure>, now: rustack_stepfunctions_core::ClockSample) {
+    /// let update = driver.complete_fanout(plan.attempt(), result, now, &mut rustack_stepfunctions_core::SystemUuidSource::default());
+    /// # }
+    /// ```
+    pub fn complete_fanout<S: ExecutionSource + ?Sized>(
+        &mut self,
+        attempt: AttemptId,
+        result: Result<Payload, FanoutFailure>,
+        now: ClockSample,
+        source: &mut S,
+    ) -> DriverUpdate {
+        self.started = true;
+        if let Some(update) = self.guard(now) {
+            return update;
+        }
+        let Phase::Joining {
+            attempt: current,
+            count,
+        } = self.phase
+        else {
+            return self.current_update();
+        };
+        if current != attempt {
+            return self.current_update();
+        }
+        self.phase = Phase::Ready { entry: false };
+        let step = match result {
+            Err(FanoutFailure::Branch(failure)) => self.recover(failure, now, source),
+            Err(FanoutFailure::Evaluation(error)) => {
+                self.evaluation_failure(error, now, source, true)
+            }
             Ok(result) => {
-                let machine = self.machine.clone();
-                let output = match machine.state(self.state) {
-                    Ok(StateView::Task { flow, next, .. }) => flow
-                        .finish_with_source(&self.input, &result, &self.context, source)
-                        .map(|output| (output, next)),
-                    _ => Err(AslError::InvalidStateId),
+                let result = if result
+                    .value()
+                    .as_array()
+                    .is_some_and(|values| values.len() == count)
+                {
+                    Ok(result)
+                } else {
+                    Err(AslError::InvalidFanoutResult)
                 };
-                match output {
-                    Ok((output, next)) => self.transfer(output, next),
+                match self.finish_result(result, source) {
+                    Ok(step) => step,
                     Err(error) => self.evaluation_failure(error, now, source, true),
                 }
             }
         };
         update(step)
+    }
+
+    fn finish_result<S: ExecutionSource + ?Sized>(
+        &mut self,
+        result: Result<Payload, AslError>,
+        source: &mut S,
+    ) -> Result<DriverStep, AslError> {
+        let result = result?;
+        let machine = self.machine.clone();
+        let (StateView::Task { flow, next, .. }
+        | StateView::Parallel { flow, next, .. }
+        | StateView::Map { flow, next, .. }) = machine.state(self.state)?
+        else {
+            return Err(AslError::InvalidStateId);
+        };
+        let output = flow.finish_with_source(&self.input, &result, &self.context, source)?;
+        Ok(self.transfer(output, next))
     }
 
     /// Abort once, bypassing user recovery; elapsed overall deadlines still win.
@@ -360,6 +459,7 @@ impl ExecutionDriver {
     fn current_update(&self) -> DriverUpdate {
         update(match &self.phase {
             Phase::Calling { deadline, .. } => DriverStep::Park(*deadline),
+            Phase::Joining { .. } => DriverStep::Park(self.deadline),
             Phase::Waiting { until, .. } => DriverStep::Park((*until).min(self.deadline)),
             Phase::Ready { .. } => DriverStep::Continue,
             Phase::Terminal(outcome) => DriverStep::Settled(outcome.clone()),
@@ -367,7 +467,7 @@ impl ExecutionDriver {
     }
     fn active(&self) -> Option<AttemptId> {
         match self.phase {
-            Phase::Calling { attempt, .. } => Some(attempt),
+            Phase::Calling { attempt, .. } | Phase::Joining { attempt, .. } => Some(attempt),
             _ => None,
         }
     }
@@ -416,7 +516,10 @@ impl ExecutionDriver {
         {
             Ok(step) => step,
             Err(error) => {
-                let task = matches!(self.machine.state(self.state), Ok(StateView::Task { .. }));
+                let task = matches!(
+                    self.machine.state(self.state),
+                    Ok(StateView::Task { .. } | StateView::Parallel { .. } | StateView::Map { .. })
+                );
                 self.evaluation_failure(error, now, source, task)
             }
         };
@@ -444,6 +547,7 @@ impl ExecutionDriver {
             | AslError::Encoding(_)
             | AslError::Allocation(_)
             | AslError::InvalidStateId
+            | AslError::InvalidFanoutResult
             | AslError::InvalidExecution => "Rustack.InternalError",
             _ => "States.Runtime",
         };

@@ -10,6 +10,12 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Inline Map input or dynamically selected concurrency violates the profile.
+    #[error("invalid Inline Map input or concurrency")]
+    InvalidMap,
+    /// A structured owner supplied an invalid child index or joined result.
+    #[error("invalid structured frame result")]
+    InvalidFanoutResult,
     /// The artifact requires an execution owner unavailable in this driver.
     #[error("ASL artifact requires structured execution support")]
     StructuredExecutionRequired,

@@ -8,7 +8,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::{AslError, Payload, StateId, SystemUuidSource, UuidSource};
+use crate::{AslError, FanoutPlan, Payload, StateId, SystemUuidSource, UuidSource};
 
 /// One paired wall/monotonic observation supplied by the execution owner.
 #[derive(Debug, Clone, Copy)]
@@ -251,6 +251,8 @@ pub enum DriverStep {
     Continue,
     /// Start exactly once and retain the accepted call under supervisor ownership.
     Dispatch(TaskDispatch),
+    /// Admit indexed children lazily, then join this generation after cleanup.
+    FanOut(FanoutPlan),
     /// Arm a monotonic wakeup (also returned while waiting for a Task result).
     Park(Instant),
     /// An immutable outcome; does not certify resource cleanup or history commit.
@@ -278,7 +280,7 @@ impl DriverUpdate {
     pub fn step(&self) -> &DriverStep {
         &self.step
     }
-    /// Read the invalidated attempt whose cleanup the owner must still supervise.
+    /// Read the invalidated call or round whose cleanup the owner must supervise.
     ///
     /// ```
     /// # fn inspect(update:&rustack_stepfunctions_core::DriverUpdate) { let call=update.cancellation(); }

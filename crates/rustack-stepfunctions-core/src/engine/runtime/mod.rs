@@ -131,7 +131,10 @@ impl ExecutionSupervisor {
             return Err(ExecutionError::Unavailable);
         }
         self.reap_ready();
-        if driver.started || (self.shared.port.is_none() && driver.machine().uses_lambda()) {
+        if driver.started
+            || driver.machine().requires_structured_execution()
+            || (self.shared.port.is_none() && driver.machine().uses_lambda())
+        {
             return Err(ExecutionError::Unavailable);
         }
         let permit = self

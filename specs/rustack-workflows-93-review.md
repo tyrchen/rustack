@@ -660,6 +660,14 @@ The structured compiler dependency in ASL§1.2/D55 extends typed IR and normaliz
 
 Final independent read-only review reports no remaining in-slice findings. `make test-stepfunctions-core` passes490 unit cases,182 doctests and89 preserve_order compiler cases, followed by standard/strict production Clippy. Feature-enabled workspace build, all-target tests (3,049 passed/427 explicitly gated), Clippy, rustdoc with denied warnings and nightly formatting pass. The real Rust SDK/boto3/forced-runner suite also passes3 cases with no ignored tests. Evidence: `/tmp/rustack-p3-compiler-{core-final,build,workspace,clippy,docs,format,sdk}.log`. Six changed documents have241 resolvable local links, and diff whitespace checks pass. No dependencies, toolchain or Docker experiments changed; existing B06 remains open. Structured frame scheduling, concurrent causal history, sibling cleanup and nested integration remain required before P3/M2 acceptance.
 
+## P3 structured frame-effect interpreter independent review
+
+ASL§3.3/D56 now define lazy indexed Parallel/Map effects, typed round joins and ordered recovery. Independent read-only review reports no actionable in-slice findings after the final additions for actual selector failure, typed internal-error bypass and exhausted retry admission. FanoutFailure retains an Error source for interpreter failures and redacts business details. The existing supervisor and API remain sequential; no concurrent actor or M2 acceptance is claimed.
+
+The reviewer highlighted two binding owner-composition obligations, now explicit in ASL§3.3: inherit the exact captured absolute deadline even with less than one second left, and preserve terminal failure origin separately from a historical retained diagnostic. A child internal/interpreter terminal failure must not be flattened into a Branch error eligible for States.ALL replay. These are requirements for the next frame-owner dependency, not dismissed findings or changes to current pure interpreter acceptance.
+
+Final gates: `make test-stepfunctions-core` passes525 default units/193 doctests plus89 compiler and35 structured-effect cases under preserve_order; standard and strict production Clippy pass. Feature-enabled workspace build/all-target tests pass3,084 cases with427 explicitly gated, followed by Clippy, denied-warning rustdoc and nightly format checks. Actual Rust SDK, boto3 and forced-runner cleanup acceptance pass3 cases with no ignored tests. Evidence: `/tmp/rustack-p3-effects-{core-final,build,workspace,clippy,docs,format,sdk}.log`. Six changed documents have244 resolvable local links; diff whitespace checks pass. No dependency versions or Docker experiments changed. B06 and the remaining P3/M3/M4/image/platform requirements remain open.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

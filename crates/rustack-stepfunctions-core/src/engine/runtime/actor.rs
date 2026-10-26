@@ -181,6 +181,10 @@ impl Actor {
             match &self.driver.phase {
                 Phase::Ready { .. } => return Some(Operation::Advance),
                 Phase::Terminal(_) => return None,
+                Phase::Joining { .. } => {
+                    self.fail(ExecutionError::Unavailable);
+                    return None;
+                }
                 Phase::Waiting { until, .. } => {
                     let until = Instant::from_std((*until).min(self.driver.deadline));
                     tokio::select! {
