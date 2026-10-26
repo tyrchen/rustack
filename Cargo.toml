@@ -187,7 +187,7 @@ form_urlencoded = "1.2"
 rstest = { version = "0.28", default-features = false }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 tokio-test = "0.4"
-aws-config = { version = "1.12", default-features = false, features = [
+aws-config = { version = "1.13", default-features = false, features = [
   "credentials-process",
   "default-https-client",
   "rt-tokio",
@@ -203,6 +203,10 @@ aws-sdk-dynamodb = { version = "1.124", default-features = false, features = [
   "rt-tokio",
 ] }
 aws-sdk-dynamodbstreams = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-sfn = { version = "1.123", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
 ] }

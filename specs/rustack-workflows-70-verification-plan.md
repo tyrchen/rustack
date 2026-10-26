@@ -265,3 +265,52 @@ Generator regression checks preserve HTTP402/408 rather than collapsing them to5
 `make test-stepfunctions-runtime` composes the actual supported API/bridge gate with full and workflow-only binary tests and strict production checks. Pin target-family priority under conflicting Lambda paths, form/SNS signing hints and duplicate DynamoDB/SFN targets. Use actual sockets to check modeled408 timeout/error/request-ID framing. Validate supported YAML ranges/relationships and strict credential requirements before listening; reject unqualified backend capability claims. Saturate registry command admission while reading health without business commands.
 
 Natural grace must let a real one-second Wait succeed. Cancel and expire separate shutdown observers only after actual execution acceptance; resume the same cutoff/controllers. Final cleanup must bypass60-second grace and abort an outstanding3600-second Wait with Rustack.Shutdown before provider destruction. Keep actual Native timeout/Stop/missing-function readiness separate from retained worker failures. Report unsupported workflow snapshots and later compiler/integration features truthfully. Ordinary Rust SDK+boto3 against the actual registered service remains a separate required acceptance gate; transport-only SDK or generic Hyper-body tests cannot close it.
+
+### M1 ordinary SDK acceptance against the real binary
+
+Add an explicitly selected `make test-stepfunctions-sdk` gate. It builds the host bootstrap and the stepfunctions-enabled Rustack binary, then runs separate ordinary Rust SDK and pinned boto3 suites against independently owned real server processes. Use aws-sdk-sfn1.123.0 (current Cargo registry and [official builder](https://docs.rs/aws-sdk-sfn/latest/aws_sdk_sfn/config/struct.Builder.html), checked2026-10-26) and existing aws-sdk-lambda. The new service requires the current shared SDK runtime; upgrade aws-config to1.13 to match aws-types1.7/current shared Smithy protocol rather than mixing its previous Smithy schema0.2 protocol type. Re-run existing SDK consumer compilation/workspace suites and dependency gates; retain the pinned boto3/botocore1.43.118 fixture requirements. Disable SDK retries and install bounded connection/operation timeouts, an independent120s exercise deadline, and page/token limits even for empty or repeated pages. Credentials/endpoint/region are explicit local values; never resolve host profiles or contact AWS.
+
+The server child receives a cleared environment, strict Step Functions/Lambda signature validation, only those two enabled services, explicit Native selection, and an owned temporary root (including TMPDIR for Lambda artifacts). Health must become ready before SDK calls, with bounded checks of early child exit. Deploy the actual executable bootstrap using ordinary Lambda CreateFunction ZIP APIs. Computation doubles21 to42; FunctionError, fail-once retry and consumed-event timeout fixtures execute actual processes. Host bootstrap evidence does not qualify Docker/managed-language images.
+
+A checked-in SDK case catalog carries independent literal expectations and official-source links. Both clients execute all catalog entries, including full data pipeline/original-input merge, paths/intrinsics, guarded Choice, successful Wait, explicit Fail, fatal runtime, exact data-limit matching, and transition/history-byte exhaustion under small validated quotas. Exercise all15 M1 APIs, raw-input RUNNING idempotency and mismatched/closed collisions, consumed-event-gated definition revision capture (never a short timing window), concrete original/update/captured revision IDs and advancement, direct/optimized Lambda envelopes, retry/Catch and distinct function/Task/execution deadlines. Validate numeric dates through each SDK's native timestamp type, exact ARN scope, raw input/output JSON strings, exact sequential predecessor IDs, preserved reverse/data-disabled pages, token replay/query binding and continuation after deletion. No fixture may calculate expected values with the evaluator under test.
+
+Provision the pinned Python environment as a dedicated build artifact before any server starts; uv run temporary environments are not persistent interpreter paths. Spawn the interpreter directly, with a cleared environment and32KiB stdout/stderr caps; a PID-barrier timeout regression must kill and reap that actual Python process. The harness retains server process, stop signal, temporary directory and one resumable root JoinHandle above test/SDK futures. On any exercise error, stop and join the server before reporting assertions. Dropping/expiring a cleanup observer signals the same root and retains its join. The root sends SIGTERM for the main coordinated shutdown; forced termination or uncertain marker/child retirement fails qualification and retains the private directory. The bootstrap writes per-PID ownership markers before taking events; after clean server exit, require every recorded PID to be absent. Never kill arbitrary marker PIDs or delete evidence after uncertain cleanup. Bound marker count, file bytes, health responses and child output. Missing bootstrap/uv/prerequisites fails the explicitly selected gate; ordinary offline workspace tests may mark these resource cases ignored, but the required gate executes both suites with no skipped cases.
+
+```text
+make → real Rustack executable + real host bootstrap
+           │ isolated strict-auth server root owns process/files/join
+           ▼
+   Rust SDK       boto3 (separate server)
+      └──── signed localhost HTTP ────┘
+                         ▼
+       gateway → actual API/registry/ASL → actual Lambda provider
+                         │                      ▼
+                 real bounded history      computed bootstrap/error/timeout
+                         │                      │ PID ownership markers
+                         └──── SIGTERM/join ────┘
+                        clean absence proof / retained failed evidence
+```
+
+A01–A13/I01 closure combines these ordinary SDK observations with the existing detailed unit/property/Native matrices; record the exact case mapping and limits, rather than claiming cloud differential parity or final workflow/image acceptance. Existing B06 security remediation remains required.
+
+#### Executed SDK evidence mapping
+
+The [17-case SDK catalog](../tests/workflows/sdk-cases.json) has explicit outcome/source validation and per-case document/local-policy provenance. Both clients execute it, then independently exercise control-plane behavior. Host Native acceptance is not AWS differential or image/platform qualification.
+
+| Acceptance | Ordinary SDK observation | Complementary detailed evidence |
+|---|---|---|
+| A01 | All15 supported actions; native date types, scoped ARNs, tags, validation and explicit unsupported action | Typed model/HTTP framing and API error matrices |
+| A02 | Concurrent equal raw-input RUNNING start, mismatched/malformed input rejection, closed-name collision | Registry name/retention/property cases |
+| A03 | Actual consumed-event gate holds the old execution through update/new execution; original/update/captured UUIDs and dates checked | Immutable revision/admission/TTL cases |
+| A04–A05 | All six instruction forms and full Task data pipeline with original-input merge | Driver/evaluator phase and missing/null matrices |
+| A06 | Quoted/index/wildcard/slice selections; invalid grammar and duplicate .$ output produce validation failure | Parser/compiler bounded malformed-input properties |
+| A07 | All12 intrinsics, including valid v4 UUID; literal expected values are independent | Intrinsic nesting/work/rounding/output-boundary matrices |
+| A08 | Guarded missing/null/string glob/timestamp Choice and Wait/Succeed path | Short-circuit/type/numeric/clock boundary matrices |
+| A09 | Actual fail-once Lambda retries exactly twice; FunctionError/Catch preserves parsed cause | Matcher/backoff/jitter/count/race matrices and alias re-resolution Native cases |
+| A10 | Distinct function-owned Sandbox.Timedout, Task States.Timeout and uncatchable execution TIMED_OUT | Consumed-event Native PID cancellation/timeout cases |
+| A11 | Fatal runtime bypasses ALL; data limit excludes ALL and is caught explicitly | Parameters/result/selector/failure-domain boundaries |
+| A12 | Native SDK paginators, exact sequential causality, reverse/data omission, replay/forgery/query-binding and deletion continuation | Page-store24h expiry/collision/capacity and scope tests |
+| A13 | Local80-transition and1MiB history-byte failures retain final ExecutionFailed events | Reserved terminal event/count/global-byte/admission tests |
+| I01 | Direct/optimized actual Lambda results, correct FunctionError handling and actual invocation-ID envelope | Envelope/quota/invalid-JSON/error-type mapping matrices |
+
+The required SDK target also observes a directly owned Python PID, forces a timeout and proves reap/absence, including a malformed-PID-barrier path that still joins cleanup. It explicitly runs three resource cases with no skipped resource case. The separate catalog-shape test runs in ordinary workspace tests. Current source/dependency verification results and review resolutions are recorded in the implementation ledger and review.

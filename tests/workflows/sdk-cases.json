@@ -1,0 +1,755 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-standard-jsonpath-v1",
+  "evidence": "Document-derived literal expectations, not an AWS-observed execution or Rustack-evaluator oracle. Builds on semantic-cases.json and its pinned provenance.",
+  "sources": {
+    "asl": "https://states-language.net/spec.html",
+    "pipeline": "https://docs.aws.amazon.com/step-functions/latest/dg/input-output-inputpath-params.html",
+    "errors": "https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html",
+    "intrinsics": "https://docs.aws.amazon.com/step-functions/latest/dg/intrinsic-functions.html",
+    "paths": "https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-paths.html",
+    "choice": "https://docs.aws.amazon.com/step-functions/latest/dg/state-choice.html",
+    "quotas": "../../specs/rustack-workflows-60-operations-design.md#12-tunable-budgets"
+  },
+  "localBudgets": {
+    "workflowTransitions": 80,
+    "workflowHistoryBytes": 1048576,
+    "workflowTotalHistoryBytes": 8388608
+  },
+  "cases": [
+    {
+      "id": "paths",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Pass",
+            "Parameters": {
+              "quoted.$": "$['odd.key']",
+              "ids.$": "$.items[*].id",
+              "slice.$": "$.values[1:3]",
+              "index.$": "$.values[0]"
+            },
+            "End": true
+          }
+        }
+      },
+      "input": {
+        "odd.key": 17,
+        "items": [
+          {
+            "id": 7
+          },
+          {
+            "id": 9
+          }
+        ],
+        "values": [
+          3,
+          5,
+          8
+        ]
+      },
+      "expectedOutput": {
+        "quoted": 17,
+        "ids": [
+          7,
+          9
+        ],
+        "slice": [
+          5,
+          8
+        ],
+        "index": 3
+      },
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "paths"
+        ]
+      }
+    },
+    {
+      "id": "intrinsics",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Pass",
+            "Parameters": {
+              "format.$": "States.Format('x-{}', $.n)",
+              "from.$": "States.StringToJson($.encoded)",
+              "to.$": "States.JsonToString($.obj)",
+              "array.$": "States.Array(1, 2)",
+              "length.$": "States.ArrayLength($.items)",
+              "get.$": "States.ArrayGetItem($.items, 1)",
+              "contains.$": "States.ArrayContains($.items, 2)",
+              "partition.$": "States.ArrayPartition($.items, 2)",
+              "split.$": "States.StringSplit('a,b;;c', ',;')",
+              "add.$": "States.MathAdd(-1.5, 0)",
+              "uuid.$": "States.UUID()",
+              "merge.$": "States.JsonMerge($.left, $.right, false)"
+            },
+            "End": true
+          }
+        }
+      },
+      "input": {
+        "n": 7,
+        "encoded": "{\"n\":7}",
+        "obj": {
+          "n": 7
+        },
+        "items": [
+          1,
+          2,
+          3
+        ],
+        "left": {
+          "a": 1,
+          "same": 0
+        },
+        "right": {
+          "b": 2,
+          "same": 3
+        }
+      },
+      "uuidField": "uuid",
+      "expectedOutput": {
+        "format": "x-7",
+        "from": {
+          "n": 7
+        },
+        "to": "{\"n\":7}",
+        "array": [
+          1,
+          2
+        ],
+        "length": 3,
+        "get": 2,
+        "contains": true,
+        "partition": [
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ]
+        ],
+        "split": [
+          "a",
+          "b",
+          "c"
+        ],
+        "add": -1,
+        "merge": {
+          "a": 1,
+          "b": 2,
+          "same": 3
+        }
+      },
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "intrinsics"
+        ]
+      }
+    },
+    {
+      "id": "choice-wait-succeed",
+      "definition": {
+        "StartAt": "Choose",
+        "States": {
+          "Choose": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "And": [
+                  {
+                    "Variable": "$.missing",
+                    "IsPresent": false
+                  },
+                  {
+                    "Variable": "$.v",
+                    "IsNull": true
+                  },
+                  {
+                    "Variable": "$.name",
+                    "StringMatches": "report-*.txt"
+                  },
+                  {
+                    "Variable": "$.when",
+                    "TimestampLessThan": "2030-01-01T00:00:00Z"
+                  }
+                ],
+                "Next": "Wait"
+              }
+            ],
+            "Default": "Fail"
+          },
+          "Wait": {
+            "Type": "Wait",
+            "Seconds": 0,
+            "Next": "Done"
+          },
+          "Done": {
+            "Type": "Succeed"
+          },
+          "Fail": {
+            "Type": "Fail",
+            "Error": "WrongBranch"
+          }
+        }
+      },
+      "input": {
+        "v": null,
+        "name": "report-42.txt",
+        "when": "2026-01-01T00:00:00Z"
+      },
+      "expectedOutput": {
+        "v": null,
+        "name": "report-42.txt",
+        "when": "2026-01-01T00:00:00Z"
+      },
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "choice",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "pipeline",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkCompute",
+            "End": true,
+            "InputPath": "$.request",
+            "Parameters": {
+              "n.$": "$.n"
+            },
+            "ResultSelector": {
+              "answer.$": "$.computed"
+            },
+            "ResultPath": "$.result",
+            "OutputPath": "$"
+          }
+        }
+      },
+      "input": {
+        "ignored": 9,
+        "request": {
+          "n": 21
+        },
+        "trace": "keep"
+      },
+      "expectedOutput": {
+        "ignored": 9,
+        "request": {
+          "n": 21
+        },
+        "trace": "keep",
+        "result": {
+          "answer": 42
+        }
+      },
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "pipeline",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "direct",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkCompute",
+            "End": true,
+            "Parameters": {
+              "n.$": "$.n"
+            },
+            "ResultSelector": {
+              "answer.$": "$.computed"
+            }
+          }
+        }
+      },
+      "input": {
+        "n": 21
+      },
+      "expectedOutput": {
+        "answer": 42
+      },
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "pipeline",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "optimized",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "End": true,
+            "Parameters": {
+              "FunctionName": "SdkCompute",
+              "Payload": {
+                "n.$": "$.n"
+              }
+            }
+          }
+        }
+      },
+      "input": {
+        "n": 21
+      },
+      "optimizedComputed": 42,
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "pipeline",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "retry",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkRetry",
+            "End": true,
+            "Parameters": {
+              "n.$": "$.n",
+              "retryCount.$": "$$.State.RetryCount"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "WorkflowTransient"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 1,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "ResultSelector": {
+              "answer.$": "$.computed",
+              "attempt.$": "$.retryCount"
+            }
+          }
+        }
+      },
+      "input": {
+        "n": 21
+      },
+      "expectedOutput": {
+        "answer": 42,
+        "attempt": 1
+      },
+      "taskAttempts": 2,
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "function-error-catch",
+      "definition": {
+        "StartAt": "Call",
+        "States": {
+          "Call": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkFail",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "TestError"
+                ],
+                "ResultPath": "$.failure",
+                "Next": "Recovered"
+              }
+            ],
+            "End": true
+          },
+          "Recovered": {
+            "Type": "Pass",
+            "Parameters": {
+              "error.$": "$.failure.Error",
+              "cause.$": "States.StringToJson($.failure.Cause)"
+            },
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "expectedOutput": {
+        "error": "TestError",
+        "cause": {
+          "errorMessage": "boom",
+          "errorType": "TestError"
+        }
+      },
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "task-timeout",
+      "definition": {
+        "StartAt": "Call",
+        "States": {
+          "Call": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkSlow",
+            "TimeoutSeconds": 1,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.Timeout"
+                ],
+                "Next": "Recovered",
+                "ResultPath": null
+              }
+            ],
+            "End": true
+          },
+          "Recovered": {
+            "Type": "Pass",
+            "Result": "task-timeout",
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "expectedOutput": "task-timeout",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "function-timeout",
+      "definition": {
+        "StartAt": "Call",
+        "States": {
+          "Call": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkFunctionTimeout",
+            "TimeoutSeconds": 5,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "Sandbox.Timedout"
+                ],
+                "Next": "Recovered",
+                "ResultPath": null
+              }
+            ],
+            "End": true
+          },
+          "Recovered": {
+            "Type": "Pass",
+            "Result": "function-timeout",
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "expectedOutput": "function-timeout",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "execution-timeout",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkSlow",
+            "End": true,
+            "TimeoutSeconds": 5,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Caught"
+              }
+            ]
+          },
+          "Caught": {
+            "Type": "Pass",
+            "Result": "wrong",
+            "End": true
+          }
+        },
+        "TimeoutSeconds": 1
+      },
+      "input": {},
+      "expectedStatus": "TIMED_OUT",
+      "expectedError": "States.Timeout",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "runtime-fatal",
+      "definition": {
+        "StartAt": "Call",
+        "States": {
+          "Call": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkCompute",
+            "Parameters": {
+              "n.$": "$.missing"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Caught"
+              }
+            ],
+            "End": true
+          },
+          "Caught": {
+            "Type": "Pass",
+            "Result": "wrong",
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "expectedStatus": "FAILED",
+      "expectedError": "States.Runtime",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "data-limit-all",
+      "definition": {
+        "StartAt": "Call",
+        "States": {
+          "Call": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkCompute",
+            "Parameters": {
+              "large.$": "States.Format('{}{}', $.large, $.large)"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": null,
+                "Next": "Caught"
+              }
+            ],
+            "End": true
+          },
+          "Caught": {
+            "Type": "Pass",
+            "Result": "caught",
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "largeInputBytes": 140000,
+      "expectedStatus": "FAILED",
+      "expectedError": "States.DataLimitExceeded",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "data-limit-explicit",
+      "definition": {
+        "StartAt": "Call",
+        "States": {
+          "Call": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:000000000000:function:SdkCompute",
+            "Parameters": {
+              "large.$": "States.Format('{}{}', $.large, $.large)"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.DataLimitExceeded"
+                ],
+                "ResultPath": null,
+                "Next": "Caught"
+              }
+            ],
+            "End": true
+          },
+          "Caught": {
+            "Type": "Pass",
+            "Result": "caught",
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "largeInputBytes": 140000,
+      "expectedOutput": "caught",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "errors",
+          "asl"
+        ]
+      }
+    },
+    {
+      "id": "transition-limit",
+      "definition": {
+        "StartAt": "Loop",
+        "States": {
+          "Loop": {
+            "Type": "Pass",
+            "Next": "Again"
+          },
+          "Again": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.again",
+                "BooleanEquals": true,
+                "Next": "Loop"
+              }
+            ],
+            "Default": "Done"
+          },
+          "Done": {
+            "Type": "Succeed"
+          }
+        }
+      },
+      "input": {
+        "again": true
+      },
+      "expectedStatus": "FAILED",
+      "expectedError": "Rustack.TransitionLimitExceeded",
+      "evidence": {
+        "kind": "localQuotaPolicy",
+        "sources": [
+          "quotas"
+        ]
+      }
+    },
+    {
+      "id": "history-byte-limit",
+      "definition": {
+        "StartAt": "Loop",
+        "States": {
+          "Loop": {
+            "Type": "Pass",
+            "Next": "Again"
+          },
+          "Again": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.again",
+                "BooleanEquals": true,
+                "Next": "Loop"
+              }
+            ],
+            "Default": "Done"
+          },
+          "Done": {
+            "Type": "Succeed"
+          }
+        }
+      },
+      "input": {
+        "again": true
+      },
+      "largeInputBytes": 80000,
+      "expectedStatus": "FAILED",
+      "expectedError": "States.HistoryLimitExceeded",
+      "evidence": {
+        "kind": "localQuotaPolicy",
+        "sources": [
+          "quotas"
+        ]
+      }
+    },
+    {
+      "id": "explicit-fail",
+      "definition": {
+        "StartAt": "Run",
+        "States": {
+          "Run": {
+            "Type": "Fail",
+            "Error": "FixtureFailure",
+            "Cause": "quoted \"value\" 🙂"
+          }
+        }
+      },
+      "input": {},
+      "expectedStatus": "FAILED",
+      "expectedError": "FixtureFailure",
+      "expectedCause": "quoted \"value\" 🙂",
+      "evidence": {
+        "kind": "documentDerived",
+        "sources": [
+          "asl"
+        ]
+      }
+    }
+  ],
+  "retrievedAt": "2026-10-26"
+}

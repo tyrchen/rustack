@@ -472,3 +472,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: a mutex would obscure unique shutdown ownership; generic gateway timers can preempt modeled408 responses; historical invocation diagnostics are not supervisor failures.
 - **Pinned by**: [operations§1.6](./rustack-workflows-60-operations-design.md#16-executable-m1-gateway-composition), [shutdown](./rustack-workflows-60-operations-design.md#3-shutdown-cancellation-and-snapshots).
 - **Date**: 2026-10-26. Ordinary Rust SDK/boto3 real service acceptance and later workflow milestones remain required; Docker work remains deferred by user priority.
+
+## D54 — Qualify ordinary SDKs against the owned real binary and independent case catalog
+
+- **Context**: transport-only SDK and generic Hyper/Native fixtures cannot establish real gateway/core/SDK acceptance, and a test-process timeout must not orphan its Python runner or bootstrap children.
+- **Decision**: run ordinary Rust SDK and pinned boto3 against separate strict-auth real Rustack server processes with explicit Native execution. Both use17 source-linked literal outcome cases plus all15 M1 control actions. Retain server/process/file ownership independently; directly spawn persistent-environment Python, bound/join helpers and streams, then prove marker PID absence after coordinated shutdown. A consumed-event gate pins running idempotency and definition revision isolation without a scheduling window.
+- **Why**: independent expectations prevent the interpreter from becoming its own oracle; exact causal links, concrete revision identities and page bounds make SDK passes meaningful under slow CI and faulty responses. Latest aws-sdk-sfn requires a coherent aws-config1.13/shared runtime cohort rather than the prior incompatible protocol type.
+- **Pinned by**: [SDK contract](./rustack-workflows-70-verification-plan.md#m1-ordinary-sdk-acceptance-against-the-real-binary), [catalog](../tests/workflows/sdk-cases.json).
+- **Date**: 2026-10-26. This closes the ordinary SDK feature-acceptance gap for the selected M1 profile, not B06 security remediation, cloud differential parity, later workflow features or final Docker/platform qualification. Docker image work remains deferred by user priority.

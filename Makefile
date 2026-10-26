@@ -186,6 +186,18 @@ test-stepfunctions-runtime: test-stepfunctions-api
 
 .PHONY: test-stepfunctions-runtime
 
+# Dedicated build artifact: uv's ephemeral run environment disappears on exit.
+workflows-sdk-python:
+	@uv venv --python 3.13 --allow-existing "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python"
+	@uv pip install --python "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" --requirement tests/workflows/requirements.txt
+
+# Both ordinary SDKs directly own their real client and server processes.
+test-stepfunctions-sdk: workflows-sdk-python
+	@cargo build -p rustack-lambda-echo-bootstrap
+	@RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test -p rustack-cli --test workflows_sdk --features stepfunctions -- --ignored --test-threads=1 --nocapture
+
+.PHONY: workflows-sdk-python test-stepfunctions-sdk
+
 audit-codegen:
 	@cargo audit --file codegen/Cargo.lock
 
