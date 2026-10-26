@@ -7,6 +7,7 @@ mod connection;
 mod framing;
 mod image;
 mod lease;
+mod logs;
 mod ownership;
 mod pin;
 mod types;
@@ -29,6 +30,7 @@ use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 pub use image::ImageResolver;
 pub use lease::{ImageLeaseConfig, ImageLeaseManager, ImageLeasePort, ImageLeaseStatus};
+pub use logs::{FunctionLogs, LogSnapshot};
 use models::{
     ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, ContainerSummary,
     ContainerWaitResponse, ImageInspect, SystemInfo, SystemVersion,
@@ -515,14 +517,41 @@ impl DockerPort {
         relay: &DockerKey,
         deadline: Instant,
     ) -> Result<DockerAttachment, DockerError> {
+        self.attach_inner(relay, true, deadline).await
+    }
+
+    /// Attach only live function output before start, without stdin or replay.
+    ///
+    /// # Errors
+    /// Returns admission, upgrade, status, deadline or joined transport failure.
+    ///
+    /// ```no_run
+    /// # async fn logs(port: &rustack_lambda_core::docker::DockerPort, function: &rustack_lambda_core::docker::DockerKey) {
+    /// let attached = port.attach_logs(function, tokio::time::Instant::now() + std::time::Duration::from_secs(5)).await;
+    /// # }
+    /// ```
+    pub async fn attach_logs(
+        &self,
+        function: &DockerKey,
+        deadline: Instant,
+    ) -> Result<DockerAttachment, DockerError> {
+        self.attach_inner(function, false, deadline).await
+    }
+
+    async fn attach_inner(
+        &self,
+        key: &DockerKey,
+        stdin: bool,
+        deadline: Instant,
+    ) -> Result<DockerAttachment, DockerError> {
         let reply = self
             .call(
                 Operation::Attach,
                 Method::POST,
                 format!(
-                    "/containers/{}/attach?stdin=true&stdout=true&stderr=true&stream=true&\
+                    "/containers/{}/attach?stdin={stdin}&stdout=true&stderr=true&stream=true&\
                      logs=false",
-                    escaped(relay.as_str())
+                    escaped(key.as_str())
                 ),
                 Bytes::new(),
                 StatusCode::SWITCHING_PROTOCOLS,

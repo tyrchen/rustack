@@ -291,6 +291,21 @@ Both explicit two-case Docker wire suites pass using real DirectoryLease-backed 
 
 Persistent namespace capability is now implemented/reviewed. Startup historical-effect reconciliation, allowed pulls, remaining log/network/probe consumers, environment/pool executor and production configuration/acceptance remain P1 requirements. P2–P5 remain required.
 
+## P1 task1.3 function output capture review
+
+Independent read-only review covers §3.7/D29: output-only live attach, bounded binary rings/tail, fair snapshot/read service, retained partial framing, early socket closure, priority stop and cached join/failure ownership. Its final recheck finds no remaining in-slice issue. Capture is a runtime consumer primitive, not production executor readiness or complete per-invocation log attribution.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W63 | P3; `docker/logs_tests.rs`, cancelled snapshot proof | Dropping the Pin reference produced by tokio::pin does not drop its backing future. Use a lexical scope around future/pin/poll to actually abandon its receiver | A fragmented record completes after both16 completed snapshots and a genuinely abandoned snapshot; shutdown succeeds |
+| W64 | P2; self-review, `docker/logs.rs`, terminal reader ownership | Keeping the idle actor alive after EOF/framing failure also retained its socket. Drop the reader immediately but preserve capture state and failure for final snapshots/join | All four malformed stream cases observe peer EOF before owner shutdown, then retain failure across repeated shutdown |
+
+Eighteen focused cases pass, including independent channel overwrite/saturating counters, binary combined tail, bounded mailbox8 admission, output flooding, quiet off-runtime Drop, partial/silence deadline independence, cancelled shutdown join, actor panic and a scripted-daemon output-only/no-replay upgrade. The latter shuts down DockerWire after handoff and still consumes the separately owned capture, proving no management slot/driver remains needed for the transferred stream. Debug exposes sizes/error classes, never user bytes. No new dependency/version or lint exception is introduced.
+
+Final-source workspace build/test/fmt/Clippy/rustdoc pass with2,140 tests, zero failures and401 resource-gated cases. Core has461 tests/107 doctests; the six-library strict boundary target passes725 unit tests/171 doctests (896 total), with seven separately gated Docker cases. The unchanged dependency graph retains the current turn's clean474-dependency audit and passing deny advisories/bans/licenses/sources from the directory slice.
+
+Both explicit two-case Docker wire suites pass on Engine29.5.2 arm64 VZ and amd64/QEMU. The official RIC handler prints deliberate stdout/stderr markers only for the requested fixture event; the test requires both independently from its computed near6MiB response and warm/error outcomes, then joins capture after function removal. After both suites, ownership queries show no Rustack containers or internal aliases. These are60s stream/120s attempt stress qualifications, not default executor latency or native x86/Desktop evidence. Historical reconciliation, pulls, network/probe consumers, environment/pool actors, production wiring and P2–P5 remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

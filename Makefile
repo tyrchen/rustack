@@ -306,6 +306,12 @@ test-lambda-ownership:
 
 .PHONY: test-lambda-ownership
 
+# Bounded function output, snapshot/read fairness and joined attachment cleanup.
+test-lambda-logs:
+	@cargo test -p rustack-lambda-core --lib docker::logs::tests
+
+.PHONY: test-lambda-logs
+
 # Real-execution Lambda invoke tests (native backend).
 # Builds a Rust bootstrap fixture and invokes it through the rustack provider.
 test-lambda-invoke-native:

@@ -254,3 +254,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 
 - ← [PRD](./rustack-workflows-00-prd.md)
 - ↔ [roadmap](./rustack-workflows-80-roadmap.md), [implementation plan](./rustack-workflows-90-impl-plan.md), [survey](../docs/research/survey-stepfunctions-lambda-container-runtime.md)
+
+## D29 — Retain function output framing independently of snapshot traffic
+
+- **Context:** real Docker handlers can produce binary/flooding stdout/stderr while the control channel carries invocation results. Log snapshots must not cancel a partially consumed outer Docker record or retain unbounded output.
+- **Alternatives considered:** ordinary buffered Docker logs can accumulate response bodies; sharing control transport introduces output backpressure into invocation delivery; cancelling next() for every snapshot poisons its partial parser; blocking consumers on a full ring can block the handler.
+- **Decision:** attach live output only before function start using the existing joined upgrade transport; one retained actor owns framing and bounded channel/tail rings, preserving its pinned read future across read-only snapshot requests and prioritizing stop. Close failed/EOF sockets immediately while retaining final snapshots and join failures.
+- **Why:** snapshot and log flooding have bounded service quanta, user bytes never enter infrastructure diagnostics, and environment cleanup can join this socket independently of function/relay termination. The capture alone does not prove container exit or exact per-invocation log attribution.
+- **Pinned by:** [runtime §3.7](./rustack-workflows-20-lambda-runtime-design.md#37-retained-function-log-capture), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-26. No new dependency or version is introduced.

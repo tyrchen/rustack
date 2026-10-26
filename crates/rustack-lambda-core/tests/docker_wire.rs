@@ -12,7 +12,8 @@ use rustack_lambda_core::{
     artifact::{Architecture as ImageArchitecture, ImageReference, PinnedImage},
     docker::{
         DirectoryLease, DirectoryLeaseError, DockerError, DockerKey, DockerPort, DockerSocket,
-        DockerWire, ImageLeaseConfig, ImageLeaseManager, ImagePinScope, OutputChannel, OwnerFilter,
+        DockerWire, FunctionLogs, ImageLeaseConfig, ImageLeaseManager, ImagePinScope,
+        OutputChannel, OwnerFilter,
         models::{ContainerCreateBody, HostConfig},
     },
 };
@@ -106,6 +107,7 @@ struct Environment {
     wire: DockerWire,
     names: Names,
     runtime: Option<Runtime>,
+    logs: Option<FunctionLogs>,
     images: ImageLeaseManager,
     artifacts: Vec<PinnedImage>,
     directory: Option<TempDir>,
@@ -142,6 +144,7 @@ impl Environment {
                 environment: EnvironmentId::default(),
             },
             runtime: None,
+            logs: None,
             images,
             artifacts: Vec::new(),
             directory: Some(directory),
@@ -248,6 +251,11 @@ impl Environment {
             deadline(),
         )
         .await?;
+        self.logs = Some(FunctionLogs::start(
+            port.attach_logs(&self.names.function, deadline()).await?,
+            IO,
+            262_144,
+        )?);
         port.start_container(&self.names.function, deadline())
             .await?;
         ensure!(
@@ -325,6 +333,11 @@ impl Environment {
     async fn cleanup(&mut self) -> Result<()> {
         let port = self.wire.port();
         let function = remove(&port, &self.names.function).await;
+        let logs = if let Some(logs) = &mut self.logs {
+            logs.shutdown().await.map(drop).map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
         let runtime = if let Some(runtime) = &mut self.runtime {
             runtime.shutdown().await
         } else {
@@ -356,6 +369,7 @@ impl Environment {
             Ok(())
         };
         let result = function
+            .and(logs)
             .and(runtime)
             .and(relay)
             .and(listed)
@@ -403,7 +417,8 @@ async fn test_should_execute_real_ric_over_production_wire_with_large_binary_fra
     let mut environment = Environment::new().await?;
     let result = async {
         environment.start().await?;
-        let event = json!({"value":35,"padding":"p".repeat(LARGE),"response_bytes":LARGE});
+        let event =
+            json!({"value":35,"padding":"p".repeat(LARGE),"response_bytes":LARGE,"logs":true});
         let computed = environment.call(&event, false).await?;
         ensure!(
             computed["computed"] == 42
@@ -434,6 +449,27 @@ async fn test_should_execute_real_ric_over_production_wire_with_large_binary_fra
             failure["errorType"] == "ValueError",
             "function error mismatch"
         );
+        let logs = environment.logs.as_ref().context("function log capture")?;
+        timeout_at(deadline(), async {
+            loop {
+                let snapshot = logs.snapshot(deadline()).await?;
+                ensure!(snapshot.failure.is_none(), "log capture failed");
+                if snapshot
+                    .tail
+                    .windows(19)
+                    .any(|part| part == b"WIRE_STDOUT_CAPTURE")
+                    && snapshot
+                        .tail
+                        .windows(19)
+                        .any(|part| part == b"WIRE_STDERR_CAPTURE")
+                {
+                    break Ok::<(), anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("function log receipt deadline")??;
         Ok(())
     }
     .await;

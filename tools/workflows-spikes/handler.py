@@ -1,6 +1,7 @@
 """Real official-RIC handler used by the isolated P0 transport experiment."""
 
 import os
+import sys
 from pathlib import Path
 import time
 
@@ -10,6 +11,9 @@ counter = 0
 def handler(event, context):
     global counter
     counter += 1
+    if event.get("logs"):
+        print("WIRE_STDOUT_CAPTURE", flush=True)
+        print("WIRE_STDERR_CAPTURE", file=sys.stderr, flush=True)
     if event.get("fail"):
         raise ValueError("intentional P0 failure")
     if event.get("sleep"):
