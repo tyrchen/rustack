@@ -542,6 +542,18 @@ ASL§1.1/D47 implements strict whole-definition compilation into immutable six-s
 
 Core315 unit cases/66 doctests and strict production/all-targets checks pass, including45 additions, two512-case properties and exact65,536/65,537 compiled-node fixtures under the source/state caps. The bounded writer minimum drops from4KiB to64 bytes to avoid hundreds of MiB in tiny scalar caches; output/depth limits remain unchanged. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,820 tests/415 gated, including retained deferred Docker changes. No dependencies changed; B06 remains open. Actor scheduling/resource ownership, runtime adapter availability, API registration and complete M1 acceptance remain required.
 
+## P2 sequential transition-driver independent review
+
+ASL§3.1/D48 implements six-state deterministic execution, explicit dispatch/timer/cancellation effects, stable terminal outcomes, raw-input recovery, checked deadline/backoff and bounded unbiased FULL jitter. The outer supervisor still owns invocation lifetime, official history and API publication. Three independent findings are closed and rechecked; the final reviewer reports no remaining in-slice findings.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W112 | P2; `crates/rustack-stepfunctions-core/src/engine/recovery.rs:80` | Check remaining transition capacity before scheduling a retry | One-dispatch budget fails immediately without Park, entropy or retry-count mutation |
+| W113 | P3; `crates/rustack-stepfunctions-core/src/engine/mod.rs:433` | Treat encoding infrastructure failures as Rustack.InternalError and retain typed sources | Encoding failure bypasses business Retry/Catch and keeps its source |
+| W114 | P2; `crates/rustack-stepfunctions-core/src/engine/mod.rs:428` | Classify byte/string/key payload quota failures as States.DataLimitExceeded | Compiled Pass string at encoded256KiB succeeds; +1 and above scalar cap fail consistently |
+
+Core365 unit cases/89 doctests and strict production/all-targets checks pass, including50 new cases and a512-case arbitrary-control-order property. Catch merge errors are Runtime, explicit parameter/result expansion limits recover, and Stop/timeout/stale results settle once. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,870 tests/415 gated, including retained deferred Docker changes. No dependencies changed; B06 audit/deny remains open and was not rerun for this slice. Async actor/cleanup ownership, history, registry, real Lambda bridge and complete M1 acceptance remain required; Docker-image completion remains deferred under the user's priority.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

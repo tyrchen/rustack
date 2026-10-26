@@ -9,6 +9,7 @@
 mod choice;
 mod compiler;
 mod dataflow;
+mod engine;
 mod error;
 mod expression;
 mod path;
@@ -23,6 +24,10 @@ pub use compiler::{
     RetryTiming, StateId, StateView, TaskSupport, TaskTimeout, TenantScope, Transition,
 };
 pub use dataflow::DataFlow;
+pub use engine::{
+    AttemptId, ClockSample, DriverStep, DriverUpdate, ExecutionDriver, ExecutionFailure,
+    ExecutionLimits, ExecutionOutcome, ExecutionSource, TaskDispatch, TaskFailure,
+};
 pub use error::AslError;
 pub use expression::{Expression, SystemUuidSource, UuidSource};
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};

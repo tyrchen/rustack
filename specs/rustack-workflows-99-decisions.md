@@ -420,3 +420,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: the same artifact/error drives Create/Update/Validate; later actor work consumes validated IR and concrete adapter availability remains a composition-root decision.
 - **Pinned by**: [ASL§1.1](./rustack-workflows-30-asl-design.md#11-executable-sequential-compiler-and-indexed-ir), [API](./rustack-workflows-10-api-design.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. No new external dependencies; complete M1 requires registry/actor/real Lambda evidence beyond compilation.
+
+## D48 — Drive sequential execution through explicit effects and attempt generations
+
+- **Context**: compiled sequential states need deterministic execution and deadline/recovery semantics before asynchronous resource composition.
+- **Alternatives considered**: awaiting resources inside the interpreter obscures ownership; reevaluating parked waits reacts to wall jumps; per-attempt input mutation breaks Retry; dropping futures does not prove cleanup.
+- **Decision**: one bounded synchronous driver owns frame transitions and emits explicit dispatch/timer/cancellation obligations. The outer supervisor retains resource and evaluation ownership; the driver never certifies cleanup or API/history readiness.
+- **Why**: injected clock/random/completion inputs make deadline, stale-result and recovery behavior independently testable; the same frame can later be scheduled with Parallel/Map siblings.
+- **Pinned by**: [ASL§3.1](./rustack-workflows-30-asl-design.md#31-sequential-transition-driver), [integrations§1](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction).
+- **Date**: 2026-10-26. Keep Docker-image work deferred under the user's workflow-first priority.

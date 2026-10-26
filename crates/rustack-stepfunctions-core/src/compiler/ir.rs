@@ -42,6 +42,7 @@ impl fmt::Debug for TaskTimeout {
 
 /// Failure field view preserving omission, literal text or compiled expression.
 #[non_exhaustive]
+#[derive(Clone, Copy)]
 pub enum FailureView<'a> {
     /// No value was supplied.
     Omitted,

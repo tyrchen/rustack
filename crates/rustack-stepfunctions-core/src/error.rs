@@ -10,6 +10,12 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Invalid execution settings, context or clock sample.
+    #[error("invalid ASL execution configuration")]
+    InvalidExecution,
+    /// External failure fields violate the bounded Task contract.
+    #[error("invalid ASL Task failure")]
+    InvalidFailure,
     /// Invalid configured tenant identity.
     #[error("invalid workflow tenant scope")]
     InvalidScope,
