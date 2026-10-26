@@ -1,9 +1,13 @@
 //! Actual host process → Runtime API → ASL fixtures. Built by the Makefile gate.
 
-use std::{env, process, time::Duration};
+use std::{env, error::Error, process, time::Duration};
 
 use rustack_lambda_model::input::{
     CreateAliasInput, UpdateAliasInput, UpdateFunctionCodeInput, UpdateFunctionConfigurationInput,
+};
+use rustack_stepfunctions_core::{
+    ExecutionSnapshot, PreparedDefinition, Registry, RegistryCommand, RegistryError,
+    RegistryLimits, RegistryResult, Tags,
 };
 use tokio::{
     fs,
@@ -437,5 +441,125 @@ async fn native_e2e_should_preserve_function_timeout_class_for_asl_catch() {
     assert_eq!(
         output(view.outcome().unwrap()).get("Error"),
         Some(&json!("Sandbox.Timedout"))
+    );
+}
+
+async fn run_registry_case(
+    registry: &Registry,
+) -> Result<(ExecutionSnapshot, ExecutionSnapshot, ExecutionSnapshot), Box<dyn Error>> {
+    let compiler = AslCompiler::new(TenantScope::default(), TaskSupport::Lambda);
+    let prepared = PreparedDefinition::new(
+        compiler
+            .compile(&serde_json::to_vec(&workflow(true))?)?
+            .machine()
+            .clone(),
+    );
+    let mut create = registry.submit(RegistryCommand::Create(
+        "NativeWorkflow".parse()?,
+        prepared,
+        "arn:aws:iam::000000000000:role/Workflow".parse()?,
+        Tags::default(),
+    ))?;
+    let RegistryResult::Machine(machine) = create.wait(deadline()).await? else {
+        return Err(RegistryError::Unavailable.into());
+    };
+    let mut start = registry.submit(RegistryCommand::Start(
+        machine.arn().clone(),
+        Some("first".parse()?),
+        Payload::parse(br#"{"n":21}"#)?,
+        None,
+    ))?;
+    let RegistryResult::Execution(first) = start.wait(deadline()).await? else {
+        return Err(RegistryError::Unavailable.into());
+    };
+    first.handle().wait(deadline()).await?;
+    let mut updated = workflow(true);
+    updated["States"]["Call"]["Parameters"]["Payload"] = json!({"n":22,"retryCount":0});
+    let prepared = PreparedDefinition::new(
+        compiler
+            .compile(&serde_json::to_vec(&updated)?)?
+            .machine()
+            .clone(),
+    );
+    let mut update = registry.submit(RegistryCommand::Update(
+        machine.arn().clone(),
+        Some(prepared),
+        None,
+    ))?;
+    update.wait(deadline()).await?;
+    let mut start = registry.submit(RegistryCommand::Start(
+        machine.arn().clone(),
+        Some("second".parse()?),
+        Payload::parse(br#"{"n":21}"#)?,
+        None,
+    ))?;
+    let RegistryResult::Execution(second) = start.wait(deadline()).await? else {
+        return Err(RegistryError::Unavailable.into());
+    };
+    second.handle().wait(deadline()).await?;
+    let mut delete = registry.submit(RegistryCommand::Delete(machine.arn().clone()))?;
+    delete.wait(deadline()).await?;
+    let mut read = registry.submit(RegistryCommand::Execution(first.arn().clone()))?;
+    let RegistryResult::Execution(first_final) = read.wait(deadline()).await? else {
+        return Err(RegistryError::Unavailable.into());
+    };
+    let mut read = registry.submit(RegistryCommand::Execution(second.arn().clone()))?;
+    let RegistryResult::Execution(second_final) = read.wait(deadline()).await? else {
+        return Err(RegistryError::Unavailable.into());
+    };
+    Ok((first, first_final, second_final))
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the actual host bootstrap; run make test-stepfunctions-bridge-native"]
+async fn native_e2e_should_execute_captured_registry_revisions_and_read_after_machine_deletion() {
+    let mut fixture = NativeFixture::new(&[("WORKFLOW_MODE", "1")], false).await;
+    let (port, mut bridge) = StepFunctionsLambdaBridge::new(
+        fixture.provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let (registry, mut owner) = Registry::new(
+        TenantScope::default(),
+        RegistryLimits::default(),
+        executions(port),
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let result = run_registry_case(&registry).await;
+    let absolute = Instant::now() + Duration::from_secs(15);
+    let workflow = owner.shutdown(absolute).await;
+    let calls = bridge.shutdown(absolute).await;
+    if workflow.is_err() || calls.is_err() {
+        if let Some(directory) = fixture.directory.take() {
+            let _retained = directory.keep();
+        }
+    }
+    fixture.cleanup().await;
+    assert!(workflow.is_ok(), "registry cleanup: {workflow:?}");
+    assert!(calls.is_ok(), "bridge cleanup: {calls:?}");
+    let (first, captured, second) = result.unwrap();
+    assert_eq!(first.revision().id(), captured.revision().id());
+    assert_ne!(captured.revision().id(), second.revision().id());
+    let first_result = output(captured.view().outcome().unwrap());
+    let second_result = output(second.view().outcome().unwrap());
+    assert_eq!(first_result.pointer("/Payload/computed"), Some(&json!(42)));
+    assert_eq!(second_result.pointer("/Payload/computed"), Some(&json!(44)));
+    for response in [first_result, second_result] {
+        let actual = response
+            .pointer("/Payload/request_id")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(actual.len(), 36);
+        assert_eq!(
+            response
+                .pointer("/SdkResponseMetadata/RequestId")
+                .and_then(Value::as_str),
+            Some(actual)
+        );
+    }
+    assert_ne!(
+        first_result.pointer("/Payload/request_id"),
+        second_result.pointer("/Payload/request_id")
     );
 }

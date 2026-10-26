@@ -446,3 +446,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Pinned by**: [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge), [ASL§3.2](./rustack-workflows-30-asl-design.md#32-supervised-sequential-runtime-and-history-publication).
 - **Compatibility**: the bridge profile accepts plain names and complete same-scope ARNs; ordinary Invoke keeps same-account partial references with an explicit account guard. Cleanup observer expiry retains the same invocation handle until Clean or permanent quarantine.
 - **Date**: 2026-10-26. Qualify actual Native workflow calls before the deferred Docker image work; main registration and full milestone gates remain required.
+
+## D51 — Linearize resource revisions and execution names in one retained registry
+
+- **Context**: the execution owner and real Lambda bridge need resource identity, revision capture, idempotency and deletion semantics without coupling core to HTTP.
+- **Decision**: a bounded registry actor accepts compiled/validated domain commands, atomically registers fresh executions, retains revision/record permits through immutable snapshots and separates24h record retention from90day name tombstones. Stop observes the engine outside the registry lane. A unique controller retains shutdown and abnormal ownership.
+- **Why**: independent CRUD maps race update/start and delete/recreate; response loss is not cancellation; record expiry must not reuse an execution ARN early.
+- **Ownership refinements**: independent immutable tag-version admission prevents retained snapshots from bypassing metadata limits; pending blocking entropy and its accepted command stay in root state. Cleanup-aware TTLs retain uncertain graphs, and Stop is an owned command before its caller observes termination.
+- **Pinned by**: [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle), [operations](./rustack-workflows-60-operations-design.md).
+- **Date**: 2026-10-26. Main/API pagination and the retained preparation adapter remain required before ordinary SDK service acceptance; Docker image work remains deferred.

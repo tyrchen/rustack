@@ -56,6 +56,10 @@ All budgets are validated once; limits below are local defaults and safe configu
 
 | Budget field | Default | Allowed range / relationship |
 |---|---:|---|
+| workflowRegistryMachines |256|1..4,096 current resources |
+| workflowRegistryVersions |1,024|1..4,096, independently applied to retained definition revisions and immutable tag versions |
+| workflowRegistryRecords |10,000|1..100,000 total retained execution records, including RUNNING and unsettled terminal work |
+| workflowRegistryCommands |128|1..1,024 accepted commands, held through pending CPU preparation and unobserved replies |
 | workflowOpenExecutions |128|1..4,096, including children |
 | workflowEvaluations |8|1..128; retained blocking evaluation/entropy workers |
 | workflowDispatches |32|1..1,024; released while waiting on child/callback |
@@ -145,6 +149,8 @@ The workflow drain interval permits already accepted executions to finish. Then 
 The host and pinned relay image must implement control protocol version2 together (§3.8 of the runtime design). An older version1 relay is incompatible and fails initialization before function allocation. Rebuild/re-pin the relay on protocol upgrades; do not silently omit handler-timeout enforcement to accept an older image. Caller absolute budgets include queue/startup/execution; the captured function handler budget arms only at consumed Runtime API delivery. Cleanup remains independently owned if the caller budget expires.
 
 LogType=Tail uses the invocation's bounded observed log window; environment-wide diagnostic tails remain separate. Window boundaries follow actor-observed completed chunks across independent stdout/stderr and control streams. Buffered/background output can arrive in a later window; this local runtime does not claim a causal producer flush barrier. A silent invocation never copies the prior collected diagnostic tail. Lost capabilities or unconsumed/expired mutation receipts invalidate capture and require environment retirement. No flush sleeps or extra Docker log replay are used.
+
+Registry constructor limits implement [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle); YAML/main wiring remains required. One retained blocking worker acquires secure IDs while its pending command stays owned above the await. Source fingerprints/compilation are prepared by the embedding caller's bounded CPU owner. Record and name TTLs never release uncertain cleanup; deletion may remove mutable tags while the captured revision/resource identity remains retained. Immutable tag versions have independent allocation accounting, and cloned list snapshots share those allocations. Close the registry and observe the same joined shutdown before closing its Lambda bridge. Root failure synchronously signals the execution owner and preserves the bounded graph instead of inferring cleanup.
 
 The Step Functions Lambda bridge closes and joins before provider quiescence. Its supervisor retains one manager join across deadline expiry or a dropped shutdown waiter; unresolved Lambda handles and bridge slots remain charged, and the same cleanup observer can later settle the receipt without a second business outcome. See [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge). These bridge budgets are validated constructor settings until the main YAML/service composition is implemented.
 

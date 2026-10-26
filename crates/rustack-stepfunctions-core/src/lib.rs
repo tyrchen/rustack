@@ -2,8 +2,9 @@
 //!
 //! Immutable payloads and scoped IR feed actor-owned execution/history. Concrete
 //! task ports keep Lambda/runtime ownership outside this crate; there is no SDK,
-//! Lambda-core, Docker or HTTP dependency. Registry and main-service registration
-//! remain the embedding application's responsibility.
+//! Lambda-core, Docker or HTTP dependency. The actor-owned registry exposes validated domain
+//! commands; HTTP preparation, pagination and main-service composition remain the embedding
+//! application's responsibility.
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +16,7 @@ mod error;
 mod expression;
 mod path;
 mod payload;
+mod registry;
 mod task;
 mod template;
 mod wait;
@@ -36,6 +38,12 @@ pub use error::AslError;
 pub use expression::{Expression, SystemUuidSource, UuidSource};
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};
 pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
+pub use registry::{
+    DefinitionRevision, ExecutionArn, ExecutionName, ExecutionSnapshot, MachineSnapshot,
+    MachineStatus, PreparedDefinition, Registry, RegistryCapacities, RegistryCommand,
+    RegistryError, RegistryLimits, RegistryReceipt, RegistryResult, RegistrySupervisor, RoleArn,
+    StateMachineArn, StateMachineName, StopReason, Tags,
+};
 pub use task::{
     LambdaTaskCommand, LambdaTaskPort, QuarantinedTask, TaskCall, TaskChannelError, TaskEvent,
     TaskResponder, TaskSettlement,
