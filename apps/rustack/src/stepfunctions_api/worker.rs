@@ -32,7 +32,9 @@ pub(super) async fn run(
     let prepared = cpu(&context, deadline, move || {
         prepare::prepare(
             request,
-            &AslCompiler::new(scope.clone(), tasks).with_state_support(states),
+            &AslCompiler::new(scope.clone(), tasks)
+                .with_state_support(states)
+                .with_child_support(true),
             &scope,
         )
     })

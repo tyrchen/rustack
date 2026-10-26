@@ -1001,3 +1001,9 @@ async fn test_should_reject_unstarted_success_without_fabricating_start_history(
 }
 
 mod structured;
+
+impl ExecutionSupervisor {
+    pub(crate) fn inject_child_cpu_panic(&mut self) {
+        Arc::get_mut(&mut self.shared).unwrap().child_cpu_panic = true;
+    }
+}

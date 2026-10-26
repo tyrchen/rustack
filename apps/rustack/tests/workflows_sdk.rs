@@ -64,6 +64,8 @@ async fn test_should_accept_ordinary_boto3_through_actual_runtime() -> Result<()
         ensure!(
             result["catalogCases"] == 17
                 && result["m1Actions"] == 15
+                && result["nestedCases"] == 6
+                && result["nestedLifecycle"] == 2
                 && result["structuredCases"] == 6
                 && result["structuredLifecycle"] == 2
                 && result["actualNative"] == true,
@@ -107,5 +109,22 @@ async fn test_should_reap_actual_python_after_observed_execution_timeout() -> Re
             ensure!(barrier.is_err(), "malformed PID barrier accepted");
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires actual host bootstrap; run make test-stepfunctions-sdk"]
+async fn test_should_run_actual_nested_native_with_one_dispatch_slot() -> Result<()> {
+    let mut server = Server::start_with_dispatch(1).await?;
+    let result = match timeout(Duration::from_secs(60), rust::nested_only(&server)).await {
+        Ok(result) => result,
+        Err(error) => Err(error.into()),
+    };
+    let cleanup = server
+        .shutdown(Instant::now() + Duration::from_secs(45))
+        .await;
+    let observed = cleanup?;
+    result?;
+    ensure!(observed > 0, "no actual nested Native handler was observed");
     Ok(())
 }

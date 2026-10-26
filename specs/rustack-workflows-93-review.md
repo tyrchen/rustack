@@ -738,6 +738,19 @@ No new package versions or lint/advisory ignores are introduced; Tokio test-util
 
 The P0 record distinguishes unchanged workspace advisory failures from the clean probe dependency graph; it never reports a fully green security baseline.
 
+## P3 registered nested ASL binding independent review
+
+Integrations§4.2/D61 compose the atomic child port with compiler, exact parent registration gate, structured resource ownership, causal TaskSubmitted projection and the real service. All four valid early findings/semantic corrections are implemented and covered. Final independent read-only review reports no remaining valid findings. An omission-helper concern was withdrawn after direct reread confirmed both ordinary SDK helpers already check TaskSubmitted output and metadata.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W173 | P1; `engine/runtime/structured/child.rs`, independent panic review | Preserve child CPU JoinError as typed fatal actor diagnostics before generic completion; unexpected child worker loss is also fatal, with receipts/lease quarantined | Injected parse CPU panic with Retry/Catch States.ALL produces one attempt, Rustack.InternalError, typed Worker panic and nonclean shutdown |
+| W174 | P2; `engine/runtime/structured/resource.rs`, independent error-domain review | Explicit uncertain child-port errors use ChildError's StepFunctions namespace and quarantined settlement; never fabricate a Lambda failure for child owner loss | The child worker forwards its typed mapping; channel closure from unexpected internal worker disappearance is actor-fatal under W173 |
+| W175 | P2; `engine/runtime/structured/child.rs`, independent lifecycle review | Publish known mapped child business result separately from pending physical settlement; continuation/recovery retirement retains the exact child and frame until Clean | Actual child success is observed and TaskSucceeded recorded before its cleanup receipt is released; cleanup held beyond the parent's one-second Task deadline preserves success |
+| W176 | P2; `engine/runtime/structured/mod.rs`, independent resource-bound review | Drain ready child protocol joins at every actor loop boundary before new business effects, retaining failure classification | The owner reaps ready child jobs alongside retained watcher joins; nested/depth/Stop suites retain charged resources through cleanup |
+
+Final gates: workspace build/all-target tests pass3,164 cases with431 separately gated; Clippy, denied-warning rustdoc and nightly formatting pass. Core600 units/245 doctests, all preserve_order/strict checks, full/minimal main77/57, Native12 and ordinary SDK/single-dispatch/runner4 required cases pass. All264 local links in the six changed spec documents resolve. No dependency package/version or advisory ignore changes. The deferred Docker-image worktree remains untouched. Fresh audit still reports4 vulnerabilities/10 warnings across481 dependencies/1,378 advisories; deny advisories fail while bans/licenses/sources pass (B06 remains open).
+
 ## Cross-references
 
 - ← [implementation plan](./rustack-workflows-90-impl-plan.md)

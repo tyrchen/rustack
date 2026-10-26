@@ -102,7 +102,7 @@ impl StateMachineArn {
     pub fn name(&self) -> &StateMachineName {
         &self.name
     }
-    pub(super) fn check(&self, scope: &TenantScope) -> Result<(), RegistryError> {
+    pub(crate) fn check(&self, scope: &TenantScope) -> Result<(), RegistryError> {
         if same_scope(&self.scope, scope) {
             Ok(())
         } else {

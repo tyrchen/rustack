@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import boto3
 from stepfunctions_structured import exercise as structured_exercise
+from stepfunctions_nested import exercise as nested_exercise
 import botocore
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -125,7 +126,7 @@ def history(sfn, arn, reverse=False, data=True):
 def assert_omitted(events):
     for event in events:
         for details in ["executionStartedEventDetails", "executionSucceededEventDetails", "stateEnteredEventDetails",
-                        "stateExitedEventDetails", "taskSucceededEventDetails", "lambdaFunctionScheduledEventDetails",
+                        "stateExitedEventDetails", "taskSucceededEventDetails", "taskSubmittedEventDetails", "lambdaFunctionScheduledEventDetails",
                         "lambdaFunctionSucceededEventDetails"]:
             if details in event:
                 assert not {"input", "output", "inputDetails", "outputDetails"} & set(event[details])
@@ -295,6 +296,7 @@ try:
     deploy(lam)
     cases = catalog(sfn)
     controls(sfn)
+    nested_cases = nested_exercise(sfn, lam, BOOTSTRAP, MARKERS, create, call, terminal, history, assert_omitted)
     structured_cases = structured_exercise(sfn, lam, BOOTSTRAP, MARKERS, create, call, terminal, history, assert_omitted)
     required = {"create_state_machine", "describe_state_machine", "update_state_machine", "delete_state_machine",
                 "list_state_machines", "start_execution", "stop_execution", "describe_execution",
@@ -302,7 +304,7 @@ try:
                 "validate_state_machine_definition", "tag_resource", "untag_resource", "list_tags_for_resource"}
     assert required <= ACTIONS, required - ACTIONS
     print(json.dumps({"realBinary": True, "actualNative": True, "strictAuth": True, "catalogCases": cases,
-                      "m1Actions": len(required), "structuredCases": structured_cases, "structuredLifecycle": 2, "cloudDifferential": False, "dockerQualified": False}))
+                      "nestedCases": nested_cases, "nestedLifecycle": 2, "m1Actions": len(required), "structuredCases": structured_cases, "structuredLifecycle": 2, "cloudDifferential": False, "dockerQualified": False}))
 finally:
     sfn.close()
     lam.close()

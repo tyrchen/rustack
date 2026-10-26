@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::{ChildError, ChildExecution, ChildPattern};
-use crate::{ExecutionOutcome, Payload, TaskFailure};
+use crate::{ExecutionOutcome, ExecutionSnapshot, Payload, TaskFailure};
 
 impl ChildExecution {
     /// Map the observed child to a bounded optimized Task result without IO.
@@ -18,47 +18,58 @@ impl ChildExecution {
     /// # fn result(c:&rustack_stepfunctions_core::ChildExecution){let result=c.result();}
     /// ```
     pub fn result(&self) -> Result<Result<Payload, TaskFailure>, ChildError> {
-        let strings = match self.pattern {
-            ChildPattern::RequestResponse => {
-                return Ok(Ok(Payload::from_value(&json!({
-                    "ExecutionArn":self.snapshot.arn().as_str(),
-                    "StartDate":self.snapshot.start_date().timestamp_millis(),
-                }))?));
-            }
-            ChildPattern::Sync => true,
-            ChildPattern::Sync2 => false,
-        };
-        let outcome = self.snapshot.view().outcome().ok_or(ChildError::Pending)?;
-        let output = match outcome.as_ref() {
-            ExecutionOutcome::Succeeded(output) => output,
-            other => return Ok(Err(failed(self.snapshot.arn().as_str(), other)?)),
-        };
-        let (input, output) = if strings {
-            (
-                Value::String(text(self.snapshot.input())?),
-                Value::String(text(output)?),
-            )
-        } else {
-            (
-                self.snapshot.input().value().clone(),
-                output.value().clone(),
-            )
-        };
-        let stopped = self
-            .snapshot
-            .view()
-            .stop_date()
-            .ok_or(ChildError::Invalid)?;
-        Ok(Ok(Payload::from_value(&json!({
-            "ExecutionArn":self.snapshot.arn().as_str(),
-            "StateMachineArn":self.snapshot.arn().machine().as_str(),
-            "Name":self.snapshot.arn().name().as_str(),
-            "Status":"SUCCEEDED", "Input":input, "Output":output,
-            "InputDetails":{"Included":true}, "OutputDetails":{"Included":true},
-            "StartDate":self.snapshot.start_date().timestamp_millis(),
-            "StopDate":stopped.timestamp_millis(),
-        }))?))
+        map(&self.snapshot, self.pattern)
     }
+    pub(crate) fn mapper(
+        &self,
+        start: bool,
+    ) -> impl FnOnce() -> Result<Result<Payload, TaskFailure>, ChildError> + Send + 'static {
+        let snapshot = self.snapshot.clone();
+        let pattern = if start {
+            ChildPattern::RequestResponse
+        } else {
+            self.pattern
+        };
+        move || map(&snapshot, pattern)
+    }
+}
+fn map(
+    snapshot: &ExecutionSnapshot,
+    pattern: ChildPattern,
+) -> Result<Result<Payload, TaskFailure>, ChildError> {
+    let strings = match pattern {
+        ChildPattern::RequestResponse => {
+            return Ok(Ok(Payload::from_value(&json!({
+                "ExecutionArn":snapshot.arn().as_str(),
+                "StartDate":snapshot.start_date().timestamp_millis(),
+            }))?));
+        }
+        ChildPattern::Sync => true,
+        ChildPattern::Sync2 => false,
+    };
+    let outcome = snapshot.view().outcome().ok_or(ChildError::Pending)?;
+    let output = match outcome.as_ref() {
+        ExecutionOutcome::Succeeded(output) => output,
+        other => return Ok(Err(failed(snapshot.arn().as_str(), other)?)),
+    };
+    let (input, output) = if strings {
+        (
+            Value::String(text(snapshot.input())?),
+            Value::String(text(output)?),
+        )
+    } else {
+        (snapshot.input().value().clone(), output.value().clone())
+    };
+    let stopped = snapshot.view().stop_date().ok_or(ChildError::Invalid)?;
+    Ok(Ok(Payload::from_value(&json!({
+        "ExecutionArn":snapshot.arn().as_str(),
+        "StateMachineArn":snapshot.arn().machine().as_str(),
+        "Name":snapshot.arn().name().as_str(),
+        "Status":"SUCCEEDED", "Input":input, "Output":output,
+        "InputDetails":{"Included":true}, "OutputDetails":{"Included":true},
+        "StartDate":snapshot.start_date().timestamp_millis(),
+        "StopDate":stopped.timestamp_millis(),
+    }))?))
 }
 fn text(payload: &Payload) -> Result<String, ChildError> {
     String::from_utf8(payload.original_bytes().to_vec()).map_err(|_| ChildError::Invalid)

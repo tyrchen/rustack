@@ -232,6 +232,7 @@ impl Actor {
                                                match event {
                                                    Ok(TaskEvent::Started)=>{if let Some(active)=&mut self.resources.active {active.started=true;}
                     if !self.record(events::task_started(self.driver.machine(),self.driver.state,observed.wall)) {return None;}},
+                                                   Ok(TaskEvent::Submitted(_))=>{self.fail(ExecutionError::Unavailable);},
                                                    Ok(TaskEvent::Completed(result))=>{
                                                        if !self.record_result(&result,observed.wall) {return None;}
                                                        self.retire_active();return Some(Operation::Complete {attempt,result,observed});
@@ -363,7 +364,7 @@ impl Actor {
             return;
         }
         let lease = Arc::new(DispatchLease {
-            _permit: permit,
+            _permit: Some(permit),
             _frame: None,
         });
         self.resources.leases.push(lease.clone());

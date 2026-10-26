@@ -11,7 +11,7 @@ use rustack_stepfunctions_model::types::{
     LambdaFunctionSucceededEventDetails, LambdaFunctionTimedOutEventDetails,
     StateEnteredEventDetails, StateExitedEventDetails, TaskFailedEventDetails,
     TaskScheduledEventDetails, TaskStartFailedEventDetails, TaskStartedEventDetails,
-    TaskSucceededEventDetails, TaskTimedOutEventDetails,
+    TaskSubmittedEventDetails, TaskSucceededEventDetails, TaskTimedOutEventDetails,
 };
 
 use crate::{
@@ -98,6 +98,31 @@ fn resource(machine: &CompiledMachine, state: StateId) -> Result<&Integration, A
         _ => Err(AslError::InvalidStateId),
     }
 }
+fn metadata(resource: &Integration) -> (&'static str, &'static str) {
+    match resource {
+        Integration::StartExecution(pattern) => (pattern.action(), "states"),
+        Integration::LambdaInvoke | Integration::DirectLambda(_) => ("invoke", "lambda"),
+    }
+}
+pub(crate) fn task_submitted(
+    machine: &CompiledMachine,
+    state: StateId,
+    output: &Payload,
+    wall: DateTime<Utc>,
+) -> Result<HistoryEvent, AslError> {
+    let integration = resource(machine, state)?;
+    if !matches!(integration, Integration::StartExecution(pattern) if pattern.owned()) {
+        return Err(AslError::InvalidStateId);
+    }
+    let mut e = event(HistoryEventType::TaskSubmitted, wall);
+    let mut d = TaskSubmittedEventDetails::default();
+    d.resource = metadata(integration).0.into();
+    d.resource_type = metadata(integration).1.into();
+    d.output = Some(text(output)?);
+    d.output_details = Some(details());
+    e.task_submitted_event_details = Some(d);
+    Ok(e)
+}
 pub(crate) fn scheduled(
     machine: &CompiledMachine,
     state: StateId,
@@ -116,14 +141,14 @@ pub(crate) fn scheduled(
             e.lambda_function_scheduled_event_details = Some(d);
             Ok(e)
         }
-        Integration::LambdaInvoke => {
+        integration @ (Integration::LambdaInvoke | Integration::StartExecution(_)) => {
             let mut e = event(HistoryEventType::TaskScheduled, wall);
             e.task_scheduled_event_details = Some(
                 TaskScheduledEventDetails::builder()
                     .parameters(text(input)?)
                     .region(machine.scope().region().into())
-                    .resource("invoke".into())
-                    .resource_type("lambda".into())
+                    .resource(metadata(integration).0.into())
+                    .resource_type(metadata(integration).1.into())
                     .timeout_in_seconds(timeout)
                     .build(),
             );
@@ -138,11 +163,11 @@ pub(crate) fn task_started(
 ) -> Result<HistoryEvent, AslError> {
     match resource(machine, state)? {
         Integration::DirectLambda(_) => Ok(event(HistoryEventType::LambdaFunctionStarted, wall)),
-        Integration::LambdaInvoke => {
+        integration @ (Integration::LambdaInvoke | Integration::StartExecution(_)) => {
             let mut e = event(HistoryEventType::TaskStarted, wall);
             let mut d = TaskStartedEventDetails::default();
-            d.resource = "invoke".into();
-            d.resource_type = "lambda".into();
+            d.resource = metadata(integration).0.into();
+            d.resource_type = metadata(integration).1.into();
             e.task_started_event_details = Some(d);
             Ok(e)
         }
@@ -163,13 +188,13 @@ pub(crate) fn task_success(
             e.lambda_function_succeeded_event_details = Some(d);
             Ok(e)
         }
-        Integration::LambdaInvoke => {
+        integration @ (Integration::LambdaInvoke | Integration::StartExecution(_)) => {
             let mut e = event(HistoryEventType::TaskSucceeded, wall);
             let mut d = TaskSucceededEventDetails::default();
             d.output = Some(text(output)?);
             d.output_details = Some(details());
-            d.resource = "invoke".into();
-            d.resource_type = "lambda".into();
+            d.resource = metadata(integration).0.into();
+            d.resource_type = metadata(integration).1.into();
             e.task_succeeded_event_details = Some(d);
             Ok(e)
         }
@@ -188,6 +213,7 @@ pub(crate) fn task_failure(
     kind: TaskFailureKind,
     wall: DateTime<Utc>,
 ) -> Result<HistoryEvent, AslError> {
+    let integration = resource(machine, state)?;
     macro_rules! failure {
         ($event:ident,$field:ident,$details:ident) => {{
             let mut e = event(HistoryEventType::$event, wall);
@@ -200,13 +226,13 @@ pub(crate) fn task_failure(
         (optimized $event:ident,$field:ident,$details:ident) => {{
             let mut e = failure!($event, $field, $details);
             if let Some(d) = &mut e.$field {
-                d.resource = "invoke".into();
-                d.resource_type = "lambda".into();
+                d.resource = metadata(integration).0.into();
+                d.resource_type = metadata(integration).1.into();
             }
             e
         }};
     }
-    Ok(match (resource(machine, state)?, kind) {
+    Ok(match (integration, kind) {
         (Integration::DirectLambda(_), TaskFailureKind::Failed) => failure!(
             LambdaFunctionFailed,
             lambda_function_failed_event_details,
@@ -222,13 +248,16 @@ pub(crate) fn task_failure(
             lambda_function_schedule_failed_event_details,
             LambdaFunctionScheduleFailedEventDetails
         ),
-        (Integration::LambdaInvoke, TaskFailureKind::Failed) => {
+        (Integration::LambdaInvoke | Integration::StartExecution(_), TaskFailureKind::Failed) => {
             failure!(optimized TaskFailed,task_failed_event_details,TaskFailedEventDetails)
         }
-        (Integration::LambdaInvoke, TaskFailureKind::TimedOut) => {
+        (Integration::LambdaInvoke | Integration::StartExecution(_), TaskFailureKind::TimedOut) => {
             failure!(optimized TaskTimedOut,task_timed_out_event_details,TaskTimedOutEventDetails)
         }
-        (Integration::LambdaInvoke, TaskFailureKind::Admission) => {
+        (
+            Integration::LambdaInvoke | Integration::StartExecution(_),
+            TaskFailureKind::Admission,
+        ) => {
             failure!(optimized TaskStartFailed,task_start_failed_event_details,TaskStartFailedEventDetails)
         }
     })

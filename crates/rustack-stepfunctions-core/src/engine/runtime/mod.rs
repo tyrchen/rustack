@@ -5,15 +5,15 @@ use std::{collections::HashMap, future::pending, mem::take, sync::Arc};
 use chrono::Utc;
 use tokio::{
     runtime::Handle,
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch},
     task::{Id, JoinError, JoinSet},
     time::{Instant, timeout_at},
 };
 
 use super::history::{HistoryCapacity, HistoryLimits, Journal, TerminalReserve, events};
 use crate::{
-    ExecutionDriver, ExecutionFailure, FrameCapacity, FrameLease, FrameLimits, FrameScheduler,
-    LambdaTaskPort, TaskFailure,
+    ChildExecutionPort, ChildParent, ExecutionDriver, ExecutionFailure, FrameCapacity, FrameLease,
+    FrameLimits, FrameScheduler, LambdaTaskPort, TaskFailure,
 };
 
 mod actor;
@@ -39,6 +39,8 @@ struct Pools {
 struct Shared {
     #[cfg(test)]
     worker_hook: Option<Arc<tests::WorkerHook>>,
+    #[cfg(test)]
+    child_cpu_panic: bool,
     pools: Pools,
     port: Option<Arc<dyn LambdaTaskPort>>,
     history: HistorySettings,
@@ -65,7 +67,7 @@ struct Slot {
 }
 #[derive(Debug)]
 struct DispatchLease {
-    _permit: OwnedSemaphorePermit,
+    _permit: Option<OwnedSemaphorePermit>,
     _frame: Option<Arc<FrameLease>>,
 }
 #[derive(Debug)]
@@ -79,6 +81,12 @@ struct OwnerState {
     jobs: JoinSet<RunExit>,
     slots: HashMap<Id, Slot>,
     quarantine: Vec<Retained>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Registered {
+    pub(crate) handle: ExecutionHandle,
+    pub(crate) parent: Option<oneshot::Sender<ChildParent>>,
 }
 
 /// Actor-owned supervisor; the registry must reap jobs and drain before shutdown.
@@ -140,6 +148,8 @@ impl ExecutionSupervisor {
             shared: Arc::new(Shared {
                 #[cfg(test)]
                 worker_hook: None,
+                #[cfg(test)]
+                child_cpu_panic: false,
                 pools: Pools {
                     open_limit: limits.open,
                     open: Arc::new(Semaphore::new(limits.open)),
@@ -174,7 +184,8 @@ impl ExecutionSupervisor {
     /// # }
     /// ```
     pub fn start(&mut self, driver: ExecutionDriver) -> Result<ExecutionHandle, ExecutionError> {
-        self.start_owned(driver, false)
+        self.start_owned(driver, false, None)
+            .map(|registered| registered.handle)
     }
     /// Start an execution with the installed structured frame/resource owner.
     ///
@@ -190,19 +201,30 @@ impl ExecutionSupervisor {
         &mut self,
         driver: ExecutionDriver,
     ) -> Result<ExecutionHandle, ExecutionError> {
-        self.start_owned(driver, true)
+        self.start_owned(driver, true, None)
+            .map(|registered| registered.handle)
+    }
+    pub(crate) fn start_registered(
+        &mut self,
+        driver: ExecutionDriver,
+        structured: bool,
+        port: ChildExecutionPort,
+    ) -> Result<Registered, ExecutionError> {
+        self.start_owned(driver, structured, Some(port))
     }
     fn start_owned(
         &mut self,
         driver: ExecutionDriver,
         structured: bool,
-    ) -> Result<ExecutionHandle, ExecutionError> {
+        child_port: Option<ChildExecutionPort>,
+    ) -> Result<Registered, ExecutionError> {
         if !self.state.accepting || Handle::try_current().is_err() {
             return Err(ExecutionError::Unavailable);
         }
         self.reap_ready();
         if driver.started
             || (!structured && driver.machine().requires_structured_execution())
+            || (driver.machine().uses_children() && (!structured || child_port.is_none()))
             || (self.shared.port.is_none() && driver.machine().uses_lambda())
         {
             return Err(ExecutionError::Unavailable);
@@ -215,18 +237,7 @@ impl ExecutionSupervisor {
             .try_acquire_owned()
             .map_err(|_| ExecutionError::Capacity)?;
         let deadline = Instant::from_std(driver.deadline());
-        let mut graph = if structured {
-            Some(
-                FrameScheduler::new(
-                    driver.clone(),
-                    self.shared.frames.capacity.clone(),
-                    self.shared.frames.limits,
-                )
-                .map_err(|_| ExecutionError::Capacity)?,
-            )
-        } else {
-            None
-        };
+        let mut graph = self.graph(&driver, structured)?;
         let root_frame = if let Some(graph) = &graph {
             graph.root_lease().ok_or(ExecutionError::Invalid)?
         } else {
@@ -252,6 +263,12 @@ impl ExecutionSupervisor {
         }));
         let (stop, cancelled) = watch::channel(None);
         let (leases, ledger) = watch::channel(Arc::new(Vec::new()));
+        let (parent, registration) = if driver.machine().uses_children() {
+            let (sender, receiver) = oneshot::channel();
+            (Some(sender), child_port.map(|port| (port, receiver)))
+        } else {
+            (None, None)
+        };
         let task = if let Some(graph) = graph.take() {
             self.state.jobs.spawn(
                 structured::Actor::new(
@@ -263,6 +280,7 @@ impl ExecutionSupervisor {
                     leases,
                     self.shared.clone(),
                 )
+                .with_child_registration(registration)
                 .run(),
             )
         } else {
@@ -289,7 +307,27 @@ impl ExecutionSupervisor {
                 _root_frame: root_frame,
             },
         );
-        Ok(ExecutionHandle { stop, view: reader })
+        Ok(Registered {
+            handle: ExecutionHandle { stop, view: reader },
+            parent,
+        })
+    }
+    fn graph(
+        &self,
+        driver: &ExecutionDriver,
+        structured: bool,
+    ) -> Result<Option<FrameScheduler>, ExecutionError> {
+        if structured {
+            FrameScheduler::new(
+                driver.clone(),
+                self.shared.frames.capacity.clone(),
+                self.shared.frames.limits,
+            )
+            .map(Some)
+            .map_err(|_| ExecutionError::Capacity)
+        } else {
+            Ok(None)
+        }
     }
     /// Reap already completed jobs without waiting; retained quarantine stays charged.
     ///

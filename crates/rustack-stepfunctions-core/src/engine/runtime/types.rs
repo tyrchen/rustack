@@ -185,6 +185,18 @@ impl ExecutionHandle {
     ) -> Result<Arc<ExecutionView>, ExecutionError> {
         self.wait_view(deadline, true).await
     }
+    pub(crate) async fn settled(&mut self) -> Result<Arc<ExecutionView>, ExecutionError> {
+        loop {
+            let view = self.snapshot();
+            if view.cleanup == CleanupState::Clean {
+                return Ok(view);
+            }
+            self.view
+                .changed()
+                .await
+                .map_err(|_| ExecutionError::Unavailable)?;
+        }
+    }
     async fn wait_view(
         &mut self,
         deadline: Instant,

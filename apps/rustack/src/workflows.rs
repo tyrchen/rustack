@@ -46,7 +46,7 @@ impl WorkflowStatus {
             "type": "STANDARD", "queryLanguage": "JSONPath",
             "stateTypes": ["Pass", "Choice", "Wait", "Task", "Succeed", "Fail", "Parallel", "Map"],
             "inlineMapMaxConcurrency": 40,
-            "lambdaRequestResponse": lambda, "nestedSync": false, "callbacks": false,
+            "lambdaRequestResponse": lambda, "nestedSync": true, "callbacks": false,
             "snapshot": "unsupported", "dockerQualified": false,
             "limits": {
                 "apiAccepted": self.budgets.workflow_api_accepted,

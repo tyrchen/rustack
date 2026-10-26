@@ -154,7 +154,39 @@ Use integer epoch milliseconds from captured accepted/stopped dates for optimize
 RequestResponse detaches at acceptance; unknown joins retain ownership.
 ```
 
-### 4.2 Example: wait for a real child workflow
+### 4.2 ASL binding, registration gate and retained child Task worker
+
+Trusted compilation enables child resources independently of Lambda support. Match only the three exact partition-scoped startExecution resources in §2. Validate literal StateMachineArn/Name and serialized Input immediately; dynamic fields pass the same validated domain parser after Parameters evaluation. Unknown parameters and normalized literal/dynamic collisions reject. Callback resources remain unavailable. Recursively distinguish Lambda dependency from child dependency across Parallel/Map scopes.
+
+Registry admission routes machines containing child Tasks through the structured owner, including sequential one-frame machines. Public unregistered supervisor starts reject child-dependent artifacts. Registered starts allocate a one-shot parent-capability gate before spawning; the registry inserts the exact charged record and name claim before publishing its ChildParent. The actor awaits that gate before evaluating work, while still honoring Stop/execution timeout. A closed gate fails without issuing work. Ordinary sequential Lambda/pure machines retain their established execution path.
+
+Each accepted child Task retains a frame-only resource lease in the supervisor ledger before spawning a protocol worker. It acquires no Task dispatch permit, including while parsing, submitting, waiting for completion or awaiting cleanup. Pending child Tasks can pass a Lambda Task waiting for a dispatch permit. Accepted child work is bounded by frame/open/child-lane capacity; payload parsing and envelope serialization additionally use retained bounded CPU jobs. The actor joins workers and result watchers before releasing resources. An unexpected worker loss closes progress/settlement, cancels owned relations and preserves actual child/CPU receipts in charged process quarantine; channel closure never proves cleanup.
+
+The worker retains the same ChildSubmission through caller cancellation, Task timeout and delayed admission. After cancellation it requests cancellation and still resolves acceptance to determine issuance. Explicit rejection before issuance is clean; a lost admission owner is uncertain. RequestResponse detaches on registry acceptance and returns its start envelope without waiting for child business/cleanup. Owned patterns emit Started then Submitted only after real acceptance, observe terminal business outcome, cancel on parent Task control, and publish the mapped terminal business result once before awaiting actual physical cleanup to confirm settlement. A later Task deadline cannot replace an already observed business result merely because cleanup remains pending; frame retirement/recovery still waits for cleanup. Observation expiry never drops a receipt. Cleanup waiting observes in-memory retained execution state rather than external IO; quarantine remains charged until proven Clean or permanently retained after owner loss.
+
+```text
+Registry                  Structured owner            Child Task worker
+  │ allocate gate ───────────▶│                              │
+  │ commit record + name      │ wait gate / Stop / deadline   │
+  │ publish ChildParent ─────▶│                              │
+  │                          │ ledger(frame, no dispatch)    │
+  │                          │ spawn retained worker ───────▶│
+  │◀─────────────────────────┼── parse(CPU), child port.start│
+  │ atomic acceptance ───────┼─────────────────────────────▶│
+  │                          │◀── Started, Submitted         │
+  │ child terminal + cleanup ┼─────────────────────────────▶│
+  │                          │◀── mapped business result     │
+  │                          │    retain frame / child       │
+  │                          │◀── physical cleanup: Clean    │
+  │                          │ join worker/watcher, retire   │
+  │◀── Stop/timeout ──────────┼── cancel, retain same receipt │
+```
+
+Child Task history uses TaskScheduled/TaskStarted/TaskSucceeded/TaskFailed/TaskTimedOut/TaskStartFailed with resourceType `states` and the exact resource action (`startExecution`, `startExecution.sync`, `startExecution.sync:2`). Sync patterns additionally produce TaskSubmitted between Started and completion, with the actual ExecutionArn/StartDate start envelope as output. RequestResponse has no Submitted event. Per-frame predecessor chains remain causal; includeExecutionData=false removes Submitted output and outputDetails alongside existing Task data. No synthetic child ARN or invented Lambda event is emitted.
+
+Acceptance requires real registry execution for all three patterns; string/JSON output distinction, fast completion, detached child survival, owned Stop/Task timeout cleanup, errors/capacity/depth and no-dispatch deadlock tests. The service capability remains false until actual registered Native and both ordinary SDK nested suites qualify this binding. Docker remains deferred.
+
+### 4.3 Example: wait for a real child workflow
 
 The child can be the image-Lambda machine from the PRD. The parent definition is:
 

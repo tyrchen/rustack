@@ -73,6 +73,7 @@ pub(super) fn compile(
                     object.get("Parameters"),
                     &context.compiler.scope,
                     context.compiler.tasks,
+                    context.compiler.children,
                     location,
                 )?,
                 timeout: timeout(object, location)?,

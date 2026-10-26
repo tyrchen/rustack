@@ -19,31 +19,13 @@ use super::{
     ExecutionArn, ExecutionName, ExecutionSnapshot, Registry, RegistryError, Shared,
     StateMachineArn, types::ExecutionRecord,
 };
+pub use crate::compiler::ChildPattern;
 use crate::{AslError, ExecutionError, ExecutionFailure, ExecutionView, Payload, TaskFailure};
 
 mod envelope;
 pub(super) mod owner;
 mod parameters;
 
-/// Optimized nested integration behavior selected by the trusted caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ChildPattern {
-    /// Detach at successful start acceptance.
-    RequestResponse,
-    /// Await termination; return Input/Output as serialized JSON strings.
-    Sync,
-    /// Await termination; return Input/Output as JSON values.
-    Sync2,
-}
-impl ChildPattern {
-    pub(super) fn owned(self) -> bool {
-        match self {
-            Self::RequestResponse => false,
-            Self::Sync | Self::Sync2 => true,
-        }
-    }
-}
 /// Typed child admission/observation failures; public text is static and redacted.
 #[derive(Error)]
 #[non_exhaustive]
@@ -256,9 +238,12 @@ impl Registry {
     /// ```
     #[must_use]
     pub fn child_port(&self) -> ChildExecutionPort {
-        ChildExecutionPort {
-            registry: Arc::downgrade(&self.shared),
-        }
+        port(&self.shared)
+    }
+}
+pub(super) fn port(shared: &Arc<Shared>) -> ChildExecutionPort {
+    ChildExecutionPort {
+        registry: Arc::downgrade(shared),
     }
 }
 impl ChildExecutionPort {
@@ -350,11 +335,23 @@ impl ChildSubmission {
         if Instant::now() >= deadline {
             return Err(ChildError::Deadline);
         }
+        let _observation = timeout_at(deadline, self.resolve())
+            .await
+            .map_err(|_| ChildError::Deadline)?;
+        if Instant::now() >= deadline {
+            return Err(ChildError::Deadline);
+        }
+        match self.accepted.as_ref() {
+            Some(Ok(child)) => Ok(child),
+            Some(Err(source)) => Err(ChildError::Admission(source.clone())),
+            None => Err(ChildError::Unavailable),
+        }
+    }
+
+    pub(crate) async fn resolve(&mut self) -> Result<(), ChildError> {
         if self.accepted.is_none() {
             let receiver = self.receiver.as_mut().ok_or(ChildError::Unavailable)?;
-            let response = timeout_at(deadline, receiver)
-                .await
-                .map_err(|_| ChildError::Deadline)?;
+            let response = receiver.await;
             self.receiver = None;
             self.accepted = Some(
                 response
@@ -363,11 +360,8 @@ impl ChildSubmission {
                     .map_err(Arc::new),
             );
         }
-        if Instant::now() >= deadline {
-            return Err(ChildError::Deadline);
-        }
         match self.accepted.as_ref() {
-            Some(Ok(child)) => Ok(child),
+            Some(Ok(_)) => Ok(()),
             Some(Err(source)) => Err(ChildError::Admission(source.clone())),
             None => Err(ChildError::Unavailable),
         }
@@ -457,6 +451,11 @@ impl ChildExecution {
         let view = handle.wait_cleanup(deadline).await?;
         self.snapshot.view = view.clone();
         Ok(view)
+    }
+    pub(crate) async fn settled(&mut self) -> Result<(), ChildError> {
+        let view = self.snapshot.handle().settled().await?;
+        self.snapshot.view = view;
+        Ok(())
     }
     /// Request cancellation of an owned relationship, never a detached child.
     ///

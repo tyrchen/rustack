@@ -35,7 +35,7 @@ pub use ir::{
 };
 use ir::{Failure, Node, Row};
 pub use recovery::{Catcher, Jitter, RecoveryPolicy, Retrier, RetryTiming};
-pub use task::{FunctionArn, Integration, TaskSupport, TenantScope};
+pub use task::{ChildPattern, FunctionArn, Integration, TaskSupport, TenantScope};
 
 /// Trusted state-instruction profile selected by an execution composition root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -55,6 +55,7 @@ pub struct AslCompiler {
     scope: TenantScope,
     tasks: TaskSupport,
     states: StateSupport,
+    children: bool,
 }
 
 impl fmt::Debug for AslCompiler {
@@ -76,6 +77,7 @@ impl AslCompiler {
             scope,
             tasks,
             states: StateSupport::Sequential,
+            children: false,
         }
     }
 
@@ -90,6 +92,17 @@ impl AslCompiler {
     #[must_use]
     pub fn with_state_support(mut self, states: StateSupport) -> Self {
         self.states = states;
+        self
+    }
+
+    /// Enable child Tasks only when a real registry binding is installed.
+    ///
+    /// ```
+    /// let compiler = rustack_stepfunctions_core::AslCompiler::default().with_child_support(true);
+    /// ```
+    #[must_use]
+    pub fn with_child_support(mut self, enabled: bool) -> Self {
+        self.children = enabled;
         self
     }
 

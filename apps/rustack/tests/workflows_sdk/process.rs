@@ -48,6 +48,13 @@ pub(super) struct Server {
 }
 impl Server {
     pub async fn start() -> Result<Self> {
+        Self::start_with_dispatch(32).await
+    }
+    pub async fn start_with_dispatch(dispatch: usize) -> Result<Self> {
+        ensure!(
+            (1..=32).contains(&dispatch),
+            "invalid fixture dispatch capacity"
+        );
         let bootstrap = PathBuf::from(
             env::var_os("RUSTACK_WORKFLOWS_BOOTSTRAP")
                 .context("run make test-stepfunctions-sdk")?,
@@ -61,7 +68,15 @@ impl Server {
         fs::create_dir(&markers).await?;
         fs::create_dir(directory.path().join("gates")).await?;
         let config = directory.path().join("rustack.yaml");
-        fs::write(&config, b"budgets:\n  workflowTransitions: 80\n  workflowHistoryBytes: 1048576\n  workflowTotalHistoryBytes: 8388608\n  workflowDrainSeconds: 0\n").await?;
+        fs::write(
+            &config,
+            format!(
+                "budgets:\n  workflowTransitions: 80\n  workflowHistoryBytes: 1048576\n  \
+                 workflowTotalHistoryBytes: 8388608\n  workflowDrainSeconds: 0\n  \
+                 workflowDispatches: {dispatch}\n"
+            ),
+        )
+        .await?;
         let reservation = TcpListener::bind("127.0.0.1:0").await?;
         let address = reservation.local_addr()?;
         drop(reservation);

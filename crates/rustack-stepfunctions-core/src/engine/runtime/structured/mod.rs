@@ -19,9 +19,10 @@ use super::{
     shutdown_reason,
 };
 use crate::{
-    ClockSample, CompiledMachine, DriverStep, ExecutionFailure, ExecutionOutcome, FrameCallId,
-    FrameError, FrameLease, FrameScheduler, FrameUpdate, LambdaTaskCommand, Payload, StateView,
-    SystemUuidSource, TaskCall, TaskDispatch, TaskFailure, TaskTimeout,
+    ChildPattern, ClockSample, CompiledMachine, DriverStep, ExecutionFailure, ExecutionOutcome,
+    FrameCallId, FrameError, FrameLease, FrameScheduler, FrameUpdate, Integration,
+    LambdaTaskCommand, Payload, StateView, SystemUuidSource, TaskCall, TaskDispatch, TaskFailure,
+    TaskTimeout,
     engine::{
         Phase,
         history::{
@@ -32,6 +33,7 @@ use crate::{
     },
 };
 
+mod child;
 mod history;
 mod resource;
 use history::CausalHistory;
@@ -39,8 +41,10 @@ use history::CausalHistory;
 #[derive(Debug)]
 enum Message {
     Started(FrameCallId),
+    Submitted(FrameCallId, Payload),
     Completed(FrameCallId, Result<Payload, TaskFailure>),
     Quarantined(FrameCallId),
+    Fatal(ExecutionError),
 }
 #[derive(Debug)]
 struct WatchExit {
@@ -48,13 +52,19 @@ struct WatchExit {
     owned: OwnedCall,
     clean: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Progress {
+    Pending,
+    Started,
+    Submitted,
+}
 #[derive(Debug)]
 struct Call {
     cancel: watch::Sender<bool>,
     lease: Arc<DispatchLease>,
     machine: Arc<CompiledMachine>,
     dispatch: TaskDispatch,
-    started: bool,
+    progress: Progress,
     result_seen: bool,
     cancelled: bool,
     settled: Option<bool>,
@@ -93,6 +103,8 @@ pub(super) struct Actor {
     watch_ids: BTreeMap<Id, FrameCallId>,
     workers: JoinSet<Evaluated>,
     watchers: JoinSet<WatchExit>,
+    child_jobs: JoinSet<()>,
+    children: Option<child::Binding>,
     sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
     forced: Option<Arc<ExecutionOutcome>>,
@@ -129,6 +141,8 @@ impl Actor {
             watch_ids: BTreeMap::new(),
             workers: JoinSet::new(),
             watchers: JoinSet::new(),
+            child_jobs: JoinSet::new(),
+            children: None,
             sender,
             receiver,
             forced: None,
@@ -510,9 +524,39 @@ impl Actor {
                 matches!(driver.phase, Phase::Calling { attempt, .. } if attempt == id.attempt())
             })
     }
+    fn submitted(&mut self, id: FrameCallId, output: &Payload) {
+        let current = self.current(id);
+        if let Some(call) = self.calls.get_mut(&id) {
+            if call.progress != Progress::Started || call.result_seen {
+                self.fail(ExecutionError::Unavailable);
+                return;
+            }
+            call.progress = Progress::Submitted;
+            if !self.published
+                && current
+                && !call.cancelled
+                && Instant::now().into_std() < call.dispatch.deadline()
+            {
+                if let Err(error) = self.history.event(
+                    id.frame(),
+                    events::task_submitted(
+                        &call.machine,
+                        call.dispatch.state(),
+                        output,
+                        Utc::now(),
+                    ),
+                ) {
+                    self.fail(error);
+                } else {
+                    self.publish_running();
+                }
+            }
+        }
+    }
     async fn message(&mut self, message: Message) {
         self.control();
         match message {
+            Message::Fatal(error) => self.fail(error),
             Message::Quarantined(id) => {
                 if self.calls.contains_key(&id) {
                     self.cleanup(CleanupState::Quarantined);
@@ -521,7 +565,7 @@ impl Actor {
             Message::Started(id) => {
                 let current = self.current(id);
                 if let Some(call) = self.calls.get_mut(&id) {
-                    call.started = true;
+                    call.progress = Progress::Started;
                     if !self.published
                         && current
                         && !call.cancelled
@@ -539,6 +583,7 @@ impl Actor {
                     }
                 }
             }
+            Message::Submitted(id, output) => self.submitted(id, &output),
             Message::Completed(id, result) => {
                 let observed = Self::sample();
                 let current = self.current(id);
@@ -556,7 +601,7 @@ impl Actor {
                     self.reconcile();
                     return;
                 }
-                if result.is_ok() && !call.started {
+                if result.is_ok() && call.progress == Progress::Pending {
                     self.fail(ExecutionError::Unavailable);
                     return;
                 }
@@ -572,10 +617,10 @@ impl Actor {
                             &call.machine,
                             call.dispatch.state(),
                             failure,
-                            if call.started {
-                                TaskFailureKind::Failed
-                            } else {
+                            if call.progress == Progress::Pending {
                                 TaskFailureKind::Admission
+                            } else {
+                                TaskFailureKind::Failed
                             },
                             observed.wall,
                         ),
@@ -596,7 +641,12 @@ impl Actor {
         if self.published {
             return;
         }
-        let Some(id) = self.pending.keys().next().copied() else {
+        let Some(id) = self
+            .pending
+            .iter()
+            .find_map(|(id, pending)| child_pattern(&pending.command).map(|_| *id))
+            .or_else(|| self.pending.keys().next().copied())
+        else {
             return;
         };
         if self.pending.get(&id).is_some_and(|pending| {
@@ -605,13 +655,21 @@ impl Actor {
             self.park = None;
             return;
         }
-        let permit = if let Some(permit) = self.reserved.take() {
-            permit
+        let is_child = self
+            .pending
+            .get(&id)
+            .and_then(|p| child_pattern(&p.command))
+            .is_some();
+        let permit = if is_child {
+            self.reserved = None;
+            None
+        } else if let Some(permit) = self.reserved.take() {
+            Some(permit)
         } else {
             let Ok(permit) = self.shared.pools.dispatch.clone().try_acquire_owned() else {
                 return;
             };
-            permit
+            Some(permit)
         };
         self.control();
         if self.published {
@@ -633,6 +691,10 @@ impl Actor {
         self.sync_ledger();
         let machine = pending.command.machine().clone();
         let dispatch = pending.command.dispatch().clone();
+        if let Some(pattern) = child_pattern(&pending.command) {
+            self.start_child(id, pending.command, pattern, lease);
+            return;
+        }
         let result = self.shared.port.as_ref().map_or_else(
             || Err(TaskFailure::service_exception()),
             |port| port.start(pending.command),
@@ -683,6 +745,13 @@ impl Actor {
     ) {
         let cancel = call.cancellation_sender();
         let cancelled = cancel.subscribe();
+        let child = matches!(
+            machine.state(dispatch.state()),
+            Ok(StateView::Task {
+                resource: Integration::StartExecution(_),
+                ..
+            })
+        );
         self.calls.insert(
             id,
             Call {
@@ -690,7 +759,7 @@ impl Actor {
                 lease: lease.clone(),
                 machine,
                 dispatch,
-                started: false,
+                progress: Progress::Pending,
                 result_seen: false,
                 cancelled: false,
                 settled: None,
@@ -701,6 +770,7 @@ impl Actor {
             OwnedCall { call, lease },
             cancelled,
             self.sender.clone(),
+            child,
         ));
         self.watch_ids.insert(task.id(), id);
     }
@@ -737,11 +807,13 @@ impl Actor {
         self.published
             && self.workers.is_empty()
             && self.watchers.is_empty()
+            && self.child_jobs.is_empty()
             && self.pending.is_empty()
             && self.calls.values().all(|call| call.settled == Some(false))
             && self.park.is_some()
     }
     pub(super) async fn run(mut self) -> RunExit {
+        self.register_children().await;
         let mut ticks = 0_u8;
         loop {
             ticks = ticks.saturating_add(1);
@@ -752,6 +824,12 @@ impl Actor {
             self.control();
             self.expired();
             self.reconcile();
+            while let Some(result) = self.child_jobs.try_join_next() {
+                if let Err(error) = result {
+                    self.uncertain = true;
+                    self.fail(ExecutionError::Worker(error));
+                }
+            }
             while let Some(result) = self.watchers.try_join_next_with_id() {
                 self.joined(result);
             }
@@ -795,9 +873,10 @@ impl Actor {
                 _=self.stop.changed(),if !self.published=>self.control(),
                 ()=sleep_until(until),if !self.published=>{self.control();self.expired();self.park=None;},
                 result=self.workers.join_next(),if !self.workers.is_empty()=>if let Some(result)=result{self.evaluated(result);},
+                result=self.child_jobs.join_next(),if !self.child_jobs.is_empty()=>if let Some(Err(error))=result{self.uncertain=true;self.fail(ExecutionError::Worker(error));},
                 result=self.watchers.join_next_with_id(),if !self.watchers.is_empty()=>if let Some(result)=result{self.joined(result);},
                 message=self.receiver.recv(),if self.workers.is_empty()=>if let Some(message)=message{self.message(message).await;},
-                permit=self.shared.pools.dispatch.clone().acquire_owned(),if !self.published&&self.workers.is_empty()&&!self.pending.is_empty()&&self.reserved.is_none()=>{match permit{Ok(permit)=>self.reserved=Some(permit),Err(_)=>self.fail(ExecutionError::Unavailable)}},
+                permit=self.shared.pools.dispatch.clone().acquire_owned(),if !self.published&&self.workers.is_empty()&&self.pending.values().any(|p| child_pattern(&p.command).is_none())&&self.reserved.is_none()=>{match permit{Ok(permit)=>self.reserved=Some(permit),Err(_)=>self.fail(ExecutionError::Unavailable)}},
                 result=self.shared.frames.capacity.wait_for_capacity(until),if !self.published&&self.workers.is_empty()&&global=>{if result.is_ok(){self.park=None;}},
             }
         }
@@ -811,5 +890,15 @@ impl Actor {
             quarantined: self.quarantine,
             uncertain,
         }
+    }
+}
+
+fn child_pattern(command: &LambdaTaskCommand) -> Option<ChildPattern> {
+    match command.machine().state(command.dispatch().state()).ok()? {
+        StateView::Task {
+            resource: Integration::StartExecution(pattern),
+            ..
+        } => Some(*pattern),
+        _ => None,
     }
 }

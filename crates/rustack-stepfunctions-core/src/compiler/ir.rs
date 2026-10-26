@@ -425,9 +425,21 @@ impl CompiledMachine {
 
     pub(crate) fn uses_lambda(&self) -> bool {
         self.rows.iter().any(|row| match &row.node {
-            Node::Task { .. } => true,
+            Node::Task { resource, .. } => matches!(
+                resource,
+                Integration::DirectLambda(_) | Integration::LambdaInvoke
+            ),
             Node::Parallel { branches, .. } => branches.iter().any(|branch| branch.uses_lambda()),
             Node::Map { processor, .. } => processor.uses_lambda(),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn uses_children(&self) -> bool {
+        self.rows.iter().any(|row| match &row.node {
+            Node::Task { resource, .. } => matches!(resource, Integration::StartExecution(_)),
+            Node::Parallel { branches, .. } => branches.iter().any(|branch| branch.uses_children()),
+            Node::Map { processor, .. } => processor.uses_children(),
             _ => false,
         })
     }

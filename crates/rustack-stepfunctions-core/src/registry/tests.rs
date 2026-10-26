@@ -19,6 +19,8 @@ use crate::{
 
 #[path = "tests/children.rs"]
 mod children;
+#[path = "tests/nested.rs"]
+mod nested;
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)

@@ -12,6 +12,7 @@ pub(super) async fn run(
     mut owned: OwnedCall,
     mut cancelled: watch::Receiver<bool>,
     sender: mpsc::Sender<Message>,
+    child: bool,
 ) -> WatchExit {
     loop {
         if *cancelled.borrow() {
@@ -21,7 +22,9 @@ pub(super) async fn run(
             tokio::select! {biased;_ = cancelled.changed()=>break,event=owned.call.next()=>event};
         let (message, done) = match event {
             Ok(TaskEvent::Started) => (Message::Started(id), false),
+            Ok(TaskEvent::Submitted(output)) => (Message::Submitted(id, output), false),
             Ok(TaskEvent::Completed(result)) => (Message::Completed(id, result), true),
+            Err(_) if child => (Message::Fatal(super::ExecutionError::Unavailable), true),
             Err(_) => (
                 Message::Completed(id, Err(TaskFailure::service_exception())),
                 true,

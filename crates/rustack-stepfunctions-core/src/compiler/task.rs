@@ -5,7 +5,7 @@ use std::fmt;
 use serde_json::{Map, Value};
 
 use super::{Code, CompileError, Location};
-use crate::AslError;
+use crate::{AslError, ExecutionName, Payload, StateMachineArn};
 
 /// Adapter support supplied by trusted composition, never a request field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -129,6 +129,25 @@ impl FunctionArn {
     }
 }
 
+/// Optimized nested integration behavior selected by the trusted caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChildPattern {
+    /// Detach at successful start acceptance.
+    RequestResponse,
+    /// Await termination; return Input/Output as serialized JSON strings.
+    Sync,
+    /// Await termination; return Input/Output as JSON values.
+    Sync2,
+}
+impl ChildPattern {
+    pub(crate) fn owned(self) -> bool {
+        match self {
+            Self::RequestResponse => false,
+            Self::Sync | Self::Sync2 => true,
+        }
+    }
+}
 /// Fully allowlisted M1 Lambda task pattern.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -137,6 +156,8 @@ pub enum Integration {
     DirectLambda(FunctionArn),
     /// Optimized request-response result envelope.
     LambdaInvoke,
+    /// Start or await an execution through the installed registry.
+    StartExecution(ChildPattern),
 }
 impl fmt::Debug for Integration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -171,21 +192,30 @@ pub(super) fn compile(
     parameters: Option<&Value>,
     scope: &TenantScope,
     support: TaskSupport,
+    children: bool,
     location: &Location,
 ) -> Result<Integration, CompileError> {
     let prefix = format!("arn:{}:states:::", scope.partition());
     let integration = if value == format!("{prefix}lambda:invoke") {
         optimized(parameters, scope, &location.field("Parameters")?)?;
         Integration::LambdaInvoke
-    } else if [
-        "lambda:invoke.waitForTaskToken",
-        "states:startExecution",
-        "states:startExecution.sync",
-        "states:startExecution.sync:2",
+    } else if let Some(pattern) = [
+        ("states:startExecution", ChildPattern::RequestResponse),
+        ("states:startExecution.sync", ChildPattern::Sync),
+        ("states:startExecution.sync:2", ChildPattern::Sync2),
     ]
-    .iter()
-    .any(|suffix| value == format!("{prefix}{suffix}"))
+    .into_iter()
+    .find_map(|(suffix, pattern)| (value == format!("{prefix}{suffix}")).then_some(pattern))
     {
+        if !children {
+            return Err(location.field("Resource")?.error(
+                Code::ProfileUnavailable,
+                "child execution adapter is unavailable",
+            ));
+        }
+        child_parameters(parameters, scope, &location.field("Parameters")?)?;
+        return Ok(Integration::StartExecution(pattern));
+    } else if value == format!("{prefix}lambda:invoke.waitForTaskToken") {
         return Err(location.field("Resource")?.error(
             Code::ProfileUnavailable,
             "integration requires a later workflow profile",
@@ -273,4 +303,56 @@ fn static_string<'a>(
         .get(key)
         .map(|v| v.as_str().ok_or_else(|| invalid(location)))
         .transpose()
+}
+
+fn child_parameters(
+    parameters: Option<&Value>,
+    scope: &TenantScope,
+    location: &Location,
+) -> Result<(), CompileError> {
+    let Some(parameters) = parameters else {
+        return Ok(());
+    };
+    let fields = parameters
+        .as_object()
+        .ok_or_else(|| location.error(Code::InvalidSchema, "child parameters must be an object"))?;
+    for key in fields.keys() {
+        if !matches!(
+            key.strip_suffix(".$").unwrap_or(key),
+            "StateMachineArn" | "Input" | "Name"
+        ) {
+            return Err(location.error(
+                Code::UnsupportedField,
+                "unsupported child execution parameter",
+            ));
+        }
+    }
+    if let Some(value) = fields.get("StateMachineArn") {
+        let arn: StateMachineArn = value
+            .as_str()
+            .ok_or_else(|| invalid(location))?
+            .parse()
+            .map_err(|_| invalid(location))?;
+        arn.check(scope).map_err(|_| invalid(location))?;
+    }
+    if let Some(value) = fields.get("Name") {
+        let _: ExecutionName = value
+            .as_str()
+            .ok_or_else(|| invalid(location))?
+            .parse()
+            .map_err(|_| invalid(location))?;
+    }
+    if let Some(Value::String(input)) = fields.get("Input") {
+        Payload::parse(input.as_bytes()).map_err(|e| CompileError::asl(location, e))?;
+    }
+    Ok(())
+}
+impl ChildPattern {
+    pub(crate) fn action(self) -> &'static str {
+        match self {
+            Self::RequestResponse => "startExecution",
+            Self::Sync => "startExecution.sync",
+            Self::Sync2 => "startExecution.sync:2",
+        }
+    }
 }

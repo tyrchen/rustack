@@ -415,3 +415,44 @@ proptest! {
 }
 
 mod structured;
+
+#[test]
+fn test_should_gate_exact_child_resources_independently_of_lambda_support() {
+    let compiler = AslCompiler::default().with_child_support(true);
+    for suffix in ["", ".sync", ".sync:2"] {
+        let value = json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":format!("arn:aws:states:::states:startExecution{suffix}"),"Parameters":{"StateMachineArn":"arn:aws:states:us-east-1:000000000000:stateMachine:Child"},"End":true}}});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(AslCompiler::default().compile(&bytes).is_err());
+        let artifact = compiler.compile(&bytes).unwrap();
+        assert!(artifact.machine().uses_children());
+        assert!(!artifact.machine().uses_lambda());
+    }
+    for resource in [
+        "arn:aws:states:::states:startExecution.sync:3",
+        "arn:aws:states:::states:startExecution.waitForTaskToken",
+        "arn:aws-cn:states:::states:startExecution",
+        "arn:aws:states:::lambda:invoke.sync",
+    ] {
+        let bytes = serde_json::to_vec(
+            &json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":resource,"End":true}}}),
+        )
+        .unwrap();
+        assert!(compiler.compile(&bytes).is_err());
+    }
+}
+#[test]
+fn test_should_reject_invalid_literal_nested_parameters_during_compilation() {
+    let compiler = AslCompiler::default().with_child_support(true);
+    for parameters in [
+        json!({"StateMachineArn":"bad"}),
+        json!({"StateMachineArn":"arn:aws:states:us-west-2:000000000000:stateMachine:Child"}),
+        json!({"Name":null}),
+        json!({"Name":"bad:name"}),
+        json!({"Unknown":true}),
+        json!({"Input":"invalid"}),
+        json!({"StateMachineArn":"arn:aws:states:us-east-1:000000000000:stateMachine:Child","StateMachineArn.$":"$.arn"}),
+    ] {
+        let bytes=serde_json::to_vec(&json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2","Parameters":parameters,"End":true}}})).unwrap();
+        assert!(compiler.compile(&bytes).is_err());
+    }
+}

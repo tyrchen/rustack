@@ -33,6 +33,8 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::process::{ACCESS, SECRET, Server};
 
+#[path = "rust/nested.rs"]
+mod nested;
 #[path = "rust/structured.rs"]
 mod structured;
 
@@ -493,6 +495,9 @@ fn assert_omitted(events: &[HistoryEvent]) -> Result<()> {
         ];
         let outputs = [
             event
+                .task_submitted_event_details()
+                .and_then(|d| d.output()),
+            event
                 .execution_succeeded_event_details()
                 .and_then(|d| d.output()),
             event.state_exited_event_details().and_then(|d| d.output()),
@@ -504,6 +509,10 @@ fn assert_omitted(events: &[HistoryEvent]) -> Result<()> {
                 .and_then(|d| d.output()),
         ];
         let metadata_present = [
+            event
+                .task_submitted_event_details()
+                .and_then(|d| d.output_details())
+                .is_some(),
             event
                 .execution_started_event_details()
                 .and_then(|d| d.input_details())
@@ -1009,6 +1018,11 @@ pub(super) async fn exercise(server: &Server) -> Result<()> {
     deploy(server, &lambda(server)).await?;
     catalog(&client).await?;
     controls(&client, server).await?;
+    nested::exercise(&client, server).await?;
     structured::exercise(&client, server).await?;
     Ok(())
+}
+
+pub(super) async fn nested_only(server: &Server) -> Result<()> {
+    nested::exercise(&sfn(server, SECRET), server).await
 }

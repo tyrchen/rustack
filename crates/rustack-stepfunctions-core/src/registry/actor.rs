@@ -517,7 +517,8 @@ impl State {
         let context = EvaluationContext::from_value(
             &json!({"Execution":{"Id":arn.as_str(),"Name":arn.name().as_str(),"Input":input.value(),"RoleArn":machine.revision.role().as_str(),"StartTime":now.to_rfc3339_opts(SecondsFormat::Millis,true)},"StateMachine":{"Id":machine.arn().as_str(),"Name":machine.arn().name().as_str()}}),
         )?;
-        let structured = machine.revision.machine().requires_structured_execution();
+        let structured = machine.revision.machine().requires_structured_execution()
+            || machine.revision.machine().uses_children();
         let construct = if structured {
             ExecutionDriver::for_structured_owner
         } else {
@@ -532,11 +533,12 @@ impl State {
         )?;
         let absolute_deadline = driver.deadline();
         // No await between runtime registration and the atomic record/name commit.
-        let handle = if structured {
-            self.runtime.start_structured(driver)?
-        } else {
-            self.runtime.start(driver)?
-        };
+        let registered = self.runtime.start_registered(
+            driver,
+            structured,
+            super::child::port(&self.children.registry),
+        )?;
+        let handle = registered.handle;
         let view = handle.snapshot();
         let record = Arc::new(ExecutionRecord {
             lineage,
@@ -560,10 +562,11 @@ impl State {
                 closed: None,
             },
         );
-        Ok(RegistryResult::Execution(ExecutionSnapshot {
-            record,
-            view,
-        }))
+        let snapshot = ExecutionSnapshot { record, view };
+        if let Some(parent) = registered.parent {
+            let _ = parent.send(snapshot.child_parent());
+        }
+        Ok(RegistryResult::Execution(snapshot))
     }
     fn maintain(&mut self, now: Instant) {
         self.children.maintain(now);

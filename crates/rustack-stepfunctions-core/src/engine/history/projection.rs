@@ -31,6 +31,10 @@ pub(super) fn omit_data(event: &mut HistoryEvent) {
         d.output = None;
         d.output_details = None;
     }
+    if let Some(d) = &mut event.task_submitted_event_details {
+        d.output = None;
+        d.output_details = None;
+    }
     // Parameters is required within the Smithy details type. Omit that optional
     // details object as a whole instead of fabricating a replacement JSON value.
     event.task_scheduled_event_details = None;

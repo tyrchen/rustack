@@ -117,22 +117,26 @@ async fn cases(client: &Client) -> Result<()> {
     Ok(())
 }
 async fn deploy_gate(server: &Server, client: &Lambda, stop: bool) -> Result<PathBuf> {
-    let directory = server.markers.parent().context("root")?.join(if stop {
-        "fanout-stop"
-    } else {
-        "fanout-overlap"
-    });
+    deploy_named(
+        server,
+        client,
+        if stop {
+            "SdkFanoutStop"
+        } else {
+            "SdkFanoutGate"
+        },
+    )
+    .await
+}
+pub(super) async fn deploy_named(server: &Server, client: &Lambda, name: &str) -> Result<PathBuf> {
+    let directory = server.markers.parent().context("root")?.join(name);
     fs::create_dir(&directory).await?;
     fs::create_dir(directory.join("consumed")).await?;
     let bytes = fs::read(&server.bootstrap).await?;
     let archive = tokio::task::spawn_blocking(move || archive(&bytes)).await??;
     client
         .create_function()
-        .function_name(if stop {
-            "SdkFanoutStop"
-        } else {
-            "SdkFanoutGate"
-        })
+        .function_name(name)
         .role(ROLE)
         .runtime(Runtime::Providedal2023)
         .handler("bootstrap")
@@ -167,7 +171,7 @@ async fn deploy_gate(server: &Server, client: &Lambda, stop: bool) -> Result<Pat
         .await?;
     Ok(directory)
 }
-async fn consumed(directory: &Path) -> Result<BTreeSet<(u32, String)>> {
+pub(super) async fn consumed(directory: &Path, count: usize) -> Result<BTreeSet<(u32, String)>> {
     timeout(Duration::from_secs(10), async {
         loop {
             let mut entries = fs::read_dir(directory.join("consumed")).await?;
@@ -177,7 +181,7 @@ async fn consumed(directory: &Path) -> Result<BTreeSet<(u32, String)>> {
                     continue;
                 }
                 ensure!(
-                    markers.len() < 2 && entry.metadata().await?.len() <= 1024,
+                    markers.len() < count && entry.metadata().await?.len() <= 1024,
                     "unexpected marker count/size"
                 );
                 let marker: Value = serde_json::from_slice(&fs::read(entry.path()).await?)?;
@@ -189,20 +193,20 @@ async fn consumed(directory: &Path) -> Result<BTreeSet<(u32, String)>> {
                 );
                 markers.insert((pid, request.to_owned()));
             }
-            if markers.len() == 2 {
+            if markers.len() == count {
                 ensure!(
                     markers
                         .iter()
                         .map(|(pid, _)| pid)
                         .collect::<BTreeSet<_>>()
                         .len()
-                        == 2
+                        == count
                         && markers
                             .iter()
                             .map(|(_, id)| id)
                             .collect::<BTreeSet<_>>()
                             .len()
-                            == 2,
+                            == count,
                     "handlers did not consume independent invocations"
                 );
                 return Ok(markers);
@@ -247,7 +251,7 @@ async fn gated(client: &Client, server: &Server, stop: bool) -> Result<()> {
         })
         .send()
         .await?;
-    let markers = consumed(&directory).await?;
+    let markers = consumed(&directory, 2).await?;
     if stop {
         finish_stopped(client, started.execution_arn(), markers).await
     } else {

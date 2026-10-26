@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-standard-jsonpath-nested-v1",
+  "source": "https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html",
+  "cases": [
+    {"id":"accept", "suffix":"", "input":{"answer":42}, "expected":{"answer":42}},
+    {"id":"sync", "suffix":".sync", "input":{"answer":42}, "expected":{"answer":42}},
+    {"id":"sync2", "suffix":".sync:2", "input":{"answer":42}, "expected":{"answer":42}},
+    {"id":"null-default", "suffix":".sync:2", "input":null, "expected":{}},
+    {"id":"serialized-null", "suffix":".sync:2", "input":"null", "expected":null},
+    {"id":"serialized-object", "suffix":".sync", "input":" { \"answer\":42 } ", "expected":{"answer":42}}
+  ]
+}

@@ -186,6 +186,39 @@ async fn test_should_report_pure_profile_and_reject_lambda_without_actual_port()
     assert_eq!(capabilities["snapshot"], "unsupported");
     assert_eq!(capabilities["dockerQualified"], false);
     assert_eq!(capabilities["limits"]["apiWorkers"], 8);
+    assert_eq!(capabilities["nestedSync"], true);
+    let child = json!({"StartAt":"D","States":{"D":{"Type":"Pass","End":true}}});
+    let (status, created) = request(runtime.api.clone(), "CreateStateMachine", json!({"name":"PureChild","definition":child.to_string(),"roleArn":"arn:aws:iam::000000000000:role/Test"})).await?;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let parent = json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2","Parameters":{"StateMachineArn":created["stateMachineArn"],"Input":{"answer":42}},"End":true}}});
+    let (status, created) = request(runtime.api.clone(), "CreateStateMachine", json!({"name":"PureParent","definition":parent.to_string(),"roleArn":"arn:aws:iam::000000000000:role/Test"})).await?;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, started) = request(
+        runtime.api.clone(),
+        "StartExecution",
+        json!({"stateMachineArn":created["stateMachineArn"],"input":"{}"}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let arn = started["executionArn"]
+        .as_str()
+        .context("nested execution ARN")?
+        .parse()?;
+    let RegistryResult::Execution(snapshot) = runtime
+        .status
+        .registry
+        .submit(RegistryCommand::Execution(arn))?
+        .wait(Instant::now() + Duration::from_secs(5))
+        .await?
+    else {
+        anyhow::bail!("nested execution missing");
+    };
+    let complete = snapshot
+        .wait(Instant::now() + Duration::from_secs(5))
+        .await?;
+    assert!(
+        matches!(complete.view().outcome().map(Arc::as_ref), Some(ExecutionOutcome::Succeeded(output)) if output.value()["Output"] == json!({"answer":42}))
+    );
     let definition = json!({"StartAt":"Call","States":{"Call":{"Type":"Task","Resource":"arn:aws:lambda:us-east-1:000000000000:function:Fn","End":true}}}).to_string();
     let (status, body) = request(runtime.api.clone(), "CreateStateMachine", json!({"name":"Task","definition":definition,"roleArn":"arn:aws:iam::000000000000:role/Test"})).await?;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

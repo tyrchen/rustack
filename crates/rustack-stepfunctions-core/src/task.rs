@@ -77,6 +77,8 @@ pub enum TaskSettlement {
 pub enum TaskEvent {
     /// The adapter actually admitted the underlying invocation.
     Started,
+    /// A real accepted nested job identity, before its terminal result.
+    Submitted(Payload),
     /// A business result; consult settlement separately before releasing capacity.
     Completed(Result<Payload, TaskFailure>),
 }
@@ -108,11 +110,20 @@ pub struct TaskResponder {
     cancellation: watch::Receiver<bool>,
     settlement: watch::Sender<TaskSettlement>,
     started: bool,
+    submitted: bool,
 }
 /// Adapter-owned uncertain cleanup capability; Drop never fabricates settlement.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct QuarantinedTask(TaskResponder);
+
+#[derive(Debug)]
+pub(crate) struct TaskCompletion(TaskResponder);
+impl TaskCompletion {
+    pub(crate) fn settle(self) {
+        self.0.settlement.send_replace(TaskSettlement::Clean);
+    }
+}
 
 impl TaskCall {
     /// Create bounded channels before admission; the adapter owns the responder.
@@ -137,6 +148,7 @@ impl TaskCall {
                 cancellation: cancelled,
                 settlement,
                 started: false,
+                submitted: false,
             },
         )
     }
@@ -231,6 +243,31 @@ impl TaskResponder {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TaskChannelError::InvalidProgress),
         }
+    }
+    /// Publish one actual accepted job envelope after Started.
+    ///
+    /// # Errors
+    /// Rejects duplicate, out-of-order or overflowing progress.
+    ///
+    /// ```
+    /// let (_, mut owner) = rustack_stepfunctions_core::TaskCall::channel();
+    /// owner.started()?;
+    /// owner.submitted(rustack_stepfunctions_core::Payload::parse(b"{}")?)?;
+    /// # Ok::<(),Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn submitted(&mut self, output: Payload) -> Result<(), TaskChannelError> {
+        if !self.started || self.submitted {
+            return Err(TaskChannelError::InvalidProgress);
+        }
+        self.submitted = true;
+        match self.events.try_send(TaskEvent::Submitted(output)) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TaskChannelError::InvalidProgress),
+        }
+    }
+    pub(crate) fn complete(self, result: Result<Payload, TaskFailure>) -> TaskCompletion {
+        let _ = self.events.try_send(TaskEvent::Completed(result));
+        TaskCompletion(self)
     }
     /// Confirm cleanup and deliver one result, even if its observer has departed.
     ///
