@@ -167,22 +167,44 @@ impl Expression {
     ) -> Result<Payload, AslError> {
         eval::node(&self.0, data, context, source, &mut Budget::new())
     }
+
+    pub(crate) fn evaluate_scoped<S: UuidSource + ?Sized>(
+        &self,
+        data: &Payload,
+        context: &EvaluationContext,
+        source: &mut S,
+        budget: &mut Budget,
+    ) -> Result<Payload, AslError> {
+        eval::node(&self.0, data, context, source, budget)
+    }
+
+    pub(crate) fn node_count(&self) -> usize {
+        fn count(node: &Node) -> usize {
+            match node {
+                Node::Call { args, .. } => args
+                    .iter()
+                    .fold(1_usize, |sum, node| sum.saturating_add(count(node))),
+                Node::Path(_) | Node::Literal(_) => 1,
+            }
+        }
+        count(&self.0)
+    }
 }
 
-struct Budget {
+pub(crate) struct Budget {
     units: usize,
     text: usize,
     materialized: usize,
 }
 impl Budget {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             units: 10_000,
             text: 4 * 1024 * 1024,
             materialized: 4 * 1024 * 1024,
         }
     }
-    fn work(&mut self, count: usize) -> Result<(), AslError> {
+    pub(crate) fn work(&mut self, count: usize) -> Result<(), AslError> {
         self.units = self.units.checked_sub(count).ok_or(AslError::WorkLimit)?;
         Ok(())
     }
@@ -190,12 +212,26 @@ impl Budget {
         self.text = self.text.checked_sub(count).ok_or(AslError::WorkLimit)?;
         Ok(())
     }
-    fn result(&mut self, result: &Payload) -> Result<(), AslError> {
+    pub(crate) fn result(&mut self, result: &Payload) -> Result<(), AslError> {
         self.materialized = self
             .materialized
             .checked_sub(result.original_bytes().len())
             .ok_or(AslError::WorkLimit)?;
         Ok(())
+    }
+
+    pub(crate) fn path(
+        &mut self,
+        path: &Path,
+        data: &Payload,
+        context: &EvaluationContext,
+    ) -> Result<Payload, AslError> {
+        self.work(1)?;
+        let result = path
+            .select_with_work(data, context, &mut self.units)?
+            .to_payload()?;
+        self.result(&result)?;
+        Ok(result)
     }
 }
 

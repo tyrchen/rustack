@@ -7,15 +7,19 @@
 #![forbid(unsafe_code)]
 
 mod choice;
+mod dataflow;
 mod error;
 mod expression;
 mod path;
 mod payload;
+mod template;
 mod wait;
 
 pub use choice::Predicate;
+pub use dataflow::DataFlow;
 pub use error::AslError;
 pub use expression::{Expression, SystemUuidSource, UuidSource};
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};
 pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
+pub use template::Template;
 pub use wait::WaitSource;

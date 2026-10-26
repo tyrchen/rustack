@@ -10,6 +10,12 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Invalid template shape, normalized-key collision or compiled limit.
+    #[error("invalid ASL payload template")]
+    InvalidTemplate,
+    /// Unknown data-flow fields or invalid field types.
+    #[error("invalid ASL data flow")]
+    InvalidDataFlow,
     /// Unsupported or invalid intrinsic syntax/arity.
     #[error("invalid ASL expression")]
     InvalidExpression,

@@ -530,6 +530,12 @@ ASL§2.3.1/D45 implements the complete12-call selected intrinsic profile, winnow
 
 Core242 unit cases/21 doctests and strict checks pass, including all12 independent catalog cases and two new512-case properties. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,747 tests/415 gated, including retained deferred Docker changes. Audit still reports the same4 vulnerabilities/10 unsound warnings in the existing zstd/Squib graph (477 packages); deny passes bans/licenses/sources and fails advisories under open B06. No external package/version was added and no ignores were introduced. Template/pipeline/compiler, async entropy isolation and full workflow acceptance remain required.
 
+## P2 template/data-flow independent review
+
+ASL§2.2.1/D46 implements compiled normalized templates, streaming borrowed output preparation, phase-wide budgets and pure resource-input/result phases retaining original input. The independent read-only reviewer reports no in-slice findings. Exact combined-node and depth boundaries, shared-field/phase work, all four independent pipeline cases and intermediate failure-before-discard cases pass.
+
+Final core270 unit cases/31 doctests and strict production/all-targets checks pass, including28 additions and two512-case properties. Current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,775 tests/415 gated, including retained deferred Docker changes. No dependencies changed; the previously verified B06 audit/deny failure remains open. Machine compiler/indexed IR, actor/registry/resource execution, callback provenance and complete M1 acceptance remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

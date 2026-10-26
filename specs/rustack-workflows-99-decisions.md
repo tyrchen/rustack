@@ -402,3 +402,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: fixed bounds and historical independent edge inputs make expression behavior reviewable before template/compiler consumers. Async execution owners keep entropy acquisition off the scheduler loop.
 - **Pinned by**: [ASL§2.3.1](./rustack-workflows-30-asl-design.md#231-executable-expression-contract), [semantic memo](../docs/research/spike-stepfunctions-semantic-oracle.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Add normal dependency edges to already-resolved getrandom0.4.3/uuid1.26.0 without updating external versions. Formal scalar Format is selected over the historical cloud's object formatting extension.
+
+## D46 — Compile templates and keep original state input outside resource phases
+
+- **Context**: reusable Parameters/ResultSelector expansion must share limits, and result merging must target raw state input across an external call.
+- **Alternatives considered**: per-field fresh budgets allow aggregate work amplification; building expanded Value trees before sizing defeats output quotas; merging into prepared parameters changes state semantics; owning a resource inside a data helper obscures cancellation.
+- **Decision**: compile normalized collision-free templates, encode borrowed prepared views under shared budgets, and expose pure prepare/finish phases requiring the owner to retain original input.
+- **Why**: one implementation pins exact transformation ordering before state compilation/execution; future actor ownership and callback provenance remain explicit.
+- **Pinned by**: [ASL§2.2.1](./rustack-workflows-30-asl-design.md#221-executable-templates-and-data-flow-phases), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse compiled paths/intrinsics and bounded serde output; no dependency changes. This does not close machine compilation or resource execution acceptance.
