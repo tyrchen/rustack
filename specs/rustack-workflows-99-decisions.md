@@ -168,6 +168,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [local resolution](./rustack-workflows-20-lambda-runtime-design.md#28-local-image-resolution-and-selected-platform-identity), [live/source evidence](../docs/research/study-bollard-docker-transport-boundaries.md#platform-specific-image-identity-follow-up).
 - Date:2026-10-25. This refines D19's generated Id representation; it does not promise registry existence, cross-platform execution or completed deployment/provider integration.
 
+## D22 — Own private image aliases through deployment and invocation lifetime
+
+- Context: immutable IDs prevent tag drift but do not retain addressability when mutable image references are replaced. A prepared revision also needs unpacked-size proof rather than containerd compressed Size.
+- Alternatives: rely on an operator tag/ID remaining present; hold never-started containers per revision; create private aliases under validated owner/run/pin identities with retained lease supervision.
+- Decision: a bounded image lease actor prepares a private alias, verifies immutable identity and unpacked quota, and publishes a shared live artifact; only known private aliases can be removed. Record mutation phase before IO and retain uncertain cleanup/reservations across caller cancellation, deadlines and supervised recovery.
+- Why: published versions and captured calls must own artifact availability. Observing one absent alias after an uncertain tag does not prove that a late tag cannot appear; visible matching commit followed by removal can establish cleanliness. A root/worker failure must preserve these identities rather than merely release permits.
+- Pinned by: [owned image preparation](./rustack-workflows-20-lambda-runtime-design.md#29-owned-image-pins-and-deployment-preparation), [transport/source study](../docs/research/study-bollard-docker-transport-boundaries.md).
+- Date:2026-10-25. Provider status/CAS, allowed pulls, directory ownership and previous-run reconciliation remain separate required consumers.
+
 ## Glossary
 
 | Term | Meaning in this specification |

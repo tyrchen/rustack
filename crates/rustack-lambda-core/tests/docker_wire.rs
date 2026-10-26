@@ -9,10 +9,10 @@ use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use http::StatusCode;
 use rustack_lambda_core::{
-    artifact::{Architecture as ImageArchitecture, ImageReference, ResolvedImage},
+    artifact::{Architecture as ImageArchitecture, ImageReference, PinnedImage},
     docker::{
-        DockerError, DockerKey, DockerPort, DockerSocket, DockerWire, ImageResolver, OutputChannel,
-        OwnerFilter,
+        DockerError, DockerKey, DockerPort, DockerSocket, DockerWire, ImageLeaseConfig,
+        ImageLeaseManager, ImagePinScope, OutputChannel, OwnerFilter,
         models::{ContainerCreateBody, HostConfig},
     },
 };
@@ -105,6 +105,8 @@ struct Environment {
     wire: DockerWire,
     names: Names,
     runtime: Option<Runtime>,
+    images: ImageLeaseManager,
+    artifacts: Vec<PinnedImage>,
 }
 impl Environment {
     async fn new() -> Result<Self> {
@@ -113,33 +115,41 @@ impl Environment {
         let socket: DockerSocket = format!("unix://{socket}").parse()?;
         let wire = DockerWire::connect(socket, deadline()).await?;
         let run = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let images = ImageLeaseManager::start(
+            wire.port(),
+            ImagePinScope::new(owner, run)?,
+            ImageLeaseConfig::default(),
+        )?;
         Ok(Self {
             wire,
             names: Names {
                 relay: format!("rustack-wire-relay-{run}").parse()?,
                 function: format!("rustack-wire-function-{run}").parse()?,
-                owner: Uuid::new_v4(),
+                owner,
                 run,
                 environment: EnvironmentId::default(),
             },
             runtime: None,
+            images,
+            artifacts: Vec::new(),
         })
     }
 
-    async fn image(
-        port: &DockerPort,
-        reference: &str,
-        architecture: &str,
-    ) -> Result<ResolvedImage> {
+    async fn image(&mut self, reference: &str, architecture: &str) -> Result<PinnedImage> {
         let reference: ImageReference = reference.parse()?;
         let architecture = match architecture {
             "arm64" => ImageArchitecture::Arm64,
             "amd64" => ImageArchitecture::X86_64,
             _ => bail!("unknown fixture architecture"),
         };
-        Ok(ImageResolver::new(port.clone())
-            .resolve_local(&reference, architecture, None, deadline())
-            .await?)
+        let image = self
+            .images
+            .port()
+            .prepare(&reference, architecture, None, deadline())
+            .await?;
+        self.artifacts.push(image.clone());
+        Ok(image)
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -157,14 +167,16 @@ impl Environment {
                 && info.architecture.as_deref() == Some(daemon_arch),
             "daemon platform mismatch"
         );
-        let relay = Self::image(&port, &relay, &arch).await?;
-        let function = Self::image(&port, &format!("rustack-p0-handler:{arch}"), &arch).await?;
-        let relay_plan = relay.metadata().execution.plan(None)?;
-        let function_plan = function.metadata().execution.plan(None)?;
+        let relay = self.image(&relay, &arch).await?;
+        let function = self
+            .image(&format!("rustack-p0-handler:{arch}"), &arch)
+            .await?;
+        let relay_plan = relay.resolved().metadata().execution.plan(None)?;
+        let function_plan = function.resolved().metadata().execution.plan(None)?;
         port.create_container_on_platform(
             &self.names.relay,
             &ContainerCreateBody {
-                image: Some(relay.metadata().image_id.as_str().into()),
+                image: Some(relay.resolved().metadata().image_id.as_str().into()),
                 entrypoint: Some(relay_plan.entrypoint().to_vec()),
                 cmd: Some(relay_plan.command().to_vec()),
                 working_dir: Some(relay_plan.working_directory().into()),
@@ -184,7 +196,7 @@ impl Environment {
                 host_config: Some(limits("none".into(), 64 * 1024 * 1024, 100_000_000, 64)),
                 ..Default::default()
             },
-            relay.metadata().architecture,
+            relay.resolved().metadata().architecture,
             deadline(),
         )
         .await?;
@@ -198,7 +210,7 @@ impl Environment {
         port.create_container_on_platform(
             &self.names.function,
             &ContainerCreateBody {
-                image: Some(function.metadata().image_id.as_str().into()),
+                image: Some(function.resolved().metadata().image_id.as_str().into()),
                 entrypoint: Some(function_plan.entrypoint().to_vec()),
                 cmd: Some(function_plan.command().to_vec()),
                 working_dir: Some(function_plan.working_directory().into()),
@@ -220,7 +232,7 @@ impl Environment {
                 )),
                 ..Default::default()
             },
-            function.metadata().architecture,
+            function.resolved().metadata().architecture,
             deadline(),
         )
         .await?;
@@ -320,8 +332,23 @@ impl Environment {
             );
             Ok(())
         });
-        let joined = self.wire.shutdown().await.map_err(anyhow::Error::from);
-        function.and(runtime).and(relay).and(listed).and(joined)
+        self.artifacts.clear();
+        let images = self
+            .images
+            .shutdown(deadline())
+            .await
+            .map_err(anyhow::Error::from);
+        let joined = if images.is_ok() {
+            self.wire.shutdown().await.map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        function
+            .and(runtime)
+            .and(relay)
+            .and(listed)
+            .and(images)
+            .and(joined)
     }
 }
 
@@ -401,7 +428,9 @@ async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() 
     let result = async {
         let arch = env::var("RUSTACK_RUNTIME_ARCH").context("explicit architecture required")?;
         let port = environment.wire.port();
-        let image = Environment::image(&port, &format!("rustack-p0-handler:{arch}"), &arch).await?;
+        let image = environment
+            .image(&format!("rustack-p0-handler:{arch}"), &arch)
+            .await?;
         for reset in [false, true] {
             let overrides = rustack_lambda_model::types::ImageConfig {
                 entry_point: reset.then(Vec::new),
@@ -412,11 +441,15 @@ async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() 
                 }),
                 ..Default::default()
             };
-            let plan = image.metadata().execution.plan(Some(&overrides))?;
+            let plan = image
+                .resolved()
+                .metadata()
+                .execution
+                .plan(Some(&overrides))?;
             port.create_container_on_platform(
                 &environment.names.function,
                 &ContainerCreateBody {
-                    image: Some(image.metadata().image_id.as_str().into()),
+                    image: Some(image.resolved().metadata().image_id.as_str().into()),
                     entrypoint: Some(plan.entrypoint().to_vec()),
                     cmd: Some(plan.command().to_vec()),
                     working_dir: Some(plan.working_directory().into()),
@@ -425,7 +458,7 @@ async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() 
                     host_config: Some(limits("none".into(), 192 * 1024 * 1024, 1_000_000_000, 256)),
                     ..Default::default()
                 },
-                image.metadata().architecture,
+                image.resolved().metadata().architecture,
                 deadline(),
             )
             .await?;

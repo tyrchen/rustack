@@ -6,6 +6,8 @@
 mod connection;
 mod framing;
 mod image;
+mod lease;
+mod pin;
 mod types;
 
 use std::{
@@ -25,11 +27,13 @@ use http::{Method, StatusCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 pub use image::ImageResolver;
+pub use lease::{ImageLeaseConfig, ImageLeaseManager, ImageLeasePort, ImageLeaseStatus};
 use models::{
     ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, ContainerSummary,
     ContainerWaitResponse, ImageInspect, SystemInfo, SystemVersion,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+pub use pin::{ImagePin, ImagePinScope};
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};
@@ -53,6 +57,9 @@ enum Operation {
     Version,
     Info,
     Image,
+    TagPin,
+    InspectPin,
+    RemovePin,
     Create,
     Start,
     Inspect,
@@ -64,7 +71,15 @@ enum Operation {
 }
 impl Operation {
     fn cleanup(self) -> bool {
-        matches!(self, Self::Inspect | Self::Kill | Self::Remove | Self::List)
+        matches!(
+            self,
+            Self::Inspect
+                | Self::Kill
+                | Self::Remove
+                | Self::List
+                | Self::InspectPin
+                | Self::RemovePin
+        )
     }
 }
 

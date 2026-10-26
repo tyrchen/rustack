@@ -7,12 +7,12 @@ use tokio::time::Instant;
 
 use super::{
     DockerError, DockerPort, Operation, decode, escaped,
-    models::{ImageInspect, SystemInfo},
+    models::{ImageInspect, ImageManifestSummaryKindEnum, OciDescriptor, SystemInfo},
 };
 use crate::{
     artifact::{
         Architecture, ArtifactError, ImageExecutionDefaults, ImageExecutionMetadata, ImageMetadata,
-        ImageReference, ResolvedImage, Sha256Digest,
+        ImageReference, ResolvedImage, Sha256Digest, UnpackedImageSize,
     },
     function_config::validate_image_config,
 };
@@ -103,14 +103,100 @@ impl ImageResolver {
         }
         result
     }
+
+    /// Prove the selected image's unpacked-storage quota without running code.
+    ///
+    /// # Errors
+    /// Rejects missing, ambiguous, incompatible or out-of-quota unpacked proof,
+    /// classic-store ambiguity, expiry or bounded Docker metadata/IO failure.
+    ///
+    /// ```no_run
+    /// # async fn size(port:rustack_lambda_core::docker::DockerPort,image:&rustack_lambda_core::artifact::ResolvedImage) {
+    /// let bytes = rustack_lambda_core::docker::ImageResolver::new(port).unpacked_size(image,
+    ///     tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await;
+    /// # }
+    /// ```
+    pub async fn unpacked_size(
+        &self,
+        image: &ResolvedImage,
+        deadline: Instant,
+    ) -> Result<UnpackedImageSize, DockerError> {
+        super::check_deadline(deadline)?;
+        let root = self
+            .port
+            .image_manifests(&image.metadata().image_id, deadline)
+            .await?;
+        if image.metadata().selected_manifest.is_none() {
+            verify_classic_store(&root, &self.port.info(deadline).await?)?;
+        }
+        let size = unpacked_proof(image, &root)?;
+        if Instant::now() >= deadline {
+            return Err(DockerError::Deadline);
+        }
+        Ok(size)
+    }
+}
+
+fn unpacked_proof(
+    image: &ResolvedImage,
+    root: &ImageInspect,
+) -> Result<UnpackedImageSize, DockerError> {
+    let metadata = image.metadata();
+    if root.id.as_deref() != Some(metadata.image_id.as_str()) {
+        return Err(invalid());
+    }
+    let Some(manifest) = &metadata.selected_manifest else {
+        if root.os.as_deref() != Some("linux")
+            || root.architecture.as_deref() != Some(docker_arch(metadata.architecture))
+        {
+            return Err(invalid());
+        }
+        let size = root
+            .size
+            .and_then(|size| u64::try_from(size).ok())
+            .ok_or_else(invalid)?;
+        return size.try_into().map_err(DockerError::from);
+    };
+    let summaries = root.manifests.as_deref().ok_or_else(invalid)?;
+    if summaries.len() > 128 {
+        return Err(invalid());
+    }
+    let mut matching = summaries
+        .iter()
+        .filter(|summary| summary.id == manifest.as_str());
+    let summary = matching.next().ok_or_else(invalid)?;
+    if matching.next().is_some()
+        || !summary.available
+        || summary.kind != Some(ImageManifestSummaryKindEnum::IMAGE)
+        || image_descriptor(&summary.descriptor, docker_arch(metadata.architecture))? != *manifest
+    {
+        return Err(invalid());
+    }
+    let data = summary.image_data.as_ref().ok_or_else(invalid)?;
+    if data.platform.os.as_deref() != Some("linux")
+        || data.platform.architecture.as_deref() != Some(docker_arch(metadata.architecture))
+    {
+        return Err(invalid());
+    }
+    let bytes = u64::try_from(data.size.unpacked).map_err(|_| invalid())?;
+    bytes.try_into().map_err(DockerError::from)
+}
+
+fn docker_arch(architecture: Architecture) -> &'static str {
+    match architecture {
+        Architecture::X86_64 => "amd64",
+        Architecture::Arm64 => "arm64",
+    }
 }
 
 fn verify_classic_store(inspected: &ImageInspect, info: &SystemInfo) -> Result<(), DockerError> {
     let driver = inspected.graph_driver.as_ref().ok_or_else(invalid)?;
-    if !matches!(
-        driver.name.as_str(),
-        "overlay2" | "aufs" | "btrfs" | "devicemapper" | "vfs" | "zfs" | "fuse-overlayfs"
-    ) || info.driver.as_deref() != Some(driver.name.as_str())
+    if inspected.descriptor.is_some()
+        || !matches!(
+            driver.name.as_str(),
+            "overlay2" | "aufs" | "btrfs" | "devicemapper" | "vfs" | "zfs" | "fuse-overlayfs"
+        )
+        || info.driver.as_deref() != Some(driver.name.as_str())
         || inspected
             .manifests
             .as_ref()
@@ -214,9 +300,17 @@ fn selected_descriptor(
     {
         return Err(invalid());
     }
-    let Some(descriptor) = &inspected.descriptor else {
-        return Ok(None);
-    };
+    inspected
+        .descriptor
+        .as_ref()
+        .map(|descriptor| image_descriptor(descriptor, architecture))
+        .transpose()
+}
+
+fn image_descriptor(
+    descriptor: &OciDescriptor,
+    architecture: &str,
+) -> Result<Sha256Digest, DockerError> {
     if !matches!(
         descriptor.media_type.as_deref(),
         Some(
@@ -239,9 +333,12 @@ fn selected_descriptor(
     {
         return Err(invalid());
     }
-    Ok(Some(
-        descriptor.digest.as_deref().ok_or_else(invalid)?.parse()?,
-    ))
+    descriptor
+        .digest
+        .as_deref()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(DockerError::from)
 }
 
 fn repository_identity(reference: &ImageReference) -> String {
@@ -597,5 +694,67 @@ mod tests {
         let inspected: ImageInspect = serde_json::from_value(value).unwrap();
         assert!(verify_classic_store(&inspected, &classic).is_err());
         assert!(selected_descriptor(&inspected, "arm64").is_err());
+    }
+
+    fn storage_proof() -> Value {
+        json!({"Id":digest('a'),"Manifests":[{"ID":digest('b'),
+            "Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":digest('b'),"platform":{"os":"linux","architecture":"arm64"}},
+            "Available":true,"Kind":"image","Size":{"Content":64,"Total":99999},
+            "ImageData":{"Containers":[],"Platform":{"os":"linux","architecture":"arm64"},"Size":{"Unpacked":4096}}}]})
+    }
+
+    #[test]
+    fn test_should_measure_selected_unpacked_storage_instead_of_compressed_or_total_size() {
+        let image = selected("registry.test/team/worker:v1", inspection()).unwrap();
+        let proof: ImageInspect = serde_json::from_value(storage_proof()).unwrap();
+        assert_eq!(unpacked_proof(&image, &proof).unwrap().get(), 4096);
+        let legacy = ResolvedImage::fixture(Architecture::Arm64);
+        let proof: ImageInspect = serde_json::from_value(
+            json!({"Id":digest('a'),"Size":8192,"Os":"linux","Architecture":"arm64"}),
+        )
+        .unwrap();
+        assert_eq!(unpacked_proof(&legacy, &proof).unwrap().get(), 8192);
+    }
+
+    #[rstest::rstest]
+    #[case("parent")]
+    #[case("missing")]
+    #[case("duplicate")]
+    #[case("unavailable")]
+    #[case("attestation")]
+    #[case("id")]
+    #[case("descriptor")]
+    #[case("platform")]
+    #[case("data")]
+    #[case("zero")]
+    #[case("negative")]
+    #[case("large")]
+    fn test_should_reject_missing_or_incompatible_unpacked_storage_evidence(#[case] fault: &str) {
+        let image = selected("registry.test/team/worker:v1", inspection()).unwrap();
+        let mut proof = storage_proof();
+        match fault {
+            "parent" => proof["Id"] = json!(digest('e')),
+            "missing" => proof["Manifests"] = json!([]),
+            "duplicate" => {
+                let duplicate = proof["Manifests"][0].clone();
+                proof["Manifests"].as_array_mut().unwrap().push(duplicate);
+            }
+            "unavailable" => proof["Manifests"][0]["Available"] = json!(false),
+            "attestation" => proof["Manifests"][0]["Kind"] = json!("attestation"),
+            "id" => proof["Manifests"][0]["ID"] = json!(digest('e')),
+            "descriptor" => proof["Manifests"][0]["Descriptor"]["digest"] = json!(digest('e')),
+            "platform" => {
+                proof["Manifests"][0]["ImageData"]["Platform"]["architecture"] = json!("amd64");
+            }
+            "data" => proof["Manifests"][0]["ImageData"] = Value::Null,
+            "zero" => proof["Manifests"][0]["ImageData"]["Size"]["Unpacked"] = json!(0),
+            "negative" => proof["Manifests"][0]["ImageData"]["Size"]["Unpacked"] = json!(-1),
+            "large" => {
+                proof["Manifests"][0]["ImageData"]["Size"]["Unpacked"] =
+                    json!(10_u64 * 1024 * 1024 * 1024 + 1);
+            }
+            _ => panic!("unknown test fault"),
+        }
+        assert!(unpacked_proof(&image, &serde_json::from_value(proof).unwrap()).is_err());
     }
 }

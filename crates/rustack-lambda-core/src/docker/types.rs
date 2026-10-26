@@ -37,6 +37,12 @@ pub enum DockerError {
     /// A bounded mailbox has no capacity.
     #[error("Docker wire is busy")]
     Busy,
+    /// An attached preparation caller cancelled before receiving an artifact.
+    #[error("Docker preparation cancelled")]
+    Cancelled,
+    /// An owned image mutation/cleanup is not yet proven settled.
+    #[error("Docker image cleanup is quarantined")]
+    Quarantined,
     /// An owned task panicked or failed to join.
     #[error("Docker supervision failed")]
     Worker,

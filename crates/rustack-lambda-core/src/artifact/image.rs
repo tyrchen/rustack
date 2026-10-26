@@ -11,7 +11,7 @@ use winnow::{
     token::take_while,
 };
 
-use super::ImageExecutionDefaults;
+use super::{ImageExecutionDefaults, MAX_IMAGE_BYTES};
 
 /// Closed Lambda architecture, also used to select a Docker platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -416,7 +416,7 @@ impl ImageMetadata {
             size: u64,
             defaults: &'a ImageExecutionDefaults,
         }
-        if !(1..=10 * 1024 * 1024 * 1024).contains(&size) {
+        if !(1..=MAX_IMAGE_BYTES).contains(&size) {
             return Err(ArtifactError::Inspection);
         }
         // Validated defaults contain <=128KiB of argv/environment, whose worst
@@ -445,7 +445,7 @@ impl TryFrom<ImageMetadata> for ResolvedImage {
     fn try_from(metadata: ImageMetadata) -> Result<Self, Self::Error> {
         if metadata.os != "linux"
             || metadata.size_bytes == 0
-            || metadata.size_bytes > 10 * 1024 * 1024 * 1024
+            || metadata.size_bytes > MAX_IMAGE_BYTES
             || metadata
                 .registry_manifest
                 .as_ref()

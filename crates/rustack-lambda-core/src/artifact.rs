@@ -5,6 +5,7 @@
 
 mod execution;
 mod image;
+mod pinned;
 
 use std::{
     fmt::{Debug, Formatter, Result as FmtResult},
@@ -18,9 +19,12 @@ pub use execution::{ImageExecutionDefaults, ImageExecutionMetadata, ImageExecuti
 pub use image::{
     Architecture, ArtifactError, ImageMetadata, ImageReference, ResolvedImage, Sha256Digest,
 };
+pub use pinned::{PinnedImage, UnpackedImageSize};
 use tempfile::TempDir;
 
 use crate::storage::compute_sha256;
+
+pub(crate) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 #[cfg(test)]
 use crate::{storage::stage_zip, test_zip::minimal_zip};
 

@@ -178,6 +178,25 @@ Actual official-RIC wire execution now consumes resolver identities and material
 
 Deployment/status/CAS actors, image availability leases, allowed pulls, unpacked-image quota proof, environment/pool owners, remaining network/log/probe consumers and B01/B03 remain required before P1 closes. This slice does not advertise Docker invocation in Rustack.
 
+## P1 task1.3 owned image preparation review
+
+The independent read-only design and implementation review verified typed private-only mutation endpoints, shared lease lifetime, retained cancellation/cleanup, digest/platform unpacked proof, and worker/root recovery. The final recheck found no remaining concrete in-slice issue. Source review preserves the HTTP500 uncertainty rule: a returned nested containerd gRPC error does not prove its server stopped committing.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W39 | P2; runtime §2.9, private alias removal | Verify-ID and DELETE are separate operations; Docker has no expected-target CAS. Reserve the private namespace exclusively and state that concurrent external retargeting invalidates that guarantee. Observed mismatches quarantine without deletion | Wrong-target/repair regression; generated-only pin identities and force=false/noprune=true endpoints; pinned classic/containerd source |
+| W40 | P3; `docker/lease.rs:65` | IO budget accepted subsecond positive durations despite the1..60s contract. Constructor now enforces the actual lower bound |1ns and over60s rejection plus typed config checks |
+| W41 | P2; `docker/lease.rs:606`, self-review with independent recheck | Root failure with no registered rows could drop queued work without recording failure. Actor now records settled completion explicitly; abnormal Drop closes admission/marks failure even with zero rows | Empty-root failure, aborted-root cached failure, worker panic and off-runtime root Drop tests |
+| W42 | P2; `docker/lease.rs:275`, self-review with independent recheck | Acquiring every semaphore permit to observe emptiness consumed other preparation capacity and distorted pin counts. Dedicated bounded count/watch observation now leaves admission capacity untouched | Wait-empty observer remains pending while a second legitimate preparation succeeds; clone lifetime and cancelled observer cases |
+
+ImageLeaseManager now owns accepted preparations, live aliases and uncertain cleanup through retained workers/registry reservations. PinnedImage cannot be deserialized from metadata; clones keep the release channel alive, and shutdown revokes further use after consumers settle. Successful or discarded response delivery retains artifact ownership correctly. UnpackedImageSize validates1..10GiB; modern proof selects exactly one available image summary by digest/platform and reads Unpacked, with verified classic fallback. Preparation does not run user code or pull/build images.
+
+Thirty-three new cases pass within321 Lambda core tests, including13 unpacked proof cases, two scalar/shared-lease cases and18 preparation/lifecycle cases. The latter cover exact precommit400/404 rejection, lost/postcommit/late nested500 outcomes, initial404 quarantine, no Tag replay, caller/response abandonment, bounded admission, alias conflict repair, lost/failed DELETE recovery, cancelled/timed shutdown, cached supervision failure and cleanup outside an entered runtime.76 core doctests pass. Workspace build/test/fmt/Clippy/rustdoc pass with1,997 tests and399 explicitly resource-gated cases. Native SDK/DryRun regressions pass; the separately gated Squib case remains excluded as VM evidence.
+
+The real Docker wire harness now acquires PinnedImages, keeps them through actual handler calls/container cleanup, and joins the image manager before DockerWire shutdown. Both two-case suites pass on arm64 VZ and amd64/QEMU, retaining near6MiB computed warm/error and empty-override behavior. Independent daemon queries find no private pin aliases. These are preparation/control-path qualifications, not provider/executor or default-latency acceptance. No dependencies/versions changed. Strict boundary checks report the same65 preexisting B03 findings, with no new pin/preparation/defaults-path finding; B01 remains an open dependency gate.
+
+Next consume these artifacts in provider deployment/status/CAS and invocation capture, followed by pool/environment actors, startup directory ownership/previous-run reconciliation, allowed pulls, remaining stream/network/probe consumers and complete P1/M0 acceptance. No Docker execution capability is advertised by the current binary yet.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

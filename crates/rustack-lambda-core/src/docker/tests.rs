@@ -31,13 +31,13 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
 
-struct IncomingRequest {
-    head: String,
+pub(super) struct IncomingRequest {
+    pub(super) head: String,
     body: Vec<u8>,
-    stream: UnixStream,
+    pub(super) stream: UnixStream,
 }
 impl IncomingRequest {
-    async fn reply(mut self, status: u16, body: &[u8]) {
+    pub(super) async fn reply(mut self, status: u16, body: &[u8]) {
         let head = format!(
             "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -50,7 +50,7 @@ impl IncomingRequest {
         .unwrap()
         .unwrap();
     }
-    async fn raw(mut self, response: &[u8]) {
+    pub(super) async fn raw(mut self, response: &[u8]) {
         timeout_at(deadline(), self.stream.write_all(response))
             .await
             .unwrap()
@@ -58,14 +58,14 @@ impl IncomingRequest {
     }
 }
 
-struct Daemon {
+pub(super) struct Daemon {
     directory: TempDir,
-    requests: mpsc::Receiver<IncomingRequest>,
+    pub(super) requests: mpsc::Receiver<IncomingRequest>,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 impl Daemon {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_version("1.53")
     }
     fn with_version(version: &'static str) -> Self {
@@ -117,20 +117,20 @@ impl Daemon {
         .parse()
         .unwrap()
     }
-    async fn wire(&self) -> DockerWire {
+    pub(super) async fn wire(&self) -> DockerWire {
         match DockerWire::connect(self.socket(), deadline()).await {
             Ok(wire) => wire,
             Err(DockerError::Http(error)) => panic!("fixture HTTP startup failed: {error:?}"),
             Err(error) => panic!("fixture startup failed: {error}"),
         }
     }
-    async fn next(&mut self) -> IncomingRequest {
+    pub(super) async fn next(&mut self) -> IncomingRequest {
         timeout_at(deadline(), self.requests.recv())
             .await
             .unwrap()
             .unwrap()
     }
-    async fn close(self) {
+    pub(super) async fn close(self) {
         self.stop.send_replace(true);
         self.task.await.unwrap();
     }
