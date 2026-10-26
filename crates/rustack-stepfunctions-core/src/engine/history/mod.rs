@@ -166,7 +166,7 @@ pub struct HistoryPage {
     next: Option<u32>,
 }
 impl HistoryPage {
-    /// Read complete official DTOs in ascending event order.
+    /// Read complete official DTOs in the selected traversal order.
     ///
     /// ```
     /// # fn inspect(page:&rustack_stepfunctions_core::HistoryPage) { let events=page.events(); }
@@ -233,7 +233,39 @@ impl ExecutionHistory {
         limit: usize,
         include_data: bool,
     ) -> Result<HistoryPage, ExecutionError> {
-        if first == 0 || first > self.count.saturating_add(1) || !(1..=1000).contains(&limit) {
+        self.page_ordered(first, limit, include_data, false)
+    }
+    /// Read a descending complete page from this captured high-water boundary.
+    ///
+    /// # Errors
+    /// Rejects last outside1..len, except empty history accepts0; limit is1..1000.
+    ///
+    /// ```
+    /// let page=rustack_stepfunctions_core::ExecutionHistory::default().page_reverse(0,100,false)?;
+    /// assert!(page.events().is_empty());
+    /// # Ok::<(),rustack_stepfunctions_core::ExecutionError>(())
+    /// ```
+    pub fn page_reverse(
+        &self,
+        last: u32,
+        limit: usize,
+        include_data: bool,
+    ) -> Result<HistoryPage, ExecutionError> {
+        self.page_ordered(last, limit, include_data, true)
+    }
+    fn page_ordered(
+        &self,
+        first: u32,
+        limit: usize,
+        include_data: bool,
+        reverse: bool,
+    ) -> Result<HistoryPage, ExecutionError> {
+        let valid = if reverse {
+            (self.count == 0 && first == 0) || (first > 0 && first <= self.count)
+        } else {
+            first > 0 && first <= self.count.saturating_add(1)
+        };
+        if !valid || !(1..=1000).contains(&limit) {
             return Err(ExecutionError::Invalid);
         }
         let mut records = Vec::new();
@@ -242,14 +274,19 @@ impl ExecutionHistory {
             records.extend(chunk.events.iter().rev());
             head = chunk.previous.as_deref();
         }
+        if !reverse {
+            records.reverse();
+        }
         let mut events = Vec::new();
         let mut bytes = 256_usize;
         let mut next = None;
-        for record in records
-            .into_iter()
-            .rev()
-            .filter(|r| r.event.id >= i64::from(first))
-        {
+        for record in records.into_iter().filter(|r| {
+            if reverse {
+                r.event.id <= i64::from(first)
+            } else {
+                r.event.id >= i64::from(first)
+            }
+        }) {
             if events.len() >= limit {
                 next = u32::try_from(record.event.id).ok();
                 break;

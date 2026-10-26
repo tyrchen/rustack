@@ -52,6 +52,11 @@ all = [
 ]
 
 [errors.custom]
+AccessDeniedException = { status = 403, message = "Request scope is not authorized" }
+InternalFailure = { status = 500, message = "Request processing failed" }
+RequestTimeoutException = { status = 408, message = "Request deadline exceeded" }
+ServiceUnavailable = { status = 503, message = "Workflow API unavailable" }
+ThrottlingException = { status = 400, message = "Workflow API admission exhausted" }
 UnknownOperationException = { status = 404, message = "Unknown Step Functions operation" }
 UnsupportedOperation = { status = 400, message = "Operation is outside the supported Step Functions profile" }
 

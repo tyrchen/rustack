@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::json;
 use tokio::{
     sync::{Semaphore, mpsc, watch},
@@ -135,6 +135,7 @@ fn uuid() -> Result<String, RegistryError> {
 }
 impl State {
     async fn run(&mut self, mut stop: watch::Receiver<bool>) -> Result<(), RegistryError> {
+        let mut commands_open = true;
         let mut timer = interval(Duration::from_secs(1));
         timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -143,7 +144,7 @@ impl State {
             }
             tokio::select! {biased;
                 _=stop.changed()=>{},
-                envelope=self.io.receiver.recv()=>match envelope{Some(envelope)=>self.dispatch(envelope).await,None=>break},
+                envelope=self.io.receiver.recv(),if commands_open=>match envelope{Some(envelope)=>self.dispatch(envelope).await,None=>commands_open=false},
                 _=timer.tick()=>self.maintain(Instant::now()),
             }
         }
@@ -220,15 +221,17 @@ impl State {
                     hash: current.revision.data.hash,
                 });
                 let revision_id = self.next_uuid()?;
+                let now = Utc::now();
                 let revision = self.resources.revision(
                     definition,
                     role.clone()
                         .unwrap_or_else(|| current.revision.data.role.clone()),
                     revision_id,
+                    now,
                 )?;
                 let snapshot = MachineSnapshot {
                     revision,
-                    updated: Utc::now(),
+                    updated: now,
                     ..current
                 };
                 self.resources
@@ -341,10 +344,10 @@ impl State {
         }
         let revision_id = self.next_uuid()?;
         let resource_id = self.next_uuid()?;
-        let revision = self
-            .resources
-            .revision(definition.clone(), role.clone(), revision_id)?;
         let now = Utc::now();
+        let revision =
+            self.resources
+                .revision(definition.clone(), role.clone(), revision_id, now)?;
         let snapshot = MachineSnapshot {
             identity: Arc::new(MachineIdentity {
                 arn: arn.clone(),
@@ -503,6 +506,7 @@ impl Resources {
         definition: PreparedDefinition,
         role: RoleArn,
         id: String,
+        published: DateTime<Utc>,
     ) -> Result<Arc<DefinitionRevision>, RegistryError> {
         let permit = self
             .revisions
@@ -515,6 +519,7 @@ impl Resources {
                 machine: definition.machine,
                 role,
                 hash: definition.hash,
+                published,
             },
             _permit: permit,
         }))
@@ -523,6 +528,11 @@ impl Resources {
 
 #[cfg(test)]
 mod clock_tests {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+
     use super::{
         super::{RegistryCapacities, Tags},
         *,
@@ -762,5 +772,22 @@ mod clock_tests {
         assert!(observed.try_recv().is_err());
         drop(release); // Receiver disconnection releases even if any assertion unwinds.
         assert_eq!(capacity.available_permits(), 0);
+    }
+    #[tokio::test]
+    async fn test_should_keep_registry_owner_live_after_last_command_sender_is_dropped() {
+        let mut owner = owner(RegistryCapacities::default(), None);
+        let mut state = owner.state.take().unwrap();
+        // The helper's only command sender was dropped when it returned.
+        let closing = state.io.closing.clone();
+        let stop = closing.subscribe();
+        let mut run = Box::pin(state.run(stop));
+        poll_fn(|cx| {
+            assert!(matches!(run.as_mut().poll(cx), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        assert!(!*closing.borrow());
+        closing.send_replace(true);
+        run.await.unwrap();
     }
 }

@@ -151,3 +151,43 @@ fn test_should_fill_and_drop_exact_twenty_five_thousand_events_without_recursion
     drop(journal);
     assert_eq!(capacity.used(), 0);
 }
+
+#[test]
+fn test_should_reverse_fixed_history_without_changing_causal_ids_or_splitting_events() {
+    let (mut journal, _) = journal(100, 32 * 1024 * 1024);
+    let payload = Payload::from_value(&serde_json::json!("\0".repeat(40_000))).unwrap();
+    for _ in 0..20 {
+        journal
+            .append(events::started(&payload, Utc::now()).unwrap(), false)
+            .unwrap();
+    }
+    let old = journal.view.clone();
+    journal.append(event(), false).unwrap();
+    let first = old.page_reverse(20, 1000, true).unwrap();
+    assert!(first.events().len() < 20);
+    assert!(serde_json::to_vec(first.events()).unwrap().len() < PAGE_BYTES);
+    assert_eq!(first.events().first().unwrap().id, 20);
+    let next = old
+        .page_reverse(first.next_id().unwrap(), 1000, true)
+        .unwrap();
+    assert_eq!(first.events().len() + next.events().len(), 20);
+    assert_eq!(next.events().last().unwrap().id, 1);
+    assert_eq!(next.next_id(), None);
+    let omitted = old.page_reverse(20, 1000, false).unwrap();
+    assert_eq!(omitted.events().len(), 20);
+    assert!(
+        !serde_json::to_string(omitted.events())
+            .unwrap()
+            .contains("u0000")
+    );
+    assert!(old.page_reverse(0, 1, true).is_err());
+    assert!(old.page_reverse(21, 1, true).is_err());
+    assert!(old.page_reverse(20, 0, true).is_err());
+    assert!(
+        ExecutionHistory::default()
+            .page_reverse(0, 1, false)
+            .unwrap()
+            .events()
+            .is_empty()
+    );
+}

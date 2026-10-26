@@ -170,7 +170,10 @@ test-stepfunctions-bridge-native:
 	@cargo build -p rustack-lambda-echo-bootstrap
 	@RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test -p rustack-cli --lib --features stepfunctions native_e2e -- --ignored --test-threads=1
 
-.PHONY: test-stepfunctions-bridge test-stepfunctions-bridge-native
+# The shared binary-support gate covers real API, pagination and Lambda bridge.
+test-stepfunctions-api: test-stepfunctions-bridge
+
+.PHONY: test-stepfunctions-bridge test-stepfunctions-bridge-native test-stepfunctions-api
 
 audit-codegen:
 	@cargo audit --file codegen/Cargo.lock

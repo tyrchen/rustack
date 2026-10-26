@@ -14,6 +14,9 @@ pub enum RegistryError {
     /// Invalid scope, metadata, identifier, arguments or trusted limits.
     #[error("invalid workflow registry input")]
     Validation,
+    /// Atomic tag mutation would exceed the fifty-tag quota.
+    #[error("too many workflow resource tags")]
+    TagLimit,
     /// No such current mutable state machine.
     #[error("state machine does not exist")]
     MachineMissing,

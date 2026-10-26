@@ -185,6 +185,15 @@ impl Registry {
             },
         ))
     }
+    /// Read the immutable trusted scope of this registry.
+    ///
+    /// ```
+    /// # fn inspect(registry:&rustack_stepfunctions_core::Registry){let scope=registry.scope();}
+    /// ```
+    #[must_use]
+    pub fn scope(&self) -> &TenantScope {
+        &self.shared.scope
+    }
     /// Validate and synchronously transfer one command to retained ownership.
     ///
     /// # Errors

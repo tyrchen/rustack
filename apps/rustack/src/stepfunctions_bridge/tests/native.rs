@@ -2,6 +2,8 @@
 
 use std::{env, error::Error, process, time::Duration};
 
+use http::{Request as HttpRequest, StatusCode};
+use http_body_util::{BodyExt, Full};
 use rustack_lambda_model::input::{
     CreateAliasInput, UpdateAliasInput, UpdateFunctionCodeInput, UpdateFunctionConfigurationInput,
 };
@@ -9,12 +11,14 @@ use rustack_stepfunctions_core::{
     ExecutionSnapshot, PreparedDefinition, Registry, RegistryCommand, RegistryError,
     RegistryLimits, RegistryResult, Tags,
 };
+use rustack_stepfunctions_http::{RequestScope, StepFunctionsHttpConfig, StepFunctionsHttpService};
 use tokio::{
     fs,
     time::{sleep, timeout_at},
 };
 
 use super::*;
+use crate::stepfunctions_api::{ApiLimits, StepFunctionsApi};
 
 #[derive(Debug)]
 struct NativeFixture {
@@ -65,7 +69,10 @@ impl NativeFixture {
         }
     }
     async fn cleanup(&mut self) {
-        let absolute = Instant::now() + Duration::from_secs(15);
+        self.cleanup_at(Instant::now() + Duration::from_secs(15))
+            .await;
+    }
+    async fn cleanup_at(&mut self, absolute: Instant) {
         let workflow = self.owner.drain(absolute).await;
         let bridge = self.bridge.shutdown(absolute).await;
         let provider = self
@@ -561,5 +568,121 @@ async fn native_e2e_should_execute_captured_registry_revisions_and_read_after_ma
     assert_ne!(
         first_result.pointer("/Payload/request_id"),
         second_result.pointer("/Payload/request_id")
+    );
+}
+
+async fn api_json(
+    service: &StepFunctionsHttpService,
+    action: &str,
+    input: Value,
+) -> Result<Value, Box<dyn Error>> {
+    let request = HttpRequest::builder()
+        .method("POST")
+        .uri("/")
+        .header("content-type", "application/x-amz-json-1.0")
+        .header("x-amz-target", format!("AWSStepFunctions.{action}"))
+        .body(Full::new(Bytes::from(serde_json::to_vec(&input)?)))?;
+    let response = service.handle(request).await;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    let value = serde_json::from_slice(&body)?;
+    if status != StatusCode::OK {
+        return Err(RegistryError::Unavailable.into());
+    }
+    Ok(value)
+}
+async fn run_http_registry_case(
+    service: &StepFunctionsHttpService,
+) -> Result<(Value, Value, Value), Box<dyn Error>> {
+    let created=api_json(service,"CreateStateMachine",json!({"name":"HttpNative","roleArn":"arn:aws:iam::000000000000:role/Workflow","definition":workflow(true).to_string()})).await?;
+    let started=api_json(service,"StartExecution",json!({"stateMachineArn":created["stateMachineArn"],"name":"computed","input":"{\"n\":21}"})).await?;
+    let absolute = deadline();
+    let description = loop {
+        let description = api_json(
+            service,
+            "DescribeExecution",
+            json!({"executionArn":started["executionArn"]}),
+        )
+        .await?;
+        if description["status"] != "RUNNING" {
+            break description;
+        }
+        if Instant::now() >= absolute {
+            return Err(RegistryError::Deadline.into());
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+    let history=api_json(service,"GetExecutionHistory",json!({"executionArn":started["executionArn"],"reverseOrder":true,"includeExecutionData":false,"maxResults":1})).await?;
+    api_json(
+        service,
+        "DeleteStateMachine",
+        json!({"stateMachineArn":created["stateMachineArn"]}),
+    )
+    .await?;
+    let next=api_json(service,"GetExecutionHistory",json!({"executionArn":started["executionArn"],"reverseOrder":true,"includeExecutionData":false,"maxResults":1,"nextToken":history["nextToken"]})).await?;
+    Ok((description, history, next))
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the actual host bootstrap; run make test-stepfunctions-bridge-native"]
+async fn native_e2e_should_execute_real_lambda_through_typed_http_api_and_paginated_history() {
+    let mut fixture = NativeFixture::new(&[("WORKFLOW_MODE", "1")], false).await;
+    let (port, mut bridge) = StepFunctionsLambdaBridge::new(
+        fixture.provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let (registry, mut owner) = Registry::new(
+        TenantScope::default(),
+        RegistryLimits::default(),
+        executions(port),
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let (handler, mut api) = StepFunctionsApi::new(
+        TenantScope::default(),
+        TaskSupport::Lambda,
+        registry,
+        ApiLimits::default(),
+    )
+    .unwrap();
+    let config = StepFunctionsHttpConfig::new(
+        RequestScope::new("aws".into(), "us-east-1".into(), "000000000000".into()).unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
+    let service = StepFunctionsHttpService::new(handler, config);
+    let result = run_http_registry_case(&service).await;
+    let absolute = Instant::now() + Duration::from_secs(15);
+    let requests = api.shutdown(absolute).await;
+    let workflows = owner.shutdown(absolute).await;
+    let calls = bridge.shutdown(absolute).await;
+    if requests.is_err() || workflows.is_err() || calls.is_err() {
+        if let Some(directory) = fixture.directory.take() {
+            let _retained = directory.keep();
+        }
+    }
+    fixture.cleanup_at(absolute).await;
+    assert!(requests.is_ok(), "API cleanup: {requests:?}");
+    assert!(workflows.is_ok(), "registry cleanup: {workflows:?}");
+    assert!(calls.is_ok(), "bridge cleanup: {calls:?}");
+    let (description, history, next) = result.unwrap();
+    assert_eq!(description["status"], "SUCCEEDED");
+    let result: Value = serde_json::from_str(description["output"].as_str().unwrap()).unwrap();
+    assert_eq!(result["Payload"]["computed"], 42);
+    assert_eq!(
+        result["Payload"]["request_id"],
+        result["SdkResponseMetadata"]["RequestId"]
+    );
+    assert_eq!(result["Payload"]["request_id"].as_str().unwrap().len(), 36);
+    assert_eq!(history["events"][0]["type"], "ExecutionSucceeded");
+    assert!(
+        history["events"][0]["executionSucceededEventDetails"]
+            .get("output")
+            .is_none()
+    );
+    assert!(
+        next["events"][0]["id"].as_i64().unwrap() < history["events"][0]["id"].as_i64().unwrap()
     );
 }

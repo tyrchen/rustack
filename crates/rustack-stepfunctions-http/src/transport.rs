@@ -32,6 +32,17 @@ macro_rules! operations {
                 let request=match operation {$(StepFunctionsOperation::$op=>Self::$op(Box::new(from_slice::<input::$input>(bytes,limits).map_err(HttpError::Json)?)),)* _=>return Err(HttpError::UnsupportedOperation)};
                 crate::validation::validate(&request)?; Ok(request)
             }
+            /// Recheck bounds for a trusted typed request before domain preparation.
+            ///
+            /// # Errors
+            /// Rejects invalid byte/count limits, business JSON or wire fields.
+            ///
+            /// ```
+            /// let request=rustack_stepfunctions_http::Request::decode(rustack_stepfunctions_model::StepFunctionsOperation::ListStateMachines,b"{}")?;
+            /// request.validate()?;
+            /// # Ok::<(),rustack_stepfunctions_http::HttpError>(())
+            /// ```
+            pub fn validate(&self)->Result<(),HttpError>{crate::validation::validate(self)}
             /// Exact modeled operation for this variant.
             #[must_use] pub fn operation(&self)->StepFunctionsOperation {match self {$(Self::$op(_)=>StepFunctionsOperation::$op,)*}}
         }

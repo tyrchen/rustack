@@ -438,7 +438,7 @@ async fn test_should_keep_revisions_charged_until_last_snapshot_and_apply_tags_a
             )
         )
         .await,
-        Err(RegistryError::Validation)
+        Err(RegistryError::TagLimit)
     ));
     let RegistryResult::Machine(capture) =
         result(&reg, RegistryCommand::Machine(arn())).await.unwrap()
@@ -787,4 +787,37 @@ async fn test_should_return_typed_failure_on_repeated_observation_of_closed_repl
             Err(RegistryError::Unavailable)
         ));
     }
+}
+
+#[tokio::test]
+async fn test_should_finish_accepted_task_after_all_registry_command_handles_are_dropped() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let (reg, mut owner) = registry(RegistryLimits::default(), Some(Arc::new(Port(tx))));
+    let prepared=PreparedDefinition::new(AslCompiler::new(TenantScope::default(),TaskSupport::Lambda).compile(br#"{"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:lambda:us-east-1:000000000000:function:Worker","End":true}}}"#).unwrap().machine().clone());
+    result(
+        &reg,
+        RegistryCommand::Create(
+            "Machine".parse().unwrap(),
+            prepared,
+            role(),
+            Tags::default(),
+        ),
+    )
+    .await
+    .unwrap();
+    let snapshot = start(&reg, "caller-independent", "{}").await.unwrap();
+    let mut responder = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    responder.started().unwrap();
+    drop(reg);
+    tokio::task::yield_now().await;
+    assert!(!*owner.closing.borrow());
+    responder.finish(Ok(Payload::parse(b"42").unwrap()));
+    let finished = observe(snapshot).await;
+    assert!(
+        matches!(finished.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(p)) if p.value()==&json!(42))
+    );
+    owner.shutdown(deadline()).await.unwrap();
 }

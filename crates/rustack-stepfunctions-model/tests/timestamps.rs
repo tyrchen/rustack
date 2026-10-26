@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use rstest::rstest;
 use rustack_stepfunctions_model::{
+    StepFunctionsErrorCode,
     output::{DescribeExecutionOutput, StartExecutionOutput},
     types::{ExecutionStatus, HistoryEvent, HistoryEventType},
 };
@@ -194,4 +195,18 @@ fn test_should_require_present_collections_and_keep_supported_operation_names_ex
         error.message,
         "Operation is outside the supported Step Functions profile"
     );
+}
+
+#[test]
+fn test_should_preserve_generated_common_error_http_statuses() {
+    for (code, status) in [
+        (StepFunctionsErrorCode::RequestTimeoutException, 408),
+        (StepFunctionsErrorCode::ServiceQuotaExceededException, 402),
+        (StepFunctionsErrorCode::InternalFailure, 500),
+        (StepFunctionsErrorCode::ServiceUnavailable, 503),
+        (StepFunctionsErrorCode::AccessDeniedException, 403),
+        (StepFunctionsErrorCode::ThrottlingException, 400),
+    ] {
+        assert_eq!(code.default_status_code().as_u16(), status);
+    }
 }

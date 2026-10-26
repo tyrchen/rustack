@@ -56,6 +56,8 @@ All budgets are validated once; limits below are local defaults and safe configu
 
 | Budget field | Default | Allowed range / relationship |
 |---|---:|---|
+| workflowApiAccepted / workflowApiWorkers |32 /8|1..128 /1..32; workers≤accepted, root admission remains charged through ready replies |
+| workflowPaginationBytes |64 MiB|8 MiB..1 GiB incremental shared snapshot storage, plus core allocation/history budgets |
 | workflowRegistryMachines |256|1..4,096 current resources |
 | workflowRegistryVersions |1,024|1..4,096, independently applied to retained definition revisions and immutable tag versions |
 | workflowRegistryRecords |10,000|1..100,000 total retained execution records, including RUNNING and unsettled terminal work |
@@ -149,6 +151,8 @@ The workflow drain interval permits already accepted executions to finish. Then 
 The host and pinned relay image must implement control protocol version2 together (§3.8 of the runtime design). An older version1 relay is incompatible and fails initialization before function allocation. Rebuild/re-pin the relay on protocol upgrades; do not silently omit handler-timeout enforcement to accept an older image. Caller absolute budgets include queue/startup/execution; the captured function handler budget arms only at consumed Runtime API delivery. Cleanup remains independently owned if the caller budget expires.
 
 LogType=Tail uses the invocation's bounded observed log window; environment-wide diagnostic tails remain separate. Window boundaries follow actor-observed completed chunks across independent stdout/stderr and control streams. Buffered/background output can arrive in a later window; this local runtime does not claim a causal producer flush barrier. A silent invocation never copies the prior collected diagnostic tail. Lost capabilities or unconsumed/expired mutation receipts invalidate capture and require environment retirement. No flush sleeps or extra Docker log replay are used.
+
+The real binary API adapter uses [API§1.3/§6.1](./rustack-workflows-10-api-design.md#13-retained-real-api-adapter-and-preparation) constructor limits until main YAML/routing composition lands. Its root owns request workers and PageStore; token entries are count-bounded and share a separately byte-charged read capture. Charge vector capacity, not filtered length. Stop API admission and join its same workers before registry shutdown. Loss of API/Registry command handles alone does not cancel accepted executions while the unique registry supervisor remains alive. API health distinguishes a closed intake or retained worker failure, with typed diagnostics preserved through shutdown.
 
 Registry constructor limits implement [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle); YAML/main wiring remains required. One retained blocking worker acquires secure IDs while its pending command stays owned above the await. Source fingerprints/compilation are prepared by the embedding caller's bounded CPU owner. Record and name TTLs never release uncertain cleanup; deletion may remove mutable tags while the captured revision/resource identity remains retained. Immutable tag versions have independent allocation accounting, and cloned list snapshots share those allocations. Close the registry and observe the same joined shutdown before closing its Lambda bridge. Root failure synchronously signals the execution owner and preserves the bounded graph instead of inferring cleanup.
 

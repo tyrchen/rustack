@@ -374,7 +374,7 @@ impl Tags {
         let mut out = self.0.clone();
         out.extend(other.0.clone());
         if out.len() > 50 {
-            return Err(RegistryError::Validation);
+            return Err(RegistryError::TagLimit);
         }
         Ok(Self(out))
     }

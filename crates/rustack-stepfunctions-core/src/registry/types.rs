@@ -4,11 +4,12 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::{sync::OwnedSemaphorePermit, time::Instant};
 
 use super::{ExecutionArn, RegistryError, RoleArn, StateMachineArn, Tags, domain::redacted};
 use crate::{
-    CompiledMachine, ExecutionFailure, ExecutionHandle, ExecutionView, Payload, TaskFailure,
+    CompiledMachine, ExecutionError, ExecutionFailure, ExecutionHandle, ExecutionView, Payload,
+    TaskFailure,
 };
 
 macro_rules! get {
@@ -118,6 +119,7 @@ pub(super) struct RevisionData {
     pub(super) machine: Arc<CompiledMachine>,
     pub(super) role: RoleArn,
     pub(super) hash: [u8; 32],
+    pub(super) published: DateTime<Utc>,
 }
 redacted!(RevisionData);
 /// Immutable revision; its admission slot stays charged through the last Arc.
@@ -128,6 +130,7 @@ pub struct DefinitionRevision {
 }
 redacted!(DefinitionRevision);
 impl DefinitionRevision {
+    get!(DefinitionRevision,publication_date,DateTime<Utc>,s=>s.data.published,"Read the publication date captured by this revision.");
     get!(DefinitionRevision,id,&str,s=>&s.data.id,"Read the immutable secure revision UUID.");
     get!(DefinitionRevision,machine,&Arc<CompiledMachine>,s=>&s.data.machine,"Read compiled IR and exact source bytes.");
     get!(DefinitionRevision,role,&RoleArn,s=>&s.data.role,"Read captured role metadata.");
@@ -199,6 +202,22 @@ pub struct ExecutionSnapshot {
 }
 redacted!(ExecutionSnapshot);
 impl ExecutionSnapshot {
+    /// Observe termination while preserving captured identity and revision.
+    ///
+    /// # Errors
+    /// Returns the execution observer deadline/owner error without cancellation.
+    ///
+    /// ```no_run
+    /// # async fn inspect(snapshot:&rustack_stepfunctions_core::ExecutionSnapshot,deadline:tokio::time::Instant){let result=snapshot.wait(deadline).await;}
+    /// ```
+    pub async fn wait(&self, deadline: Instant) -> Result<Self, ExecutionError> {
+        let mut handle = self.handle();
+        let view = handle.wait(deadline).await?;
+        Ok(Self {
+            record: self.record.clone(),
+            view,
+        })
+    }
     get!(ExecutionSnapshot,arn,&ExecutionArn,s=>&s.record.identity.arn,"Read the scoped execution ARN.");
     get!(ExecutionSnapshot,resource_id,&str,s=>&s.record.identity.machine.resource,"Read the captured machine incarnation UUID.");
     get!(ExecutionSnapshot,start_date,DateTime<Utc>,s=>s.record.identity.started,"Read original start acceptance time.");

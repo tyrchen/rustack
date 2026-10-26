@@ -1114,6 +1114,8 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
 fn status_code_const(status: u16) -> &'static str {
     match status {
         400 => "http::StatusCode::BAD_REQUEST",
+        402 => "http::StatusCode::PAYMENT_REQUIRED",
+        408 => "http::StatusCode::REQUEST_TIMEOUT",
         401 => "http::StatusCode::UNAUTHORIZED",
         403 => "http::StatusCode::FORBIDDEN",
         404 => "http::StatusCode::NOT_FOUND",

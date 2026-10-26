@@ -6,3 +6,7 @@
 
 #[cfg(all(feature = "lambda", feature = "stepfunctions"))]
 pub mod stepfunctions_bridge;
+
+/// Real registry-backed Step Functions API and stable pagination ownership.
+#[cfg(feature = "stepfunctions")]
+pub mod stepfunctions_api;

@@ -9,6 +9,8 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum StepFunctionsErrorCode {
+    /// `AccessDeniedException` error.
+    AccessDeniedException,
     /// `ActivityAlreadyExists` error.
     ActivityAlreadyExists,
     /// `ActivityDoesNotExist` error.
@@ -27,6 +29,8 @@ pub enum StepFunctionsErrorCode {
     ExecutionLimitExceeded,
     /// `ExecutionNotRedrivable` error.
     ExecutionNotRedrivable,
+    /// `InternalFailure` error.
+    InternalFailure,
     /// `InvalidArn` error.
     InvalidArn,
     /// `InvalidDefinition` error.
@@ -53,10 +57,14 @@ pub enum StepFunctionsErrorCode {
     KmsThrottlingException,
     /// `MissingRequiredParameter` error.
     MissingRequiredParameter,
+    /// `RequestTimeoutException` error.
+    RequestTimeoutException,
     /// `ResourceNotFound` error.
     ResourceNotFound,
     /// `ServiceQuotaExceededException` error.
     ServiceQuotaExceededException,
+    /// `ServiceUnavailable` error.
+    ServiceUnavailable,
     /// `StateMachineAlreadyExists` error.
     StateMachineAlreadyExists,
     /// `StateMachineDeleting` error.
@@ -71,6 +79,8 @@ pub enum StepFunctionsErrorCode {
     TaskDoesNotExist,
     /// `TaskTimedOut` error.
     TaskTimedOut,
+    /// `ThrottlingException` error.
+    ThrottlingException,
     /// `TooManyTags` error.
     TooManyTags,
     /// `UnknownOperationException` error.
@@ -93,6 +103,7 @@ impl StepFunctionsErrorCode {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::AccessDeniedException => "AccessDeniedException",
             Self::ActivityAlreadyExists => "ActivityAlreadyExists",
             Self::ActivityDoesNotExist => "ActivityDoesNotExist",
             Self::ActivityLimitExceeded => "ActivityLimitExceeded",
@@ -102,6 +113,7 @@ impl StepFunctionsErrorCode {
             Self::ExecutionDoesNotExist => "ExecutionDoesNotExist",
             Self::ExecutionLimitExceeded => "ExecutionLimitExceeded",
             Self::ExecutionNotRedrivable => "ExecutionNotRedrivable",
+            Self::InternalFailure => "InternalFailure",
             Self::InvalidArn => "InvalidArn",
             Self::InvalidDefinition => "InvalidDefinition",
             Self::InvalidEncryptionConfiguration => "InvalidEncryptionConfiguration",
@@ -115,8 +127,10 @@ impl StepFunctionsErrorCode {
             Self::KmsInvalidStateException => "KmsInvalidStateException",
             Self::KmsThrottlingException => "KmsThrottlingException",
             Self::MissingRequiredParameter => "MissingRequiredParameter",
+            Self::RequestTimeoutException => "RequestTimeoutException",
             Self::ResourceNotFound => "ResourceNotFound",
             Self::ServiceQuotaExceededException => "ServiceQuotaExceededException",
+            Self::ServiceUnavailable => "ServiceUnavailable",
             Self::StateMachineAlreadyExists => "StateMachineAlreadyExists",
             Self::StateMachineDeleting => "StateMachineDeleting",
             Self::StateMachineDoesNotExist => "StateMachineDoesNotExist",
@@ -124,6 +138,7 @@ impl StepFunctionsErrorCode {
             Self::StateMachineTypeNotSupported => "StateMachineTypeNotSupported",
             Self::TaskDoesNotExist => "TaskDoesNotExist",
             Self::TaskTimedOut => "TaskTimedOut",
+            Self::ThrottlingException => "ThrottlingException",
             Self::TooManyTags => "TooManyTags",
             Self::UnknownOperationException => "UnknownOperationException",
             Self::UnsupportedOperation => "UnsupportedOperation",
@@ -163,12 +178,17 @@ impl StepFunctionsErrorCode {
             | Self::StateMachineTypeNotSupported
             | Self::TaskDoesNotExist
             | Self::TaskTimedOut
+            | Self::ThrottlingException
             | Self::TooManyTags
             | Self::UnsupportedOperation
             | Self::ValidationException => http::StatusCode::BAD_REQUEST,
-            Self::ServiceQuotaExceededException => http::StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServiceQuotaExceededException => http::StatusCode::PAYMENT_REQUIRED,
+            Self::AccessDeniedException => http::StatusCode::FORBIDDEN,
             Self::ResourceNotFound | Self::UnknownOperationException => http::StatusCode::NOT_FOUND,
+            Self::RequestTimeoutException => http::StatusCode::REQUEST_TIMEOUT,
             Self::ConflictException => http::StatusCode::CONFLICT,
+            Self::InternalFailure => http::StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServiceUnavailable => http::StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
@@ -184,6 +204,7 @@ impl StepFunctionsErrorCode {
     #[must_use]
     pub fn default_message(&self) -> &'static str {
         match self {
+            Self::AccessDeniedException => "Request scope is not authorized",
             Self::ActivityAlreadyExists => "ActivityAlreadyExists",
             Self::ActivityDoesNotExist => "ActivityDoesNotExist",
             Self::ActivityLimitExceeded => "ActivityLimitExceeded",
@@ -193,6 +214,7 @@ impl StepFunctionsErrorCode {
             Self::ExecutionDoesNotExist => "ExecutionDoesNotExist",
             Self::ExecutionLimitExceeded => "ExecutionLimitExceeded",
             Self::ExecutionNotRedrivable => "ExecutionNotRedrivable",
+            Self::InternalFailure => "Request processing failed",
             Self::InvalidArn => "InvalidArn",
             Self::InvalidDefinition => "InvalidDefinition",
             Self::InvalidEncryptionConfiguration => "InvalidEncryptionConfiguration",
@@ -206,8 +228,10 @@ impl StepFunctionsErrorCode {
             Self::KmsInvalidStateException => "KmsInvalidStateException",
             Self::KmsThrottlingException => "KmsThrottlingException",
             Self::MissingRequiredParameter => "MissingRequiredParameter",
+            Self::RequestTimeoutException => "Request deadline exceeded",
             Self::ResourceNotFound => "ResourceNotFound",
             Self::ServiceQuotaExceededException => "ServiceQuotaExceededException",
+            Self::ServiceUnavailable => "Workflow API unavailable",
             Self::StateMachineAlreadyExists => "StateMachineAlreadyExists",
             Self::StateMachineDeleting => "StateMachineDeleting",
             Self::StateMachineDoesNotExist => "StateMachineDoesNotExist",
@@ -215,6 +239,7 @@ impl StepFunctionsErrorCode {
             Self::StateMachineTypeNotSupported => "StateMachineTypeNotSupported",
             Self::TaskDoesNotExist => "TaskDoesNotExist",
             Self::TaskTimedOut => "TaskTimedOut",
+            Self::ThrottlingException => "Workflow API admission exhausted",
             Self::TooManyTags => "TooManyTags",
             Self::UnknownOperationException => "Unknown Step Functions operation",
             Self::UnsupportedOperation => {
@@ -289,6 +314,21 @@ impl StepFunctionsError {
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {
         Self::with_message(StepFunctionsErrorCode::ValidationException, message)
+    }
+
+    /// Internal error.
+    #[must_use]
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::with_message(StepFunctionsErrorCode::InternalFailure, message)
+    }
+
+    /// Not implemented.
+    #[must_use]
+    pub fn not_implemented(operation: &str) -> Self {
+        Self::with_message(
+            StepFunctionsErrorCode::InternalFailure,
+            format!("Operation {operation} is not yet implemented"),
+        )
     }
 }
 

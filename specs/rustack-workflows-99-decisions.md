@@ -455,3 +455,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Ownership refinements**: independent immutable tag-version admission prevents retained snapshots from bypassing metadata limits; pending blocking entropy and its accepted command stay in root state. Cleanup-aware TTLs retain uncertain graphs, and Stop is an owned command before its caller observes termination.
 - **Pinned by**: [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle), [operations](./rustack-workflows-60-operations-design.md).
 - **Date**: 2026-10-26. Main/API pagination and the retained preparation adapter remain required before ordinary SDK service acceptance; Docker image work remains deferred.
+
+## D52 — Retain API preparation and charge shared immutable pagination captures
+
+- **Context**: typed HTTP and the real registry need one actual handler without making observer cancellation own commands or multiplying uncharged snapshot vectors.
+- **Decision**: a bounded binary-support API root retains worker admission above preparation/response CPU jobs and registry observation. Its actor-owned PageStore binds opaque256-bit handles to complete queries and shares a byte-charged immutable capture across continuation cursors. Reverse history uses the core complete-page projection.
+- **Why**: unowned spawn_blocking work outlives HTTP timeout; latest-state cursors drift; token-count limits alone permit unbounded high-water vector memory.
+- **Refinements**: count actual Vec capacity, preserve typed diagnostics and final deadline checks, and keep RegistrySupervisor alive independently of its command senders. Capture revision publication time for DescribeStateMachineForExecution. Generated common statuses preserve402/408; tag-specific errors follow the current action contract.
+- **Pinned by**: [API§1.3](./rustack-workflows-10-api-design.md#13-retained-real-api-adapter-and-preparation), [API§6.1](./rustack-workflows-10-api-design.md#61-owned-stable-pagination-and-reverse-history).
+- **Date**: 2026-10-26. Main/settings/capability composition, both ordinary SDKs and final image/platform qualification remain required; Docker image work remains deferred.

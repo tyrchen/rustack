@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::{
     codegen::generate_all,
-    config::{ServiceConfig, ServiceConfigFile},
+    config::{CustomError, ServiceConfig, ServiceConfigFile},
     model::SmithyModel,
     shapes::resolve_model,
 };
@@ -150,4 +150,22 @@ fn test_should_emit_one_redacted_debug_without_serde_derives() {
         assert!(!files.contains_key("epoch_seconds.rs"));
         assert!(!files["lib.rs"].contains("mod epoch_seconds"));
     }
+}
+
+#[test]
+fn test_should_preserve_payment_required_and_request_timeout_error_statuses() {
+    let mut config = config("awsJson1_0", true);
+    for (name, status) in [("Quota", 402), ("Timeout", 408)] {
+        config.custom_errors.insert(
+            name.into(),
+            CustomError {
+                status,
+                message: "static".into(),
+            },
+        );
+    }
+    let resolved = resolve_model(&model(None, None, false), &config).unwrap();
+    let files = generate_all(&resolved, &config).unwrap();
+    assert!(files["error.rs"].contains("Self::Quota => http::StatusCode::PAYMENT_REQUIRED"));
+    assert!(files["error.rs"].contains("Self::Timeout => http::StatusCode::REQUEST_TIMEOUT"));
 }
