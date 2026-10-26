@@ -3,12 +3,15 @@
 use std::{fmt, net::Ipv6Addr, str::FromStr};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use typed_builder::TypedBuilder;
 use winnow::{
     ModalResult, Parser,
     combinator::{alt, repeat, separated},
     token::take_while,
 };
+
+use super::ImageExecutionDefaults;
 
 /// Closed Lambda architecture, also used to select a Docker platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -63,7 +66,7 @@ impl FromStr for Architecture {
 }
 
 /// Invalid artifact metadata; errors never include the untrusted input.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 #[non_exhaustive]
 pub enum ArtifactError {
     /// Reference does not match the bounded Docker grammar.
@@ -99,6 +102,64 @@ impl ImageReference {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Repository spelling, including an explicit registry, without tag/digest.
+    ///
+    /// ```
+    /// let image: rustack_lambda_core::artifact::ImageReference = "localhost:5000/team/worker:v1".parse()?;
+    /// assert_eq!(image.repository(), "localhost:5000/team/worker");
+    /// # Ok::<(), rustack_lambda_core::artifact::ArtifactError>(())
+    /// ```
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        let name = self
+            .0
+            .split_once('@')
+            .map_or(self.0.as_str(), |(name, _)| name);
+        if name
+            .rsplit('/')
+            .next()
+            .is_some_and(|part| part.contains(':'))
+        {
+            name.rsplit_once(':').map_or(name, |(name, _)| name)
+        } else {
+            name
+        }
+    }
+
+    /// Explicit registry component; short local names do not invent provenance.
+    ///
+    /// ```
+    /// let image: rustack_lambda_core::artifact::ImageReference = "worker:v1".parse()?;
+    /// assert_eq!(image.registry(), None);
+    /// # Ok::<(), rustack_lambda_core::artifact::ArtifactError>(())
+    /// ```
+    #[must_use]
+    pub fn registry(&self) -> Option<&str> {
+        self.repository()
+            .split_once('/')
+            .and_then(|(first, _)| is_registry_component(first).then_some(first))
+    }
+
+    /// Requested digest suffix, if present, already checked by the constructor.
+    ///
+    /// ```
+    /// let image: rustack_lambda_core::artifact::ImageReference = "worker:v1".parse()?;
+    /// assert_eq!(image.digest(), None);
+    /// # Ok::<(), rustack_lambda_core::artifact::ArtifactError>(())
+    /// ```
+    #[must_use]
+    pub fn digest(&self) -> Option<&str> {
+        self.0.split_once('@').map(|(_, digest)| digest)
+    }
+}
+
+fn is_registry_component(first: &str) -> bool {
+    first.contains('.')
+        || first.contains(':')
+        || first == "localhost"
+        || first.starts_with('[')
+        || first.bytes().any(|byte| byte.is_ascii_uppercase())
 }
 
 impl FromStr for ImageReference {
@@ -134,12 +195,7 @@ impl FromStr for ImageReference {
             return Err(ArtifactError::Reference);
         }
         let repository = if let Some((first, remaining)) = name.split_once('/') {
-            if first.contains('.')
-                || first.contains(':')
-                || first == "localhost"
-                || first.starts_with('[')
-                || first.bytes().any(|byte| byte.is_ascii_uppercase())
-            {
+            if is_registry_component(first) {
                 validate_registry(first)?;
                 remaining
             } else {
@@ -314,6 +370,8 @@ pub struct ImageMetadata {
     pub requested_reference: ImageReference,
     /// Immutable daemon image content ID.
     pub image_id: Sha256Digest,
+    /// Selected platform manifest, separate from an addressable parent image ID.
+    pub selected_manifest: Option<Sha256Digest>,
     /// Registry repository and selected manifest digest, when available.
     pub registry_manifest: Option<ImageReference>,
     /// Inspected operating system, required to equal linux.
@@ -322,8 +380,58 @@ pub struct ImageMetadata {
     pub architecture: Architecture,
     /// SHA-256 of the normalized inspected execution metadata.
     pub inspection_hash: Sha256Digest,
-    /// Inspected uncompressed size, bounded to 10 GiB locally.
+    /// Selected image size reported by the daemon, bounded to 10 GiB locally.
     pub size_bytes: u64,
+    /// Validated inherited execution defaults, retained without re-inspection.
+    pub execution: ImageExecutionDefaults,
+}
+
+impl ImageMetadata {
+    /// Compute the canonical fingerprint also verified during snapshot restore.
+    ///
+    /// # Errors
+    /// Rejects an invalid inspected size or bounded metadata serialization.
+    ///
+    /// ```no_run
+    /// # fn hash(metadata: &rustack_lambda_core::artifact::ImageMetadata) -> Result<(), rustack_lambda_core::artifact::ArtifactError> {
+    /// let hash = rustack_lambda_core::artifact::ImageMetadata::execution_fingerprint(
+    ///     &metadata.image_id, metadata.selected_manifest.as_ref(),
+    ///     metadata.architecture, metadata.size_bytes, &metadata.execution)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn execution_fingerprint(
+        image_id: &Sha256Digest,
+        selected_manifest: Option<&Sha256Digest>,
+        architecture: Architecture,
+        size: u64,
+        defaults: &ImageExecutionDefaults,
+    ) -> Result<Sha256Digest, ArtifactError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fingerprint<'a> {
+            version: u8,
+            image_id: &'a Sha256Digest,
+            descriptor_digest: Option<&'a Sha256Digest>,
+            architecture: Architecture,
+            size: u64,
+            defaults: &'a ImageExecutionDefaults,
+        }
+        if !(1..=10 * 1024 * 1024 * 1024).contains(&size) {
+            return Err(ArtifactError::Inspection);
+        }
+        // Validated defaults contain <=128KiB of argv/environment, whose worst
+        // JSON escape expansion is sixfold; fixed-size identities keep this <1MiB.
+        let bytes = serde_json::to_vec(&Fingerprint {
+            version: 1,
+            image_id,
+            descriptor_digest: selected_manifest,
+            architecture,
+            size,
+            defaults,
+        })
+        .map_err(|_| ArtifactError::Inspection)?;
+        format!("sha256:{}", hex::encode(Sha256::digest(bytes))).parse()
+    }
 }
 
 /// Immutable Linux image metadata that passed all inspection invariants.
@@ -345,6 +453,24 @@ impl TryFrom<ImageMetadata> for ResolvedImage {
         {
             return Err(ArtifactError::Inspection);
         }
+        if metadata.inspection_hash
+            != ImageMetadata::execution_fingerprint(
+                &metadata.image_id,
+                metadata.selected_manifest.as_ref(),
+                metadata.architecture,
+                metadata.size_bytes,
+                &metadata.execution,
+            )?
+        {
+            return Err(ArtifactError::Inspection);
+        }
+        if let (Some(selected), Some(registry)) =
+            (&metadata.selected_manifest, &metadata.registry_manifest)
+        {
+            if registry.digest() != Some(selected.as_str()) {
+                return Err(ArtifactError::Inspection);
+            }
+        }
         Ok(Self(metadata))
     }
 }
@@ -357,26 +483,35 @@ impl From<ResolvedImage> for ImageMetadata {
 impl ResolvedImage {
     #[cfg(test)]
     pub(crate) fn fixture(architecture: Architecture) -> Self {
+        let image_id = format!("sha256:{}", "a".repeat(64))
+            .parse()
+            .expect("valid unit digest");
+        let execution = super::ImageExecutionMetadata::builder()
+            .entrypoint(vec!["/bootstrap".into()])
+            .command(Vec::new())
+            .working_directory("/".into())
+            .environment(Vec::new())
+            .user("1000".into())
+            .build()
+            .try_into()
+            .expect("valid execution defaults");
+        let hash =
+            ImageMetadata::execution_fingerprint(&image_id, None, architecture, 1024, &execution)
+                .expect("unit fingerprint");
         ImageMetadata::builder()
             .requested_reference(
                 "rustack-fixture:unit"
                     .parse()
                     .expect("valid unit reference"),
             )
-            .image_id(
-                format!("sha256:{}", "a".repeat(64))
-                    .parse()
-                    .expect("valid unit digest"),
-            )
+            .image_id(image_id)
+            .selected_manifest(None)
             .registry_manifest(None)
             .os("linux".into())
             .architecture(architecture)
-            .inspection_hash(
-                format!("sha256:{}", "b".repeat(64))
-                    .parse()
-                    .expect("valid unit inspection digest"),
-            )
+            .inspection_hash(hash)
             .size_bytes(1024)
+            .execution(execution)
             .build()
             .try_into()
             .expect("valid unit image metadata")
@@ -563,5 +698,53 @@ mod tests {
             );
         }
         Ok(())
+    }
+    #[rstest::rstest]
+    #[case("/imageId", serde_json::json!(format!("sha256:{}", "d".repeat(64))))]
+    #[case("/selectedManifest", serde_json::json!(format!("sha256:{}", "d".repeat(64))))]
+    #[case("/sizeBytes", serde_json::json!(1025))]
+    #[case("/architecture", serde_json::json!("arm64"))]
+    #[case("/execution/command", serde_json::json!(["changed-valid-argv"]))]
+    #[case("/execution/environment", serde_json::json!(["KEY=changed-valid-value"]))]
+    #[case("/execution/user", serde_json::json!("1001"))]
+    #[case("/execution/entrypoint", serde_json::json!(["/other"]))]
+    #[case("/execution/workingDirectory", serde_json::json!("/other"))]
+    #[case("/inspectionHash", serde_json::json!(format!("sha256:{}", "f".repeat(64))))]
+    fn test_should_reject_valid_saved_metadata_mutations_with_a_stale_fingerprint(
+        #[case] pointer: &str,
+        #[case] replacement: serde_json::Value,
+    ) {
+        let image = ResolvedImage::fixture(Architecture::X86_64);
+        let mut saved = serde_json::to_value(image).unwrap();
+        *saved.pointer_mut(pointer).unwrap() = replacement;
+        assert!(serde_json::from_value::<ResolvedImage>(saved).is_err());
+    }
+
+    #[test]
+    fn test_should_extract_registry_repository_and_digest_without_confusing_ports() {
+        for (reference, repository, registry) in [
+            (
+                "localhost:5000/team/worker:v1",
+                "localhost:5000/team/worker",
+                Some("localhost:5000"),
+            ),
+            (
+                "[::1]:5000/team/worker:v1",
+                "[::1]:5000/team/worker",
+                Some("[::1]:5000"),
+            ),
+            ("Registry/worker:v1", "Registry/worker", Some("Registry")),
+            ("team/worker:v1", "team/worker", None),
+            ("worker:v1", "worker", None),
+        ] {
+            let with_digest = format!("{reference}@sha256:{}", "e".repeat(64));
+            let image: ImageReference = with_digest.parse().unwrap();
+            assert_eq!(image.repository(), repository);
+            assert_eq!(image.registry(), registry);
+            assert_eq!(
+                image.digest(),
+                Some(format!("sha256:{}", "e".repeat(64)).as_str())
+            );
+        }
     }
 }

@@ -201,7 +201,7 @@ fn validate_layout(
     Ok(())
 }
 
-fn validate_image_config(config: &ImageConfig) -> Result<(), LambdaServiceError> {
+pub(crate) fn validate_image_config(config: &ImageConfig) -> Result<(), LambdaServiceError> {
     let mut bytes = 0usize;
     for args in [config.entry_point.as_deref(), config.command.as_deref()]
         .into_iter()

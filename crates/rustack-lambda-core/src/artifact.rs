@@ -3,6 +3,7 @@
 //! ZIP leases keep successfully staged code alive through invocation cleanup.
 //! Images carry immutable daemon identity rather than an unresolved mutable tag.
 
+mod execution;
 mod image;
 
 use std::{
@@ -13,6 +14,7 @@ use std::{
 };
 
 use bytes::Bytes;
+pub use execution::{ImageExecutionDefaults, ImageExecutionMetadata, ImageExecutionPlan};
 pub use image::{
     Architecture, ArtifactError, ImageMetadata, ImageReference, ResolvedImage, Sha256Digest,
 };

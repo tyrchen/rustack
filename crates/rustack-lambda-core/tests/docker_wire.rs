@@ -9,9 +9,10 @@ use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use http::StatusCode;
 use rustack_lambda_core::{
-    artifact::{ImageReference, Sha256Digest},
+    artifact::{Architecture as ImageArchitecture, ImageReference, ResolvedImage},
     docker::{
-        DockerError, DockerKey, DockerPort, DockerSocket, DockerWire, OutputChannel, OwnerFilter,
+        DockerError, DockerKey, DockerPort, DockerSocket, DockerWire, ImageResolver, OutputChannel,
+        OwnerFilter,
         models::{ContainerCreateBody, HostConfig},
     },
 };
@@ -125,17 +126,20 @@ impl Environment {
         })
     }
 
-    async fn image(port: &DockerPort, reference: &str, architecture: &str) -> Result<String> {
+    async fn image(
+        port: &DockerPort,
+        reference: &str,
+        architecture: &str,
+    ) -> Result<ResolvedImage> {
         let reference: ImageReference = reference.parse()?;
-        let image = port.inspect_image(&reference, deadline()).await?;
-        ensure!(
-            image.os.as_deref() == Some("linux")
-                && image.architecture.as_deref() == Some(architecture),
-            "fixture image platform mismatch"
-        );
-        let id = image.id.context("image content id")?;
-        let _: Sha256Digest = id.parse()?;
-        Ok(id)
+        let architecture = match architecture {
+            "arm64" => ImageArchitecture::Arm64,
+            "amd64" => ImageArchitecture::X86_64,
+            _ => bail!("unknown fixture architecture"),
+        };
+        Ok(ImageResolver::new(port.clone())
+            .resolve_local(&reference, architecture, None, deadline())
+            .await?)
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -155,10 +159,15 @@ impl Environment {
         );
         let relay = Self::image(&port, &relay, &arch).await?;
         let function = Self::image(&port, &format!("rustack-p0-handler:{arch}"), &arch).await?;
-        port.create_container(
+        let relay_plan = relay.metadata().execution.plan(None)?;
+        let function_plan = function.metadata().execution.plan(None)?;
+        port.create_container_on_platform(
             &self.names.relay,
             &ContainerCreateBody {
-                image: Some(relay),
+                image: Some(relay.metadata().image_id.as_str().into()),
+                entrypoint: Some(relay_plan.entrypoint().to_vec()),
+                cmd: Some(relay_plan.command().to_vec()),
+                working_dir: Some(relay_plan.working_directory().into()),
                 user: Some("1000:1000".into()),
                 env: Some(vec![
                     format!("RUSTACK_LAMBDA_ENVIRONMENT_ID={}", self.names.environment),
@@ -175,6 +184,7 @@ impl Environment {
                 host_config: Some(limits("none".into(), 64 * 1024 * 1024, 100_000_000, 64)),
                 ..Default::default()
             },
+            relay.metadata().architecture,
             deadline(),
         )
         .await?;
@@ -185,10 +195,13 @@ impl Environment {
             client.next(deadline()).await? == ClientEvent::RelayReady,
             "relay handshake mismatch"
         );
-        port.create_container(
+        port.create_container_on_platform(
             &self.names.function,
             &ContainerCreateBody {
-                image: Some(function),
+                image: Some(function.metadata().image_id.as_str().into()),
+                entrypoint: Some(function_plan.entrypoint().to_vec()),
+                cmd: Some(function_plan.command().to_vec()),
+                working_dir: Some(function_plan.working_directory().into()),
                 user: Some("1000:1000".into()),
                 labels: Some(self.names.labels()),
                 env: Some(vec![
@@ -207,6 +220,7 @@ impl Environment {
                 )),
                 ..Default::default()
             },
+            function.metadata().architecture,
             deadline(),
         )
         .await?;
@@ -373,6 +387,80 @@ async fn test_should_execute_real_ric_over_production_wire_with_large_binary_fra
             failure["errorType"] == "ValueError",
             "function error mismatch"
         );
+        Ok(())
+    }
+    .await;
+    let cleanup = environment.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Docker wire qualification images/socket"]
+async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() -> Result<()> {
+    let mut environment = Environment::new().await?;
+    let result = async {
+        let arch = env::var("RUSTACK_RUNTIME_ARCH").context("explicit architecture required")?;
+        let port = environment.wire.port();
+        let image = Environment::image(&port, &format!("rustack-p0-handler:{arch}"), &arch).await?;
+        for reset in [false, true] {
+            let overrides = rustack_lambda_model::types::ImageConfig {
+                entry_point: reset.then(Vec::new),
+                command: Some(if reset {
+                    vec!["/bin/true".into()]
+                } else {
+                    vec![]
+                }),
+                ..Default::default()
+            };
+            let plan = image.metadata().execution.plan(Some(&overrides))?;
+            port.create_container_on_platform(
+                &environment.names.function,
+                &ContainerCreateBody {
+                    image: Some(image.metadata().image_id.as_str().into()),
+                    entrypoint: Some(plan.entrypoint().to_vec()),
+                    cmd: Some(plan.command().to_vec()),
+                    working_dir: Some(plan.working_directory().into()),
+                    labels: Some(environment.names.labels()),
+                    user: Some("1000:1000".into()),
+                    host_config: Some(limits("none".into(), 192 * 1024 * 1024, 1_000_000_000, 256)),
+                    ..Default::default()
+                },
+                image.metadata().architecture,
+                deadline(),
+            )
+            .await?;
+            let actual = port
+                .inspect_container(&environment.names.function, deadline())
+                .await?
+                .config
+                .context("actual create config")?;
+            if reset {
+                ensure!(
+                    actual.entrypoint.as_deref().unwrap_or_default().is_empty(),
+                    "daemon restored a cleared entrypoint"
+                );
+                ensure!(
+                    actual
+                        .cmd
+                        .as_deref()
+                        .is_some_and(|command| command == ["/bin/true"]),
+                    "reset command mismatch"
+                );
+            } else {
+                ensure!(
+                    actual
+                        .entrypoint
+                        .as_deref()
+                        .is_some_and(|entrypoint| entrypoint == plan.entrypoint()),
+                    "inherited entrypoint mismatch"
+                );
+                ensure!(
+                    actual.cmd.as_deref().unwrap_or_default().is_empty(),
+                    "daemon restored a cleared command"
+                );
+            }
+            remove(&port, &environment.names.function).await?;
+        }
         Ok(())
     }
     .await;

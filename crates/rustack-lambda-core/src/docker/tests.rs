@@ -66,6 +66,9 @@ struct Daemon {
 }
 impl Daemon {
     fn new() -> Self {
+        Self::with_version("1.53")
+    }
+    fn with_version(version: &'static str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let listener = UnixListener::bind(directory.path().join("docker.sock")).unwrap();
         let (requests, received) = mpsc::channel(32);
@@ -85,7 +88,7 @@ impl Daemon {
                             // normal. Panics still fail the joined server task.
                             if let Ok(incoming) = read_request(stream).await {
                                 if incoming.head.starts_with("GET /version ") {
-                                    incoming.reply(200, br#"{"ApiVersion":"1.53","MinAPIVersion":"1.44"}"#).await;
+                                    incoming.reply(200, format!(r#"{{"ApiVersion":"{version}","MinAPIVersion":"1.44"}}"#).as_bytes()).await;
                                 } else { let _ = requests.send(incoming).await; }
                             }
                         });
@@ -746,4 +749,96 @@ async fn test_should_reject_expired_and_excessive_deadlines_before_metadata_publ
     };
     let decoded: Result<SystemInfo, DockerError> = decode(response, Instant::now());
     assert!(matches!(decoded, Err(DockerError::Deadline)));
+}
+
+#[rstest::rstest]
+#[case("1.44", false)]
+#[case("1.48", false)]
+#[case("1.49", true)]
+#[case("1.53", true)]
+#[tokio::test]
+async fn test_should_resolve_preloaded_images_with_versioned_platform_selection(
+    #[case] version: &'static str,
+    #[case] platform: bool,
+) {
+    use crate::artifact::Architecture;
+    let mut daemon = Daemon::with_version(version);
+    let mut wire = daemon.wire().await;
+    let resolver = ImageResolver::new(wire.port());
+    let reference = "registry.test:5000/team/worker:v1".parse().unwrap();
+    let invalid_override = rustack_lambda_model::types::ImageConfig {
+        working_directory: Some("relative".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        resolver
+            .resolve_local(
+                &reference,
+                Architecture::Arm64,
+                Some(&invalid_override),
+                deadline()
+            )
+            .await,
+        Err(DockerError::Configuration)
+    ));
+    assert!(daemon.requests.try_recv().is_err());
+    let (image, ()) = tokio::join!(
+        resolver.resolve_local(&reference, Architecture::Arm64, None, deadline()),
+        async {
+            let request = daemon.next().await;
+            let target = request.head.split_whitespace().nth(1).unwrap();
+            assert_eq!(
+                target,
+                format!("/v{version}/images/registry%2Etest%3A5000%2Fteam%2Fworker%3Av1/json")
+            );
+            let id = format!("sha256:{}", "a".repeat(64));
+            let body = serde_json::json!({"Id":id,"Os":"linux","Architecture":"arm64","Size":1024,"Config":{"Cmd":["/start"]},"GraphDriver":{"Name":"overlay2","Data":{}}});
+            request
+                .reply(200, &serde_json::to_vec(&body).unwrap())
+                .await;
+            if platform {
+                let request = daemon.next().await;
+                let target = request.head.split_whitespace().nth(1).unwrap();
+                let (path, query) = target.split_once('?').unwrap();
+                assert_eq!(
+                    path,
+                    format!("/v{version}/images/sha256%3A{}/json", "a".repeat(64))
+                );
+                let pairs: Vec<_> = form_urlencoded::parse(query.as_bytes()).collect();
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs.first().unwrap().0, "platform");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&pairs.first().unwrap().1).unwrap(),
+                    serde_json::json!({"os":"linux","architecture":"arm64"})
+                );
+                let mut selected = body;
+                selected["Id"] = serde_json::json!(format!("sha256:{}", "b".repeat(64)));
+                selected["Descriptor"] = serde_json::json!({"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":format!("sha256:{}","b".repeat(64))});
+                request
+                    .reply(200, &serde_json::to_vec(&selected).unwrap())
+                    .await;
+            } else {
+                let request = daemon.next().await;
+                assert!(request.head.starts_with(&format!("GET /v{version}/info ")));
+                request
+                    .reply(
+                        200,
+                        br#"{"Driver":"overlay2","DriverStatus":[["Backing Filesystem","extfs"]]}"#,
+                    )
+                    .await;
+            }
+        }
+    );
+    let image = image.unwrap();
+    assert_eq!(image.metadata().architecture, Architecture::Arm64);
+    assert_eq!(
+        image.metadata().image_id.as_str(),
+        format!("sha256:{}", "a".repeat(64))
+    );
+    assert_eq!(
+        image.metadata().execution.plan(None).unwrap().entrypoint(),
+        [""]
+    );
+    wire.shutdown().await.unwrap();
+    daemon.close().await;
 }

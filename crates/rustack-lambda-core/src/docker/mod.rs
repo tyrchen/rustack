@@ -5,6 +5,7 @@
 
 mod connection;
 mod framing;
+mod image;
 mod types;
 
 use std::{
@@ -23,6 +24,7 @@ pub use framing::{DockerOutputReader, MAX_DOCKER_RECORD, OutputChannel, OutputCh
 use http::{Method, StatusCode};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
+pub use image::ImageResolver;
 use models::{
     ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, ContainerSummary,
     ContainerWaitResponse, ImageInspect, SystemInfo, SystemVersion,
@@ -42,7 +44,7 @@ use typed_builder::TypedBuilder;
 pub use types::{ApiVersion, DockerError, DockerKey, DockerSocket};
 use uuid::Uuid;
 
-use crate::artifact::ImageReference;
+use crate::artifact::{Architecture, ImageReference};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
@@ -351,9 +353,47 @@ impl DockerPort {
         body: &ContainerCreateBody,
         deadline: Instant,
     ) -> Result<ContainerCreateResponse, DockerError> {
-        let query = form_urlencoded::Serializer::new(String::new())
-            .append_pair("name", name.as_str())
-            .finish();
+        self.create_container_inner(name, body, None, deadline)
+            .await
+    }
+
+    /// Create from an immutable image ID using an explicit captured platform.
+    ///
+    /// # Errors
+    /// Returns bounded request, status, deadline or transport failure; the owner
+    /// must reconcile uncertain creation under the preallocated name/labels.
+    ///
+    /// ```no_run
+    /// # async fn example(port: &rustack_lambda_core::docker::DockerPort, key: &rustack_lambda_core::docker::DockerKey, body: &rustack_lambda_core::docker::models::ContainerCreateBody) {
+    /// let result = port.create_container_on_platform(key,body,
+    ///     rustack_lambda_core::artifact::Architecture::Arm64,
+    ///     tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await;
+    /// # }
+    /// ```
+    pub async fn create_container_on_platform(
+        &self,
+        name: &DockerKey,
+        body: &ContainerCreateBody,
+        architecture: Architecture,
+        deadline: Instant,
+    ) -> Result<ContainerCreateResponse, DockerError> {
+        self.create_container_inner(name, body, Some(architecture), deadline)
+            .await
+    }
+
+    async fn create_container_inner(
+        &self,
+        name: &DockerKey,
+        body: &ContainerCreateBody,
+        architecture: Option<Architecture>,
+        deadline: Instant,
+    ) -> Result<ContainerCreateResponse, DockerError> {
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query.append_pair("name", name.as_str());
+        if let Some(architecture) = architecture {
+            query.append_pair("platform", architecture.docker_platform());
+        }
+        let query = query.finish();
         decode(
             self.call(
                 Operation::Create,

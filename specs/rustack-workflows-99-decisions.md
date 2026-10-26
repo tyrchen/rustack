@@ -159,6 +159,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [Docker request ownership and quotas](./rustack-workflows-20-lambda-runtime-design.md#36-bounded-docker-api-boundary); executable held-wait and business-saturation regressions in the Docker wire tests.
 - Date:2026-10-25. The wire lane does not itself own container lifetime or prove successful cleanup.
 
+## D21 — Resolve the selected executable image, not its parent index
+
+- Context: the live Engine29.5.2/containerd image store returns an index Id for unqualified inspection and a child-manifest Id for platform-qualified inspection; RepoDigests may continue naming the parent index, including for unpushed BuildKit-loaded local images.
+- Alternatives: always use inspect Id without a platform; take the first RepoDigest; require a registry round trip for every local deployment; request/validate the selected platform and keep local/registry representation explicit.
+- Decision: platform-qualified read-only local resolution validates executable child identity, retains validated inherited execution defaults and derives an explicit Docker-create plan preserving empty overrides, rejects unresolved index descriptors, and derives registry child references only from matching repository evidence. Capture the addressable parent Id before platform inspection, retain the selected child descriptor independently, and create by immutable parent Id plus explicit platform; the selected child Id is not necessarily a locally addressable image object. Recompute the canonical execution fingerprint during restore. Short local names retain local://Id. Legacy descriptor-free images remain supported on older compatible APIs.
+- Why: deployment pinning must survive tag movement and daemon default-platform changes without inventing registry provenance. Inspection hashes must also be deterministic across irrelevant metadata/map ordering.
+- Pinned by: [local resolution](./rustack-workflows-20-lambda-runtime-design.md#28-local-image-resolution-and-selected-platform-identity), [live/source evidence](../docs/research/study-bollard-docker-transport-boundaries.md#platform-specific-image-identity-follow-up).
+- Date:2026-10-25. This refines D19's generated Id representation; it does not promise registry existence, cross-platform execution or completed deployment/provider integration.
+
 ## Glossary
 
 | Term | Meaning in this specification |

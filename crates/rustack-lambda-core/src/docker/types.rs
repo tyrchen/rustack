@@ -7,6 +7,7 @@ use rustack_core::json::JsonError;
 use tokio::time::{Instant, timeout_at};
 
 use super::check_deadline;
+use crate::artifact::ArtifactError;
 
 /// Docker boundary failure classes; no peer response body is displayed.
 #[derive(Clone, thiserror::Error)]
@@ -57,6 +58,9 @@ pub enum DockerError {
     /// Bounded metadata validation failed.
     #[error(transparent)]
     Json(#[from] JsonError),
+    /// Image inspection cannot establish a valid executable artifact.
+    #[error(transparent)]
+    Image(#[from] ArtifactError),
 }
 
 impl fmt::Debug for DockerError {

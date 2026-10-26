@@ -159,6 +159,25 @@ W01's implemented filter now covers Hyper/hyper_util/Bollard independent of appl
 
 Deployment/image actors, remaining stream/network/probe consumers, warm pooling, startup/resource checks, full SDK/provider acceptance and B01/B03 remain required before P1 closes. W30 is closed for implemented wire admission/handoff; future log/pull owners remain subject to its existing-reservation rule. W31's source citations remain pinned and checked.
 
+## P1 task1.3 local image resolution review
+
+Independent design and implementation review found the issues below. All are fixed, with a final read-only recheck reporting no remaining concrete in-slice finding. The [source study](../docs/research/study-bollard-docker-transport-boundaries.md#platform-specific-image-identity-follow-up) pins the actual observations and historical Moby merge/store source.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W33 | P2; runtime §2.8 / `artifact/execution.rs:38` | A hash alone discards the defaults needed to preserve empty overrides without per-invoke inspection. ResolvedImage now retains validated Arc defaults and returns a fully materialized redacted Docker plan with the empty-entrypoint reset sentinel | Default/override/composed-budget tests, snapshot round trips and real create/inspect merge checks |
+| W34 | P3; `docker/image.rs`, repository matching | Raw repository equality loses familiar Docker Hub digest evidence. Normalize default docker.io/library and index.docker.io, while classifying short-local provenance from original spelling | Familiar-name, registry-case, port/IPv6, unrelated-alias and short-local cases |
+| W35 | P2; `artifact/image.rs:443` | Valid saved execution changes could retain a stale inspection hash; the selected descriptor digest was not retained. Metadata now stores selected_manifest and the constructor/deserializer recomputes centralized canonical SHA-256 over parent/child/platform/size/defaults | Ten valid-value mutation cases reject stale fingerprints; immutable defaults and Debug remain redacted |
+| W36 | P2; `docker/image.rs:206` | Missing Descriptor alone can misclassify downlevel containerd as classic, including contradictory manifest summaries. Require matching classic inspect/info driver evidence, reject the containerd status marker, and reject explicit manifest summaries | API1.44/1.48 classic fallback, modern captured-parent selection, ambiguous summaries, malformed rows and btrfs/zfs marker negatives |
+| W37 | P2; `docker/image.rs:108` | Requiring nonnull DriverStatus rejects legitimate classic VFS. Normalize absent/null rows after classic evidence, retaining marker/shape rejection | Missing/null VFS positives and containerd negatives; historical source pinned |
+| W38 | P2; actual Docker qualification | Platform-qualified child Id is not independently addressable by lookup/create on the retained containerd store. Bind the requested tag once, platform-inspect its captured parent Id, retain child manifest separately and create from immutable parent plus explicit platform | Initial404 reproduced on both daemons; corrected two-case suites pass on each. Fake parent-a/child-b cases prove the second lookup cannot re-resolve a moved tag |
+
+The resolver performs bounded read-only local inspection only. It validates selected Linux image metadata, inherited argv/environment/user/working-directory bounds, effective entry overrides and local/registry URI representation. No registry pull, credential discovery or image build occurs.61 new tests pass within288 Lambda core tests;58 core doctests pass. Workspace build/test/fmt/Clippy/rustdoc pass with1,964 tests and399 explicitly resource-gated cases. Native SDK/DryRun regressions pass; the separately gated Squib case remains excluded as VM evidence.
+
+Actual official-RIC wire execution now consumes resolver identities and materialized plans. Near6MiB computed warm calls/errors and a separate clear-command/reset-entrypoint create test pass on both arm64 VZ and amd64/QEMU, with independent stream/container cleanup. Default IO latency, old-daemon execution, native x86/Desktop/rootless and full provider/executor acceptance remain outside this evidence. Strict production Clippy has the same65 existing B03 findings, with none in the new resolver/defaults paths. Hex reuses an existing workspace version/package; audit still reports the16 B01 advisories and deny bans/licenses/sources pass without new ignores.
+
+Deployment/status/CAS actors, image availability leases, allowed pulls, unpacked-image quota proof, environment/pool owners, remaining network/log/probe consumers and B01/B03 remain required before P1 closes. This slice does not advertise Docker invocation in Rustack.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

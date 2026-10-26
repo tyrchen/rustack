@@ -79,6 +79,8 @@ The shared runtime contract suite is available as `make test-lambda-runtime`; it
 
 Current wire qualification on2026-10-25 passes on Engine29.5.2 Linux arm64 in native VZ and Linux amd64 under QEMU. Both near6MiB cases pass with60s IO/120s attempt stress budgets. These do not establish the default5s IO latency budget, native x86 performance, Docker Desktop/rootless support or full Lambda provider/pool/deployment acceptance. Independent daemon queries find no remaining containers bearing the wire harness ownership label after the runs.
 
+Local image resolution now extends `test-lambda-docker-wire` with a second real create/inspect case: clear inherited CMD and reset ENTRYPOINT without daemon re-inheritance. The execution case uses the captured addressable parent Id plus explicit platform, and preserves the selected child manifest independently.61 unit additions cover validated inherited defaults/plans, deterministic base fingerprints, ten valid-value stale-hash snapshot mutations, familiar registry identities, actual captured-parent query encoding and legacy API1.44/1.48 classic evidence. Null/missing VFS status remains valid; explicit containerd markers and contradictory manifest summaries reject. Historical engine code is pinned at vendors/moby v28.0.0; fake older-version cases are not old-daemon execution qualification. Current two-case suites pass on both retained daemons. Local resolution does not establish deployment status/CAS, availability leases, allowed registry pulls or unpacked-image quota enforcement.
+
 ## 4. Security acceptance
 
 | Boundary | Required proof |
