@@ -77,6 +77,20 @@ The independent read-only review found three cancellation/order races. All were 
 
 The actor owns an eight-command mailbox, one queued/offered/delivered attempt and one poll; per-attempt tickets prevent old cancellation from targeting new work. RPC envelopes carry their own deadline, readiness changes once, initialization notifies once, shutdown retains its join handle across cancelled waiters and caches failed settlement. Sixteen actor tests and the39 codec tests pass;23 runtime doctests and strict production-boundary Clippy pass. Workspace build/fmt/Clippy/rustdoc and1,822 tests pass (392 preexisting ignored). This review covers the shared actor only: the Native HTTP adapter still uses its existing session implementation until migration; the relay/socket client, Docker executor and ASL engine are not implemented by this slice. B01/B03 remain required.
 
+## P1 task1.2 shared HTTP / Native migration review
+
+The independent read-only review found three boundary/lifecycle defects. All were fixed and the final recheck found no remaining concrete in-slice finding.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W20 | P1; `crates/rustack-lambda-runtime/src/http.rs:216`, pinned Hyper1.11.1 `proto/h1/decode.rs:149` | Hyper TRACE includes partial trailer bytes before application validation. Every HTTP supervisor/connection future now uses an independent subscriber denying Hyper/hyper_util DEBUG/TRACE while delegating allowed application context/events | TRACE capture covers ordinary target/header/body and a deliberately fragmented secret trailer; no secret reaches diagnostics |
+| W21 | P2; `crates/rustack-lambda-runtime/src/http.rs:456` | Collected trailers bypassed per-header validation. All trailers now reject before session mutation | Short, oversized and Invocation-Id trailers return400 without initialization notification or session closure |
+| W22 | P2; `crates/rustack-lambda-core/src/executor/instance.rs:309` | Revision mismatch cleared old instances through Drop, losing API join ownership. Acquisition now extracts stale instances and awaits bounded parallel retirement outside map guards; empty buckets are removed | Real old API holds an incomplete body while code changes; replacement waits its408 deadline/join and old child reap before invoking new code |
+
+The shared adapter replaces the old pending-map implementation while preserving executor module reexports. Native cold start now races first-poll readiness, init error, process exit and caller cancellation under one init deadline, retiring API/process owners on failure. The Native executor's one cleanup task atomically captures reaper/pool/child ownership, survives cancelled/concurrent shutdown waiters and preserves cleanup failures. Eleven real fixture tests cover slow/no polling, init failure, startup cancellation, version isolation, stale connections, busy cancellation and joined shutdown. The existing native SDK target passes six Native/DryRun scenarios; its separately gated Squib selection remains excluded as VM execution evidence.
+
+Workspace build/fmt/Clippy/rustdoc and1,841 tests pass (392 preexisting ignored). Shared runtime:71 tests,34 doctests and strict production-boundary Clippy; Lambda core:212 tests and26 doctests. Three old core HTTP tests moved into the shared adapter's stronger wire suite. Cargo audit still finds the same16 B01 advisories; no new dependency version/package landed, and deny bans/licenses/sources pass. B03 remains open for old core boundaries. The relay executable/client, Docker executor and ASL engine remain required before milestone completion.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

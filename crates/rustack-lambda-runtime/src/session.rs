@@ -490,6 +490,29 @@ impl SessionHandle {
     pub fn close(&self) {
         self.stop.send_replace(true);
     }
+
+    /// Wait until the actor closes its command receiver.
+    ///
+    /// ```no_run
+    /// # async fn closed(handle: &rustack_lambda_runtime::session::SessionHandle) {
+    /// handle.closed().await;
+    /// # }
+    /// ```
+    pub async fn closed(&self) {
+        self.inbox.closed().await;
+    }
+
+    /// Whether admission is closed or its owner has requested stop.
+    ///
+    /// ```
+    /// # fn inspect(handle: &rustack_lambda_runtime::session::SessionHandle) {
+    /// let closed = handle.is_closed();
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        *self.stop.borrow() || self.inbox.is_closed()
+    }
 }
 
 fn check_deadline(deadline: Instant) -> Result<(), SessionError> {

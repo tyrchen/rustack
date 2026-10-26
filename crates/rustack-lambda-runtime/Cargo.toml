@@ -13,13 +13,20 @@ workspace = true
 [dependencies]
 bytes = { workspace = true, features = ["serde"] }
 ciborium = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 typed-builder = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-core = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

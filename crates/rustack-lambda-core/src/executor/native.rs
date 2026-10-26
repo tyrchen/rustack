@@ -42,8 +42,9 @@ use crate::{
 pub struct NativeExecutor {
     pool: Arc<InstancePool>,
     cancel_tx: watch::Sender<bool>,
-    reaper: PMutex<Option<tokio::task::JoinHandle<()>>>,
+    reaper: PMutex<Option<tokio::task::JoinHandle<Result<(), ExecutorError>>>>,
     processes: Arc<NativeProcesses>,
+    cleanup: CleanupTask,
 }
 
 #[derive(Debug)]
@@ -80,15 +81,7 @@ impl NativeProcesses {
 
 impl Drop for NativeExecutor {
     fn drop(&mut self) {
-        self.processes.accepting.store(false, Ordering::Release);
-        self.cancel_tx.send_replace(true);
-        self.pool.shutdown();
-        if let Some(reaper) = self.reaper.lock().take() {
-            reaper.abort();
-        }
-        // Process supervisors retain children, artifact leases and reservations
-        // until exit. Dropping the executor must not abort these owners.
-        self.processes.start_cleanup();
+        self.start_cleanup();
     }
 }
 
@@ -120,7 +113,32 @@ impl NativeExecutor {
             cancel_tx,
             reaper: PMutex::new(Some(reaper)),
             processes,
+            cleanup: CleanupTask::default(),
         }
+    }
+
+    fn start_cleanup(&self) {
+        self.processes.accepting.store(false, Ordering::Release);
+        self.cancel_tx.send_replace(true);
+        self.pool.stop_retention();
+        self.cleanup.start_on(&self.processes.runtime, || {
+            let pool = Arc::clone(&self.pool);
+            let processes = Arc::clone(&self.processes);
+            let reaper = self.reaper.lock().take();
+            async move {
+                processes.start_cleanup();
+                let reaper = match reaper {
+                    Some(reaper) => reaper
+                        .await
+                        .map_err(|_| ExecutorError::CleanupFailed("Native reaper failed".into()))
+                        .and_then(|result| result),
+                    None => Ok(()),
+                };
+                let pool = pool.shutdown().await;
+                let children = processes.cleanup.wait().await;
+                reaper.and(pool).and(children)
+            }
+        });
     }
 }
 
@@ -174,17 +192,8 @@ impl Executor for NativeExecutor {
     }
 
     async fn shutdown(&self) -> Result<(), ExecutorError> {
-        self.processes.accepting.store(false, Ordering::Release);
-        self.cancel_tx.send_replace(true);
-        self.pool.shutdown();
-        self.processes.start_cleanup();
-        let reaper = self.reaper.lock().take();
-        if let Some(reaper) = reaper {
-            reaper
-                .await
-                .map_err(|_| ExecutorError::CleanupFailed("Native reaper failed".into()))?;
-        }
-        self.processes.cleanup.wait().await
+        self.start_cleanup();
+        self.cleanup.wait().await
     }
 }
 

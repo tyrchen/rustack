@@ -116,6 +116,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [shared session ownership and state diagram](./rustack-workflows-20-lambda-runtime-design.md#32-runtime-session-ownership).
 - Date: 2026-10-25.
 
+## D16 — Enforce HTTP dependency secrecy and retain adapter retirement
+
+- Alternatives: redact only application Debug; trust RUST_LOG defaults; reject trailers after decoding without filtering the dependency; drop invalidated warm API handles without awaiting retirement.
+- Decision: task-bound Hyper/hyper_util verbosity filtering independent of the application's subscriber, no supported HTTP trailers, and explicit joined API/process retirement on revision invalidation and shutdown. Cache supervision failures and retain the complete Native cleanup future across dropped/concurrent waiters.
+- Why: pinned Hyper1.11.1 logs buffered trailer contents before application validation. Dropping a handle only signals asynchronous cleanup and cannot establish that an old listener's connections have finished. First-poll readiness, joined retirement and checked metadata let Native and the future Docker relay share one actual session engine.
+- Pinned by: [shared HTTP adapter and Native startup](./rustack-workflows-20-lambda-runtime-design.md#33-shared-http-adapter-and-native-startup), [review W20–W22](./rustack-workflows-93-review.md#p1-task12-shared-http--native-migration-review).
+- Date:2026-10-25. The separate mandatory Bollard filter W01 remains required when Docker is implemented.
+
 ## Glossary
 
 | Term | Meaning in this specification |

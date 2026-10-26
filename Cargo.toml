@@ -154,6 +154,7 @@ uuid = { version = "1.26", features = ["v4"] }
 
 # Logging / tracing
 tracing = "0.1"
+tracing-core = "0.1.36"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Async utilities

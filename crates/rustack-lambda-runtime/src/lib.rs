@@ -6,5 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+mod diagnostics;
+pub mod http;
+pub mod metadata;
 pub mod protocol;
 pub mod session;

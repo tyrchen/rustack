@@ -41,6 +41,20 @@ fn main() {
             return;
         }
     }
+    if let Some(delay) = std::env::var("INIT_DELAY_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(delay));
+    }
+    if std::env::var("INIT_FAIL").is_ok_and(|value| value == "1") {
+        let _ = agent
+            .post(&format!("http://{api}/2018-06-01/runtime/init/error"))
+            .send_string(
+                r#"{"errorMessage":"secret-initialization-value","errorType":"TestInitError"}"#,
+            );
+        return;
+    }
     loop {
         let next = agent
             .get(&format!("http://{api}/2018-06-01/runtime/invocation/next"))
@@ -84,6 +98,7 @@ fn main() {
             "codeMarker": code_marker,
             "configMarker": config_marker,
             "pid": std::process::id(),
+            "runtimeApi": api,
         });
         let _ = agent
             .post(&format!(

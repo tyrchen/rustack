@@ -14,6 +14,7 @@ workspace = true
 rustack-core = { workspace = true }
 rustack-lambda-model = { workspace = true }
 rustack-lambda-http = { workspace = true }
+rustack-lambda-runtime = { workspace = true }
 rustack-auth = { workspace = true }
 squib = { workspace = true }
 http = { workspace = true }

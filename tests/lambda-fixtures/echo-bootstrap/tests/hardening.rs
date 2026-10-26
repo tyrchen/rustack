@@ -76,6 +76,248 @@ async fn invoke(provider: &RustackLambda, version: Option<&str>) -> serde_json::
 }
 
 #[tokio::test]
+async fn test_should_wait_for_first_poll_before_starting_the_native_handler_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path()),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            init_timeout: Duration::from_secs(3),
+            ..Default::default()
+        },
+    );
+    let mut input = create("slow-init");
+    input.timeout = Some(1);
+    input.environment = Some(Environment {
+        variables: Some(HashMap::from([("INIT_DELAY_MILLIS".into(), "1200".into())])),
+    });
+    provider.create_function(input).await.unwrap();
+    let started = tokio::time::Instant::now();
+    assert_eq!(invoke(&provider, None).await["codeMarker"], "slow-init");
+    assert!(started.elapsed() >= Duration::from_millis(1200));
+    provider.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_join_stale_revision_api_connections_before_invoking_replacement_code() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path()),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            ..Default::default()
+        },
+    );
+    provider.create_function(create("old")).await.unwrap();
+    let old = invoke(&provider, None).await;
+    let address = old["runtimeApi"].as_str().unwrap();
+    let mut held = tokio::net::TcpStream::connect(address).await.unwrap();
+    held.write_all(b"POST /2018-06-01/runtime/init/error HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 1\r\n\r\n").await.unwrap();
+    // Keep the old API's body collector active while the revision is replaced.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    provider
+        .update_function_code(
+            "revision-test",
+            UpdateFunctionCodeInput {
+                zip_file: Some(package("new")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    assert_eq!(invoke(&provider, None).await["codeMarker"], "new");
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "replacement must await the old API connection deadline and join"
+    );
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), held.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.starts_with(b"HTTP/1.1 408"));
+    let status = tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(old["pid"].as_u64().unwrap().to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert!(!status.success());
+    provider.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_time_out_and_reap_a_bootstrap_that_never_polls_the_runtime_api() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("started");
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path().join("code")),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            init_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+    );
+    let mut input = create("never-ready");
+    input.timeout = Some(120);
+    input.environment = Some(Environment {
+        variables: Some(HashMap::from([
+            ("INIT_DELAY_MILLIS".into(), "60000".into()),
+            ("STARTED_FILE".into(), marker.to_string_lossy().into_owned()),
+        ])),
+    });
+    provider.create_function(input).await.unwrap();
+    let started = tokio::time::Instant::now();
+    assert!(
+        provider
+            .invoke("revision-test", None, b"{}", InvokeKind::RequestResponse)
+            .await
+            .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_secs(4));
+    let pid = tokio::fs::read_to_string(marker).await.unwrap();
+    let status = tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.trim())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert!(
+        !status.success(),
+        "initialization timeout must join child cleanup"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_should_report_native_initialization_error_without_echoing_its_payload() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path()),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            ..Default::default()
+        },
+    );
+    let mut input = create("init-error");
+    input.environment = Some(Environment {
+        variables: Some(HashMap::from([("INIT_FAIL".into(), "1".into())])),
+    });
+    provider.create_function(input).await.unwrap();
+    let error = provider
+        .invoke("revision-test", None, b"{}", InvokeKind::RequestResponse)
+        .await
+        .unwrap_err();
+    assert!(!format!("{error} {error:?}").contains("secret-initialization-value"));
+    provider.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_cancel_and_reap_a_bootstrap_while_waiting_for_first_poll() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("started");
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path().join("code")),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            init_timeout: Duration::from_secs(30),
+            ..Default::default()
+        },
+    );
+    let mut input = create("cancel-init");
+    input.environment = Some(Environment {
+        variables: Some(HashMap::from([
+            ("INIT_DELAY_MILLIS".into(), "60000".into()),
+            ("STARTED_FILE".into(), marker.to_string_lossy().into_owned()),
+        ])),
+    });
+    provider.create_function(input).await.unwrap();
+    let handle = provider
+        .start_invocation("revision-test", None, b"{}", None)
+        .await
+        .unwrap();
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match tokio::fs::read_to_string(&marker).await {
+                Ok(pid) if !pid.is_empty() => break pid,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => {}
+                Err(error) => panic!("Read initialization marker: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    handle
+        .cancel_and_wait(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let status = tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.trim())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert!(
+        !status.success(),
+        "cancelled startup must reap before settlement"
+    );
+    provider.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_join_shared_api_and_child_cleanup_after_cancelled_and_concurrent_native_shutdown_waiters()
+ {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path()),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            ..Default::default()
+        },
+    );
+    provider.create_function(create("shutdown")).await.unwrap();
+    let response = invoke(&provider, None).await;
+    let executor = provider.executor().clone();
+    let mut waiting = Box::pin(executor.shutdown());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    drop(waiting);
+    let (first, second) = tokio::join!(executor.shutdown(), executor.shutdown());
+    first.unwrap();
+    second.unwrap();
+    let status = tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(response["pid"].as_u64().unwrap().to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert!(!status.success());
+    provider.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_should_preserve_published_code_and_refresh_warm_revisions() {
     let root = tempfile::tempdir().unwrap();
     let provider = RustackLambda::with_store(
