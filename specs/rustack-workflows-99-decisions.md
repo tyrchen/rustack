@@ -347,3 +347,13 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: the same retained directory capability protects filesystem transactions and daemon ownership; interrupted recovery is repeatable without replaying create or touching foreign resources. This is a container-specific part of full reconciliation, not production readiness.
 - **Pinned by**: [runtime §4.8](./rustack-workflows-20-lambda-runtime-design.md#48-durable-container-intents-and-restart-reconciliation), [implementation plan](./rustack-workflows-90-impl-plan.md).
 - **Date**: 2026-10-26. Reuse existing nix/sha2/hex dependencies and the bounded ownership worker pool.
+
+
+## D40 — Generate exact JSON epoch timestamps before the Step Functions API
+
+- **Context**: Step Functions uses AWS JSON1.0 numeric timestamps; default chrono serde emits strings, and the existing optional KMS float helper mishandles negative fractions.
+- **Alternatives considered**: binary f64 arithmetic introduces avoidable rounding; copying the KMS helper preserves its negative-epoch defect; workspace-wide arbitrary_precision changes unrelated payload semantics; hand-editing generated files cannot survive regeneration.
+- **Decision**: resolve timestamp-format precedence in the generator and emit a JSON-specific RawValue decimal adapter, normalized by checked bounded arithmetic to millisecond precision toward zero. Select strict model generation for Step Functions: documented/nonexhaustive DTOs, required collections, typed builders, redacted diagnostics and no blanket ignores.
+- **Why**: SDK wire dates are numeric and exact at the promised precision, including negative/exponent/range edges, while other protocols retain their bindings. Oversized exponents are classified with bounded work. Serde-disabled output gets neither duplicate Debug nor unused codec modules.
+- **Pinned by**: [API §1.1](./rustack-workflows-10-api-design.md#11-executable-timestampmodel-generation-contract), [verification](./rustack-workflows-70-verification-plan.md), [implementation plan](./rustack-workflows-90-impl-plan.md).
+- **Date**: 2026-10-26. The model reuses workspace serde/chrono/typed-builder; the excluded developer generator adds the already-workspace [Tokio1.54.1](https://docs.rs/tokio/1.54.1/tokio/attr.main.html) with explicit local-IO features and independent audit/deny. No Step Functions endpoint or engine is advertised by the model alone.

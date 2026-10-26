@@ -7,8 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 
-use crate::config::ServiceConfig;
-use crate::model::{MemberShape, Shape, SmithyModel, StructureShape};
+use crate::{
+    config::ServiceConfig,
+    model::{MemberShape, Shape, SmithyModel, StructureShape},
+};
 
 /// Maximum recursion depth when resolving shape references.
 const MAX_RESOLVE_DEPTH: usize = 15;
@@ -38,6 +40,8 @@ pub struct FieldInfo {
     pub rust_type: String,
     /// Whether this field is required.
     pub required: bool,
+    /// Timestamp format; empty means protocol default, None means not a timestamp.
+    pub timestamp_format: Option<String>,
     /// HTTP binding annotation if any.
     pub http_binding: Option<HttpBinding>,
 }
@@ -75,8 +79,6 @@ pub struct ErrorInfo {
     pub wire_name: String,
     /// Default HTTP status code (from `smithy.api#httpError`, or 400/500 based on fault).
     pub status_code: u16,
-    /// Default human-readable message.
-    pub message: String,
     /// Fault type: `"client"` or `"server"`.
     pub fault: String,
 }
@@ -331,10 +333,31 @@ fn resolve_struct_fields(
                 rust_name: to_snake_case(name),
                 rust_type,
                 required,
+                timestamp_format: timestamp_format(model, member),
                 http_binding,
             }
         })
         .collect()
+}
+
+/// Resolve a timestamp member override before its target-shape override.
+fn timestamp_format(model: &SmithyModel, member: &MemberShape) -> Option<String> {
+    let shape = model.shapes.get(&member.target);
+    let target_traits = match shape {
+        Some(Shape::Timestamp(shape)) => Some(&shape.traits),
+        _ if member.target == "smithy.api#Timestamp" => None,
+        _ => return None,
+    };
+    Some(
+        member
+            .traits
+            .get("smithy.api#timestampFormat")
+            .or_else(|| target_traits.and_then(|traits| traits.get("smithy.api#timestampFormat")))
+            .map_or("", |value| {
+                value.as_str().unwrap_or("<invalid timestampFormat>")
+            })
+            .to_owned(),
+    )
 }
 
 /// Check if a type is a collection type that should not be wrapped in Option.
@@ -506,6 +529,7 @@ pub fn resolve_model(model: &SmithyModel, config: &ServiceConfig) -> Result<Reso
                         rust_name: to_snake_case(name),
                         rust_type: format!("Option<{base_type}>"),
                         required: false,
+                        timestamp_format: timestamp_format(model, member),
                         http_binding: None,
                     }
                 })
@@ -565,14 +589,11 @@ fn collect_errors(
         // for a cleaner Rust API, but keep the wire name for serialization)
         let name = wire_name.clone();
 
-        let message = name.clone();
-
         seen_names.insert(name.clone());
         errors.push(ErrorInfo {
             name,
             wire_name,
             status_code,
-            message,
             fault,
         });
     }
@@ -585,7 +606,6 @@ fn collect_errors(
                 name: name.clone(),
                 wire_name: name.clone(),
                 status_code: custom.status,
-                message: custom.message.clone(),
                 fault: if custom.status >= 500 {
                     "server".to_owned()
                 } else {

@@ -125,6 +125,33 @@ codegen-lambda:
 	@cd codegen && cargo run -- --config services/lambda.toml --model smithy-model/lambda.json --output ../crates/rustack-lambda-model/src
 	@cargo +nightly fmt -p rustack-lambda-model
 
+codegen-stepfunctions:
+	@cargo run --manifest-path codegen/Cargo.toml -- --config codegen/services/stepfunctions.toml --model codegen/smithy-model/stepfunctions.json --output crates/rustack-stepfunctions-model/src
+	@cargo +nightly fmt -p rustack-stepfunctions-model
+
+check-stepfunctions-codegen:
+	@set -eu; generated=$$(mktemp -d /tmp/rustack-sfn-codegen.XXXXXX); \
+	trap 'rm -rf "$$generated"' EXIT; \
+	cargo run --manifest-path codegen/Cargo.toml -- --config codegen/services/stepfunctions.toml --model codegen/smithy-model/stepfunctions.json --output "$$generated"; \
+	rustup run nightly rustfmt --edition 2024 --config-path rustfmt.toml "$$generated"/*.rs; \
+	diff -r "$$generated" crates/rustack-stepfunctions-model/src
+
+test-stepfunctions-model: check-stepfunctions-codegen
+	@cargo test --manifest-path codegen/Cargo.toml
+	@cargo clippy --manifest-path codegen/Cargo.toml --all-targets -- -D warnings
+	@cargo test -p rustack-stepfunctions-model
+	@cargo clippy -p rustack-stepfunctions-model --lib --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: codegen-stepfunctions check-stepfunctions-codegen test-stepfunctions-model
+
+audit-codegen:
+	@cargo audit --file codegen/Cargo.lock
+
+deny-codegen:
+	@cargo deny --manifest-path codegen/Cargo.toml check
+
+.PHONY: audit-codegen deny-codegen
+
 codegen-kms:
 	@cd codegen && cargo run -- --config services/kms.toml --model smithy-model/kms.json --output ../crates/rustack-kms-model/src
 	@cargo +nightly fmt -p rustack-kms-model

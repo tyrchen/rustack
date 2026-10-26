@@ -464,6 +464,19 @@ Twenty-four new unit/scripted cases cover11 journal transactions/codecs/filesyst
 
 Each retained Engine29.5.2 daemon (arm64 VZ and amd64/QEMU) explicitly passes11 distinct actual cases: recovery1, owner/pool7, boto3/HTTP/provider/executor1 and wire2, all with zero ignored. The recovery fixture leaves a real stopped function and running relay across directory reacquisition, then verifies ordered retirement and durable erasure. Scoped owner-container and private-image-alias queries are empty after the suites. QEMU is not native x86 qualification. The existing network/kernel/shared-runtime evidence remains separately scoped; this change does not grant startup readiness or cover historical private image aliases, allowed pulls, endpoint/configuration coordination or P2–P5. The12 feature/index documents resolve265 local references.
 
+## P2 generated model and numeric timestamp review
+
+API§1.1/D40 lands the official model and protocol-aware numeric serde generation. This is the first P2 contract under the user's explicit priority change; HTTP/core/ASL remain required. Docker-image changes remain a separate deferred worktree checkpoint. Independent final read-only review reports no remaining model/generator issue.
+
+| Finding | Priority / source | Correction | Verification |
+|---|---|---|---|
+| W97 | P2; `codegen/src/codegen.rs:256`, separate JSON-error generation | Strict DTO Debug hides all values; strict Error is nonexhaustive with redacted Debug/Display and retained source() | Actual task-token/output/nested-history/error-source fixtures; no blanket ignores |
+| W98 | P2; `codegen/templates/epoch_seconds.rs:36` | Classify large exponents with bounded saturating arithmetic instead of rejecting representable zero/underflow at i32 parsing | Required and optional oversized exponent regressions; genuine positive overflow still rejects |
+| W99 | P2; strict no-serde branch in `codegen/src/codegen.rs:278` | Emit one manual redacted Debug without deriving another implementation | Strict no-serde policy fixture |
+| W100 | P3; `codegen/src/codegen.rs:34` | Gate codec emission on serde usage | Both AWS JSON no-serde protocols and restXml produce no unused codec module |
+
+Final focused evidence:5 generator tests,34 generated-model cases and1 executed doctest; formatted regeneration and strict tool/model checks pass. Final workspace build/test/fmt/Clippy/rustdoc pass with2,447 tests/414 gated, including retained deferred Docker changes. Audit scans475 workspace/29 standalone-tool dependencies without vulnerabilities; both deny graphs pass with existing unmatched/duplicate-policy notices and no new ignores. The developer tool uses bounded ordinary-file Tokio IO, validates Smithy2.0 and no longer retains unused trait/phase data. This does not close P2, M1 or final real-image/platform requirements.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

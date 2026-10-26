@@ -58,3 +58,5 @@ UnsupportedOperation = { status = 400, message = "Operation is outside the suppo
 [output]
 file_layout = "flat"
 always_serialize_arrays = true
+
+strict_model = true

@@ -2,6 +2,7 @@
 name = "rustack-codegen"
 version = "0.1.1"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -9,3 +10,5 @@ serde_json = "1.0"
 toml = "0.9"
 heck = "0.5"
 anyhow = "1.0"
+
+tokio = { version = "~1.54.1", features = ["rt", "macros", "fs", "time", "io-util"] }
