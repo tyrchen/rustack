@@ -100,6 +100,8 @@ Dependency security closure (§7.2/D27) additionally requires current cargo audi
 
 ## 4. Security acceptance
 
+`make test-lambda-ownership` verifies the real directory capability independently of Docker: stable owner/fresh run, descriptor/allocated-pin lifetime, actual subprocess contention and reacquisition, bounded malformed/pending state, symlink spellings (including trailing slash/current-directory), hardlink/FIFO/permission rejection, trusted/sticky ancestor rules and repeated parent sync after interrupted creation. Worker tests cover admission expiry, running deadline/cancelled waiter retention, completed-but-unconsumed result capacity and panic release. A scripted-daemon integration additionally holds a real directory lease through abandoned image-owner quarantine and delayed deletion, requiring exclusion until cleanup settles. Production wire fixtures acquire actual directory leases and retain their namespace files on uncertain cleanup. These checks do not establish prior-run reconciliation, startup readiness or full M0 acceptance.
+
 | Boundary | Required proof |
 |---|---|
 | HTTP/ASL/archives | Byte/count/depth bounds before expansion; duplicate-key rejection; invalid values cannot reach unchecked engine indexing |

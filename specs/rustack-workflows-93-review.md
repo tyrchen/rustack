@@ -273,6 +273,24 @@ The independent read-only review verifies the released ZIP9/source semantics, ra
 
 Final-source workspace build/test/fmt/Clippy/rustdoc pass with2,083 tests, zero failed and401 resource-gated cases. Core has404 tests (nine new ZIP cases) and101 doctests; `make test-lambda-boundaries` passes668 unit tests/165 doctests (833 total), seven resource-gated Docker cases, and all six strict production-library checks. The Native provider target passes six actual Native/validation scenarios; its gated Squib selection is excluded as VM evidence. Post-upgrade real Rust SDK/HTTP validation and revision/412 tests each pass with zero ignored, and the owned test gateway exits normally. Audit/deny pass against the same committed dependency graph. B01/B03/B04 are closed; persistent directory ownership/reconciliation, allowed pulls, Docker environment/pool executor, startup/configuration/probes and full M0 acceptance remain required. P2–P5 also remain required.
 
+## P1 task1.3 persistent namespace lease review
+
+Independent read-only review covers runtime §4.1/D28: bounded acquisition, private descriptor-relative files, immutable durable identity, raw-path normalization, ancestor trust, process contention and retention through image cleanup. The final recheck finds no remaining in-slice issue. This is host-directory ownership evidence, not prior-run reconciliation, Docker readiness or P1/M0 acceptance.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W60 | P2; `docker/ownership.rs`, raw root spelling | A trailing slash or /. can bypass final-component NOFOLLOW. Normalize the validated component sequence before any IO | Four root-symlink spellings reject before touching the destination |
+| W61 | P2; `docker/ownership.rs`, worker result ownership | Releasing the work permit when blocking work finishes allows ready results to accumulate outside capacity. Return the permit with the result until delivery/disposal | Completed-but-unconsumed result retains capacity and the actual directory lock; abort/deadline cases retain both until worker completion |
+| W62 | P2; `docker/ownership.rs`, interrupted creation retry | Syncing only newly created parents lets a retry skip a parent left unsynced by an earlier failed attempt. Repeat the same-filesystem ancestor barrier on every acquisition | Fault at the second directory sync, then successful retry through existing parents proves the parent inode is synced |
+
+Logical and canonical ancestor checks also reject untrusted UID or writable nonsticky rename paths before creation; sticky trusted ancestors remain supported. Safe nix0.31.3 fs/user calls reuse the already-resolved package, and standard File supplies advisory locking. The only new lint exception is ownership.rs:5 for synchronous standard-file/descriptor operations, all executed on bounded blocking workers because Tokio files do not supply OS advisory locks. No unsafe, production panic/unwrap, ignored boundary finding or dependency-security exception is added.
+
+Final-source standard workspace build/test/fmt/Clippy/rustdoc pass:2,122 tests, zero failed and401 separately resource-gated cases. Lambda core has443 unit tests and103 doctests; the new ownership target has38 directory cases plus one abandoned-manager cleanup case, all passing. The actual subprocess test checks contention while held and reacquisition after release with the same owner/fresh run. The six-library strict boundary target passes707 unit tests/167 doctests (874 total), seven separately gated Docker cases and all strict production checks. Fresh audit scans474 dependencies without vulnerabilities; deny advisories/bans/licenses/sources all pass.
+
+Both explicit two-case Docker wire suites pass using real DirectoryLease-backed image owners on Engine29.5.2 arm64 VZ and amd64/QEMU. Afterward both daemons have no owner-labeled containers or rustack-internal/lambda aliases. The host-directory tests run on macOS; this is not native Linux directory-lock qualification. The harness retains60s stream/120s attempt stress budgets. The local Docker CLI lacks an auto-discovered buildx plugin, so these successful Make invocations explicitly set WORKFLOWS_IMAGE_BUILDER=/opt/homebrew/bin/docker-buildx. Initial failure with the default builder occurred before any test allocation; no default Docker/runtime readiness is claimed.
+
+Persistent namespace capability is now implemented/reviewed. Startup historical-effect reconciliation, allowed pulls, remaining log/network/probe consumers, environment/pool executor and production configuration/acceptance remain P1 requirements. P2–P5 remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

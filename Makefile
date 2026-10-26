@@ -299,6 +299,13 @@ test-lambda-boundaries:
 
 .PHONY: test-lambda-boundaries
 
+# Descriptor lifetime, persisted namespace identity and cleanup ownership.
+test-lambda-ownership:
+	@cargo test -p rustack-lambda-core --lib docker::ownership::tests
+	@cargo test -p rustack-lambda-core --lib test_should_retain_the_directory_lock_through_abandoned_image_owner_cleanup
+
+.PHONY: test-lambda-ownership
+
 # Real-execution Lambda invoke tests (native backend).
 # Builds a Rust bootstrap fixture and invokes it through the rustack provider.
 test-lambda-invoke-native:

@@ -3678,6 +3678,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "nix",
  "parking_lot",
  "percent-encoding",
  "rstest",

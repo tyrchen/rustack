@@ -224,6 +224,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Pinned by:** [runtime §7.2](./rustack-workflows-20-lambda-runtime-design.md#72-dependency-security-closure-b01), [HTTP authentication profile](./rustack-http-hardening-design.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date:** 2026-10-25. SDK model versions and supported AWS wire modes are preserved.
 
+## D28 — Retain an OS directory lease in image namespace capabilities
+
+- **Context:** owner/run UUIDs alone cannot exclude another process, and a coordinator-only lock can close while retained Docker cleanup still runs.
+- **Alternatives considered:** PID files/in-process maps do not establish OS exclusion; replacing a lock file splits its inode ownership; arbitrary caller-supplied UUID scopes lose the filesystem proof; following path-based symlinks can redirect managed writes.
+- **Decision:** acquire a permanent advisory-locked descriptor in a private UID-checked directory, durably publish a bounded immutable owner record, and clone the lease through the scope/pin/job/recovery lifetime. Use safe nix0.31.3 relative-descriptor operations and standard File locking on bounded blocking workers; do not expose arbitrary production scope constructors. The [current nix openat API](https://docs.rs/nix/0.31.3/nix/fcntl/fn.openat.html) returns an OwnedFd with fs enabled; [standard File locking](https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.try_lock) supplies nonblocking advisory exclusion. Verified 2026-10-26; no new package version is required.
+- **Why:** process exclusion must last through cleanup settlement, persisted corruption must fail closed, and a failed/cancelled initialization cannot authorize Docker effects. Retaining a standard File is a deliberate lint exception because Tokio has no advisory-lock API; synchronous IO is confined to blocking workers. This capability does not prove previous-run reconciliation or backend readiness.
+- **Pinned by:** [runtime §4.1](./rustack-workflows-20-lambda-runtime-design.md#41-persistent-directory-lease-and-namespace-capability), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-26.
+
 ## Glossary
 
 | Term | Meaning in this specification |

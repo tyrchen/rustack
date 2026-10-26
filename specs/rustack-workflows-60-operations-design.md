@@ -81,6 +81,14 @@ Deployment JSON/base64 workers have a fixed aggregate ceiling of four, retained 
 
 Registry/execution mailbox capacities and per-tick quantum are compile-time implementation constants from the ASL design, not runtime tuning knobs. Function init/idle settings reuse existing validated Lambda configuration. CPU and log limits use the exact environment keys above. Effective memory admission may allow fewer than 32 environments. Lower quotas must reject admission or fail the affected execution explicitly, never silently drop data/work.
 
+### 1.3 Persistent Docker namespace ownership
+
+Acquire the existing configured data directory before constructing a mutating image owner. [Runtime §4.1](./rustack-workflows-20-lambda-runtime-design.md#41-persistent-directory-lease-and-namespace-capability) defines its descriptor lease, immutable checksummed owner UUID, fresh run UUID and filesystem trust rules. Acquisition has a positive absolute deadline≤60s and a fixed four-worker IO ceiling. Require an operator-controlled local filesystem with advisory locking, atomic rename and directory sync support; an unsupported filesystem fails acquisition rather than falling back to an unlocked namespace. ACLs must not grant untrusted namespace/ancestor replacement, and operators must not unlink/replace live lock files or data roots. Same-UID/root or Docker-daemon adversaries remain outside this local execution isolation promise.
+
+The permanent lease.lock inode is never truncated, replaced or deleted during release. Last-descriptor closure releases exclusion; image scopes, pins, queued work and quarantined cleanup retain clones until their ownership settles. A failed/cancelled acquisition may leave bounded initialization files, which are validated on retry. A corrupt published identity fails closed and is never silently regenerated. Errors contain static classes without operator paths or identity values. No Docker effect is authorized until acquisition succeeds.
+
+This capability alone is not a ready backend. Startup must separately reconcile prior runs and unresolved historical effects under the same persistent owner before accepting image execution. Do not treat one empty list/404 as proof that a prior uncertain daemon mutation cannot appear later. Shutdown keeps the lease until environment/deployment/image cleanup owners are joined; unresolved cleanup prevents successful quiescence/snapshot publication.
+
 ## 2. Deployment topology and readiness
 
 | Topology | Control path | Handler SDK path | Required test |

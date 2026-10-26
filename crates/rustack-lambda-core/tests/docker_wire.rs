@@ -11,8 +11,8 @@ use http::StatusCode;
 use rustack_lambda_core::{
     artifact::{Architecture as ImageArchitecture, ImageReference, PinnedImage},
     docker::{
-        DockerError, DockerKey, DockerPort, DockerSocket, DockerWire, ImageLeaseConfig,
-        ImageLeaseManager, ImagePinScope, OutputChannel, OwnerFilter,
+        DirectoryLease, DirectoryLeaseError, DockerError, DockerKey, DockerPort, DockerSocket,
+        DockerWire, ImageLeaseConfig, ImageLeaseManager, ImagePinScope, OutputChannel, OwnerFilter,
         models::{ContainerCreateBody, HostConfig},
     },
 };
@@ -23,6 +23,7 @@ use rustack_lambda_runtime::{
     session::{Invocation, RuntimeResult},
 };
 use serde_json::{Value, json};
+use tempfile::TempDir;
 use tokio::{
     io::AsyncWriteExt,
     sync::watch,
@@ -107,6 +108,7 @@ struct Environment {
     runtime: Option<Runtime>,
     images: ImageLeaseManager,
     artifacts: Vec<PinnedImage>,
+    directory: Option<TempDir>,
 }
 impl Environment {
     async fn new() -> Result<Self> {
@@ -114,13 +116,22 @@ impl Environment {
             .context("explicit test Docker socket required")?;
         let socket: DockerSocket = format!("unix://{socket}").parse()?;
         let wire = DockerWire::connect(socket, deadline()).await?;
-        let run = Uuid::new_v4();
-        let owner = Uuid::new_v4();
+        let directory = tempfile::tempdir()?;
+        let lease = DirectoryLease::acquire(directory.path().to_path_buf(), deadline()).await?;
+        let run = lease.run_id();
+        let owner = lease.owner_id();
         let images = ImageLeaseManager::start(
             wire.port(),
-            ImagePinScope::new(owner, run)?,
+            ImagePinScope::new(lease),
             ImageLeaseConfig::default(),
         )?;
+        ensure!(
+            matches!(
+                DirectoryLease::acquire(directory.path().to_path_buf(), deadline()).await,
+                Err(DirectoryLeaseError::InUse)
+            ),
+            "image owner did not retain directory exclusion"
+        );
         Ok(Self {
             wire,
             names: Names {
@@ -133,6 +144,7 @@ impl Environment {
             runtime: None,
             images,
             artifacts: Vec::new(),
+            directory: Some(directory),
         })
     }
 
@@ -343,12 +355,20 @@ impl Environment {
         } else {
             Ok(())
         };
-        function
+        let result = function
             .and(runtime)
             .and(relay)
             .and(listed)
             .and(images)
-            .and(joined)
+            .and(joined);
+        if result.is_err() {
+            // Uncertain cleanup still owns the namespace; retain its files for
+            // recovery rather than unlinking the live lock inode on test Drop.
+            if let Some(directory) = self.directory.take() {
+                let _retained = directory.keep();
+            }
+        }
+        result
     }
 }
 

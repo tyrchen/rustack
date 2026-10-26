@@ -11,7 +11,7 @@ use tokio::{
 
 use super::*;
 use crate::docker::{
-    DockerWire,
+    DirectoryLease, DirectoryLeaseError, DockerWire,
     tests::{Daemon, IncomingRequest},
 };
 
@@ -22,7 +22,7 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
 fn scope() -> ImagePinScope {
-    ImagePinScope::new(Uuid::new_v4(), Uuid::new_v4()).unwrap()
+    ImagePinScope::testing(Uuid::new_v4(), Uuid::new_v4()).unwrap()
 }
 fn config(pins: u16, jobs: u8) -> ImageLeaseConfig {
     ImageLeaseConfig::new(pins, jobs, Duration::from_secs(1)).unwrap()
@@ -321,6 +321,56 @@ impl Drop for FakePins {
 }
 
 #[tokio::test]
+async fn test_should_retain_the_directory_lock_through_abandoned_image_owner_cleanup() {
+    let fake = FakePins::new(Mode::HoldDelete).await;
+    let directory = tempfile::tempdir().unwrap();
+    let lease = DirectoryLease::acquire(directory.path().into(), deadline())
+        .await
+        .unwrap();
+    let identity = lease.owner_id();
+    let owner = ImageLeaseManager::start(fake.wire.port(), ImagePinScope::new(lease), config(2, 1))
+        .unwrap();
+    let image = owner
+        .port()
+        .prepare(
+            &"worker:v1".parse().unwrap(),
+            Architecture::Arm64,
+            None,
+            deadline(),
+        )
+        .await
+        .unwrap();
+    drop(image);
+    fake.stats
+        .until(|| owner.port().status().quarantined > 0)
+        .await;
+    drop(owner);
+    assert!(matches!(
+        DirectoryLease::acquire(directory.path().into(), deadline()).await,
+        Err(DirectoryLeaseError::InUse)
+    ));
+    fake.commands.send(Command::AllowDeletes).await.unwrap();
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match DirectoryLease::acquire(directory.path().into(), deadline()).await {
+                Ok(lease) => {
+                    assert_eq!(lease.owner_id(), identity);
+                    break;
+                }
+                Err(DirectoryLeaseError::InUse) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                other => panic!("unexpected lease result: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fake.stats.aliases.load(Ordering::Acquire), 0);
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn test_should_pin_old_code_across_tag_retargeting_and_keep_cloned_artifacts_live() {
     let fake = FakePins::new(Mode::Normal).await;
     let mut owner = fake.owner(2, 1);
@@ -576,7 +626,7 @@ async fn test_should_join_after_a_shutdown_waiter_is_dropped_and_cache_root_fail
 
 #[test]
 fn test_should_reject_invalid_pin_scope_and_preparation_configuration() {
-    assert!(ImagePinScope::new(Uuid::nil(), Uuid::new_v4()).is_err());
+    assert!(ImagePinScope::testing(Uuid::nil(), Uuid::new_v4()).is_err());
     let pin = scope().allocate().unwrap();
     assert!(
         pin.reference()

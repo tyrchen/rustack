@@ -8,56 +8,56 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{
-    DockerError, DockerPort, Operation, decode, escaped,
+    DirectoryLease, DockerError, DockerPort, Operation, decode, escaped,
     models::{ImageDeleteResponseItem, ImageInspect},
     unit,
 };
 use crate::artifact::{ImageReference, Sha256Digest};
 
 /// Trusted runtime owner/run identity; never populated from a Lambda request.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ImagePinScope {
-    owner: Uuid,
-    run: Uuid,
+    lease: DirectoryLease,
 }
 impl ImagePinScope {
-    /// Validate the scope supplied by the directory-lock owner.
+    /// Retain a real directory lease for this namespace and its allocated pins.
     ///
-    /// # Errors
-    /// Rejects nil UUIDs. This does not acquire the runtime's directory lock.
-    ///
+    /// ```no_run
+    /// # fn scope(lease: rustack_lambda_core::docker::DirectoryLease) {
+    /// let scope = rustack_lambda_core::docker::ImagePinScope::new(lease);
+    /// # }
     /// ```
-    /// let scope = rustack_lambda_core::docker::ImagePinScope::new(uuid::Uuid::new_v4(),uuid::Uuid::new_v4())?;
-    /// # Ok::<(),rustack_lambda_core::docker::DockerError>(())
-    /// ```
-    pub fn new(owner: Uuid, run: Uuid) -> Result<Self, DockerError> {
+    #[must_use]
+    pub fn new(lease: DirectoryLease) -> Self {
+        Self { lease }
+    }
+
+    #[cfg(test)]
+    pub(super) fn testing(owner: Uuid, run: Uuid) -> Result<Self, DockerError> {
         if owner.is_nil() || run.is_nil() {
             return Err(DockerError::Configuration);
         }
-        Ok(Self { owner, run })
+        Ok(Self::new(DirectoryLease::testing(owner, run)))
     }
     /// Allocate a fresh private alias before issuing any Docker mutation.
     ///
     /// # Errors
     /// Returns validation failure if the generated reference cannot validate.
-    ///
-    /// ```
-    /// let scope = rustack_lambda_core::docker::ImagePinScope::new(uuid::Uuid::new_v4(),uuid::Uuid::new_v4())?;
-    /// let pin = scope.allocate()?;
-    /// assert!(pin.reference().as_str().starts_with("rustack-internal/"));
-    /// # Ok::<(),rustack_lambda_core::docker::DockerError>(())
-    /// ```
-    pub fn allocate(self) -> Result<ImagePin, DockerError> {
+    pub(super) fn allocate(&self) -> Result<ImagePin, DockerError> {
         let id = Uuid::new_v4();
         let reference = format!(
             "rustack-internal/lambda-{}/{}:{}",
-            self.owner.simple(),
-            self.run.simple(),
+            self.lease.owner_id().simple(),
+            self.lease.run_id().simple(),
             id.simple()
         )
         .parse()?;
-        Ok(ImagePin { id, reference })
+        Ok(ImagePin {
+            id,
+            reference,
+            _scope: self.clone(),
+        })
     }
 }
 
@@ -67,6 +67,7 @@ impl ImagePinScope {
 pub struct ImagePin {
     pub(super) id: Uuid,
     reference: ImageReference,
+    _scope: ImagePinScope,
 }
 impl fmt::Debug for ImagePin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

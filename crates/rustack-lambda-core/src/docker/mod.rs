@@ -7,6 +7,7 @@ mod connection;
 mod framing;
 mod image;
 mod lease;
+mod ownership;
 mod pin;
 mod types;
 
@@ -32,6 +33,7 @@ use models::{
     ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, ContainerSummary,
     ContainerWaitResponse, ImageInspect, SystemInfo, SystemVersion,
 };
+pub use ownership::{DirectoryLease, DirectoryLeaseError};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub use pin::{ImagePin, ImagePinScope};
 use rustack_core::json::{JsonLimits, from_slice};
