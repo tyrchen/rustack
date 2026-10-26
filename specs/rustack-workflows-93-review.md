@@ -502,6 +502,17 @@ ASL§2.1.1/D42 implements bounded immutable business payloads, a separate intern
 
 Focused evidence:75 unit tests (including three512-case properties),12 doctests and ordinary/strict core Clippy pass. All seven independent path catalog cases execute against the evaluator. The independent read-only reviewer rechecked all three corrections and reported no remaining in-slice findings. Standard workspace build/test/fmt/Clippy/rustdoc pass with2,580 tests/415 gated, including the retained deferred Docker checkpoint. Full compiler/registry/engine and M1 acceptance remain required.
 
+## P2 compiled Choice independent review
+
+ASL§2.4.1/D43 implements compiled predicate semantics, shared evaluation budgets and a bounded Unicode glob. The independent read-only reviewer rechecked the following corrections and reported no remaining in-slice findings.
+
+| ID | Priority / source | Closed correction | Verification |
+|---|---|---|---|
+| W108 | P2; `crates/rustack-stepfunctions-core/src/choice.rs` timestamp representation/evaluation | Preserve full normalized decimal fractions beyond chrono nanoseconds; debit cached literal and dynamic source lengths | Distinct10-digit fractions, equivalent offsets/trailing zeros and valid long-literal/Path rules exhausting shared budgets |
+| W109 | P2; `crates/rustack-stepfunctions-core/src/choice.rs` numeric comparison | Reject float endpoints conservatively to prevent out-of-range source lexemes aliasing integer2^53; keep integer endpoints valid; enable existing float_roundtrip for correctly rounded interior forms | Raw decimal/exponent positive/negative boundaries and equivalent interior lexemes; type-only IsNumeric remains independent |
+
+Focused evidence:125 total core unit cases and15 doctests pass, including the90-combination matrix, four independent Choice catalog cases and two new512-case properties. Ordinary all-targets and strict production core Clippy pass. This is predicate evidence, not a complete Choice state or compiler/engine acceptance. Final standard workspace build/test/fmt/Clippy/rustdoc pass with2,630 tests/415 gated, including retained deferred Docker changes. Model regeneration and strict model/HTTP targets plus the real signed SDK fixture pass after shared feature unification. B06 audit/deny failures remain explicitly open.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

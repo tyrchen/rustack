@@ -217,6 +217,19 @@ fn validate_value(value: &Value, limits: TreeLimits) -> Result<(), AslError> {
     Ok(())
 }
 
+pub(crate) fn validate_predicate(value: &Value) -> Result<(), AslError> {
+    validate_value(
+        value,
+        TreeLimits {
+            bytes: 1024 * 1024,
+            depth: 64,
+            members: 4096,
+        },
+    )?;
+    encode_with_limit(value, 1024 * 1024)?;
+    Ok(())
+}
+
 fn check_container(
     depth: usize,
     length: usize,

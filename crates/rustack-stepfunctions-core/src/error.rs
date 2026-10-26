@@ -9,6 +9,12 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Unsupported, ambiguous or invalid Choice predicate definition.
+    #[error("invalid ASL Choice predicate")]
+    InvalidPredicate,
+    /// Numeric comparison exceeds the local binary64 interoperability range.
+    #[error("ASL numeric comparison outside supported range")]
+    NumericRange,
     /// The path is invalid or exceeds the compiled-profile limits.
     #[error("invalid ASL path")]
     InvalidPath,

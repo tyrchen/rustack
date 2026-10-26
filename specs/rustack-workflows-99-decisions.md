@@ -375,3 +375,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: one pure implementation pins data behavior for future compiler/engine consumers without coupling core to HTTP, an SDK or Docker. Original business input bytes survive for name idempotency.
 - **Pinned by**: [ASL§2.1.1](./rustack-workflows-30-asl-design.md#211-executable-path-and-payload-foundation), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Reuse the already resolved winnow1.0.4 and shared JSON/bytes/serde dependencies. This is a semantic foundation, not engine acceptance.
+
+## D43 — Compile Choice predicates and bound evaluation across the whole rule
+
+- **Context**: branching semantics need validated literal/Path operands and short-circuit behavior before the execution actor interprets Choice states.
+- **Alternatives considered**: arbitrary JSON inspection on each transition repeats validation; user regexes complicate resource bounds; binary64 coercion silently aliases large integers; per-child budgets let compounds multiply work without bound.
+- **Decision**: compile a private typed predicate tree, preserve left-to-right short-circuit and missing-reference errors, normalize timestamps to instants, use a bounded Unicode glob and share one step/string-byte budget across the complete predicate.
+- **Why**: a pure reusable evaluator pins semantics and makes local limits explicit before machine compilation and scheduling. It remains separate from transition-target ownership.
+- **Pinned by**: [ASL§2.4.1](./rustack-workflows-30-asl-design.md#241-executable-choice-predicate-contract), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse existing chrono, JSON and reference paths. Numeric integers use the closed±2^53 range; floats exclude its endpoints to avoid source-rounding aliases. Enable shared serde_json float_roundtrip for correctly rounded interior numeric lexemes; no arbitrary_precision or new external version is added. Timestamp fractions retain precision beyond nanoseconds. No complete Choice state/engine acceptance is claimed.
