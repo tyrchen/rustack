@@ -15,7 +15,7 @@ struct RuntimeSubscriber {
 
 fn allowed(metadata: &Metadata<'_>) -> bool {
     let target = metadata.target();
-    let dependency = ["hyper", "hyper_util"].iter().any(|name| {
+    let dependency = ["hyper", "hyper_util", "bollard"].iter().any(|name| {
         target == *name
             || target
                 .strip_prefix(name)
@@ -67,7 +67,17 @@ impl Subscriber for RuntimeSubscriber {
     }
 }
 
-pub(crate) fn runtime_dispatch() -> Dispatch {
+/// Capture application context while denying verbose transport dependency logs.
+///
+/// The policy covers Hyper, `hyper_util` and Bollard independently of `RUST_LOG`.
+/// Apply the dispatch to construction and every poll/spawned transport worker.
+///
+/// ```
+/// let dispatch = rustack_lambda_runtime::diagnostics::runtime_dispatch();
+/// tracing::dispatcher::with_default(&dispatch, || tracing::debug!("application event"));
+/// ```
+#[must_use]
+pub fn runtime_dispatch() -> Dispatch {
     dispatcher::get_default(|parent| {
         Dispatch::new(RuntimeSubscriber {
             parent: parent.clone(),

@@ -92,7 +92,7 @@ rustack-cloudfront-dataplane = { version = "0.11.0", path = "crates/rustack-clou
 squib = "0.2.0"
 
 # Async runtime
-tokio = { version = "1.53", features = [
+tokio = { version = "1.54", features = [
   "rt-multi-thread",
   "macros",
   "signal",
@@ -105,7 +105,7 @@ tokio = { version = "1.53", features = [
 ] }
 
 # HTTP / networking
-hyper = { version = "1.11", features = ["server", "http1", "http2"] }
+hyper = { version = "1.12", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = [
   "tokio",
   "server-auto",
@@ -120,6 +120,7 @@ config = { version = "0.15.25", default-features = false, features = ["yaml"] }
 url = "2.5.8"
 
 # Serialization
+bollard-stubs = { version = "=1.53.1-rc.29.3.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ciborium = "0.2"

@@ -8,7 +8,7 @@ This is the canonical review backlog for P0–P5. A corrected specification is n
 
 | ID | Priority / source | Finding and resolution | Remaining implementation gate |
 |---|---|---|---|
-| W01 | P1; `apps/rustack/src/main.rs:373`, runtime transport contract | Bollard logs request/response/attach bytes at debug/trace. Specification now requires an independent mandatory dependency filter, even with RUST_LOG=trace | P1: implement filter and captured-log secret/payload regression |
+| W01 | P1; `apps/rustack/src/main.rs:373`, runtime transport contract | Bollard logs request/response/attach bytes at debug/trace. Specification now requires an independent mandatory dependency filter, even with RUST_LOG=trace | Closed for implemented runtime/wire paths: mandatory task-bound filter plus captured Hyper and actual Bollard call-site regressions. Future Docker stream consumers must retain the same policy |
 | W02 | P1; runtime protocol contract | BootstrapReady was missing from the message variants despite being required by initialization. Specification fixed; real relay probe uses the separate signal | P1: implement production typed signal and initialization tests |
 | W03 | P1; runtime create contract | Omitted Architectures must default to x86_64, unlike an explicit empty list. Specification corrected | P1: normalize before validation and cover omission/empty/multiple |
 | W04 | P1; `codegen/src/shapes.rs:180`, `codegen/src/codegen.rs:263` | Generated chrono fields do not accept numeric AWS JSON timestamps. Independently reproduced; required/optional/fractional/negative codec behavior pinned | P2 task2.1: generator fix and executable generated round trips before service generation |
@@ -142,6 +142,22 @@ The independent read-only review found no concrete in-slice defect. It verified 
 rustack-core::json now exposes validated nonzero JsonLimits, validate and from_slice<T>. A linear encoded-string scan precedes DeserializeSeed traversal; the traversal retains only bounded object key sets and builds no dynamic Value tree. Typed materialization follows successful preflight, and domain validation still belongs to the service. Core now forbids unsafe code. Four existing core documentation-format findings were corrected so its complete strict production-boundary check passes without ignores; B03's Lambda/auth/model debt remains open.
 
 Core has39 passing tests (21 new JSON cases, including two512-case properties) and four passing doctests. `make test-json-boundaries` runs that suite and strict production Clippy. Workspace build/test/fmt/Clippy/rustdoc pass with1,888 tests and397 ignored resource tests. Existing proptest/rstest versions are reused only for core development; no dependency version/package was added. Audit/deny still report16 B01 advisories, with bans/licenses/sources passing. Docker metadata/stream consumers and all full P1/M0 exits remain required; a passing parser is not executor acceptance.
+
+## P1 task1.3 bounded Docker wire review
+
+The independent read-only review and final recheck found no remaining concrete in-slice issue after the lifecycle-wait correction below. Review covered typed operation paths and status handling, version negotiation, bounded serialization/JSON and HTTP framing, retained driver/handoff ownership, deadline/cancel races, worker panic settlement, strict multiplexed streaming and secret capture. No production DockerExecutor/provider acceptance is claimed.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W32 | P2; `crates/rustack-lambda-core/src/docker/mod.rs`, request admission | Long-lived Wait jobs could fill both reserved cleanup slots and prevent Kill/Remove. Dedicated bounded32-job/eight-mailbox wait lane now leaves two slots for inspect/kill/remove/list; six short business slots remain separate | Held-two-waits regression completes Kill before either wait is released; business saturation admits Remove; exported attach survives wire shutdown without retaining a management slot. D20 records the ownership rule |
+
+DockerWire and DockerPort implement bounded Unix management and strict upgraded attach using generated model-only bollard-stubs1.53.1-rc.29.3.1. All15 new fake-daemon/framing tests pass within227 Lambda core tests. The workspace passes1,903 tests (398 explicitly resource-gated), build/fmt/Clippy/rustdoc; the unchanged strict Lambda boundary debt remains B03, with no new Docker-path findings. Runtime contracts pass97 tests and48 doctests plus strict production checks and actual Linux entry-point Clippy. Eleven real Native fixture tests pass; the native SDK target passes its six actual native/DryRun cases, with its separately gated Squib case still excluded as VM evidence.
+
+The actual production-wire integration passes against official Python RIC images on arm64 VZ and amd64/QEMU, computing42/7 with warm counters1/2, transferring near6MiB requests/responses and surfacing a real FunctionError. Each run independently removes both named containers, joins stream/wire owners and checks its run-label scope; subsequent daemon queries find no owned wire containers. These stress cases use60s IO/120s attempt budgets rather than claiming default5s performance. The separate five-case relay suite remains required regression evidence on each daemon.
+
+W01's implemented filter now covers Hyper/hyper_util/Bollard independent of application TRACE. Production capture excludes request/response/header/partial-trailer markers while preserving application logs. The standalone compatibility suite passes eight tests/five doctests and Clippy, including actual Bollard create/logs construction/polls and truncated decoder fallback under LogTracer. It does not replace the stricter production framing decoder. Workspace/probe stacks align on Tokio1.54.1/Hyper1.12.0; root audit still has the same16 B01 advisories, deny bans/licenses/sources pass, and the standalone probe audit is clean. No ignore was added.
+
+Deployment/image actors, remaining stream/network/probe consumers, warm pooling, startup/resource checks, full SDK/provider acceptance and B01/B03 remain required before P1 closes. W30 is closed for implemented wire admission/handoff; future log/pull owners remain subject to its existing-reservation rule. W31's source citations remain pinned and checked.
 
 ## Existing baseline issues affecting final gates
 

@@ -1,6 +1,6 @@
 # Study: Bollard's Docker Response and Attach Boundaries
 
-Status: source review complete; no new runtime experiment · Date:2026-10-25 · Vendor pin: `vendors/bollard` @ `f9ec79e7546edfb674b1066c44a68815cb52251c` (`v0.21.1`)
+Status: pinned source review complete; bounded wire implementation and qualification recorded below · Date:2026-10-25 · Vendor pin: `vendors/bollard` @ `f9ec79e7546edfb674b1066c44a68815cb52251c` (`v0.21.1`)
 
 ## Question
 
@@ -71,3 +71,13 @@ Use the generated model/query contracts, with a small bounded Unix HTTP/upgrade 
 The earlier production suggestion to use Bollard's ordinary pipe client is superseded by D19; the retained P0 driver remains valid as a feasibility experiment. This is an in-phase transport refinement, not a request to rewrite the Docker API or support another container platform.
 
 Required implementation evidence remains bounded fake-daemon tests, actual attach/large-payload/truncation checks, TRACE capture and the established arm64/amd64 RIC lanes. No unresolved source assumption authorizes bypassing those tests. A source review is not proof that the forthcoming bounded adapter works.
+
+## Implementation follow-through
+
+P1 now reuses only generated bollard-stubs models in production. DockerWire owns bounded version/info/image inspection, typed container create/start/inspect/kill/wait/remove/list and strict upgraded attach. Its actor retains request jobs after caller cancellation; ordinary HTTP drivers are aborted/joined or recover/drop their one-shot IO, and upgraded drivers join before socket transfer. A separate32-job wait lane prevents long-running lifecycle waits from starving the two destructive-cleanup slots. Deployment actors, log/pull/network/probe consumers, pool policy and provider integration remain required; this is not executor acceptance.
+
+The current workspace and standalone probe align on [Tokio1.54.1](https://docs.rs/crate/tokio/1.54.1) and [Hyper1.12.0](https://docs.rs/crate/hyper/1.12.0), rechecked against official package documentation on2026-10-25. The original Hyper1.11.1 audit remains historical evidence; mandatory task-bound filtering and fragmented trailer tests remain in effect on the updated stack.
+
+A retained compatibility regression calls the actual pinned Bollard0.21.1 create and logs APIs against a fake local Unix daemon under TRACE with LogTracer enabled. It covers synchronous stream construction, asynchronous request/response polls and the decoder's truncated-EOF Console fallback. Test-only markers in request environment, response warnings, container target and trailing bytes are absent from infrastructure capture while an application event remains present. The production boundary independently captures create requests, response bytes/headers and fragmented trailers. These are executed call-site tests, not only synthetic logging-target tests.
+
+The explicit `make test-lambda-docker-wire` target builds the real relay and unchanged official Python RIC image and uses DockerWire for daemon IO without the Docker CLI. It sends and receives6MiB-minus4096-byte-class data through actual multiplexed attach, checks computed warm results and a handler error, closes/joins the relay stream and verifies the run-label scope is empty after removal. Stress qualification uses60s IO/120s attempt budgets; it does not establish default5s latency or throughput. The existing five-test `test-lambda-runtime-docker` suite remains a separate relay-contract regression. Exact platform results and current review state are recorded in [verification](../../specs/rustack-workflows-70-verification-plan.md) and [implementation review](../../specs/rustack-workflows-93-review.md).

@@ -19,6 +19,9 @@ rustack-auth = { workspace = true }
 squib = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
+bollard-stubs = { workspace = true }
+percent-encoding = { workspace = true }
+form_urlencoded = { workspace = true }
 typed-builder = { workspace = true }
 winnow = { workspace = true }
 dashmap = { workspace = true }
@@ -42,4 +45,5 @@ parking_lot = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

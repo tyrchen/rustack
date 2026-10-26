@@ -150,6 +150,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [bounded Docker API boundary](./rustack-workflows-20-lambda-runtime-design.md#36-bounded-docker-api-boundary), [pinned source study](../docs/research/study-bollard-docker-transport-boundaries.md).
 - Date:2026-10-25. Production acceptance still requires the specified fake-daemon and real image tests; source inspection alone closes no runtime gate.
 
+## D20 — Separate lifecycle waits from destructive cleanup capacity
+
+- Context: a Docker wait request can remain pending for an environment lifetime. Sharing two reserved management slots with waits can prevent Kill/Remove from ever reaching the daemon.
+- Alternatives: use the ordinary business lane; increase one shared queue; poll container inspection repeatedly; allocate a dedicated bounded wait lane.
+- Decision: retain six short business jobs and two reserved inspect/kill/remove/list jobs, plus a separate lane of at most32 concurrent wait jobs with an eight-command mailbox. Environment owners issue at most one wait per environment. Attach handoff releases its short management slot before warm reuse.
+- Why: waiting for external termination must not consume the capacity needed to cause that termination. Separate admission and retained supervision provide bounded ownership without cleanup starvation.
+- Pinned by: [Docker request ownership and quotas](./rustack-workflows-20-lambda-runtime-design.md#36-bounded-docker-api-boundary); executable held-wait and business-saturation regressions in the Docker wire tests.
+- Date:2026-10-25. The wire lane does not itself own container lifetime or prove successful cleanup.
+
 ## Glossary
 
 | Term | Meaning in this specification |

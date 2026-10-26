@@ -4,6 +4,9 @@
 //! the production Runtime API or a hardened external CBOR deserializer.
 #![forbid(unsafe_code)]
 
+#[cfg(all(test, unix))]
+mod diagnostics_tests;
+
 use std::{
     fmt,
     io::{self, Cursor},

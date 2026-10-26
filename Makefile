@@ -22,7 +22,10 @@ lambda-runtime-fixture-image:
 test-lambda-runtime-docker: lambda-runtime-image lambda-runtime-fixture-image
 	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-runtime --test docker -- --ignored --test-threads=1
 
-.PHONY: lambda-runtime-build lambda-runtime-image lambda-runtime-fixture-image test-lambda-runtime-docker
+test-lambda-docker-wire: lambda-runtime-image lambda-runtime-fixture-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --test docker_wire -- --ignored --test-threads=1
+
+.PHONY: lambda-runtime-build lambda-runtime-image lambda-runtime-fixture-image test-lambda-runtime-docker test-lambda-docker-wire
 
 workflows-model-check:
 	@python3 -c 'import hashlib,json,pathlib; p=pathlib.Path("codegen/smithy-model"); m=json.loads((p/"stepfunctions.provenance.json").read_text()); raw=(p/"stepfunctions.json").read_bytes(); assert len(raw)==m["bytes"] and hashlib.sha256(raw).hexdigest()==m["sha256"], "SFN source hash mismatch"; s=json.loads(raw)["shapes"][m["service"]]; assert s["version"]=="2016-11-23" and "aws.protocols#awsJson1_0" in s["traits"] and s["traits"]["aws.auth#sigv4"]["name"]=="states"; print("Pinned SFN model verified:",len(s["operations"]),"operations")'

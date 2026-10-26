@@ -16,7 +16,7 @@ def handler(event, context):
         print("P0_BUSY_START=" + context.aws_request_id, flush=True)
         time.sleep(60)
     cgroup = Path("/sys/fs/cgroup")
-    return {
+    response = {
         "computed": event["value"] + 7,
         "counter": counter,
         "uid": os.getuid(),
@@ -25,3 +25,8 @@ def handler(event, context):
         "pidsMax": (cgroup / "pids.max").read_text().strip(),
         "rootReadOnly": bool(os.statvfs("/").f_flag & os.ST_RDONLY),
     }
+    if "padding" in event:
+        response["inputBytes"] = len(event["padding"].encode("utf-8"))
+    if event.get("response_bytes"):
+        response["large"] = "r" * event["response_bytes"]
+    return response
