@@ -370,10 +370,14 @@ async fn test_should_pool_real_warm_calls_and_evict_capacity_across_revision_cha
     result.and(retired.map_err(Into::into)).and(cleanup)
 }
 
+#[rstest::rstest]
+#[case::abandoned(false)]
+#[case::awaited_settlement(true)]
 #[tokio::test]
 #[ignore = "requires explicit Docker environment images/socket"]
-async fn test_should_join_pool_retirement_after_abandoning_an_observed_running_handler()
--> Result<()> {
+async fn test_should_join_pool_retirement_after_cancelling_an_observed_running_handler(
+    #[case] awaited: bool,
+) -> Result<()> {
     let mut fixture = Fixture::new().await?;
     let mut pool = EnvironmentPool::start(fixture.owner.port(), PoolConfig::default())?;
     let result = async {
@@ -388,14 +392,20 @@ async fn test_should_join_pool_retirement_after_abandoning_an_observed_running_h
             matches!(initial.result, RuntimeResult::Success(_)),
             "warm setup failed"
         );
-        let plan = fixture.plan_revision(revision)?;
-        let invocation = invocation(&json!({"value":1,"sleep":true}))?;
+        let plan = fixture.plan_revision(revision.clone())?;
+        let event = invocation(&json!({"value":1,"sleep":true}))?;
         let mut observed = FunctionLogs::start(
             fixture.wire.port().attach_logs(&key, deadline()).await?,
             Duration::from_secs(60),
             262_144,
         )?;
-        let call = tokio::spawn(async move { port.invoke(plan, invocation, false).await });
+        let mut call = match port.start(plan, event, false) {
+            Ok(call) => call,
+            Err(error) => {
+                observed.shutdown().await?;
+                return Err(error.into());
+            }
+        };
         let observation = timeout(Duration::from_secs(30), async {
             loop {
                 let snapshot = observed.snapshot(deadline()).await?;
@@ -411,17 +421,51 @@ async fn test_should_join_pool_retirement_after_abandoning_an_observed_running_h
         })
         .await
         .context("pooled handler did not start");
-        call.abort();
-        let joined = call.await;
-        let retired = pool.shutdown(deadline()).await;
+        let cancellation = if awaited {
+            call.cancel_and_wait(deadline()).await
+        } else {
+            drop(call);
+            pool.shutdown(deadline()).await
+        };
         let logs = observed.shutdown().await;
         observation??;
-        ensure!(
-            matches!(joined,Err(ref error) if error.is_cancelled()),
-            "pooled invocation task was not cancelled"
-        );
-        retired?;
+        cancellation?;
         logs?;
+        ensure!(
+            fixture.owner.port().status().allocated == 0,
+            "call returned before environment retirement"
+        );
+        ensure!(
+            matches!(
+                fixture
+                    .wire
+                    .port()
+                    .inspect_container(&key, deadline())
+                    .await,
+                Err(rustack_lambda_core::docker::DockerError::Status(
+                    http::StatusCode::NOT_FOUND
+                ))
+            ),
+            "cancelled function still exists"
+        );
+        if awaited {
+            ensure!(
+                port.status().accepting,
+                "per-call cancellation stopped the pool"
+            );
+            let replacement = port
+                .invoke(
+                    fixture.plan_revision(revision)?,
+                    invocation(&json!({"value":2}))?,
+                    false,
+                )
+                .await?;
+            let RuntimeResult::Success(payload) = replacement.result else {
+                anyhow::bail!("replacement handler failed");
+            };
+            let output: Value = serde_json::from_slice(payload.as_ref())?;
+            ensure!(output["counter"] == 1, "cancelled environment was reused");
+        }
         Ok(())
     }
     .await;

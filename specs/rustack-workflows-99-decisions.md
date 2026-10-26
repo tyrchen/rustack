@@ -308,3 +308,13 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: current-call observed output has bounded explicit ownership, silent calls cannot inherit the cached tail, and uncertain mutations forbid reuse. The advertised stream timing limit preserves honest compatibility.
 - **Pinned by**: [runtime §3.9](./rustack-workflows-20-lambda-runtime-design.md#39-invocation-scoped-log-windows), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26.
+
+
+## D35 — Keep per-call pool cleanup settlement above dispatch workers
+
+- **Context**: the Docker Executor must retain provider invocation permits through cancellation cleanup, including response-channel closure and pool worker/root failure.
+- **Alternatives considered**: dropping an invoke future only requests cancellation; using a response-channel close as cleanup proof loses physical ownership; worker-local settlement senders disappear during panic; reusing an invocation deadline can skip cleanup once that deadline expires.
+- **Decision**: expose an exclusive PoolInvocation with cancel-safe response waiting and a separate resumable cancellation-settlement operation; retain the sender beside the environment Retirement record above JoinSet and through emergency recovery.
+- **Why**: upper-layer admission can await a positive reusable/retired proof without owning or aborting lower-layer resources. Failed supervision remains uncertain even after physical recovery; queued no-allocation rejection can settle cleanly.
+- **Pinned by**: [runtime §4.5](./rustack-workflows-20-lambda-runtime-design.md#45-supervised-pool-invocation-receipt), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. This receipt does not enable production Docker or complete Executor/provider integration.

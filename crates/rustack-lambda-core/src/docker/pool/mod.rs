@@ -20,7 +20,8 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    EnvironmentError, EnvironmentPlan, EnvironmentPort, EnvironmentResponse, check_deadline,
+    DockerError, EnvironmentError, EnvironmentPlan, EnvironmentPort, EnvironmentResponse,
+    check_deadline,
 };
 use crate::invocation::CleanupTask;
 
@@ -85,6 +86,7 @@ struct Call {
     cancellation: watch::Receiver<bool>,
     reply: oneshot::Sender<Offer>,
     queue: Option<tokio::sync::OwnedSemaphorePermit>,
+    settlement: watch::Sender<Option<Result<(), EnvironmentError>>>,
 }
 impl Call {
     fn deadline(&self) -> Instant {
@@ -103,17 +105,122 @@ impl Call {
         }
     }
     fn reject(self, error: EnvironmentError) {
+        // No environment has been allocated for a rejected queued call.
+        self.settlement.send_replace(Some(Ok(())));
         let _ = self.reply.send(Offer {
             result: Err(error),
             receipt: None,
         });
     }
 }
-struct CancelOnDrop {
+/// Exclusive response and retained cleanup receipt for one accepted pool call.
+///
+/// Drop requests cancellation; only `cancel_and_wait` proves settlement.
+#[non_exhaustive]
+pub struct PoolInvocation {
+    deadline: Instant,
     stop: watch::Sender<bool>,
+    response: Option<oneshot::Receiver<Offer>>,
+    settlement: watch::Receiver<Option<Result<(), EnvironmentError>>>,
+    failed: Arc<AtomicBool>,
     consumed: bool,
 }
-impl Drop for CancelOnDrop {
+impl fmt::Debug for PoolInvocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PoolInvocation")
+            .field("deadline", &self.deadline)
+            .field("consumed", &self.consumed)
+            .field("settled", &self.settlement.borrow().is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl PoolInvocation {
+    /// Consume one result while retaining the receiver across cancelled waiters.
+    ///
+    /// # Errors
+    /// Returns invocation failure, deadline, or unavailable supervision. A closed
+    /// response lane is not cleanup proof; use `cancel_and_wait` before releasing
+    /// higher-level work permits after cancellation or uncertain failure.
+    ///
+    /// ```no_run
+    /// # async fn result(call: &mut rustack_lambda_core::docker::PoolInvocation) {
+    /// let result = call.wait().await;
+    /// # }
+    /// ```
+    pub async fn wait(&mut self) -> Result<EnvironmentResponse, EnvironmentError> {
+        if self.consumed || self.response.is_none() {
+            return Err(EnvironmentError::Configuration);
+        }
+        let response = self
+            .response
+            .as_mut()
+            .ok_or(EnvironmentError::Configuration)?;
+        let received = timeout_at(self.deadline, response)
+            .await
+            .map_err(|_| EnvironmentError::Deadline)?;
+        self.response.take();
+        let offer = received.map_err(|_| {
+            if self.failed.load(Ordering::Acquire) {
+                EnvironmentError::Worker
+            } else {
+                EnvironmentError::Stopped
+            }
+        })?;
+        // Remove a completed receiver even when the deadline check rejects its
+        // offer. Dropping that offer revokes any unconsumed warm-return receipt.
+        if Instant::now() >= self.deadline {
+            return Err(EnvironmentError::Deadline);
+        }
+        if let Some(receipt) = offer.receipt {
+            receipt.send(()).map_err(|()| EnvironmentError::Worker)?;
+        }
+        self.consumed = true;
+        offer.result
+    }
+
+    /// Request cancellation and await independently owned physical settlement.
+    ///
+    /// A cancelled/expired waiter can resume with a fresh cleanup deadline.
+    /// Consumed success belongs to the pool and cannot be cancelled by this call.
+    ///
+    /// # Errors
+    /// Returns Deadline while cleanup remains retained, or Worker when recovery
+    /// was uncertain or the settlement producer disappeared without proof.
+    /// Cleanup deadlines over ten minutes return Configuration after signalling.
+    ///
+    /// ```no_run
+    /// # async fn stop(call: &mut rustack_lambda_core::docker::PoolInvocation) {
+    /// let settled = call.cancel_and_wait(tokio::time::Instant::now()
+    ///     + std::time::Duration::from_secs(60)).await;
+    /// # }
+    /// ```
+    pub async fn cancel_and_wait(&mut self, deadline: Instant) -> Result<(), EnvironmentError> {
+        if !self.consumed {
+            self.stop.send_replace(true);
+            self.response.take();
+        }
+        Self::check_cleanup_deadline(deadline)?;
+        loop {
+            let result = self.settlement.borrow().clone();
+            if let Some(result) = result {
+                return result;
+            }
+            timeout_at(deadline, self.settlement.changed())
+                .await
+                .map_err(|_| EnvironmentError::Deadline)?
+                .map_err(|_| EnvironmentError::Worker)?;
+            Self::check_cleanup_deadline(deadline)?;
+        }
+    }
+    fn check_cleanup_deadline(deadline: Instant) -> Result<(), EnvironmentError> {
+        check_deadline(deadline).map_err(|error| match error {
+            DockerError::Deadline => EnvironmentError::Deadline,
+            DockerError::Configuration => EnvironmentError::Configuration,
+            error => error.into(),
+        })
+    }
+}
+impl Drop for PoolInvocation {
     fn drop(&mut self) {
         if !self.consumed {
             self.stop.send_replace(true);
@@ -156,6 +263,25 @@ impl PoolPort {
         invocation: Invocation,
         capture_logs: bool,
     ) -> Result<EnvironmentResponse, EnvironmentError> {
+        self.start(plan, invocation, capture_logs)?.wait().await
+    }
+    /// Admit once and retain separate response/cancellation-settlement ownership.
+    ///
+    /// # Errors
+    /// Rejects expired calls, unavailable image pins, overload or closed admission
+    /// before enqueueing. Scope validation also occurs before physical allocation.
+    ///
+    /// ```no_run
+    /// # fn start(port: &rustack_lambda_core::docker::PoolPort, plan: rustack_lambda_core::docker::EnvironmentPlan, event: rustack_lambda_runtime::session::Invocation) {
+    /// let call = port.start(plan, event, false);
+    /// # }
+    /// ```
+    pub fn start(
+        &self,
+        plan: EnvironmentPlan,
+        invocation: Invocation,
+        capture_logs: bool,
+    ) -> Result<PoolInvocation, EnvironmentError> {
         let deadline = invocation.parts().1;
         if Instant::now() >= deadline {
             return Err(EnvironmentError::Deadline);
@@ -170,11 +296,8 @@ impl PoolPort {
             .try_acquire_owned()
             .map_err(|_| EnvironmentError::Busy)?;
         let (stop, cancellation) = watch::channel(false);
-        let mut cancel = CancelOnDrop {
-            stop,
-            consumed: false,
-        };
         let (reply, response) = oneshot::channel();
+        let (settlement, observed) = watch::channel(None);
         self.sender
             .try_send(Call {
                 plan: Arc::new(plan),
@@ -183,23 +306,20 @@ impl PoolPort {
                 cancellation,
                 reply,
                 queue: Some(queue),
+                settlement,
             })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => EnvironmentError::Busy,
                 mpsc::error::TrySendError::Closed(_) => self.closed_error(),
             })?;
-        let offer = timeout_at(deadline, response)
-            .await
-            .map_err(|_| EnvironmentError::Deadline)?
-            .map_err(|_| self.closed_error())?;
-        if Instant::now() >= deadline {
-            return Err(EnvironmentError::Deadline);
-        }
-        if let Some(receipt) = offer.receipt {
-            let _ = receipt.send(());
-        }
-        cancel.consumed = true;
-        offer.result
+        Ok(PoolInvocation {
+            deadline,
+            stop,
+            response: Some(response),
+            settlement: observed,
+            failed: self.failed.clone(),
+            consumed: false,
+        })
     }
     fn closed_error(&self) -> EnvironmentError {
         if self.failed.load(Ordering::Acquire) {

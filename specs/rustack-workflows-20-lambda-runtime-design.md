@@ -634,6 +634,32 @@ Caller                   Pool actor / retained registry       Environment owner
 
 Tests must pin identity isolation/order normalization, queue+active bounds, FIFO capacity waiting, LRU and per-identity retention, dead idle handles, cancellation before/after dispatch and at ready-result receipt, no replay after startup failure, root/worker abort recovery and cancelled/repeated shutdown. Actual image-RIC qualification must prove warm counter reuse, independent-function/revision cold counters, bounded capacity eviction and no owned allocations after joined shutdown. This pool does not establish startup reconciliation, registry/network/resource probes or production backend readiness.
 
+### 4.5 Supervised pool invocation receipt
+
+The Executor consumer needs a cancellation settlement port distinct from a response future. `PoolPort::start(plan, invocation, capture_logs)` synchronously admits once and returns an exclusive `PoolInvocation`; immediate overload/readiness errors and actor-side scope rejections allocate nothing. Existing `PoolPort::invoke` delegates to start plus wait and retains its response behavior. No method replays an invocation.
+
+`PoolInvocation::wait(&mut self)` is cancel-safe while pending. It preserves the response receiver across a dropped waiter, validates the absolute invocation deadline before synchronously acknowledging a successful result, and disarms cancellation only after consuming a valid offer. A ready-but-unconsumed result still belongs to the retained dispatch worker. A consumed response cannot be consumed twice. Success already proves the environment reusable; FunctionError and ordinary failure offers are published only after physical retirement or a no-allocation rejection. Closed response channels alone prove neither result nor cleanup.
+
+`cancel_and_wait(&mut self, cleanup_deadline)` requests cancellation and closes the unconsumed response lane before validating the independent cleanup deadline. It then awaits a cached per-call settlement receipt. An expired invocation deadline cannot shorten this cleanup budget. A timed-out or dropped cleanup waiter retains its receiver and may resume; Drop signals cancellation without claiming cleanup. After a consumed successful response, this operation only waits for bookkeeping settlement and cannot cancel an environment returned to another call.
+
+Keep each dispatched call's settlement sender alongside its environment Retirement record **above** the pool JoinSet. Normal completion publishes clean only after reusable/retired proof; a failed worker/root carries Worker uncertainty through retained recovery and publishes only after owned physical retirement. Never derive clean from sender Drop, response-channel closure, aborted workers or a cleanup timeout. Queued calls rejected before allocation publish clean settlement. Maintenance retirement has no call receipt. The Executor must retain the Lambda invocation work future/permits through this independent settlement, returning CleanupFailed for unresolved or uncertain ownership. Startup readiness, production enablement and Executor response mapping remain separate mandatory consumers.
+
+```text
+Lambda work owner          PoolInvocation          Pool actor registry       Environment owner
+ │                          │                     [Retirement + receipt]          │
+ │ start ──────────────────▶│ ── bounded admission ─────▶│                         │
+ │                          │                          │ allocate/checkout ──────▶│
+ │ wait (cancel-safe) ──────▶│◀──── result offer ────────│◀── actual result ───────│
+ │ cancellation             │                          │                         │
+ │ cancel_and_wait ────────▶│ ── stop/drop offer ──────▶│ ── retire ─────────────▶│
+ │ keeps permits            │                          │ waits physical + IO ◀───│
+ │                          │◀── cached settlement ─────│                         │
+ │ release only on proof ◀──│                          │                         │
+ └─ waiter/root loss: registry transfers receipt + retirement into retained recovery ─┘
+```
+
+Tests must hold retirement behind a channel barrier and prove cancellation does not return early, including invocation expiry and dropped cleanup waiters. Cover queued no-allocation rejection, consumed-success bookkeeping without retiring warm reuse, root/worker abort recovery and closed-receipt uncertainty. These ownership tests do not establish actual Docker/provider acceptance.
+
 ## 5. Isolation and resource limits
 
 - Initial Docker transport is a local Unix socket only. Disable implicit TCP/SSH fallback. Explicit docker configuration requires a startup daemon/version/relay-image/resource-limit probe; failure aborts startup. Default remains disabled. Auto does not acquire a new Docker fallback; Image on native/squib/auto fails explicitly.

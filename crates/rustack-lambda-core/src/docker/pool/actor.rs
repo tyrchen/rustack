@@ -37,6 +37,29 @@ pub(super) struct Completion {
     warm: Option<Warm>,
     failed: bool,
 }
+pub(super) struct Record {
+    retirement: Retirement,
+    settlement: Option<watch::Sender<Option<Result<(), EnvironmentError>>>>,
+    failed: bool,
+}
+impl Record {
+    fn maintenance(retirement: Retirement) -> Self {
+        Self {
+            retirement,
+            settlement: None,
+            failed: false,
+        }
+    }
+    fn publish(self, failed: bool) {
+        if let Some(settlement) = self.settlement {
+            settlement.send_replace(Some(if self.failed || failed {
+                Err(EnvironmentError::Worker)
+            } else {
+                Ok(())
+            }));
+        }
+    }
+}
 #[derive(TypedBuilder)]
 pub(super) struct Actor {
     environments: EnvironmentPort,
@@ -54,7 +77,7 @@ pub(super) struct Actor {
     #[builder(default)]
     jobs: JoinSet<Completion>,
     #[builder(default)]
-    receipts: HashMap<Id, Retirement>,
+    receipts: HashMap<Id, Record>,
     #[builder(default)]
     settled: bool,
     #[builder(default)]
@@ -177,10 +200,14 @@ impl Actor {
             match environment {
                 Ok(environment) => {
                     call.queue.take();
-                    let receipt = environment.retirement();
+                    let record = Record {
+                        retirement: environment.retirement(),
+                        settlement: Some(call.settlement.clone()),
+                        failed: false,
+                    };
                     let stop = self.stop.subscribe();
                     let job = self.jobs.spawn(invoke(environment, key, call, stop));
-                    self.receipts.insert(job.id(), receipt);
+                    self.receipts.insert(job.id(), record);
                 }
                 Err(EnvironmentError::Busy) => {
                     self.pending.push_front(call);
@@ -202,9 +229,12 @@ impl Actor {
         self.retire_receipt(receipt)
     }
     fn retire_receipt(&mut self, receipt: Retirement) -> Id {
-        receipt.cancel();
-        let job = self.jobs.spawn(retire(receipt.clone()));
-        self.receipts.insert(job.id(), receipt);
+        self.retire_record(Record::maintenance(receipt))
+    }
+    fn retire_record(&mut self, record: Record) -> Id {
+        record.retirement.cancel();
+        let job = self.jobs.spawn(retire(record.retirement.clone()));
+        self.receipts.insert(job.id(), record);
         job.id()
     }
     fn completed(&mut self, result: Result<(Id, Completion), tokio::task::JoinError>) {
@@ -232,10 +262,14 @@ impl Actor {
                     self.retire(warm.environment);
                 }
             }
+            if let Some(record) = receipt {
+                record.publish(completion.failed);
+            }
         } else {
             self.fail();
-            if let Some(receipt) = receipt {
-                self.retire_receipt(receipt);
+            if let Some(mut record) = receipt {
+                record.failed = true;
+                self.retire_record(record);
             }
         }
     }
@@ -257,11 +291,12 @@ impl Drop for Actor {
         let mut jobs = mem::take(&mut self.jobs);
         let mut receipts: Vec<_> = mem::take(&mut self.receipts).into_values().collect();
         for warm in self.warm.drain(..) {
-            receipts.push(warm.environment.retirement());
+            receipts.push(Record::maintenance(warm.environment.retirement()));
             drop(warm);
         }
-        for receipt in &receipts {
-            receipt.cancel();
+        for record in &mut receipts {
+            record.failed = true;
+            record.retirement.cancel();
         }
         jobs.abort_all();
         self.emergency.start_on(&self.runtime, move || async move {
@@ -270,32 +305,34 @@ impl Drop for Actor {
         });
     }
 }
-async fn recover(receipts: Vec<Retirement>) -> Result<(), ExecutorError> {
+async fn recover(receipts: Vec<Record>) -> Result<(), ExecutorError> {
     let mut cleanup = JoinSet::new();
     let mut index = HashMap::new();
     let mut failed = false;
-    for receipt in receipts {
-        let job = cleanup.spawn(retire(receipt.clone()));
-        index.insert(job.id(), receipt);
+    for record in receipts {
+        let job = cleanup.spawn(retire(record.retirement.clone()));
+        index.insert(job.id(), record);
     }
     while let Some(result) = cleanup.join_next_with_id().await {
         let id = match &result {
             Ok((id, _)) => *id,
             Err(error) => error.id(),
         };
-        let Some(receipt) = index.remove(&id) else {
+        let Some(mut record) = index.remove(&id) else {
             continue;
         };
         if let Ok((_, completion)) = result {
             failed |= completion.failed;
-            if receipt.removed() {
+            if record.retirement.removed() {
+                record.publish(completion.failed);
                 continue;
             }
         } else {
             failed = true;
+            record.failed = true;
         }
-        let job = cleanup.spawn(retire(receipt.clone()));
-        index.insert(job.id(), receipt);
+        let job = cleanup.spawn(retire(record.retirement.clone()));
+        index.insert(job.id(), record);
     }
     if failed {
         Err(ExecutorError::CleanupFailed(
@@ -388,14 +425,52 @@ pub(super) fn testing_start(
     config: PoolConfig,
     warm: Vec<(String, EnvironmentHandle)>,
 ) -> super::EnvironmentPool {
-    testing_start_inner(environments, config, warm, false)
+    testing_start_inner(environments, config, warm, false, None)
 }
 #[cfg(test)]
 pub(super) fn testing_failed_worker_start(
     environments: EnvironmentPort,
     warm: Vec<(String, EnvironmentHandle)>,
 ) -> super::EnvironmentPool {
-    testing_start_inner(environments, PoolConfig::default(), warm, true)
+    testing_start_inner(environments, PoolConfig::default(), warm, true, None)
+}
+#[cfg(test)]
+pub(super) fn testing_failed_call_start(
+    environments: EnvironmentPort,
+    plan: crate::docker::EnvironmentPlan,
+    invocation: rustack_lambda_runtime::session::Invocation,
+    environment: EnvironmentHandle,
+) -> (super::EnvironmentPool, super::PoolInvocation) {
+    let deadline = invocation.parts().1;
+    let (stop, cancellation) = watch::channel(false);
+    let (reply, response) = oneshot::channel();
+    let (settlement, observed) = watch::channel(None);
+    let key = plan.warm_key().to_owned();
+    let call = Call {
+        plan: Arc::new(plan),
+        invocation,
+        capture_logs: false,
+        cancellation,
+        reply,
+        queue: None,
+        settlement,
+    };
+    let pool = testing_start_inner(
+        environments,
+        PoolConfig::default(),
+        vec![(key, environment)],
+        true,
+        Some(call),
+    );
+    let invocation = super::PoolInvocation {
+        deadline,
+        stop,
+        response: Some(response),
+        settlement: observed,
+        failed: pool.port.failed.clone(),
+        consumed: false,
+    };
+    (pool, invocation)
 }
 #[cfg(test)]
 fn testing_start_inner(
@@ -403,6 +478,7 @@ fn testing_start_inner(
     config: PoolConfig,
     warm: Vec<(String, EnvironmentHandle)>,
     failed_worker: bool,
+    failed_call: Option<Call>,
 ) -> super::EnvironmentPool {
     let runtime = Handle::current();
     let maximum = usize::from(config.0.queue);
@@ -429,11 +505,20 @@ fn testing_start_inner(
     if failed_worker {
         let warm = actor.warm.pop_front().unwrap();
         let receipt = warm.environment.retirement();
+        let settlement = failed_call.as_ref().map(|call| call.settlement.clone());
         let job = actor.jobs.spawn(async move {
             let _owned = warm;
+            let _call = failed_call;
             std::future::pending::<Completion>().await
         });
-        actor.receipts.insert(job.id(), receipt);
+        actor.receipts.insert(
+            job.id(),
+            Record {
+                retirement: receipt,
+                settlement,
+                failed: false,
+            },
+        );
         job.abort();
     }
     let port = super::PoolPort {

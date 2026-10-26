@@ -395,6 +395,22 @@ Each retained Engine29.5.2 daemon explicitly passes owner/pool6, wire2 and share
 
 Window attribution follows observed completed chunks, with the independent-stream timing limit advertised in runtime/operations specs. Production Executor/provider base64 header wiring, historical reconciliation, allowed pulls/network/probes and M0 SDK acceptance remain required; P2–P5 remain pending.
 
+## P1 task1.3 supervised pool invocation review
+
+Independent read-only review covers runtime §4.5/D35, PoolPort::start and PoolInvocation response/settlement ownership, actor registry records above JoinSet, worker/root recovery, queued no-allocation rejection, independent cleanup deadlines and the real running-handler cancellation test. The final source review has no remaining in-slice finding. One test-fixture lifecycle finding was corrected before final verification.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W86 | P3; `crates/rustack-lambda-core/tests/docker_environment.rs`, log observer followed by synchronous pool admission | A start rejection after observer attachment could skip the explicit observer join. Match admission failure and await observed.shutdown before returning the original error | Final review verifies both admission failure and normal observation/cancellation branches join the observer; no detached observer is accepted as cleanup proof |
+
+The pool target passes27 cases (nine additions): gated cancellation and invocation expiry, cancelled/timed-out cleanup waiters, retained worker/root-abort receipts, queued no-allocation rejection, resumable pending response wait and consumed-success warm reuse, missing settlement producer, and cancellation before invalid cleanup deadline rejection. Closed response channels cannot grant cleanup proof. No dependency/version or advisory exception is introduced.
+
+Final standard workspace build/test/fmt/Clippy/rustdoc pass with2,286 tests, zero failures and408 separately resource-gated cases. The six-library strict boundary target passes870 unit tests and204 doctests (1,074 total),14 separately gated Docker cases and all strict production checks. Evidence is retained in `/tmp/rustack-workflows-settlement-verified-{build,tests,fmt,clippy,docs,boundaries}.log`.
+
+The final owner/pool suite explicitly passes7 actual-image cases with zero ignored on each retained Engine29.5.2 daemon: arm64 VZ and amd64/QEMU. The new awaited cancellation case proves owner allocation0 and container404 before pool shutdown, keeps pool admission open and obtains replacement handler counter1. The separate abandoned-call path and prior warm/revision/error/timeout/log cases remain green. Post-run scoped queries find no owner/test-labeled containers or internal image aliases. QEMU is not native-x86 platform acceptance. Logs: `/tmp/rustack-workflows-settlement-verified-{arm64,amd64}.log`.
+
+Production Executor/provider composition must consume this cancellation settlement before releasing its work permits. Startup reconciliation, allowed pulls, network/resource probes, M0 SDK acceptance and P2–P5 remain required. The receipt alone does not enable Docker or complete M0.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |
