@@ -366,3 +366,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: protocol qualification is independently testable without claiming workflow execution; core keeps domain/compiler semantics and cleanup ownership. Encoded page budgets prevent successful responses from relying on unbounded allocation.
 - **Pinned by**: [API §1.2](./rustack-workflows-10-api-design.md#12-typed-http-boundary-before-registry-wiring), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Reuse existing HTTP/auth/JSON/Tokio/async-trait dependencies. Unknown-action404 follows the current official common-error reference; no AWS error-precedence execution is claimed.
+
+## D42 — Compile bounded paths against immutable validated payloads
+
+- **Context**: the registry/compiler and every state evaluator need shared data semantics before the execution owner exists.
+- **Alternatives considered**: a general JSONPath engine admits unsupported syntax; interpreting path strings on every transition repeats validation; arbitrary Value cloning/serialization can allocate far beyond the output quota.
+- **Decision**: compile a bounded winnow subset into private typed segments; distinguish missing/single/selection results, borrow immutable payloads and materialize through a bounded writer. Validate result-target roots and prohibit array growth. Construct from borrowed trees only after structural/encoded checks; give the internal context separate byte/depth/member headroom while retaining normal limits on selected outputs.
+- **Why**: one pure implementation pins data behavior for future compiler/engine consumers without coupling core to HTTP, an SDK or Docker. Original business input bytes survive for name idempotency.
+- **Pinned by**: [ASL§2.1.1](./rustack-workflows-30-asl-design.md#211-executable-path-and-payload-foundation), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse the already resolved winnow1.0.4 and shared JSON/bytes/serde dependencies. This is a semantic foundation, not engine acceptance.

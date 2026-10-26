@@ -33,6 +33,36 @@ Use winnow for an explicit ASL subset rather than treating a general JSONPath cr
 
 Return Missing, Single or Selection, distinguishing JSON null from no match. Wildcard/slice selections remain arrays even with one match. Array ordering is stable; object wildcard uses deterministic key order as a local behavior, not an AWS object-order guarantee. Reference lookup failures do not panic or become null.
 
+#### 2.1.1 Executable path and payload foundation
+
+The first `rustack-stepfunctions-core` slice exposes only implemented pure semantics: immutable Payload, compiled Path/ReferencePath and bounded result merging. It does not supply a registry, handler or advertised service capability. Core depends on shared JSON validation, not HTTP, Lambda or an SDK. Reuse the workspace winnow1.0 parser (current1.0.4 [API](https://docs.rs/winnow/1.0.4/winnow/)); no new external dependency is required.
+
+Payload constructors validate at most262,144 original UTF-8 JSON bytes, depth64 and65,536 aggregate members through the shared duplicate-key preflight. Preserve original bytes for API idempotency and expose only an immutable parsed value. Constructors accepting an existing Value borrow it; validate structure and finish bounded serialization before cloning, so rejection never recursively drops a caller-owned deeply nested tree. Serialization must stop at262,144 bytes rather than build an oversized buffer first. All diagnostic Debug/Display implementations redact values, paths and source text. Typed source errors remain available without public input excerpts.
+
+EvaluationContext has an independent internal envelope:4MiB,68 container levels and131,584 aggregate members, with each decoded string/key at most262,144 bytes. This accommodates full-size/depth/member-count Execution.Input and Map.Item.Value plus fixed context metadata. Compact exponent lexemes can expand during numeric serialization:65,535 copies of1e9 fit262,141 source bytes but encode to about852KiB. The pinned serializer uses at most24 bytes per numeric value; a conservative allowance of both original256KiB sources plus24 extra bytes per131,584 members and256KiB metadata remains below4MiB. Test both exponent-heavy inputs together and mixed exponent/string payloads, rather than deriving context capacity from string fixtures alone. It is immutable, constructed from a borrowed validated tree before cloning, and redacts Debug. Engine-owned typed builders must later constrain the actual context schema and per-field metadata. Selecting from context still materializes through the ordinary payload's256KiB/depth64/member65,536 boundary; the context root itself need not fit that output boundary. Converting an existing Payload into EvaluationContext shares its immutable Arc and requires no serialization.
+
+Paths are at most1,024 UTF-8 bytes and128 segments. Dot member shorthand starts with an ASCII letter/underscore or non-ASCII non-control scalar; subsequent characters may also be ASCII digits. Bracket members use single quotes and support only escaped single quote/backslash; reject control characters and unterminated/unknown escapes. Bracket indices are decimal usize values with checked conversion; slices allow omitted lower/upper bounds, defaulting to zero/array length, and never negative indices, steps or whitespace. The whole string must parse. A general path may use either root; ReferencePath rejects wildcard/slice segments, and a separate result-target conversion rejects the context root. This is the local subset of the [AWS path contract](https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-paths.html), not full JSONPath support.
+
+Evaluation borrows immutable payload/context values and bounds work to10,000 visited candidates/selected members per call. A wildcard/slice makes the result a Selection even with zero or one match; failed singular traversal is Missing, distinct from Single(null). Preserve array traversal order; explicitly sort object wildcard keys independently of serde_json feature unification. No missing/type mismatch is converted to null. Materialization returns a bounded Payload and raises a typed missing/data-limit/work-limit error. Selection materialization streams references through the bounded writer before building its owned value.
+
+Result merging accepts only the validated data-root ReferencePath. The root replaces the original payload. Nested object members may be created only as objects; writing through scalar/null or a missing member immediately followed by an array index fails. Existing arrays require an in-range index; never grow an array. Apply edits to an owned copy, preserving the original payload on every failure, and enforce the full output depth/member/byte limits after the edit. Discarding a result is a separate data-pipeline decision, not a special path spelling.
+
+```text
+┌─ bounded source text ─────────────┐   ┌─ bounded path text ────────────┐
+│ JSON preflight → Payload        │   │ winnow → Path / ReferencePath  │
+│ original bytes + immutable tree │   │ root + checked typed segments │
+└────────────────┬────────────────┘   └─────────────────┬──────────────┘
+                 └──────────────────┬──────────────────┘
+                                    ▼
+┌─ pure evaluator / result merge ────────────────────────────────────┐
+│ borrowed candidates;10,000 work units; deterministic selections  │
+│ Missing / Single / Selection → bounded writer → validated Payload │
+│ typed redacted failures; original input never mutated             │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+Tests must exercise the actual evaluator against independent examples in the semantic fixture catalog, exact source/compiled/expansion limits, hostile escapes/overflow, context access, consecutive wildcards, null/missing/empty selection, scalar merges and non-growing arrays. Property tests cover arbitrary UTF-8 parsing and quoted-key round trips; this foundation does not satisfy complete compiler/engine acceptance.
+
 ### 2.2 Data processing
 
 ```text

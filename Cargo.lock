@@ -4191,6 +4191,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustack-stepfunctions-core"
+version = "0.9.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "rstest",
+ "rustack-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "winnow",
+]
+
+[[package]]
 name = "rustack-stepfunctions-http"
 version = "0.9.0"
 dependencies = [
