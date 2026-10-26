@@ -513,6 +513,12 @@ ASL§2.4.1/D43 implements compiled predicate semantics, shared evaluation budget
 
 Focused evidence:125 total core unit cases and15 doctests pass, including the90-combination matrix, four independent Choice catalog cases and two new512-case properties. Ordinary all-targets and strict production core Clippy pass. This is predicate evidence, not a complete Choice state or compiler/engine acceptance. Final standard workspace build/test/fmt/Clippy/rustdoc pass with2,630 tests/415 gated, including retained deferred Docker changes. Model regeneration and strict model/HTTP targets plus the real signed SDK fixture pass after shared feature unification. B06 audit/deny failures remain explicitly open.
 
+## P2 Wait source independent review
+
+ASL§2.4.2/D44 implements the four typed Wait sources, source/dynamic validation, supplied-clock relative-duration resolution, target-only timestamp truncation and a365-day STANDARD cap. Shared source preflight/borrow validation is reused by Choice and Wait. The independent read-only reviewer reports no findings; scheduling/timer ownership is explicitly outside this pure component.
+
+Core166 unit cases/18 doctests and strict production/all-targets Clippy pass, including41 Wait additions and one512-case property. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,671 tests/415 gated, including the deferred Docker checkpoint. B06 audit/deny failures remain open. This does not close the compiler, registry, execution actor or M1 acceptance.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

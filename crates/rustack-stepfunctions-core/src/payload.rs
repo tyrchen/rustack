@@ -217,7 +217,7 @@ fn validate_value(value: &Value, limits: TreeLimits) -> Result<(), AslError> {
     Ok(())
 }
 
-pub(crate) fn validate_predicate(value: &Value) -> Result<(), AslError> {
+pub(crate) fn validate_component(value: &Value) -> Result<(), AslError> {
     validate_value(
         value,
         TreeLimits {
@@ -302,4 +302,9 @@ impl io::Write for LimitedWriter {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+pub(crate) fn parse_component(input: &[u8]) -> Result<Value, AslError> {
+    let limits = JsonLimits::new(1024 * 1024, 64, 4096, 262_144, 262_144)?;
+    from_slice(input, limits).map_err(AslError::Json)
 }

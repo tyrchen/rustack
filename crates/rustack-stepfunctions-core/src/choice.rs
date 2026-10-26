@@ -3,10 +3,12 @@
 use std::{borrow::Cow, cmp::Ordering, fmt};
 
 use chrono::{DateTime, Timelike};
-use rustack_core::json::{JsonLimits, from_slice};
 use serde_json::{Number, Value};
 
-use crate::{AslError, EvaluationContext, Payload, ReferencePath, payload::validate_predicate};
+use crate::{
+    AslError, EvaluationContext, Payload, ReferencePath,
+    payload::{parse_component, validate_component},
+};
 
 mod glob;
 use glob::Glob;
@@ -118,8 +120,7 @@ impl Predicate {
     /// # Ok::<(), rustack_stepfunctions_core::AslError>(())
     /// ```
     pub fn parse(input: &[u8]) -> Result<Self, AslError> {
-        let limits = JsonLimits::new(1024 * 1024, 64, 4096, 262_144, 262_144)?;
-        let value: Value = from_slice(input, limits)?;
+        let value = parse_component(input)?;
         Self::compile(&value)
     }
 
@@ -134,7 +135,7 @@ impl Predicate {
     /// # Ok::<(), rustack_stepfunctions_core::AslError>(())
     /// ```
     pub fn compile(value: &Value) -> Result<Self, AslError> {
-        validate_predicate(value)?;
+        validate_component(value)?;
         Self::node(value, 0, &mut 1024)
     }
 

@@ -9,6 +9,12 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Unsupported or ambiguous static Wait source definition.
+    #[error("invalid ASL Wait source")]
+    InvalidWait,
+    /// A dynamic Wait value has an invalid type, date or supported range.
+    #[error("invalid ASL Wait value")]
+    WaitValue,
     /// Unsupported, ambiguous or invalid Choice predicate definition.
     #[error("invalid ASL Choice predicate")]
     InvalidPredicate,

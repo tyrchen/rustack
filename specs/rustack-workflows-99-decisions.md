@@ -384,3 +384,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: a pure reusable evaluator pins semantics and makes local limits explicit before machine compilation and scheduling. It remains separate from transition-target ownership.
 - **Pinned by**: [ASL§2.4.1](./rustack-workflows-30-asl-design.md#241-executable-choice-predicate-contract), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Reuse existing chrono, JSON and reference paths. Numeric integers use the closed±2^53 range; floats exclude its endpoints to avoid source-rounding aliases. Enable shared serde_json float_roundtrip for correctly rounded interior numeric lexemes; no arbitrary_precision or new external version is added. Timestamp fractions retain precision beyond nanoseconds. No complete Choice state/engine acceptance is claimed.
+
+## D44 — Resolve Wait sources once before monotonic scheduling
+
+- **Context**: absolute Wait timestamps truncate target fractions, while execution deadlines and timer ownership remain monotonic.
+- **Alternatives considered**: sleeping inside a pure evaluator obscures ownership; repeatedly subtracting wall clocks follows NTP jumps; defaulting invalid dynamic values hides workflow errors.
+- **Decision**: compile exactly one typed source and resolve it against validated data/context plus one supplied wall-time sample, returning a bounded relative duration. The future actor owns checked monotonic scheduling and generations.
+- **Why**: static validation, dynamic failures and AWS whole-second target behavior can be pinned without a sleeping task or dependency on the HTTP caller lifetime.
+- **Pinned by**: [ASL§2.4.2](./rustack-workflows-30-asl-design.md#242-executable-wait-source-contract), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Use existing chrono/std/reference paths. STANDARD local wait cap is365 days; overall execution deadlines are independent. This is source evaluation, not scheduler acceptance.

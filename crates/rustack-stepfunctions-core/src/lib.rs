@@ -10,8 +10,10 @@ mod choice;
 mod error;
 mod path;
 mod payload;
+mod wait;
 
 pub use choice::Predicate;
 pub use error::AslError;
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};
 pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
+pub use wait::WaitSource;
