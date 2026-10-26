@@ -413,3 +413,5 @@ proptest! {
         let mut id=c.machine().start();for index in 0..count {prop_assert_eq!(c.machine().state_name(id).map_err(|e|TestCaseError::fail(e.to_string()))?,format!("s{index}"));match c.machine().state(id).map_err(|e|TestCaseError::fail(e.to_string()))? {StateView::Pass {next:Transition::Next(next),..}=>id=next,StateView::Succeed {..}=>prop_assert_eq!(index+1,count),_=>return Err(TestCaseError::fail("unexpected state"))}}
     }
 }
+
+mod structured;

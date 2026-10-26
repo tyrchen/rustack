@@ -155,6 +155,7 @@ test-stepfunctions-http-sdk:
 
 test-stepfunctions-core:
 	@cargo test -p rustack-stepfunctions-core
+	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order compiler::tests
 	@cargo clippy -p rustack-stepfunctions-core --all-targets -- -D warnings
 	@cargo clippy -p rustack-stepfunctions-core --lib --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 

@@ -1,12 +1,18 @@
 //! Immutable typed state storage and checked borrowed execution views.
 
-use std::{fmt, num::NonZeroU32, sync::Arc};
+use std::{
+    fmt,
+    num::{NonZeroU8, NonZeroU32},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use serde_json::Value;
 
 use super::{Catcher, Diagnostic, Integration, RecoveryPolicy, TenantScope};
-use crate::{AslError, DataFlow, Expression, Predicate, ReferencePath, ResultPath, WaitSource};
+use crate::{
+    AslError, DataFlow, Expression, Predicate, ReferencePath, ResultPath, Template, WaitSource,
+};
 
 /// State index constructible only by the compiler; interpreted in its machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,6 +43,21 @@ pub enum TaskTimeout {
 impl fmt::Debug for TaskTimeout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TaskTimeout(<redacted>)")
+    }
+}
+
+/// Normalized Inline Map concurrency, independent of task/frame capacity.
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum MapConcurrency {
+    /// Positive static limit; omission and zero normalize to forty.
+    Limit(NonZeroU8),
+    /// Singular reference resolved from the effective Map input on entry.
+    Path(ReferencePath),
+}
+impl fmt::Debug for MapConcurrency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MapConcurrency(<redacted>)")
     }
 }
 
@@ -96,6 +117,34 @@ pub enum StateView<'a> {
         /// Ordered recovery rules.
         recovery: &'a RecoveryPolicy,
         /// Pre-resolved continuation.
+        next: Transition,
+    },
+    /// Independent branch machines sharing this state's effective input.
+    Parallel {
+        /// Compiled input and result processing.
+        flow: &'a DataFlow,
+        /// Branches in definition/result order, each with a lexical state index.
+        branches: &'a [Arc<CompiledMachine>],
+        /// Ordered enclosing-state recovery.
+        recovery: &'a RecoveryPolicy,
+        /// Continuation in the enclosing machine.
+        next: Transition,
+    },
+    /// Normalized Inline Map instruction with one reusable processor artifact.
+    Map {
+        /// Input/output/result processing; excludes legacy selector Parameters.
+        flow: &'a DataFlow,
+        /// Array source, defaulting to the effective input root.
+        items: &'a ReferencePath,
+        /// Item input template evaluated with Map.Item context, when supplied.
+        selector: Option<&'a Template>,
+        /// Immutable processor with an independent lexical index.
+        processor: &'a Arc<CompiledMachine>,
+        /// Normalized local concurrency plan.
+        concurrency: &'a MapConcurrency,
+        /// Ordered enclosing-state recovery.
+        recovery: &'a RecoveryPolicy,
+        /// Continuation in the enclosing machine.
         next: Transition,
     },
     /// Ordered conditional branches with optional fallback.
@@ -169,6 +218,21 @@ pub(super) enum Node {
         recovery: RecoveryPolicy,
         next: Transition,
     },
+    Parallel {
+        flow: DataFlow,
+        branches: Vec<Arc<CompiledMachine>>,
+        recovery: RecoveryPolicy,
+        next: Transition,
+    },
+    Map {
+        flow: DataFlow,
+        items: ReferencePath,
+        selector: Option<Template>,
+        processor: Arc<CompiledMachine>,
+        concurrency: MapConcurrency,
+        recovery: RecoveryPolicy,
+        next: Transition,
+    },
     Choice {
         flow: DataFlow,
         branches: Vec<(Predicate, StateId)>,
@@ -206,6 +270,34 @@ impl Node {
                 recovery,
                 next: *next,
             },
+            Self::Parallel {
+                flow,
+                branches,
+                recovery,
+                next,
+            } => StateView::Parallel {
+                flow,
+                branches,
+                recovery,
+                next: *next,
+            },
+            Self::Map {
+                flow,
+                items,
+                selector,
+                processor,
+                concurrency,
+                recovery,
+                next,
+            } => StateView::Map {
+                flow,
+                items,
+                selector: selector.as_ref(),
+                processor,
+                concurrency,
+                recovery,
+                next: *next,
+            },
             Self::Choice {
                 flow,
                 branches,
@@ -240,6 +332,14 @@ impl Node {
                     next: Transition::End,
                     ..
                 }
+                | Self::Parallel {
+                    next: Transition::End,
+                    ..
+                }
+                | Self::Map {
+                    next: Transition::End,
+                    ..
+                }
                 | Self::Wait {
                     next: Transition::End,
                     ..
@@ -250,7 +350,9 @@ impl Node {
         let mut result = Vec::new();
         let transition = match self {
             Self::Pass { next, .. } | Self::Wait { next, .. } => Some(*next),
-            Self::Task { next, recovery, .. } => {
+            Self::Task { next, recovery, .. }
+            | Self::Parallel { next, recovery, .. }
+            | Self::Map { next, recovery, .. } => {
                 result.extend(recovery.catches().iter().map(Catcher::next));
                 Some(*next)
             }
@@ -273,7 +375,18 @@ impl Node {
             Self::Pass { flow, .. } | Self::Wait { flow, .. } | Self::Succeed(flow) => {
                 flow.node_count()
             }
-            Self::Task { flow, recovery, .. } => flow.node_count().saturating_add(recovery.units()),
+            Self::Task { flow, recovery, .. } | Self::Parallel { flow, recovery, .. } => {
+                flow.node_count().saturating_add(recovery.units())
+            }
+            Self::Map {
+                flow,
+                selector,
+                recovery,
+                ..
+            } => flow
+                .node_count()
+                .saturating_add(recovery.units())
+                .saturating_add(selector.as_ref().map_or(0, Template::node_count)),
             Self::Choice { flow, branches, .. } => branches
                 .iter()
                 .fold(flow.node_count(), |sum, (predicate, _)| {
@@ -289,10 +402,11 @@ pub(super) struct Row {
     pub(super) node: Node,
 }
 
-/// Immutable original-byte definition and indexed sequential instructions.
+/// Immutable root-source bytes and indexed instructions in one lexical scope.
 #[non_exhaustive]
 pub struct CompiledMachine {
     pub(super) original: Bytes,
+    pub(super) definition_root: bool,
     pub(super) rows: Vec<Row>,
     pub(super) start: StateId,
     pub(super) timeout: Option<NonZeroU32>,
@@ -304,16 +418,38 @@ impl fmt::Debug for CompiledMachine {
     }
 }
 impl CompiledMachine {
+    /// Whether this artifact represents the complete original definition.
+    pub(crate) fn is_root_definition(&self) -> bool {
+        self.definition_root
+    }
+
     pub(crate) fn uses_lambda(&self) -> bool {
+        self.rows.iter().any(|row| match &row.node {
+            Node::Task { .. } => true,
+            Node::Parallel { branches, .. } => branches.iter().any(|branch| branch.uses_lambda()),
+            Node::Map { processor, .. } => processor.uses_lambda(),
+            _ => false,
+        })
+    }
+
+    /// Whether this scope requires a structured frame owner for execution.
+    ///
+    /// ```
+    /// # fn inspect(machine: &rustack_stepfunctions_core::CompiledMachine) {
+    /// let required = machine.requires_structured_execution();
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn requires_structured_execution(&self) -> bool {
         self.rows
             .iter()
-            .any(|row| matches!(&row.node, Node::Task { .. }))
+            .any(|row| matches!(&row.node, Node::Parallel { .. } | Node::Map { .. }))
     }
 
     read!(CompiledMachine,scope,&TenantScope,s=>&s.scope,"Read the validated scope captured during compilation.");
     read!(CompiledMachine,start,StateId,s=>s.start,"Read the validated entry ID.");
     read!(CompiledMachine,state_count,usize,s=>s.rows.len(),"Read the bounded number of compiled states.");
-    read!(CompiledMachine,original_bytes,&[u8],s=>s.original.as_ref(),"Read the exact successfully compiled source bytes.");
+    read!(CompiledMachine,original_bytes,&[u8],s=>s.original.as_ref(),"Read the exact original root definition bytes, shared by all scopes.");
     read!(CompiledMachine,timeout_seconds,Option<NonZeroU32>,s=>s.timeout,"Read the optional positive machine timeout.");
     /// Read a validated instruction through a checked machine-local ID.
     ///

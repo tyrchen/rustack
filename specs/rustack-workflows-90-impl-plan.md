@@ -98,6 +98,8 @@ Add `codegen-stepfunctions`, `test-stepfunctions` and a sequential `smoke-workfl
 
 **Exit:** all eight state types run; nested workflow example waits for actual child Lambda completion; string/JSON result distinction, fast-child races, cancellation, deadlock saturation and out-of-order fan-out tests pass. Unsupported service suffixes still reject.
 
+The first P3 dependency is the structured scope compiler in [ASL§1.2](./rustack-workflows-30-asl-design.md#12-structured-scope-compilation-and-staged-runtime-admission): shared bounded compilation, normalized Map IR and lexical branch indexes. This dependency alone does not close3.1 or enable the service profile. Retain Sequential API/driver admission until the frame owner and its lifecycle/history gates land.
+
 ## 7. P4 — Callback tasks, closes M3
 
 | Task | Dependency order | Contract | Days |

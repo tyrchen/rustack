@@ -648,6 +648,18 @@ Verification§3/D54 now qualify the selected M1 profile through ordinary Rust SD
 
 New aws-sdk-sfn1.123 requires matching aws-config1.13/shared protocol dependencies; existing SDK consumers compile and the workspace suites pass. The generated/model protocol and production SDK-free architecture remain unchanged. Fresh audit scans481 dependencies against1,378 advisories and still reports the existing B06 four vulnerabilities/ten unsound warnings. Deny advisories fail while bans/licenses/sources pass; no new ignore is added. This is selected M1 SDK feature acceptance on the actual host Native backend, not cloud differential, other-service live SDK acceptance, final security release clearance, later workflow milestones or image/platform qualification. Docker experiments remain deferred.
 
+## P3 structured compiler dependency independent review
+
+The structured compiler dependency in ASL§1.2/D55 extends typed IR and normalized scope compilation. It intentionally retains Sequential API and driver admission; this does not close P3 task3.1 or any runtime/child-integration exit criterion.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W153 | P2; `crates/rustack-stepfunctions-core/src/compiler/scope.rs:102`, independent lexical-index review | Assign IDs after names enter the sorted BTreeMap; source insertion order must not determine IDs while row emission remains lexical | Raw nonlexical root/nested definitions pass with default JSON maps and explicit preserve_order feature; Makefile retains both configurations |
+| W154 | P3; `crates/rustack-stepfunctions-core/src/compiler/tests/structured.rs`, independent boundary-fixture review | Distinguish scope nesting from JSON container nesting instead of requiring16 Parallel wrappers to bypass the64-container preflight cap | Exact16/17 Map processor nesting, mixed Map/Parallel property and separate excessive Parallel JSON-depth rejection |
+| W155 | P2; `crates/rustack-stepfunctions-core/src/compiler/ir.rs`, `registry/mod.rs`, independent revision-provenance review | Preserve private root/nested provenance and reject nested artifacts before accepting registry Create/Update; shared source bytes do not make a child a complete definition | Both sequential Parallel branches and Map processors fail Create and Update admission; rejected creates allocate no resource and rejected updates preserve the original revision Arc |
+
+Final independent read-only review reports no remaining in-slice findings. `make test-stepfunctions-core` passes490 unit cases,182 doctests and89 preserve_order compiler cases, followed by standard/strict production Clippy. Feature-enabled workspace build, all-target tests (3,049 passed/427 explicitly gated), Clippy, rustdoc with denied warnings and nightly formatting pass. The real Rust SDK/boto3/forced-runner suite also passes3 cases with no ignored tests. Evidence: `/tmp/rustack-p3-compiler-{core-final,build,workspace,clippy,docs,format,sdk}.log`. Six changed documents have241 resolvable local links, and diff whitespace checks pass. No dependencies, toolchain or Docker experiments changed; existing B06 remains open. Structured frame scheduling, concurrent causal history, sibling cleanup and nested integration remain required before P3/M2 acceptance.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

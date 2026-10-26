@@ -10,6 +10,9 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// The artifact requires an execution owner unavailable in this driver.
+    #[error("ASL artifact requires structured execution support")]
+    StructuredExecutionRequired,
     /// Invalid execution settings, context or clock sample.
     #[error("invalid ASL execution configuration")]
     InvalidExecution,

@@ -57,6 +57,9 @@ pub(crate) fn entered(
         StateView::Choice { .. } => HistoryEventType::ChoiceStateEntered,
         StateView::Succeed { .. } => HistoryEventType::SucceedStateEntered,
         StateView::Fail { .. } => HistoryEventType::FailStateEntered,
+        StateView::Parallel { .. } | StateView::Map { .. } => {
+            return Err(AslError::StructuredExecutionRequired);
+        }
     };
     let mut e = event(kind, wall);
     let mut d = StateEnteredEventDetails::default();
@@ -79,6 +82,9 @@ pub(crate) fn exited(
         StateView::Choice { .. } => HistoryEventType::ChoiceStateExited,
         StateView::Succeed { .. } => HistoryEventType::SucceedStateExited,
         StateView::Fail { .. } => return Err(AslError::InvalidStateId),
+        StateView::Parallel { .. } | StateView::Map { .. } => {
+            return Err(AslError::StructuredExecutionRequired);
+        }
     };
     let mut e = event(kind, wall);
     let mut d = StateExitedEventDetails::default();

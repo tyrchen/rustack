@@ -46,6 +46,33 @@ Literal payload caching uses a64-byte minimum bounded-writer reservation rather 
 
 Tests require all six IR forms, graph loops/invalid targets/unreachable terminals, field/profile/dependency/scope rejection, static optimized metadata, timeout and Retry/Catch defaults/ranges, fail expressions, original bytes, pointer escaping/redaction, duplicate/deep/large definitions, exact state/choice/compiled-node limits and malformed-input properties. This compiler is not endpoint, actor, resource execution or complete M1 acceptance.
 
+### 1.2 Structured scope compilation and staged runtime admission
+
+P3 extends the immutable IR with Parallel and Inline Map instructions. Each branch or processor owns an `Arc<CompiledMachine>` with a separate lexical StateId index. All scopes share one immutable copy of the original root definition bytes and the same validated tenant scope. `original_bytes()` on any nested artifact returns that root source, not a reserialized branch document. `state_count()` remains scope-local. Retain unforgeable root-versus-nested provenance in each artifact: registry Create/Update reject a nested artifact before accepting a command, even when its instructions are sequential and its tenant matches. A branch cannot be promoted into a root revision whose fingerprint/Describe source still denotes the containing definition. No nested scope can resolve transitions against its parent or siblings; repeated state names in independent scopes are valid. Run graph validation for every scope, including unreachable branches, and aggregate warnings with full root-relative JSON Pointers.
+
+Compilation traverses the already preflighted boundary tree once. A shared compilation context charges at most1,000 state definitions and65,536 state/component/policy units across the entire tree; neither counter resets at a nested scope. Root depth is0; at most16 nested branch/processor levels are allowed, independently of the64 JSON-container preflight limit. A Parallel has1–1,000 branches, additionally constrained by the shared state budget. Every scope has a nonempty States object and a reachable terminal. Branch/processor machines allow StartAt, States, Comment and QueryLanguage=JSONPath; Version and TimeoutSeconds are root-only. ItemProcessor additionally permits ProcessorConfig, an object with only optional Mode=INLINE; absent configuration, `{}` and INLINE are equivalent. Iterator has no ProcessorConfig. Distributed configuration and execution-type overrides fail compilation.
+
+A normalized Map instruction stores input/output/result data flow, a compiled ItemsPath (default `$`), optional compiled item-selector template, a processor artifact, concurrency metadata, ordered recovery and continuation. Legacy Parameters becomes the item selector, **not** the Map data-flow Parameters step. Reject Parameters+ItemSelector and Iterator+ItemProcessor independently; current and legacy spellings from different pairs may coexist. Require exactly one processor spelling. Preserve JSON null versus omission: a present selector must be an object. ItemsPath and MaxConcurrencyPath must be singular reference paths; wildcard/slice sources fail compilation. Concurrency is a typed positive static limit or a compiled dynamic reference. Omitted/zero static limits normalize to40; static1–40 are retained; negatives, fractions, values above40 and simultaneous literal/path fields fail. Dynamic value/type/range checks happen on entry, against the effective Map input after InputPath. Count the item-selector template toward the shared node budget. Parallel uses the ordinary Parameters and result pipeline. Both instructions compile Retry/Catch in the enclosing scope, and expose Catch edges to enclosing graph validation.
+
+The compiler's trusted `StateSupport` defaults to Sequential; explicit Structured enables construction/inspection of these artifacts for the frame executor. This flag is never a wire field or a readiness claim. Until the structured frame owner is installed, the sequential ExecutionDriver rejects structured artifacts before accepting an execution, and the real API retains Sequential support. This is an internal rollout boundary, not M2 acceptance. Remove the runtime restriction only together with bounded frame scheduling, causal history, sibling cancellation and child integration verification.
+
+```text
+┌─ strict root JSON + shared original Bytes ───────────────────────┐
+│ one budget: ≤1,000 states / ≤65,536 units / ≤16 nested scopes    │
+└────────────────────────────┬────────────────────────────────────┘
+                             ▼
+┌─ enclosing machine: lexical StateIds ───────────────────────────┐
+│ Parallel: branch Arcs ─┬─ independent machine/index → output[0] │
+│                       └─ independent machine/index → output[1] │
+│ Inline Map: one processor Arc; compiled selector + concurrency │
+│ Next / Catch resolve only in this enclosing machine            │
+└────────────────────────────┬────────────────────────────────────┘
+                             ▼
+          frame owner (next P3 dependency; API stays gated)
+```
+
+Compiler acceptance covers lexical reuse and cross-scope rejection for StartAt/Next/Choice/Catch, nested terminal validation and warnings, shared source ownership, current/legacy Map equivalence and conflicting pairs, exact state/unit/depth boundaries, nested Lambda dependency detection, pointer escaping/redaction and default API/driver refusal. P3 runtime acceptance remains the full scheduler/cleanup/nested-integration exit criteria in the implementation plan.
+
 ## 2. Supported ASL profile
 
 The [ASL specification](https://states-language.net/spec.html) supplies language terminology. The table below is the release contract; supporting eight state types does not imply support for every recent language extension.

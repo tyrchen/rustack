@@ -24,8 +24,9 @@ mod wait;
 pub use choice::Predicate;
 pub use compiler::{
     AslCompiler, CatchResult, Catcher, Compilation, CompileError, CompiledMachine, Diagnostic,
-    DiagnosticSeverity, FailureView, FunctionArn, Integration, Jitter, RecoveryPolicy, Retrier,
-    RetryTiming, StateId, StateView, TaskSupport, TaskTimeout, TenantScope, Transition,
+    DiagnosticSeverity, FailureView, FunctionArn, Integration, Jitter, MapConcurrency,
+    RecoveryPolicy, Retrier, RetryTiming, StateId, StateSupport, StateView, TaskSupport,
+    TaskTimeout, TenantScope, Transition,
 };
 pub use dataflow::DataFlow;
 pub use engine::{

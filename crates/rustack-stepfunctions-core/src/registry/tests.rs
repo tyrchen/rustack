@@ -1,6 +1,6 @@
 //! Domain and actual registry/execution lifecycle regressions.
 
-use std::{sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use proptest::prelude::*;
 use rstest::rstest;
@@ -13,7 +13,8 @@ use tokio::{
 use super::*;
 use crate::{
     AslCompiler, ExecutionError, ExecutionOutcome, HistoryLimits, LambdaTaskCommand,
-    LambdaTaskPort, RuntimeLimits, TaskCall, TaskFailure, TaskResponder, TaskSupport,
+    LambdaTaskPort, RuntimeLimits, StateSupport, StateView, TaskCall, TaskFailure, TaskResponder,
+    TaskSupport,
 };
 
 fn deadline() -> Instant {
@@ -820,4 +821,63 @@ async fn test_should_finish_accepted_task_after_all_registry_command_handles_are
         matches!(finished.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(p)) if p.value()==&json!(42))
     );
     owner.shutdown(deadline()).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_should_reject_nested_artifact_promotion_during_create_and_update()
+-> Result<(), Box<dyn Error>> {
+    let compiler = AslCompiler::default().with_state_support(StateSupport::Structured);
+    let (reg, mut owner) = registry(RegistryLimits::default(), None);
+    let first = machine(&reg, 1, false).await;
+    for state in [
+        json!({"Type":"Parallel","Branches":[{"StartAt":"Child","States":{"Child":{"Type":"Succeed"}}}],"End":true}),
+        json!({"Type":"Map","ItemProcessor":{"StartAt":"Child","States":{"Child":{"Type":"Succeed"}}},"End":true}),
+    ] {
+        let root = compiler.compile(&serde_json::to_vec(
+            &json!({"StartAt":"Run","States":{"Run":state}}),
+        )?)?;
+        assert!(root.machine().is_root_definition());
+        let child = match root.machine().state(root.machine().start())? {
+            StateView::Parallel { branches, .. } => {
+                branches.first().ok_or("missing branch")?.clone()
+            }
+            StateView::Map { processor, .. } => processor.clone(),
+            _ => return Err("missing structured state".into()),
+        };
+        assert!(!child.is_root_definition());
+        assert!(!child.requires_structured_execution());
+        assert_eq!(child.original_bytes(), root.machine().original_bytes());
+        let prepared = PreparedDefinition::new(child);
+        assert!(matches!(
+            reg.submit(RegistryCommand::Create(
+                "Injected".parse()?,
+                prepared.clone(),
+                role(),
+                Tags::default(),
+            )),
+            Err(RegistryError::Validation)
+        ));
+        assert!(matches!(
+            reg.submit(RegistryCommand::Update(arn(), Some(prepared), None)),
+            Err(RegistryError::Validation)
+        ));
+    }
+    assert!(matches!(
+        result(
+            &reg,
+            RegistryCommand::Machine(
+                "arn:aws:states:us-east-1:000000000000:stateMachine:Injected".parse()?
+            )
+        )
+        .await,
+        Err(RegistryError::MachineMissing)
+    ));
+    let RegistryResult::Machine(current) = result(&reg, RegistryCommand::Machine(arn())).await?
+    else {
+        return Err("missing current machine".into());
+    };
+    assert_eq!(current.revision().id(), first.revision().id());
+    assert!(Arc::ptr_eq(current.revision(), first.revision()));
+    owner.shutdown(deadline()).await?;
+    Ok(())
 }

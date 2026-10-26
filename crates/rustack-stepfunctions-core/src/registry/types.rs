@@ -239,6 +239,9 @@ redacted!(PreparedDefinition);
 impl PreparedDefinition {
     /// Fingerprint an already validated bounded definition.
     ///
+    /// Registry admission rejects nested scope artifacts; their source bytes
+    /// identify the enclosing root definition, not a standalone revision.
+    ///
     /// Async callers run compilation and this synchronous preparation under their
     /// retained bounded CPU owner before submitting a registry command.
     ///

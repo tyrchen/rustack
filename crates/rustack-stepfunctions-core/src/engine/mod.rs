@@ -87,7 +87,7 @@ impl ExecutionDriver {
     /// `StateMachine` fields remain unchanged; this driver owns its State fields.
     ///
     /// # Errors
-    /// Rejects nonobject context or an unrepresentable monotonic deadline.
+    /// Rejects structured artifacts, nonobject context or an unrepresentable deadline.
     ///
     /// ```
     /// use rustack_stepfunctions_core::{AslCompiler,Payload,EvaluationContext,ClockSample,ExecutionDriver,ExecutionLimits};
@@ -106,6 +106,9 @@ impl ExecutionDriver {
         started: ClockSample,
         limits: ExecutionLimits,
     ) -> Result<Self, AslError> {
+        if machine.requires_structured_execution() {
+            return Err(AslError::StructuredExecutionRequired);
+        }
         if !base.value().is_object() {
             return Err(AslError::InvalidExecution);
         }

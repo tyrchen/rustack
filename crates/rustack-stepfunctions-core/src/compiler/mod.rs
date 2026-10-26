@@ -4,7 +4,6 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
     num::NonZeroU32,
-    sync::Arc,
 };
 
 use bytes::Bytes;
@@ -23,18 +22,31 @@ macro_rules! read {
 mod diagnostic;
 mod ir;
 mod recovery;
+mod scope;
 mod state;
+mod structured;
 mod task;
 
 use diagnostic::{Code, Location};
 pub use diagnostic::{CompileError, Diagnostic, DiagnosticSeverity};
 pub use ir::{
-    CatchResult, Compilation, CompiledMachine, FailureView, StateId, StateView, TaskTimeout,
-    Transition,
+    CatchResult, Compilation, CompiledMachine, FailureView, MapConcurrency, StateId, StateView,
+    TaskTimeout, Transition,
 };
 use ir::{Failure, Node, Row};
 pub use recovery::{Catcher, Jitter, RecoveryPolicy, Retrier, RetryTiming};
 pub use task::{FunctionArn, Integration, TaskSupport, TenantScope};
+
+/// Trusted state-instruction profile selected by an execution composition root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StateSupport {
+    /// The six sequential state forms supported by the current service.
+    #[default]
+    Sequential,
+    /// Also compile Parallel and Inline Map for a structured frame owner.
+    Structured,
+}
 
 /// Synchronous bounded compiler; async owners provide bounded CPU admission.
 #[derive(Clone, Default)]
@@ -42,6 +54,7 @@ pub use task::{FunctionArn, Integration, TaskSupport, TenantScope};
 pub struct AslCompiler {
     scope: TenantScope,
     tasks: TaskSupport,
+    states: StateSupport,
 }
 
 impl fmt::Debug for AslCompiler {
@@ -59,7 +72,25 @@ impl AslCompiler {
     /// ```
     #[must_use]
     pub fn new(scope: TenantScope, tasks: TaskSupport) -> Self {
-        Self { scope, tasks }
+        Self {
+            scope,
+            tasks,
+            states: StateSupport::Sequential,
+        }
+    }
+
+    /// Select trusted IR support independently of installed Task adapters.
+    ///
+    /// Structured compilation does not enable sequential runtime admission.
+    ///
+    /// ```
+    /// use rustack_stepfunctions_core::{AslCompiler, StateSupport};
+    /// let compiler = AslCompiler::default().with_state_support(StateSupport::Structured);
+    /// ```
+    #[must_use]
+    pub fn with_state_support(mut self, states: StateSupport) -> Self {
+        self.states = states;
+        self
     }
 
     /// Compile all fields/targets before publishing an immutable artifact.
@@ -79,79 +110,11 @@ impl AslCompiler {
             .map_err(|error| CompileError::json(&root, error))?;
         let value: Value =
             from_slice(input, limits).map_err(|error| CompileError::json(&root, error))?;
-        let object = object(&value, &root)?;
-        fields(
-            object,
-            &[
-                "StartAt",
-                "States",
-                "Comment",
-                "Version",
-                "QueryLanguage",
-                "TimeoutSeconds",
-            ],
-            &root,
-        )?;
-        metadata(object, &root)?;
-        if let Some(version) = object.get("Version") {
-            if version.as_str() != Some("1.0") {
-                return Err(root
-                    .field("Version")?
-                    .error(Code::InvalidSchema, "unsupported ASL version"));
-            }
-        }
-        let timeout = object
-            .get("TimeoutSeconds")
-            .map(|v| positive(v, 31_536_000, &root.field("TimeoutSeconds")?))
-            .transpose()?;
-        let start_loc = root.field("StartAt")?;
-        let start = text(required(object, "StartAt", &root)?, &start_loc)?;
-        state_name(start, &start_loc)?;
-        let states_loc = root.field("States")?;
-        let states = object_value(required(object, "States", &root)?, &states_loc)?;
-        if states.is_empty() || states.len() > 1000 {
-            return Err(states_loc.error(
-                Code::LimitExceeded,
-                "state count must be between one and one thousand",
-            ));
-        }
-        let mut index = BTreeMap::new();
-        for name in states.keys() {
-            state_name(name, &states_loc)?;
-            index.insert(name.clone(), StateId(0));
-        }
-        for (position, (_, id)) in index.iter_mut().enumerate() {
-            *id = StateId(position);
-        }
-        let start = *index.get(start).ok_or_else(|| {
-            start_loc.error(Code::MissingTransitionTarget, "start target does not exist")
-        })?;
-        let mut rows = Vec::with_capacity(states.len());
-        let mut units = 65_536_usize;
-        for name in index.keys() {
-            let location = states_loc.field(name)?;
-            let value = states
-                .get(name)
-                .ok_or_else(|| location.error(Code::InvalidSchema, "state definition missing"))?;
-            let node = state::compile(value, &location, &index, &self.scope, self.tasks)?;
-            units = units.checked_sub(node.units()).ok_or_else(|| {
-                location.error(Code::LimitExceeded, "compiled node budget exceeded")
-            })?;
-            rows.push(Row {
-                name: name.clone(),
-                node,
-            });
-        }
-        let warnings = graph(&rows, start, &states_loc)?;
+        let mut context = scope::Context::new(self, Bytes::copy_from_slice(input));
+        let machine = context.compile(&value, &root, scope::Kind::Root, 0)?;
         Ok(Compilation {
-            machine: Arc::new(CompiledMachine {
-                original: Bytes::copy_from_slice(input),
-                scope: self.scope.clone(),
-                rows,
-                start,
-                timeout,
-            }),
-            warnings,
+            machine,
+            warnings: context.warnings,
         })
     }
 }

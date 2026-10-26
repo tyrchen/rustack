@@ -1,12 +1,13 @@
-//! Strict sequential state fields compiled once into immutable instructions.
+//! Strict scoped state fields compiled once into immutable instructions.
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use serde_json::{Map, Value};
 
 use super::{
-    Code, CompileError, Failure, Location, Node, StateId, TaskSupport, TaskTimeout, TenantScope,
-    Transition, fields, metadata, object_value, positive, recovery, required, target, task, text,
+    Code, CompileError, Failure, Location, Node, StateId, StateSupport, TaskTimeout, Transition,
+    fields, metadata, object_value, positive, recovery, required, scope::Context, structured,
+    target, task, text,
 };
 use crate::{DataFlow, Expression, Predicate, ReferencePath, WaitSource};
 
@@ -29,15 +30,15 @@ pub(super) fn compile(
     value: &Value,
     location: &Location,
     index: &BTreeMap<String, StateId>,
-    scope: &TenantScope,
-    support: TaskSupport,
+    context: &mut Context<'_>,
+    depth: usize,
 ) -> Result<Node, CompileError> {
     let object = object_value(value, location)?;
     let kind = text(
         required(object, "Type", location)?,
         &location.field("Type")?,
     )?;
-    validate_fields(kind, object, location)?;
+    validate_fields(kind, object, location, context.compiler.states)?;
     match kind {
         "Pass" => {
             if object.contains_key("Result") && object.contains_key("Parameters") {
@@ -70,8 +71,8 @@ pub(super) fn compile(
                 resource: task::compile(
                     resource,
                     object.get("Parameters"),
-                    scope,
-                    support,
+                    &context.compiler.scope,
+                    context.compiler.tasks,
                     location,
                 )?,
                 timeout: timeout(object, location)?,
@@ -79,6 +80,7 @@ pub(super) fn compile(
                 next: transition(object, location, index)?,
             })
         }
+        "Parallel" | "Map" => structured::compile(kind, object, location, index, context, depth),
         "Choice" => choice(object, location, index),
         "Wait" => {
             let source = Value::Object(
@@ -149,7 +151,14 @@ fn validate_fields(
     kind: &str,
     object: &Map<String, Value>,
     location: &Location,
+    states: StateSupport,
 ) -> Result<(), CompileError> {
+    if matches!(kind, "Parallel" | "Map") && states == StateSupport::Sequential {
+        return Err(location.field("Type")?.error(
+            Code::ProfileUnavailable,
+            "state type requires structured execution support",
+        ));
+    }
     let extra: &[&str] = match kind {
         "Pass" => &["Result", "Parameters", "ResultPath", "Next", "End"],
         "Task" => &[
@@ -177,12 +186,31 @@ fn validate_fields(
         ],
         "Succeed" => &[],
         "Fail" => &["Error", "Cause", "ErrorPath", "CausePath"],
-        "Parallel" | "Map" => {
-            return Err(location.field("Type")?.error(
-                Code::ProfileUnavailable,
-                "state type requires a later workflow profile",
-            ));
-        }
+        "Parallel" => &[
+            "Branches",
+            "Parameters",
+            "ResultSelector",
+            "ResultPath",
+            "Retry",
+            "Catch",
+            "Next",
+            "End",
+        ],
+        "Map" => &[
+            "ItemsPath",
+            "ItemSelector",
+            "Parameters",
+            "ItemProcessor",
+            "Iterator",
+            "MaxConcurrency",
+            "MaxConcurrencyPath",
+            "ResultSelector",
+            "ResultPath",
+            "Retry",
+            "Catch",
+            "Next",
+            "End",
+        ],
         _ => {
             return Err(location
                 .field("Type")?
@@ -200,11 +228,31 @@ fn validate_fields(
     Ok(())
 }
 
-fn flow(object: &Map<String, Value>, location: &Location) -> Result<DataFlow, CompileError> {
+pub(super) fn flow(
+    object: &Map<String, Value>,
+    location: &Location,
+) -> Result<DataFlow, CompileError> {
+    compile_flow(object, location, true)
+}
+
+pub(super) fn map_flow(
+    object: &Map<String, Value>,
+    location: &Location,
+) -> Result<DataFlow, CompileError> {
+    compile_flow(object, location, false)
+}
+
+fn compile_flow(
+    object: &Map<String, Value>,
+    location: &Location,
+    parameters: bool,
+) -> Result<DataFlow, CompileError> {
     let value = Value::Object(
         object
             .iter()
-            .filter(|(key, _)| FLOW.contains(&key.as_str()))
+            .filter(|(key, _)| {
+                FLOW.contains(&key.as_str()) && (parameters || key.as_str() != "Parameters")
+            })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     );
@@ -219,7 +267,7 @@ fn flow(object: &Map<String, Value>, location: &Location) -> Result<DataFlow, Co
         }
     }
 }
-fn transition(
+pub(super) fn transition(
     object: &Map<String, Value>,
     location: &Location,
     index: &BTreeMap<String, StateId>,

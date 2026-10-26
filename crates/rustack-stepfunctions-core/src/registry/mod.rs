@@ -327,7 +327,7 @@ impl Registry {
 impl RegistryCommand {
     fn check(&self, scope: &TenantScope) -> Result<(), RegistryError> {
         let check_machine = |machine: &CompiledMachine| {
-            if domain::same_scope(machine.scope(), scope) {
+            if machine.is_root_definition() && domain::same_scope(machine.scope(), scope) {
                 Ok(())
             } else {
                 Err(RegistryError::Validation)

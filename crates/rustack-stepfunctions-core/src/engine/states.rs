@@ -16,6 +16,9 @@ impl ExecutionDriver {
     ) -> Result<DriverStep, AslError> {
         let machine = self.machine.clone();
         match machine.state(self.state)? {
+            StateView::Parallel { .. } | StateView::Map { .. } => {
+                Err(AslError::StructuredExecutionRequired)
+            }
             StateView::Pass { flow, result, next } => {
                 let prepared = flow.prepare_with_source(&self.input, &self.context, source)?;
                 let result = result
