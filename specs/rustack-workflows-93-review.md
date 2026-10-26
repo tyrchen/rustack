@@ -65,6 +65,18 @@ The independent read-only review verified bounded preflight before Serde, typed 
 
 The shared runtime crate has39 passing codec tests, including512-case properties for malformed bytes, mutated valid envelopes and arbitrary binary payloads, plus eight passing doctests. The workspace suite passes1,806 tests (392 preexisting ignored); build/fmt/Clippy/rustdoc and strict runtime production-boundary checks pass. `make test-lambda-runtime` runs the reusable contract suite. Proptest1.12 uses only std; its three added dev packages introduce no audit finding. The same16 B01 advisories remain; deny bans/licenses/sources pass. This approval covers the protocol only: shared RuntimeSession, HTTP migration, relay executable, Docker execution and workflow engine remain required.
 
+## P1 task1.2 shared-session slice review
+
+The independent read-only review found three cancellation/order races. All were fixed and the final recheck found no remaining concrete in-slice finding.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W17 | P2; `crates/rustack-lambda-runtime/src/session.rs:821` | A sent oneshot response was treated as delivered before its waiter consumed it. Offering now retains Invocation until a per-poll receipt; abandoned receipts recover queued ownership | Deterministic manual-poll test drops next() after send but before consumption, then receives the same event exactly once through a replacement poll |
+| W18 | P2; `crates/rustack-lambda-runtime/src/session.rs:782` | Biased selection did not recheck cancellation arriving between branch polls. Offer/receipt/completion and command dispatch now revalidate cancellation, owner closure and deadline before mutation | Direct transition tests cover cancelled/closed/expired attempts across offer, receipt and completion and require Closed with failed pending results |
+| W19 | P2; `crates/rustack-lambda-runtime/src/session.rs:768` | A receipt and following completion could arrive between select branch polls, leaving stale Offering/initialization state. Command dispatch now synchronously reconciles ready/closed receipts before matching commands | Ready-receipt→Complete succeeds; ready-receipt→InitError returns Busy and preserves the delivered attempt |
+
+The actor owns an eight-command mailbox, one queued/offered/delivered attempt and one poll; per-attempt tickets prevent old cancellation from targeting new work. RPC envelopes carry their own deadline, readiness changes once, initialization notifies once, shutdown retains its join handle across cancelled waiters and caches failed settlement. Sixteen actor tests and the39 codec tests pass;23 runtime doctests and strict production-boundary Clippy pass. Workspace build/fmt/Clippy/rustdoc and1,822 tests pass (392 preexisting ignored). This review covers the shared actor only: the Native HTTP adapter still uses its existing session implementation until migration; the relay/socket client, Docker executor and ASL engine are not implemented by this slice. B01/B03 remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

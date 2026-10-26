@@ -15,6 +15,7 @@ bytes = { workspace = true, features = ["serde"] }
 ciborium = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+typed-builder = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 

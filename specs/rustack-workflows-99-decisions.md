@@ -108,6 +108,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [execution revision](./rustack-workflows-20-lambda-runtime-design.md#26-execution-revision-ownership), [cancellation and supervisor contract](./rustack-workflows-20-lambda-runtime-design.md#27-cancellable-invocation-and-supervisor-contract).
 - Date: 2026-10-25.
 
+## D15 — Confirm poll consumption before committing runtime delivery
+
+- Alternatives: treat a successful oneshot send as delivery; rely solely on biased select ordering across receipt and mailbox channels; leave an unconsumed event in Delivered until timeout.
+- Decision: retain Invocation ownership in Offering until next() consumes its reply and acknowledges a per-poll receipt. Recover the queued event if that receipt closes. Reconcile ready receipts and revalidate stop/cancellation/deadline synchronously before each command/transition.
+- Why: a sent response can be dropped without being consumed, and a receipt arriving between select branch polls can race a completion command. Explicit receipt ownership prevents lost events and false UnknownAttempt/initialization outcomes. Transport adapters still retire environments on failed HTTP delivery; session receipt is not proof of user-code execution.
+- Pinned by: [shared session ownership and state diagram](./rustack-workflows-20-lambda-runtime-design.md#32-runtime-session-ownership).
+- Date: 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

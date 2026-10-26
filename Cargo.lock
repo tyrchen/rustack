@@ -3884,6 +3884,7 @@ dependencies = [
  "serde",
  "thiserror",
  "tokio",
+ "typed-builder",
  "uuid",
 ]
 

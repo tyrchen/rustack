@@ -185,6 +185,32 @@ RuntimeSession is the single owner of idle/queued/delivered/closed invocation st
 
 The native HTTP adapter keeps its127.0.0.1 ephemeral socket and public executor module reexports. The relay binds127.0.0.1:9001. Both use identical session metadata/result/deadline rules, and adapter shutdown joins all connection/session tasks. Native init timeout waits for first-poll readiness rather than treating process creation as readiness. The relay's outer process supervisor owns stdio/HTTP tasks and exits on malformed control input, EOF, parent lease expiry or closed session; no transport failure silently recreates a session.
 
+The shared session API has a RuntimeSession owner, cloneable SessionHandle and InvocationTicket. start(idle lease) creates one actor with an eight-command mailbox; the owner exposes its handle, first-poll readiness and a take-once initialization-error receiver. submit(validated Invocation, command deadline) returns a ticket only after actor admission. next(command deadline) permits one outstanding poll and returns the delivered Invocation. complete(attempt, optional Invocation-Id, outcome, payload, command deadline) validates both identities and active deadline atomically before resolving the ticket. initialization_error(payload, command deadline) is legal only before any event delivery, reports once and closes the session. Transport adapters convert SessionError into their own HTTP/control outcomes without logging invalid values.
+
+Invocation has validated attempt/ARN/trace/payload fields and an absolute monotonic deadline. Ticket wait returns a typed success/function-error/init-error result. Dropping an attached ticket, including cancellation of its wait/admission future, signals a dedicated per-attempt cancellation receiver. A ticket's cancel signal never targets a later attempt. Cancellation/expiry invalidates the session, resolves the current ticket/poll once, and forbids reuse. Concurrent calls receive Busy, stale/foreign completion receives UnknownAttempt without consuming active ownership, and RPC queue overload is explicit. A cancelled long-poll waiter may be replaced without losing a queued invocation. Result delivery to a disconnected ticket closes the session rather than accepting further work.
+
+Offering an event through a oneshot channel is not delivery proof: retain the queued Invocation until next() consumes its response and synchronously acknowledges a per-poll receipt. A dropped response future closes that receipt and restores the queued event. Prioritize receipt processing before later mailbox commands so immediate completion observes Delivered. Before dispatching each selected mailbox command, synchronously reconcile any ready/closed receipt and recheck stop/attempt validity: biased select alone cannot order concurrently arriving messages on separate channels. Once the adapter receives an event, failed HTTP transmission requires retiring its environment rather than silently replaying; the receipt does not prove user-code execution.
+
+```text
+┌─ RuntimeSession owner ───────────────┐   ┌─ SessionHandle / adapter ─────┐
+│ priority stop + retained join      │   │ submit / next / complete     │
+└──────────────────┬─────────────────┘   └──────────────┬────────────────┘
+                   │ stop watch                         │ bounded mailbox8
+┌─ Session actor ───▼────────────────────────────────────▼───────────────┐
+│ Idle ──submit──▶ Queued ──offer to poll──▶ Offering                   │
+│                   ▲                         │ per-poll receipt        │
+│                   └── receiver disappears ──┤                        │
+│                                             └── consumed ─▶ Delivered│
+│ Idle ◀──────── matching, active completion ────────────────────┘      │
+│ stop / cancellation / expiry ─▶ Closed: fail pending ticket + poll    │
+│ recheck attempt validity at offer, receipt and completion transitions │
+└──────────────────────────────────────────────────────────────────────┘
+    InvocationTicket drop → per-attempt cancellation watch
+    Closed session → environment owner terminates external resources
+```
+
+The actor prioritizes owner stop, active attempt cancellation/deadline and idle lease expiry over mailbox traffic. Activity refreshes the idle lease only at valid session commands; a running attempt uses its own deadline. Each command envelope carries its absolute RPC deadline, checked again before state mutation. Shutdown signals the actor and awaits its stored join handle by mutable borrow, so a cancelled shutdown waiter cannot lose the task. Cache failed joins so repeated shutdown never reports false success. Owner Drop signals stop and leaves the actor to finish its in-process channel cleanup; adapters still own/await their HTTP tasks and external execution resources. The parent Tokio runtime must remain alive until normal service shutdown has joined these owners. Paused-clock and contention tests pin single admission/delivery/settlement, cancelled poll replacement, stale-completion isolation, old-ticket cancellation, init/readiness, idle/attempt deadlines, overload and dropped shutdown/admission waiters.
+
 ## 4. Environment states, pooling and cancellation
 
 State enum: Allocating → Initializing → Idle → Busy(attempt) → Idle. Any stage can become Retiring → Removed; failed cleanup becomes Quarantined. PoolActor owns its map and LRU. Bounded Docker IO futures run in a supervised JoinSet; never hold a shared-state lock across IO. Give cancellation a separate priority lane or reserved capacity.
