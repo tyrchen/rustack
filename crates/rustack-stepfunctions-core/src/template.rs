@@ -116,6 +116,22 @@ impl Template {
         self.evaluate_scoped(data, context, source, &mut Budget::new())
     }
 
+    pub(crate) fn node_count(&self) -> usize {
+        fn count(node: &Node) -> usize {
+            match node {
+                Node::Literal(_) => 1,
+                Node::Dynamic(expression) => 1_usize.saturating_add(expression.node_count()),
+                Node::Object(fields) => fields
+                    .iter()
+                    .fold(1_usize, |n, (_, node)| n.saturating_add(count(node))),
+                Node::Array(values) => values
+                    .iter()
+                    .fold(1_usize, |n, node| n.saturating_add(count(node))),
+            }
+        }
+        count(&self.0)
+    }
+
     pub(crate) fn evaluate_scoped<S: UuidSource + ?Sized>(
         &self,
         data: &Payload,

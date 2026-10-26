@@ -10,6 +10,12 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Invalid configured tenant identity.
+    #[error("invalid workflow tenant scope")]
+    InvalidScope,
+    /// A state ID is outside the referenced compiled machine.
+    #[error("invalid compiled state identity")]
+    InvalidStateId,
     /// Invalid template shape, normalized-key collision or compiled limit.
     #[error("invalid ASL payload template")]
     InvalidTemplate,

@@ -536,6 +536,12 @@ ASL§2.2.1/D46 implements compiled normalized templates, streaming borrowed outp
 
 Final core270 unit cases/31 doctests and strict production/all-targets checks pass, including28 additions and two512-case properties. Current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,775 tests/415 gated, including retained deferred Docker changes. No dependencies changed; the previously verified B06 audit/deny failure remains open. Machine compiler/indexed IR, actor/registry/resource execution, callback provenance and complete M1 acceptance remain required.
 
+## P2 sequential compiler independent review
+
+ASL§1.1/D47 implements strict whole-definition compilation into immutable six-state IR, lexical scoped indices, graph/terminal validation, original-byte capture, typed read views, static scoped Lambda validation and ordered recovery metadata. Data-flow component failures retain their enclosing field locations; diagnostic codes are a private exhaustive enum and static messages expose local limits without source excerpts. The independent read-only reviewer reports no in-slice findings, including the final diagnostic/allocation changes.
+
+Core315 unit cases/66 doctests and strict production/all-targets checks pass, including45 additions, two512-case properties and exact65,536/65,537 compiled-node fixtures under the source/state caps. The bounded writer minimum drops from4KiB to64 bytes to avoid hundreds of MiB in tiny scalar caches; output/depth limits remain unchanged. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,820 tests/415 gated, including retained deferred Docker changes. No dependencies changed; B06 remains open. Actor scheduling/resource ownership, runtime adapter availability, API registration and complete M1 acceptance remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

@@ -411,3 +411,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: one implementation pins exact transformation ordering before state compilation/execution; future actor ownership and callback provenance remain explicit.
 - **Pinned by**: [ASL§2.2.1](./rustack-workflows-30-asl-design.md#221-executable-templates-and-data-flow-phases), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Reuse compiled paths/intrinsics and bounded serde output; no dependency changes. This does not close machine compilation or resource execution acceptance.
+
+## D47 — Compile sequential machines into immutable scoped indices
+
+- **Context**: the registry/execution actor needs validated state graphs and precompiled operations without runtime map/string interpretation.
+- **Alternatives considered**: a runtime ASL walker repeats validation; a DAG restriction rejects legal loops; suffix-only resource routing accepts unsupported integrations; installing partially compiled definitions breaks revision invariants.
+- **Decision**: use one bounded side-effect-free compiler, strict sequential profile, lexical scoped StateIds, typed read views and immutable original-byte artifacts. Compile all control-flow targets and policies before graph acceptance.
+- **Why**: the same artifact/error drives Create/Update/Validate; later actor work consumes validated IR and concrete adapter availability remains a composition-root decision.
+- **Pinned by**: [ASL§1.1](./rustack-workflows-30-asl-design.md#11-executable-sequential-compiler-and-indexed-ir), [API](./rustack-workflows-10-api-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. No new external dependencies; complete M1 requires registry/actor/real Lambda evidence beyond compilation.

@@ -63,35 +63,47 @@ impl DataFlow {
     /// # Ok::<(), rustack_stepfunctions_core::AslError>(())
     /// ```
     pub fn compile(value: &Value) -> Result<Self, AslError> {
-        validate_component(value)?;
-        let object = value.as_object().ok_or(AslError::InvalidDataFlow)?;
+        Self::compile_located(value).map_err(|(_, error)| error)
+    }
+
+    pub(crate) fn compile_located(value: &Value) -> Result<Self, (&'static str, AslError)> {
+        validate_component(value).map_err(|e| ("", e))?;
+        let object = value.as_object().ok_or(("", AslError::InvalidDataFlow))?;
         if object.keys().any(|key| {
             !matches!(
                 key.as_str(),
                 "InputPath" | "Parameters" | "ResultSelector" | "ResultPath" | "OutputPath"
             )
         }) {
-            return Err(AslError::InvalidDataFlow);
+            return Err(("", AslError::InvalidDataFlow));
         }
         let result = match object.get("ResultPath") {
             None => Merge::Replace,
             Some(Value::Null) => Merge::Discard,
-            Some(Value::String(path)) => Merge::Path(path.parse()?),
-            _ => return Err(AslError::InvalidDataFlow),
+            Some(Value::String(path)) => Merge::Path(path.parse().map_err(|e| ("ResultPath", e))?),
+            _ => return Err(("ResultPath", AslError::InvalidDataFlow)),
         };
         Ok(Self {
-            input: filter(object.get("InputPath"))?,
+            input: filter(object.get("InputPath")).map_err(|e| ("InputPath", e))?,
             parameters: object
                 .get("Parameters")
                 .map(Template::compile)
-                .transpose()?,
+                .transpose()
+                .map_err(|e| ("Parameters", e))?,
             selector: object
                 .get("ResultSelector")
                 .map(Template::compile)
-                .transpose()?,
+                .transpose()
+                .map_err(|e| ("ResultSelector", e))?,
             result,
-            output: filter(object.get("OutputPath"))?,
+            output: filter(object.get("OutputPath")).map_err(|e| ("OutputPath", e))?,
         })
+    }
+
+    pub(crate) fn node_count(&self) -> usize {
+        1_usize
+            .saturating_add(self.parameters.as_ref().map_or(0, Template::node_count))
+            .saturating_add(self.selector.as_ref().map_or(0, Template::node_count))
     }
 
     /// Apply `InputPath` then Parameters before calling a resource.

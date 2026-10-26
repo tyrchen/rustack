@@ -10,6 +10,42 @@ Pipeline: bounded bytes → strict AST → field/state validation → scoped gra
 
 Reject unsupported fields, JSONata, Assign, Credentials, dynamic Resource, Distributed Map and unavailable integrations during creation. Diagnostics carry JSON Pointer location, severity, stable Rustack code and bounded message without copying definition/input into logs. QueryLanguage may be omitted or explicitly JSONPath.
 
+### 1.1 Executable sequential compiler and indexed IR
+
+AslCompiler is synchronous, side-effect-free and configured with a validated TenantScope and trusted TaskSupport (Disabled/Lambda). The future composition root derives support from its installed adapter, not a request field; this compiler flag alone never advertises service readiness. Default construction supports pure workflows in the existing local default scope. Preserve original definition bytes on successful compilation for revision/idempotency use. Preflight at most1MiB,64 JSON container levels,65,536 members,1MiB strings and262,144-byte keys, including decoded duplicate-key rejection, before allocating the generic boundary tree. That tree is used only during compilation; execution consumes typed IR, never state maps or string targets.
+
+Require an object with StartAt and nonempty States (at most1,000). Accept only optional Comment, Version="1.0", QueryLanguage="JSONPath" and positive integer TimeoutSeconds≤31,536,000. Validate state names/targets as1–128 UTF-8 bytes without controls. Assign StateIds in lexical state-name order and resolve every Next, Choice/Default and Catch target through the same scope's index. Allow loops, require at least one terminal reachable from StartAt, and warn for each unreachable state. Fail is terminal; a Task/Pass/Wait End=true is terminal. Potential runtime errors do not substitute for a reachable structural terminal. Bound compiled state/component/policy nodes to65,536; component-local bounds remain independently enforced.
+
+The M1 compiler emits Pass, Task, Choice, Wait, Succeed and Fail only. Known Parallel/Map and child/callback integrations return a profile-unavailable diagnostic until their milestones; unknown types/actions return unsupported/invalid diagnostics. Enforce the field table in§2 before compiling shared data flow. Reject End=false, simultaneous/missing Next/End, top-level Choice Next/End, empty/more-than128 Choices, and every unknown state field. State-level QueryLanguage may be omitted or JSONPath; validate/drop Comment metadata. Pass Result is immutable dynamic JSON retained for bounded materialization at execution; it is exclusive with Parameters. Choice branches compile predicates without their Next field. Wait compiles only its one source. Succeed compiles only input/output paths. Fail preserves omitted/literal/dynamic error/cause fields without inventing an omitted error name; Error/Cause limits are256/32,768 bytes, literal/path pairs are exclusive, and dynamic paths must be reference paths or allowlisted intrinsic expressions yielding strings at execution.
+
+Task Resource is a static complete ARN. Validate exact direct Lambda scope/name/optional qualifier or the partition-matching optimized lambda:invoke ARN; reject scope mismatch, malformed/trailing components and suffix-only .sync matches. A syntactically valid Lambda resource without TaskSupport returns dependency-disabled. Validate known static optimized Parameters fields FunctionName/Payload/Qualifier/InvocationType; FunctionName supports a name or same-scope ARN, InvocationType is RequestResponse and conflicting known qualifiers reject. Dynamic values remain checked by the future adapter. Task timeout is omitted, positive integer1..99,999,999 seconds or a singular TimeoutSecondsPath, never both. M1 rejects heartbeat fields because callback support is unavailable.
+
+Compile Retry/Catch into immutable ordered policies (at most128 entries each and128 nonempty bounded256-byte/control-free error names per matcher). States.ALL must be alone and last in its policy; duplicate names in a matcher reject. Retry defaults/ranges follow§4, with zero MaxAttempts retained. Catch requires a same-scope Next and compiles absent ResultPath as replacement, null as discard, or a data-root reference. Recovery matching never handles States.Runtime; States.ALL/States.TaskFailed exclude DataLimitExceeded unless named explicitly, and TaskFailed excludes Timeout. These are the selected local matching rules. Timing is retained as typed metadata; actor retry counts/timers and jitter sampling remain separate work.
+
+Successful Compilation contains Arc<CompiledMachine> and bounded warnings. The machine exposes immutable checked StateId/read views, original bytes and optional timeout; the IR stores compiled data flow, predicates, waits, resources, recovery and failure expressions. Invalid IDs fail explicitly. CompileError owns one Diagnostic and an optional typed JSON/ASL source; all Debug/Display redact definitions, literals, names and paths. Diagnostic codes/messages are static bounded Rustack-prefixed values, severity is ERROR/WARNING, and location is an RFC6901 pointer (empty for root; escaped ~ and /; at most4,096 bytes). A component failure may identify its enclosing component field rather than an exact expression token. Compilation stops at the first error; Validate later projects the same error or filtered/truncated warnings, without claiming AWS diagnostic ordering/count parity. CPU compilation must be run under bounded admission off the HTTP/registry scheduling loop when integrated.
+
+Literal payload caching uses a64-byte minimum bounded-writer reservation rather than4KiB per scalar; otherwise a valid65,536-node artifact could retain hundreds of MiB in tiny literal buffers. This changes allocation behavior only, retaining all encoded byte/depth/member limits. Exact aggregate-budget fixtures must compile at65,536 nodes and reject65,537 while remaining below source/state limits.
+
+```text
+┌─ original definition bytes ──────────────────────────────────────┐
+│ bounded JSON/duplicates → strict field/type validation            │
+└─────────────────────────────┬────────────────────────────────────┘
+                              ▼
+┌─ compiler-owned scope index ──────────────────────────────────────┐
+│ lexical names → StateId; resolve Next/Choice/Catch in this scope  │
+│ data flow / predicates / waits / task and recovery metadata       │
+│ reachability + terminal check; bounded warnings/compiled units    │
+└─────────────────────────────┬────────────────────────────────────┘
+                              ▼
+┌─ immutable compilation artifact ──────────────────────────────────┐
+│ Arc<CompiledMachine> + original bytes + typed read views          │
+│ diagnostics contain bounded pointers, no source-value excerpts   │
+└─────────────────────────────┬────────────────────────────────────┘
+                              ▼ future registry/revision + actor
+```
+
+Tests require all six IR forms, graph loops/invalid targets/unreachable terminals, field/profile/dependency/scope rejection, static optimized metadata, timeout and Retry/Catch defaults/ranges, fail expressions, original bytes, pointer escaping/redaction, duplicate/deep/large definitions, exact state/choice/compiled-node limits and malformed-input properties. This compiler is not endpoint, actor, resource execution or complete M1 acceptance.
+
 ## 2. Supported ASL profile
 
 The [ASL specification](https://states-language.net/spec.html) supplies language terminology. The table below is the release contract; supporting eight state types does not imply support for every recent language extension.

@@ -163,6 +163,16 @@ impl Predicate {
         )
     }
 
+    pub(crate) fn node_count(&self) -> usize {
+        match &self.0 {
+            Node::And(children) | Node::Or(children) => children
+                .iter()
+                .fold(1_usize, |n, p| n.saturating_add(p.node_count())),
+            Node::Not(child) => 1_usize.saturating_add(child.node_count()),
+            Node::Compare { .. } => 1,
+        }
+    }
+
     fn node(value: &Value, depth: usize, remaining: &mut usize) -> Result<Self, AslError> {
         if depth >= 32 {
             return Err(AslError::InvalidPredicate);

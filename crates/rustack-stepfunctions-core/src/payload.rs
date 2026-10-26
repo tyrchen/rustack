@@ -290,7 +290,7 @@ impl io::Write for LimitedWriter {
         if needed > self.bytes.capacity() {
             let capacity = needed
                 .max(self.bytes.capacity().saturating_mul(2))
-                .clamp(4096, self.limit);
+                .clamp(64, self.limit);
             self.bytes
                 .try_reserve_exact(capacity.saturating_sub(self.bytes.len()))
                 .map_err(|_| io::Error::other("bounded ASL allocation failed"))?;
