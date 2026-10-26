@@ -7,7 +7,7 @@ use std::fmt;
 pub struct AccountId(String);
 
 impl AccountId {
-    /// Default account ID used by LocalStack.
+    /// Default account ID used by `LocalStack`.
     pub const DEFAULT: &str = "000000000000";
 
     /// Create a new account ID from a string.
@@ -46,7 +46,7 @@ impl fmt::Display for AccountId {
 pub struct AwsRegion(String);
 
 impl AwsRegion {
-    /// Default region used by LocalStack.
+    /// Default region used by `LocalStack`.
     pub const DEFAULT: &str = "us-east-1";
 
     /// Create a new region.

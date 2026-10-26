@@ -1,6 +1,6 @@
 # Workflows 70: Verification, Security and Performance Gates
 
-Status: planned acceptance criteria; no new runtime tests executed · Applies to M0–M4
+Status: acceptance contract; executed foundation evidence is recorded in the implementation ledger/review; full M0–M4 acceptance remains open · Applies to M0–M4
 
 ## 1. Evidence and oracle policy
 
@@ -70,6 +70,8 @@ Add future Makefile targets: `codegen-stepfunctions`, `test-stepfunctions`, `tes
 For Rust-relevant implementation work run cargo build, cargo test, cargo +nightly fmt, and cargo clippy -- -D warnings, plus the repository's stricter pedantic/boundary lint selection and existing applicable targets. Run cargo audit and cargo deny check when dependencies land. Specification-only edits use text/link checks per AGENTS.md.
 
 The shared runtime contract suite is available as `make test-lambda-runtime`; it runs the library tests/doctests and strict production boundary Clippy without lint ignores. Protocol property tests use [proptest1.12](https://docs.rs/proptest/1.12.0/proptest/) with512 cases per property, exercising bounded malformed bytes, mutations of valid envelopes and arbitrary binary payloads. Only its std feature is enabled; subprocess/fork machinery is unnecessary for these deterministic bounded parser checks. Runtime-session/relay tests extend this same target as their consumers land; a passing codec suite alone does not satisfy Docker acceptance.
+
+`make test-json-boundaries` verifies the shared core JSON preflight and its strict production-boundary lints. Test escaped-key duplicates, per-object key scope, UTF-8 byte limits, encoded escape work, container depth, aggregate object/array members, empty collections, malformed syntax/numbers, typed schema redaction and configurable limits. Two512-case properties exercise arbitrary bounded malformed bytes and generated recursive valid values. This supports the Docker metadata/ASL parser boundaries; it does not establish their higher-level semantics or executor acceptance.
 
 `make test-lambda-runtime-docker` builds the selected architecture's relay and pinned official Python RIC fixture images, then explicitly executes every resource-gated test in the shared runtime's Docker suite. It requires WORKFLOWS_DOCKER_SOCKET and a matching WORKFLOWS_ARCH; missing prerequisites fail rather than skip. The CLI is only the test transport. Assert computed42/7, warm counter1/2, request metadata, cgroup/user/rootfs restrictions, distinct FunctionError, running-handler cancellation, pre-function Close, EOF/truncated/partial frames, idle expiry, failed setup and expired helper reaping. The ordered production ControlClient also consumes real container pipes and drives computed warm calls followed by separate function-error/busy-cancellation scenarios; join its stream supervisor independently of container/CLI cleanup on all exits. Every case reconciles its preallocated owned names/run label and joins its CLI process. These are relay/client qualification checks, not provider/deployment/pool acceptance for L01–L09. Native x86, Docker Desktop and rootless qualification still require their M4 lanes.
 

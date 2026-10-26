@@ -1,7 +1,7 @@
 //! Multi-account, multi-region state management.
 //!
 //! Provides [`AccountRegionStore`], a thread-safe concurrent store that
-//! partitions state by AWS account ID and region, matching LocalStack's
+//! partitions state by AWS account ID and region, matching `LocalStack`'s
 //! `AccountRegionBundle` pattern.
 
 use std::sync::Arc;

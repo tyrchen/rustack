@@ -1,6 +1,6 @@
 //! Configuration management for Rustack services.
 //!
-//! All configuration is driven by environment variables, matching LocalStack conventions.
+//! All configuration is driven by environment variables, matching `LocalStack` conventions.
 
 use crate::types::AwsRegion;
 

@@ -4,9 +4,12 @@
 //! Rustack service implementations, including multi-account/multi-region
 //! state management, configuration, and common AWS type definitions.
 
+#![forbid(unsafe_code)]
+
 mod config;
 mod error;
 pub mod http;
+pub mod json;
 pub mod settings;
 mod state;
 mod types;
