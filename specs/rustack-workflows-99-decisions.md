@@ -263,3 +263,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why:** snapshot and log flooding have bounded service quanta, user bytes never enter infrastructure diagnostics, and environment cleanup can join this socket independently of function/relay termination. The capture alone does not prove container exit or exact per-invocation log attribution.
 - **Pinned by:** [runtime §3.7](./rustack-workflows-20-lambda-runtime-design.md#37-retained-function-log-capture), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date:** 2026-10-26. No new dependency or version is introduced.
+
+## D30 — Materialize one immutable, bounded environment allocation plan
+
+- **Context:** container creation must bind captured function configuration to immutable image leases, namespace ownership and operator limits before any daemon side effect. Hand-built relay/function requests otherwise drift in resource, metadata and entry semantics.
+- **Alternatives considered:** per-call tag resolution breaks captured versions; assembling separate arbitrary Docker bodies permits policy drift; concatenating Env tiers leaves duplicate names with undefined process lookup precedence; inheriting daemon logging can spill unbounded output outside Rustack rings.
+- **Decision:** EnvironmentPlan owns the captured revision/leases and preallocated identities, validates policy and serializes fixed relay/function bodies; only typed create methods issue them. Compose exactly one environment entry per key with inherited→captured→authoritative precedence and explicit deletion markers. Disable daemon logging, healthchecks, restart and extra swap while retaining independent live attach capture.
+- **Why:** one plan supplies resource admission totals and immutable allocation inputs for the future environment/pool owner. Docker create futures must be Send for supervised Tokio workers, and raw request serializers must leave scope before awaits. A plan neither reserves capacity nor proves startup/reconciliation readiness.
+- **Pinned by:** [runtime §4.2](./rustack-workflows-20-lambda-runtime-design.md#42-immutable-environment-allocation-plan), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-26. No dependency/version change is required. Network none is deliberate pure-handler opt-in; bridge and resource probes remain mandatory for production enablement.

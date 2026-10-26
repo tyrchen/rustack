@@ -312,6 +312,11 @@ test-lambda-logs:
 
 .PHONY: test-lambda-logs
 
+test-lambda-environment-plans:
+	@cargo test -p rustack-lambda-core --lib docker::plan::tests
+
+.PHONY: test-lambda-environment-plans
+
 # Real-execution Lambda invoke tests (native backend).
 # Builds a Rust bootstrap fixture and invokes it through the rustack provider.
 test-lambda-invoke-native:

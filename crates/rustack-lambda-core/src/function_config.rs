@@ -270,11 +270,19 @@ pub(crate) fn validate_image_config(config: &ImageConfig) -> Result<(), LambdaSe
 }
 
 fn validate_environment(environment: &HashMap<String, String>) -> Result<(), LambdaServiceError> {
-    if environment.len() > 128 {
-        return Err(invalid("Environment has too many variables"));
-    }
+    validate_environment_entries(environment)
+}
+
+pub(crate) fn validate_environment_entries<'a>(
+    environment: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Result<(), LambdaServiceError> {
+    let mut count = 0_u16;
     let mut bytes = 0usize;
     for (key, value) in environment {
+        count = count.saturating_add(1);
+        if count > 128 {
+            return Err(invalid("Environment has too many variables"));
+        }
         if !(2..=64).contains(&key.len())
             || !key.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
             || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')

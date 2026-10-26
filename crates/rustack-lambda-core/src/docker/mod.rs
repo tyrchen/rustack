@@ -10,6 +10,7 @@ mod lease;
 mod logs;
 mod ownership;
 mod pin;
+mod plan;
 mod types;
 
 use std::{
@@ -38,6 +39,7 @@ use models::{
 pub use ownership::{DirectoryLease, DirectoryLeaseError};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub use pin::{ImagePin, ImagePinScope};
+pub use plan::{ContainerPolicy, EnvironmentPlan, NetworkSelection, RelayBudgets};
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};
@@ -407,12 +409,14 @@ impl DockerPort {
         architecture: Option<Architecture>,
         deadline: Instant,
     ) -> Result<ContainerCreateResponse, DockerError> {
-        let mut query = form_urlencoded::Serializer::new(String::new());
-        query.append_pair("name", name.as_str());
-        if let Some(architecture) = architecture {
-            query.append_pair("platform", architecture.docker_platform());
-        }
-        let query = query.finish();
+        let query = {
+            let mut query = form_urlencoded::Serializer::new(String::new());
+            query.append_pair("name", name.as_str());
+            if let Some(architecture) = architecture {
+                query.append_pair("platform", architecture.docker_platform());
+            }
+            query.finish()
+        };
         decode(
             self.call(
                 Operation::Create,

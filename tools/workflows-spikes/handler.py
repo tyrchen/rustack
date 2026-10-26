@@ -33,4 +33,21 @@ def handler(event, context):
         response["inputBytes"] = len(event["padding"].encode("utf-8"))
     if event.get("response_bytes"):
         response["large"] = "r" * event["response_bytes"]
+    if event.get("policy"):
+        temporary = os.statvfs("/tmp")
+        status = dict(
+            line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines()
+            if ":" in line
+        )
+        response["tmpBytes"] = temporary.f_blocks * temporary.f_frsize
+        response["tmpMode"] = os.stat("/tmp").st_mode & 0o7777
+        response["swapMax"] = (cgroup / "memory.swap.max").read_text().strip()
+        response["cpuMax"] = (cgroup / "cpu.max").read_text().strip()
+        response["capEff"] = status["CapEff"].strip()
+        response["noNewPrivs"] = status["NoNewPrivs"].strip()
+        response["taskRoot"] = os.environ.get("LAMBDA_TASK_ROOT")
+        response["functionName"] = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        response["functionVersion"] = os.environ.get("AWS_LAMBDA_FUNCTION_VERSION")
+        response["region"] = os.environ.get("AWS_REGION")
+        response["configuredValue"] = os.environ.get("TEST_VALUE")
     return response

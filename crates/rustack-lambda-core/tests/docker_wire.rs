@@ -3,20 +3,24 @@
 #![cfg(unix)]
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, env, time::Duration};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use http::StatusCode;
 use rustack_lambda_core::{
-    artifact::{Architecture as ImageArchitecture, ImageReference, PinnedImage},
-    docker::{
-        DirectoryLease, DirectoryLeaseError, DockerError, DockerKey, DockerPort, DockerSocket,
-        DockerWire, FunctionLogs, ImageLeaseConfig, ImageLeaseManager, ImagePinScope,
-        OutputChannel, OwnerFilter,
-        models::{ContainerCreateBody, HostConfig},
+    artifact::{
+        Architecture as ImageArchitecture, DeploymentArtifact, ImageReference, PinnedImage,
     },
+    docker::{
+        ContainerPolicy, DirectoryLease, DirectoryLeaseError, DockerError, DockerKey, DockerPort,
+        DockerSocket, DockerWire, EnvironmentPlan, FunctionLogs, ImageLeaseConfig,
+        ImageLeaseManager, ImagePinScope, OutputChannel, OwnerFilter, RelayBudgets,
+    },
+    executor::{ExecutionRevision, ExecutorBackend},
+    identity::FunctionResourceId,
 };
+use rustack_lambda_model::types::ImageConfig;
 use rustack_lambda_runtime::{
     client::{ClientConfig, ClientEvent, ControlClient},
     metadata::local_trace_id,
@@ -46,22 +50,6 @@ struct Names {
     owner: Uuid,
     run: Uuid,
     environment: EnvironmentId,
-}
-impl Names {
-    fn labels(&self) -> HashMap<String, String> {
-        HashMap::from([
-            ("rustack.lambda.ownerId".into(), self.owner.to_string()),
-            ("rustack.lambda.runId".into(), self.run.to_string()),
-            (
-                "rustack.lambda.environmentId".into(),
-                self.environment.to_string(),
-            ),
-            (
-                "rustack.lambda.functionResourceId".into(),
-                self.environment.to_string(),
-            ),
-        ])
-    }
 }
 
 #[derive(Debug)]
@@ -110,6 +98,8 @@ struct Environment {
     logs: Option<FunctionLogs>,
     images: ImageLeaseManager,
     artifacts: Vec<PinnedImage>,
+    plan: Option<EnvironmentPlan>,
+    lease: DirectoryLease,
     directory: Option<TempDir>,
 }
 impl Environment {
@@ -124,7 +114,7 @@ impl Environment {
         let owner = lease.owner_id();
         let images = ImageLeaseManager::start(
             wire.port(),
-            ImagePinScope::new(lease),
+            ImagePinScope::new(lease.clone()),
             ImageLeaseConfig::default(),
         )?;
         ensure!(
@@ -147,6 +137,8 @@ impl Environment {
             logs: None,
             images,
             artifacts: Vec::new(),
+            plan: None,
+            lease,
             directory: Some(directory),
         })
     }
@@ -168,6 +160,10 @@ impl Environment {
     }
 
     async fn start(&mut self) -> Result<()> {
+        self.start_with(None, true).await
+    }
+
+    async fn start_with(&mut self, overrides: Option<ImageConfig>, bootstrap: bool) -> Result<()> {
         let arch = env::var("RUSTACK_RUNTIME_ARCH").context("explicit architecture required")?;
         let (architecture, daemon_arch) = match arch.as_str() {
             "arm64" => (Architecture::Arm64, "aarch64"),
@@ -186,35 +182,47 @@ impl Environment {
         let function = self
             .image(&format!("rustack-p0-handler:{arch}"), &arch)
             .await?;
-        let relay_plan = relay.resolved().metadata().execution.plan(None)?;
-        let function_plan = function.resolved().metadata().execution.plan(None)?;
-        port.create_container_on_platform(
-            &self.names.relay,
-            &ContainerCreateBody {
-                image: Some(relay.resolved().metadata().image_id.as_str().into()),
-                entrypoint: Some(relay_plan.entrypoint().to_vec()),
-                cmd: Some(relay_plan.command().to_vec()),
-                working_dir: Some(relay_plan.working_directory().into()),
-                user: Some("1000:1000".into()),
-                env: Some(vec![
-                    format!("RUSTACK_LAMBDA_ENVIRONMENT_ID={}", self.names.environment),
-                    "RUSTACK_LAMBDA_RELAY_IO_SECONDS=60".into(),
-                    "RUSTACK_LAMBDA_RELAY_RETIRE_SECONDS=60".into(),
-                ]),
-                labels: Some(self.names.labels()),
-                attach_stdin: Some(true),
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                open_stdin: Some(true),
-                stdin_once: Some(true),
-                tty: Some(false),
-                host_config: Some(limits("none".into(), 64 * 1024 * 1024, 100_000_000, 64)),
-                ..Default::default()
-            },
-            relay.resolved().metadata().architecture,
-            deadline(),
-        )
-        .await?;
+        let revision = ExecutionRevision::builder()
+            .resource_id(FunctionResourceId::new())
+            .revision_id(Uuid::new_v4().to_string())
+            .backend(ExecutorBackend::Docker)
+            .function_name("wire-fixture".into())
+            .qualifier("$LATEST".into())
+            .runtime(None)
+            .handler(None)
+            .architecture(function.resolved().metadata().architecture)
+            .artifact(DeploymentArtifact::Image(function))
+            .image_config(overrides)
+            .environment(HashMap::from([
+                ("AWS_REGION".into(), "us-east-1".into()),
+                ("AWS_DEFAULT_REGION".into(), "us-east-1".into()),
+                ("TEST_VALUE".into(), "from-captured-revision".into()),
+            ]))
+            .timeout(Duration::from_secs(120))
+            .memory_mb(192)
+            .ephemeral_storage_mb(512)
+            .build();
+        let plan = EnvironmentPlan::new(
+            self.lease.clone(),
+            relay,
+            Arc::new(revision),
+            ContainerPolicy::new(
+                "none".parse()?,
+                1000,
+                1000,
+                1_000_000_000,
+                RelayBudgets::new(IO, Duration::from_secs(600), IO)?,
+            )?,
+        )?;
+        self.names.relay = plan.relay_key().clone();
+        self.names.function = plan.function_key().clone();
+        self.names.environment = plan.environment_id();
+        self.plan = Some(plan);
+        self.plan
+            .as_ref()
+            .context("allocation plan")?
+            .create_relay(&port, deadline())
+            .await?;
         self.attach(&port, architecture).await?;
         port.start_container(&self.names.relay, deadline()).await?;
         let client = &mut self.runtime.as_mut().context("runtime owner")?.client;
@@ -222,35 +230,11 @@ impl Environment {
             client.next(deadline()).await? == ClientEvent::RelayReady,
             "relay handshake mismatch"
         );
-        port.create_container_on_platform(
-            &self.names.function,
-            &ContainerCreateBody {
-                image: Some(function.resolved().metadata().image_id.as_str().into()),
-                entrypoint: Some(function_plan.entrypoint().to_vec()),
-                cmd: Some(function_plan.command().to_vec()),
-                working_dir: Some(function_plan.working_directory().into()),
-                user: Some("1000:1000".into()),
-                labels: Some(self.names.labels()),
-                env: Some(vec![
-                    "AWS_LAMBDA_RUNTIME_API=127.0.0.1:9001".into(),
-                    "AWS_LAMBDA_FUNCTION_NAME=wire-fixture".into(),
-                    "AWS_LAMBDA_FUNCTION_VERSION=$LATEST".into(),
-                    "AWS_LAMBDA_FUNCTION_MEMORY_SIZE=192".into(),
-                    "AWS_REGION=us-east-1".into(),
-                    "AWS_DEFAULT_REGION=us-east-1".into(),
-                ]),
-                host_config: Some(limits(
-                    format!("container:{}", self.names.relay.as_str()),
-                    192 * 1024 * 1024,
-                    1_000_000_000,
-                    256,
-                )),
-                ..Default::default()
-            },
-            function.resolved().metadata().architecture,
-            deadline(),
-        )
-        .await?;
+        self.plan
+            .as_ref()
+            .context("allocation plan")?
+            .create_function(&port, deadline())
+            .await?;
         self.logs = Some(FunctionLogs::start(
             port.attach_logs(&self.names.function, deadline()).await?,
             IO,
@@ -258,10 +242,12 @@ impl Environment {
         )?);
         port.start_container(&self.names.function, deadline())
             .await?;
-        ensure!(
-            client.next(deadline()).await? == ClientEvent::BootstrapReady,
-            "function readiness mismatch"
-        );
+        if bootstrap {
+            ensure!(
+                client.next(deadline()).await? == ClientEvent::BootstrapReady,
+                "function readiness mismatch"
+            );
+        }
         Ok(())
     }
 
@@ -357,6 +343,7 @@ impl Environment {
             );
             Ok(())
         });
+        self.plan.take();
         self.artifacts.clear();
         let images = self
             .images
@@ -386,23 +373,6 @@ impl Environment {
     }
 }
 
-fn limits(network_mode: String, memory: i64, nano_cpus: i64, pids_limit: i64) -> HostConfig {
-    HostConfig {
-        network_mode: Some(network_mode),
-        memory: Some(memory),
-        nano_cpus: Some(nano_cpus),
-        pids_limit: Some(pids_limit),
-        readonly_rootfs: Some(true),
-        cap_drop: Some(vec!["ALL".into()]),
-        security_opt: Some(vec!["no-new-privileges:true".into()]),
-        tmpfs: Some(HashMap::from([(
-            "/tmp".into(),
-            "rw,noexec,nosuid,size=536870912".into(),
-        )])),
-        ..Default::default()
-    }
-}
-
 async fn remove(port: &DockerPort, key: &DockerKey) -> Result<()> {
     match port.remove_container(key, deadline()).await {
         Ok(()) | Err(DockerError::Status(StatusCode::NOT_FOUND)) => Ok(()),
@@ -418,7 +388,7 @@ async fn test_should_execute_real_ric_over_production_wire_with_large_binary_fra
     let result = async {
         environment.start().await?;
         let event =
-            json!({"value":35,"padding":"p".repeat(LARGE),"response_bytes":LARGE,"logs":true});
+            json!({"value":35,"padding":"p".repeat(LARGE),"response_bytes":LARGE,"logs":true,"policy":true});
         let computed = environment.call(&event, false).await?;
         ensure!(
             computed["computed"] == 42
@@ -439,6 +409,22 @@ async fn test_should_execute_real_ric_over_production_wire_with_large_binary_fra
                 && computed["pidsMax"] == "256",
             "function resource controls differ"
         );
+        ensure!(
+            computed["tmpBytes"] == 512 * 1024 * 1024_u64
+                && computed["tmpMode"] == 0o1777
+                && computed["swapMax"] == "0"
+                && computed["capEff"] == "0000000000000000"
+                && computed["noNewPrivs"] == "1"
+                && computed["taskRoot"] == "/var/task"
+                && computed["functionName"] == "wire-fixture"
+                && computed["functionVersion"] == "$LATEST"
+                && computed["region"] == "us-east-1"
+                && computed["configuredValue"] == "from-captured-revision",
+            "allocation policy runtime enforcement differs"
+        );
+        let cpu = computed["cpuMax"].as_str().context("CPU quota report")?;
+        let cpu: Vec<_> = cpu.split_whitespace().collect();
+        ensure!(matches!(cpu.as_slice(), [quota, period] if quota.parse::<u64>().is_ok_and(|quota| quota > 0 && period.parse::<u64>() == Ok(quota))), "CPU quota does not enforce one CPU");
         let warm = environment.call(&json!({"value":0}), false).await?;
         ensure!(
             warm["computed"] == 7 && warm["counter"] == 2,
@@ -480,49 +466,39 @@ async fn test_should_execute_real_ric_over_production_wire_with_large_binary_fra
 #[tokio::test]
 #[ignore = "requires explicit Docker wire qualification images/socket"]
 async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() -> Result<()> {
-    let mut environment = Environment::new().await?;
-    let result = async {
-        let arch = env::var("RUSTACK_RUNTIME_ARCH").context("explicit architecture required")?;
-        let port = environment.wire.port();
-        let image = environment
-            .image(&format!("rustack-p0-handler:{arch}"), &arch)
-            .await?;
-        for reset in [false, true] {
-            let overrides = rustack_lambda_model::types::ImageConfig {
+    for reset in [false, true] {
+        let mut environment = Environment::new().await?;
+        let result = async {
+            let overrides = ImageConfig {
                 entry_point: reset.then(Vec::new),
                 command: Some(if reset {
                     vec!["/bin/true".into()]
                 } else {
                     vec![]
                 }),
-                ..Default::default()
+                working_directory: Some("/tmp".into()),
             };
-            let plan = image
+            environment
+                .start_with(Some(overrides.clone()), false)
+                .await?;
+            let port = environment.wire.port();
+            let expected = environment
+                .artifacts
+                .last()
+                .context("function artifact")?
                 .resolved()
                 .metadata()
                 .execution
                 .plan(Some(&overrides))?;
-            port.create_container_on_platform(
-                &environment.names.function,
-                &ContainerCreateBody {
-                    image: Some(image.resolved().metadata().image_id.as_str().into()),
-                    entrypoint: Some(plan.entrypoint().to_vec()),
-                    cmd: Some(plan.command().to_vec()),
-                    working_dir: Some(plan.working_directory().into()),
-                    labels: Some(environment.names.labels()),
-                    user: Some("1000:1000".into()),
-                    host_config: Some(limits("none".into(), 192 * 1024 * 1024, 1_000_000_000, 256)),
-                    ..Default::default()
-                },
-                image.resolved().metadata().architecture,
-                deadline(),
-            )
-            .await?;
             let actual = port
                 .inspect_container(&environment.names.function, deadline())
                 .await?
                 .config
                 .context("actual create config")?;
+            ensure!(
+                actual.working_dir.as_deref() == Some("/tmp"),
+                "working directory override differs"
+            );
             if reset {
                 ensure!(
                     actual.entrypoint.as_deref().unwrap_or_default().is_empty(),
@@ -540,7 +516,7 @@ async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() 
                     actual
                         .entrypoint
                         .as_deref()
-                        .is_some_and(|entrypoint| entrypoint == plan.entrypoint()),
+                        .is_some_and(|entrypoint| entrypoint == expected.entrypoint()),
                     "inherited entrypoint mismatch"
                 );
                 ensure!(
@@ -548,11 +524,18 @@ async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() 
                     "daemon restored a cleared command"
                 );
             }
-            remove(&port, &environment.names.function).await?;
+            let exit = port
+                .wait_container(&environment.names.function, deadline())
+                .await?;
+            ensure!(
+                exit.status_code == if reset { 0 } else { 142 },
+                "empty override execution exit differs"
+            );
+            Ok(())
         }
-        Ok(())
+        .await;
+        let cleanup = environment.cleanup().await;
+        result.and(cleanup)?;
     }
-    .await;
-    let cleanup = environment.cleanup().await;
-    result.and(cleanup)
+    Ok(())
 }

@@ -35,7 +35,7 @@ Start with `RUSTACK_CONFIG=./rustack.yaml rustack`; the current CLI does not hav
 |---|---|
 | LAMBDA_DOCKER_SOCKET | `unix:///var/run/docker.sock`; operator may select Desktop/rootless socket; absolute local socket path≤4,096 bytes; no TCP/SSH fallback |
 | LAMBDA_DOCKER_RELAY_IMAGE | Required when Docker enabled; bounded image reference, resolved and pinned at startup; no implicit pull |
-| LAMBDA_DOCKER_NETWORK | Operator-owned user bridge name/ID, or a per-owner private bridge created by Rustack;≤128 ASCII bytes; never host/container arbitrary input |
+| LAMBDA_DOCKER_NETWORK | Operator-owned user bridge name/ID, or a per-owner private bridge created by Rustack;≤128 ASCII bytes; explicit none opts into disconnected pure handlers with SDK callbacks unavailable; never host/default-bridge/arbitrary-container sharing |
 | LAMBDA_DOCKER_PULL_POLICY | never / ifMissing; default never; missing image gives actionable error |
 | LAMBDA_DOCKER_REGISTRIES | Required for ifMissing; comma-separated≤32 approved registry hosts, each≤253 bytes; exact host[:port] matching, no suffix matching |
 | LAMBDA_DOCKER_REGISTRY_AUTH_FILE | Optional operator-owned YAML credential map by approved registry host;≤64 KiB,≤32 entries, secret fields redacted and permissions checked; parse as a secret-bearing type, never execute credential helpers |
