@@ -215,6 +215,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Pinned by:** [runtime §7.1](./rustack-workflows-20-lambda-runtime-design.md#71-strict-production-boundary-closure-b03), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date:** 2026-10-25. This is an internal-library API migration for direct consumers, not a new AWS wire mode or a dependency upgrade.
 
+## D27 — Align SDK signing features with the regional local compatibility profile
+
+- **Context:** B01 includes crypto-bigint0.5 through optional AWS SDK SigV4a; the latest released signer inspected (1.6.3) still directly requires0.5, while the patched bigint floor is0.7.6.
+- **Alternatives considered:** an advisory ignore leaves the security gate false; an unreviewed crypto fork adds a maintenance/supply-chain burden; removing supported regional SigV4 clients would break the workflow contract.
+- **Decision:** remove the unused explicit S3/EventBridge/STS SDK SigV4a features, retain their regional SigV4/HTTP/Tokio behavior and current model versions, and upgrade affected compatible libraries plus ZIP9.1. This selects the actual local client profile already enforced by the gateway; user-image SDKs remain independent.
+- **Why:** the existing gateway fails closed for unimplemented ECDSA signing, and workflow acceptance has no multi-region AWS signing requirement. Security closure must prove the resolved graph, not merely rename or ignore a vulnerable version. Future multi-region support requires a repaired upstream signer and its own tests.
+- **Pinned by:** [runtime §7.2](./rustack-workflows-20-lambda-runtime-design.md#72-dependency-security-closure-b01), [HTTP authentication profile](./rustack-http-hardening-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25. SDK model versions and supported AWS wire modes are preserved.
+
 ## Glossary
 
 | Term | Meaning in this specification |

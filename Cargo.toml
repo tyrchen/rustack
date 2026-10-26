@@ -168,7 +168,7 @@ regex = "1.13"
 bytes = "1.12"
 rand = "0.10"
 tempfile = "3.27"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.1", default-features = false, features = ["deflate"] }
 percent-encoding = "2.3"
 mime = "0.3"
 futures = "0.3"
@@ -191,7 +191,6 @@ aws-sdk-s3 = { version = "1.145", default-features = false, features = [
   "default-https-client",
   "http-1x",
   "rt-tokio",
-  "sigv4a",
 ] }
 aws-sdk-dynamodb = { version = "1.124", default-features = false, features = [
   "default-https-client",
@@ -228,7 +227,6 @@ aws-sdk-cloudwatchlogs = { version = "1.150", default-features = false, features
 aws-sdk-eventbridge = { version = "1.116", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
-  "sigv4a",
 ] }
 aws-sdk-kms = { version = "1", default-features = false, features = [
   "default-https-client",
@@ -257,7 +255,6 @@ aws-sdk-iam = { version = "1", default-features = false, features = [
 aws-sdk-sts = { version = "1", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
-  "sigv4a",
 ] }
 aws-sdk-cloudfront = { version = "1", default-features = false, features = [
   "default-https-client",

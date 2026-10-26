@@ -7,8 +7,9 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
-    io::ErrorKind,
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
+    str::from_utf8,
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -21,6 +22,7 @@ use rustack_lambda_model::types::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
+use zip::{System, read::ZipFile};
 
 use crate::{
     artifact::{ImageArtifact, ResolvedImage, ValidatedArtifact},
@@ -1477,6 +1479,11 @@ fn extract_zip(
             message: format!("not a valid zip archive: {e}"),
         })?;
 
+    if archive.has_duplicate_names() {
+        return Err(LambdaServiceError::InvalidZipFile {
+            message: "Duplicate ZIP entry".into(),
+        });
+    }
     if archive.len() > 10_000 {
         return Err(LambdaServiceError::InvalidZipFile {
             message: "Too many ZIP entries".into(),
@@ -1490,28 +1497,17 @@ fn extract_zip(
             .map_err(|e| LambdaServiceError::InvalidZipFile {
                 message: format!("zip entry {i}: {e}"),
             })?;
-        let Some(rel) = entry.enclosed_name() else {
+        let rel = validated_zip_path(&entry)?;
+        if !paths.insert(rel.clone()) {
             return Err(LambdaServiceError::InvalidZipFile {
-                message: format!("zip entry has invalid path: {}", entry.name()),
-            });
-        };
-        if entry.name().len() > 1024
-            || entry.name().contains('\\')
-            || entry.name().split('/').any(|component| component == "..")
-            || entry
-                .unix_mode()
-                .is_some_and(|mode| mode & 0o170_000 == 0o120_000 || mode & 0o7000 != 0)
-            || !paths.insert(rel.clone())
-        {
-            return Err(LambdaServiceError::InvalidZipFile {
-                message: "Unsafe or duplicate ZIP entry".into(),
+                message: "Duplicate ZIP entry".into(),
             });
         }
         let out_path = target.join(&rel);
         // Defense in depth: ensure the resolved path stays within target.
         if !out_path.starts_with(target) {
             return Err(LambdaServiceError::InvalidZipFile {
-                message: format!("zip entry escapes extraction root: {}", entry.name()),
+                message: "ZIP entry escapes extraction root".into(),
             });
         }
         if entry.is_dir() {
@@ -1525,10 +1521,7 @@ fn extract_zip(
         let remaining = max_extracted.saturating_sub(extracted_total);
         if entry.size() > remaining {
             return Err(LambdaServiceError::InvalidZipFile {
-                message: format!(
-                    "zip archive expands beyond {max_extracted} bytes (entry: {})",
-                    entry.name(),
-                ),
+                message: format!("ZIP archive expands beyond {max_extracted} bytes"),
             });
         }
         if let Some(parent) = out_path.parent() {
@@ -1571,6 +1564,36 @@ fn extract_zip(
         }
     }
     Ok(())
+}
+
+/// Check original names and attributes before ZIP9 normalizes decoded metadata.
+fn validated_zip_path<R: Read + ?Sized>(
+    entry: &ZipFile<'_, R>,
+) -> Result<PathBuf, LambdaServiceError> {
+    let invalid = || LambdaServiceError::InvalidZipFile {
+        message: "Unsafe ZIP entry name or attributes".into(),
+    };
+    let raw_name = entry.name_raw();
+    if raw_name.len() > 1024
+        || (entry.flags().as_u16() & (1 << 11) != 0 && from_utf8(raw_name).is_err())
+    {
+        return Err(invalid());
+    }
+    let name = entry.name().map_err(|_| invalid())?;
+    let mode = if entry.system() == System::Dos {
+        0
+    } else {
+        entry.external_attributes() >> 16
+    };
+    if name.len() > 1024
+        || name.contains('\\')
+        || name.split('/').any(|component| component == "..")
+        || mode & 0o170_000 == 0o120_000
+        || mode & 0o7000 != 0
+    {
+        return Err(invalid());
+    }
+    entry.enclosed_name().ok_or_else(invalid)
 }
 
 /// Compute base64-encoded SHA-256 hash of the given data.
@@ -2371,6 +2394,204 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LambdaServiceError::InvalidZipFile { .. }));
+    }
+
+    #[rstest::rstest]
+    #[case::invalid_utf8(vec![0xff; 11], true)]
+    #[case::raw_limit(vec![b'a'; 1025], true)]
+    #[case::decoded_limit(vec![0x82; 513], false)]
+    #[tokio::test]
+    async fn test_should_reject_invalid_zip_names_without_publishing_artifacts(
+        #[case] raw: Vec<u8>,
+        #[case] utf8: bool,
+    ) {
+        use std::io::{Cursor, Write};
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "a".repeat(raw.len()),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"payload").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let central = bytes
+            .windows(4)
+            .position(|part| part == b"PK\x01\x02")
+            .unwrap();
+        let flag = if utf8 { 1u16 << 11 } else { 0 };
+        bytes
+            .get_mut(6..8)
+            .unwrap()
+            .copy_from_slice(&flag.to_le_bytes());
+        bytes
+            .get_mut(central + 8..central + 10)
+            .unwrap()
+            .copy_from_slice(&flag.to_le_bytes());
+        bytes
+            .get_mut(30..30 + raw.len())
+            .unwrap()
+            .copy_from_slice(&raw);
+        bytes
+            .get_mut(central + 46..central + 46 + raw.len())
+            .unwrap()
+            .copy_from_slice(&raw);
+
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        let error = store
+            .store_zip_code("safe", "$LATEST", &Bytes::from(bytes))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LambdaServiceError::InvalidZipFile { .. }));
+        assert!(store.artifacts.is_empty());
+        let mut entries = tokio::fs::read_dir(root.path()).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[rstest::rstest]
+    #[case::symlink(0o120_777)]
+    #[case::setuid(0o104_755)]
+    #[case::setgid(0o102_755)]
+    #[case::sticky(0o101_755)]
+    #[tokio::test]
+    async fn test_should_reject_hostile_zip_attributes_without_replacing_code(#[case] mode: u32) {
+        use std::io::Cursor;
+
+        let root = tempfile::tempdir().unwrap();
+        let code_dir = root.path().join("code");
+        let sentinel = root.path().join("sentinel");
+        tokio::fs::write(&sentinel, b"outside").await.unwrap();
+        let store = FunctionStore::new(&code_dir);
+        let (old, _, _) = store
+            .store_zip_code(
+                "safe",
+                "$LATEST",
+                &Bytes::from(crate::test_zip::minimal_zip(b"old")),
+            )
+            .await
+            .unwrap();
+
+        // Encode the central-directory attributes directly: safe writer APIs
+        // deliberately strip special permission bits. The symlink payload would
+        // target the outside sentinel if materialized as a link.
+        let mut hostile = crate::test_zip::minimal_zip(sentinel.as_os_str().as_encoded_bytes());
+        let central = hostile
+            .windows(4)
+            .position(|bytes| bytes == b"PK\x01\x02")
+            .unwrap();
+        hostile
+            .get_mut(central + 4..central + 6)
+            .unwrap()
+            .copy_from_slice(&((3u16 << 8) | 0x14).to_le_bytes());
+        hostile
+            .get_mut(central + 38..central + 42)
+            .unwrap()
+            .copy_from_slice(&(mode << 16).to_le_bytes());
+        let mut archive = zip::ZipArchive::new(Cursor::new(&hostile)).unwrap();
+        assert_eq!(
+            archive.by_index(0).unwrap().external_attributes() >> 16,
+            mode
+        );
+
+        let error = store
+            .store_zip_code("safe", "$LATEST", &Bytes::from(hostile))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LambdaServiceError::InvalidZipFile { .. }));
+        assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"outside");
+        assert_eq!(
+            tokio::fs::read(old.join("fixture.txt")).await.unwrap(),
+            b"old"
+        );
+        assert_eq!(store.artifacts.len(), 1);
+        let mut entries = tokio::fs::read_dir(&code_dir).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_some());
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_duplicate_raw_zip_names_before_indexed_extraction() {
+        use std::io::{Cursor, Write};
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("first", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"one").unwrap();
+        writer
+            .start_file("other", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"two").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let local = bytes
+            .windows(4)
+            .rposition(|part| part == b"PK\x03\x04")
+            .unwrap();
+        let central = bytes
+            .windows(4)
+            .rposition(|part| part == b"PK\x01\x02")
+            .unwrap();
+        bytes
+            .get_mut(local + 30..local + 35)
+            .unwrap()
+            .copy_from_slice(b"first");
+        bytes
+            .get_mut(central + 46..central + 51)
+            .unwrap()
+            .copy_from_slice(b"first");
+        let archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        assert_eq!(
+            archive.len(),
+            1,
+            "upstream metadata deduplicates identical raw names"
+        );
+        assert!(archive.has_duplicate_names());
+
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        let error = store
+            .store_zip_code("duplicate", "$LATEST", &Bytes::from(bytes))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LambdaServiceError::InvalidZipFile { .. }));
+        assert!(store.artifacts.is_empty());
+        let mut entries = tokio::fs::read_dir(root.path()).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_dos_attribute_semantics_without_special_permissions() {
+        let mut bytes = crate::test_zip::minimal_zip(b"safe");
+        let central = bytes
+            .windows(4)
+            .position(|part| part == b"PK\x01\x02")
+            .unwrap();
+        bytes
+            .get_mut(central + 4..central + 6)
+            .unwrap()
+            .copy_from_slice(&20u16.to_le_bytes());
+        bytes
+            .get_mut(central + 38..central + 42)
+            .unwrap()
+            .copy_from_slice(&(0o104_755u32 << 16).to_le_bytes());
+        let root = tempfile::tempdir().unwrap();
+        let store = FunctionStore::new(root.path());
+        let (path, _, _) = store
+            .store_zip_code("dos", "$LATEST", &Bytes::from(bytes))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(path.join("fixture.txt")).await.unwrap(),
+            b"safe"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = tokio::fs::metadata(path.join("fixture.txt")).await.unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7000, 0);
+        }
     }
 
     #[test]
