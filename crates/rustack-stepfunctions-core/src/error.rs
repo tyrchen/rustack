@@ -1,7 +1,8 @@
 //! Redacted semantic failures with typed source ownership.
 
-use std::fmt;
+use std::{collections::TryReserveError, fmt};
 
+use getrandom::Error as EntropyError;
 use rustack_core::json::JsonError;
 use thiserror::Error;
 
@@ -9,6 +10,18 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Unsupported or invalid intrinsic syntax/arity.
+    #[error("invalid ASL expression")]
+    InvalidExpression,
+    /// An intrinsic encountered an invalid value, type or format.
+    #[error("invalid ASL intrinsic value")]
+    IntrinsicValue,
+    /// The operating system could not supply secure UUID entropy.
+    #[error("ASL UUID entropy unavailable")]
+    Entropy(#[source] EntropyError),
+    /// Bounded storage could not be reserved.
+    #[error("ASL allocation failed")]
+    Allocation(#[source] TryReserveError),
     /// Unsupported or ambiguous static Wait source definition.
     #[error("invalid ASL Wait source")]
     InvalidWait,
@@ -37,7 +50,7 @@ pub enum AslError {
     #[error("ASL result path cannot be applied")]
     Merge,
     /// Expansion exceeds the allowed bounded evaluation work.
-    #[error("ASL path evaluation work limit exceeded")]
+    #[error("ASL evaluation work limit exceeded")]
     WorkLimit,
     /// Materialized data exceeds the payload byte allowance.
     #[error("ASL payload byte limit exceeded")]

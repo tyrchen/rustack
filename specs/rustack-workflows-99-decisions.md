@@ -393,3 +393,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: static validation, dynamic failures and AWS whole-second target behavior can be pinned without a sleeping task or dependency on the HTTP caller lifetime.
 - **Pinned by**: [ASL§2.4.2](./rustack-workflows-30-asl-design.md#242-executable-wait-source-contract), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. Use existing chrono/std/reference paths. STANDARD local wait cap is365 days; overall execution deadlines are independent. This is source evaluation, not scheduler acceptance.
+
+## D45 — Compile intrinsics with shared budgets and preserve format escape provenance
+
+- **Context**: Parameters/ResultSelector and the machine compiler need one reusable, bounded expression implementation.
+- **Alternatives considered**: host formatting/splitting gives different semantics; reparsing on every state entry repeats validation; decoding all format escapes before slot recognition reinterprets escaped braces; per-call budgets multiply work under nesting; infallible UUID helpers can panic on entropy failure.
+- **Decision**: compile the12-call allowlist into a private AST, preserve literal formatting provenance, share work/text/materialization budgets and encode borrowed collection views before owning results. Inject a typed UUID source and use fallible OS entropy in the concrete convenience adapter.
+- **Why**: fixed bounds and historical independent edge inputs make expression behavior reviewable before template/compiler consumers. Async execution owners keep entropy acquisition off the scheduler loop.
+- **Pinned by**: [ASL§2.3.1](./rustack-workflows-30-asl-design.md#231-executable-expression-contract), [semantic memo](../docs/research/spike-stepfunctions-semantic-oracle.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Add normal dependency edges to already-resolved getrandom0.4.3/uuid1.26.0 without updating external versions. Formal scalar Format is selected over the historical cloud's object formatting extension.

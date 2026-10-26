@@ -4196,12 +4196,14 @@ version = "0.9.0"
 dependencies = [
  "bytes",
  "chrono",
+ "getrandom 0.4.3",
  "proptest",
  "rstest",
  "rustack-core",
  "serde",
  "serde_json",
  "thiserror",
+ "uuid",
  "winnow",
 ]
 

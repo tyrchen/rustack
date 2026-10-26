@@ -519,6 +519,17 @@ ASL§2.4.2/D44 implements the four typed Wait sources, source/dynamic validation
 
 Core166 unit cases/18 doctests and strict production/all-targets Clippy pass, including41 Wait additions and one512-case property. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,671 tests/415 gated, including the deferred Docker checkpoint. B06 audit/deny failures remain open. This does not close the compiler, registry, execution actor or M1 acceptance.
 
+## P2 expression/intrinsic independent review
+
+ASL§2.3.1/D45 implements the complete12-call selected intrinsic profile, winnow AST, format provenance, shared resource accounting and fallible typed UUID sourcing. The independent read-only reviewer rechecked both corrections and reported no remaining in-slice findings.
+
+| ID | Priority / source | Closed correction | Verification |
+|---|---|---|---|
+| W110 | P2; `crates/rustack-stepfunctions-core/src/expression/eval.rs` split delimiter construction | Debit work before every construction step, including duplicate scalars |20,000 repeated identical delimiters exhaust the shared budget |
+| W111 | P2; `crates/rustack-stepfunctions-core/src/expression/eval.rs` structural object equality | Charge key lookup work before lookup and bound queued comparison work | One200-key late mismatch returns false;100 repeated mismatches exhaust rather than bypass aggregate work |
+
+Core242 unit cases/21 doctests and strict checks pass, including all12 independent catalog cases and two new512-case properties. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,747 tests/415 gated, including retained deferred Docker changes. Audit still reports the same4 vulnerabilities/10 unsound warnings in the existing zstd/Squib graph (477 packages); deny passes bans/licenses/sources and fails advisories under open B06. No external package/version was added and no ignores were introduced. Template/pipeline/compiler, async entropy isolation and full workflow acceptance remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

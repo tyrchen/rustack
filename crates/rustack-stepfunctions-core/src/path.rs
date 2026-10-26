@@ -253,17 +253,26 @@ impl Path {
         data: &'a Payload,
         context: &'a EvaluationContext,
     ) -> Result<PathMatches<'a>, AslError> {
+        let mut remaining = MAX_WORK;
+        self.select_with_work(data, context, &mut remaining)
+    }
+
+    pub(crate) fn select_with_work<'a>(
+        &self,
+        data: &'a Payload,
+        context: &'a EvaluationContext,
+        remaining: &mut usize,
+    ) -> Result<PathMatches<'a>, AslError> {
         let root = match self.root {
             Root::Data => data.value(),
             Root::Context => context.value(),
         };
         let mut values = vec![root];
-        let mut remaining = MAX_WORK;
         for segment in &self.segments {
             let mut next = Vec::new();
             for value in values {
-                spend(&mut remaining, 1)?;
-                select_segment(segment, value, &mut next, &mut remaining)?;
+                spend(remaining, 1)?;
+                select_segment(segment, value, &mut next, remaining)?;
             }
             values = next;
         }

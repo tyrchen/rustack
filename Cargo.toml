@@ -126,6 +126,7 @@ url = "2.5.8"
 bollard-stubs = { version = "=1.53.1-rc.29.3.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
+getrandom = { version = "0.4.3", features = ["std"] }
 ciborium = "0.2"
 quick-xml = "0.41"
 zstd = { version = "0.13.3", default-features = false }

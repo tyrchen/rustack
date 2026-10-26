@@ -351,7 +351,7 @@ fn resolve<'a, T>(
     }
 }
 
-fn number(value: &Value) -> Result<Option<f64>, AslError> {
+pub(crate) fn number(value: &Value) -> Result<Option<f64>, AslError> {
     const LIMIT: f64 = 9_007_199_254_740_992.0;
     if let Some(n) = value.as_u64() {
         if n > 9_007_199_254_740_992 {

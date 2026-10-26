@@ -93,6 +93,47 @@ Support `Execution.{Id,Input,Name,RoleArn,StartTime}`, `StateMachine.{Id,Name}`,
 
 Intrinsic allowlist: States.Format, StringToJson, JsonToString, Array, ArrayLength, ArrayGetItem, ArrayContains, ArrayPartition, StringSplit, MathAdd, UUID and JsonMerge. JsonMerge supports only `States.JsonMerge(a,b,false)` shallow merging. Reject all others at creation. Nesting is at most ten; each evaluation permits at most 10,000 AST operations and remains within the output budget. P0 fixtures pin escaping, Format, StringSplit delimiter behavior, MathAdd rounding/ranges, shallow merge and UUID format. Do not substitute Rust formatter/split semantics. Production UUIDs use secure randomness; deterministic tests inject a typed ID source rather than seed production randomness.
 
+#### 2.3.1 Executable expression contract
+
+Expression compiles a complete Path or an allowlisted States call, without evaluation during creation. Use the existing winnow lexer with a private typed AST. Bound each expression to4,096 UTF-8 bytes,1,024 nodes, ten nested calls and128 arguments per call. Full consumption is mandatory; reject surrounding whitespace, unknown functions, wrong arity, trailing commas, malformed numbers and unsupported syntax. Internal ASCII whitespace may surround arguments/commas. Arguments may be single-quoted strings, JSON numbers/booleans/null, compiled Paths or nested calls; object/array literals are constructed through Array/StringToJson. Numeric lexemes are at most128 bytes and use existing correctly rounded JSON conversion. These are local bounds, not full ASL parser support.
+
+Decode apostrophe/backslash/brace escapes exactly once. String literals support only `\'`, `\\`, `\{` and `\}` escapes; reject dangling/unknown escapes. Business control characters already decoded from the outer JSON string remain data and are safely JSON-encoded in results. Preserve a format literal's escape provenance until Format processes it, so an escaped brace is not accidentally reinterpreted as a placeholder. Literal non-format braces must be escaped. Format accepts only `{}` slots, checks slot/argument equality and accepts scalar substitutions (string without JSON quotes; number/bool/null compact JSON spelling); array/object substitutions fail under the formal ASL scalar profile. A runtime first argument may itself be a path or nested expression yielding a format string. No host formatter, regex or string interpolation evaluates user syntax.
+
+| Call | Arity | Selected value behavior |
+|---|---:|---|
+| Format |1–128| Scalar replacement; brace/backslash escapes; dynamic format checked at evaluation |
+| StringToJson |1| Bounded duplicate-key-safe JSON decoding of a string |
+| JsonToString |1| Compact bounded JSON text, then ordinary JSON string encoding |
+| Array |0–128| Preserve argument order |
+| ArrayLength |1| Array count |
+| ArrayGetItem |2| Nonnegative JSON integer index; no growth, coercion or missing→null |
+| ArrayContains |2| Bounded structural JSON equality; numeric representation differences use supported finite comparison |
+| ArrayPartition |2| Positive chunk size rounded as below; stable final short chunk |
+| StringSplit |2| Each delimiter scalar separates; discard empty fragments; empty delimiter preserves nonempty input as one fragment |
+| MathAdd |2| Round each finite argument to nearest integer, ties toward positive infinity; require int32 operands and checked int32 sum |
+| UUID |0| Fallible OS entropy, RFC4122 variant/version4; no hidden deterministic production seed |
+| JsonMerge |3| Objects only, false third value; right-side keys replace left, no recursive merge |
+
+MathAdd/partition rounding is pinned to the historical AWS-validated math fixtures, including negative halves; implement floor plus a fractional comparison, avoiding `floor(x+0.5)` rounding at adjacent representable values. ArrayGetItem deliberately requires an integer JSON number rather than rounding floats. For mixed numeric structural equality, apply the Choice interoperability range so large integer/float values cannot silently alias; equal integer representations compare exactly. Empty-delimiter split and checked result overflow are explicit local choices. Primary language/function contracts: [ASL](https://states-language.net/spec.html), [AWS intrinsics](https://docs.aws.amazon.com/step-functions/latest/dg/intrinsic-functions.html); historical boundaries are recorded in the [semantic memo](../docs/research/spike-stepfunctions-semantic-oracle.md).
+
+Every evaluation shares10,000 AST/data work units,4MiB of scanned text and4MiB of cumulatively materialized encoded payloads. These local budgets include nested calls, array equality/partition members and string delimiter construction (at most1,024 unique delimiter scalars). Reject exhaustion with WorkLimit; never return a partial result. Each intermediate result independently satisfies the256KiB/depth64/member65,536 payload contract, including connector/context selections before another function can discard them. Encode arrays/partitions/merges through borrowed views and the bounded writer before building an owned result; bound variadic argument retention by the shared materialization budget. Allocation overhead is separate from encoded byte accounting. Callers cannot mutate source payload/context.
+
+Expression::evaluate uses a concrete OS-backed UUID source. A separate synchronous UuidSource port enables typed deterministic/failure fixtures; validate injected UUID version/variant before publishing. Use getrandom0.4.3 fill and uuid's existing random-byte builder, preserving typed entropy failures rather than using a panicking random convenience API. Both packages are already in the workspace graph; no unrelated dependency version upgrade is required. System entropy can block during early boot: the future async actor must inject pre-acquired IDs or evaluate through a bounded retained blocking worker, rather than make an entropy syscall inside its scheduling loop. Diagnostics and Debug remain redacted. Tests execute the12 independent intrinsic catalog examples and historical half/split edge inputs, nested/escaped/path/context grammar, exact limits, type/missing errors, overflow, output expansion, work exhaustion and UUID success/source failure. Expression acceptance does not qualify template/pipeline/compiler or workflow execution by itself.
+
+```text
+┌─ bounded expression text ─────────────────────────────────────────┐
+│ winnow tokens → private call/path/scalar AST                      │
+│ arity + escapes + static format checks; no source in diagnostics  │
+└─────────────────────────────┬────────────────────────────────────┘
+                              ▼ shared evaluation budgets
+┌─ pure evaluator ──────────────────────────────────────────────────┐
+│ immutable data/context → bounded arguments → intrinsic operation │
+│ UUID source → fallible entropy      borrowed output views        │
+│                    ▼                                             │
+│ bounded writer → validated Payload → next expression/template    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
 ### 2.4 Choice and Wait
 
 Choice supports short-circuit And/Or/Not, IsPresent/IsNull/IsString/IsNumeric/IsBoolean/IsTimestamp; String/Numeric/Timestamp Equals/LessThan/GreaterThan/LessThanEquals/GreaterThanEquals and their Path variants; BooleanEquals/Path and StringMatches. Do not coerce strings to numbers. IsPresent safely tests missing data; other missing-reference errors are runtime failures. Present values of inappropriate comparison types yield false. Distinguish missing, null and wrong type in fixtures. StringMatches implements AWS wildcard/escaping grammar, not user regex. Reject NaN/Infinity; preserve numeric comparison precision within the documented binary64 interoperability range.
