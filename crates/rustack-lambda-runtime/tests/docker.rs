@@ -11,11 +11,13 @@ use std::{env, os::unix::fs::FileTypeExt, process::Stdio, time::Duration};
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use rustack_lambda_runtime::{
+    client::{ClientConfig, ClientEvent, ControlClient},
     metadata::{deadline_unix_ms, local_trace_id},
     protocol::{
         Acknowledgement, Architecture, AttemptId, EnvironmentId, Frame, Message, Outcome, Payload,
         read_frame, write_frame,
     },
+    session::{Invocation, RuntimeResult},
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -158,7 +160,7 @@ struct Names {
 struct Control {
     child: Child,
     input: Option<ChildStdin>,
-    output: ChildStdout,
+    output: Option<ChildStdout>,
 }
 
 #[derive(Debug)]
@@ -184,7 +186,7 @@ impl Environment {
         })
     }
 
-    async fn start(&mut self, idle_seconds: &str) -> Result<()> {
+    fn spawn(&mut self, idle_seconds: &str) -> Result<()> {
         let mut command = self.docker.command();
         command
             .args([
@@ -227,8 +229,13 @@ impl Environment {
         self.control = Some(Control {
             child,
             input: Some(input),
-            output,
+            output: Some(output),
         });
+        Ok(())
+    }
+
+    async fn start(&mut self, idle_seconds: &str) -> Result<()> {
+        self.spawn(idle_seconds)?;
         ensure!(
             self.next().await?
                 == Message::Hello {
@@ -251,9 +258,15 @@ impl Environment {
 
     async fn next(&mut self) -> Result<Message> {
         let control = self.control.as_mut().context("relay has not started")?;
-        let frame = read_frame(&mut control.output, Instant::now() + OPERATION)
-            .await?
-            .context("relay closed control output")?;
+        let frame = read_frame(
+            control
+                .output
+                .as_mut()
+                .context("relay output is owned by client")?,
+            Instant::now() + OPERATION,
+        )
+        .await?
+        .context("relay closed control output")?;
         ensure!(frame.environment() == self.identity, "wrong environment");
         Ok(frame.into_message())
     }
@@ -274,6 +287,15 @@ impl Environment {
     }
 
     async fn function(&mut self) -> Result<()> {
+        self.create_function().await?;
+        ensure!(
+            self.next().await? == Message::BootstrapReady,
+            "missing first RIC poll"
+        );
+        Ok(())
+    }
+
+    async fn create_function(&self) -> Result<()> {
         self.docker
             .checked(&[
                 "create",
@@ -317,10 +339,6 @@ impl Environment {
         self.docker
             .checked(&["start", &self.names.function])
             .await?;
-        ensure!(
-            self.next().await? == Message::BootstrapReady,
-            "missing first RIC poll"
-        );
         Ok(())
     }
 
@@ -373,6 +391,27 @@ impl Environment {
             .checked(&["rm", "--force", &self.names.function])
             .await?;
         Ok(())
+    }
+
+    async fn wait_busy(&self, attempt: AttemptId) -> Result<()> {
+        let marker = format!("P0_BUSY_START={attempt}");
+        let busy_deadline = Instant::now() + OPERATION;
+        loop {
+            // The helper owns the deadline so it cannot be cancelled before
+            // its CLI process has been killed and reaped.
+            let logs = self
+                .docker
+                .checked_until(&["logs", &self.names.function], busy_deadline)
+                .await?;
+            if logs.contains(&marker) {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < busy_deadline,
+                "handler never entered its busy section"
+            );
+            sleep_until((Instant::now() + Duration::from_millis(50)).min(busy_deadline)).await;
+        }
     }
 
     async fn cleanup(&mut self) -> Result<()> {
@@ -572,24 +611,7 @@ async fn test_should_cancel_a_running_official_ric_and_remove_both_containers() 
         environment.start("600").await?;
         environment.function().await?;
         let attempt = environment.invoke(json!({ "sleep": true })).await?;
-        let marker = format!("P0_BUSY_START={attempt}");
-        let busy_deadline = Instant::now() + OPERATION;
-        loop {
-            // Forward the absolute deadline into the CLI owner. Cancelling an
-            // outer timeout here would discard its in-flight kill/reap path.
-            let logs = environment
-                .docker
-                .checked_until(&["logs", &environment.names.function], busy_deadline)
-                .await?;
-            if logs.contains(&marker) {
-                break;
-            }
-            ensure!(
-                Instant::now() < busy_deadline,
-                "handler never entered its busy section"
-            );
-            sleep_until((Instant::now() + Duration::from_millis(50)).min(busy_deadline)).await;
-        }
+        environment.wait_busy(attempt).await?;
         for _ in 0..2 {
             environment.send(Message::Cancel { attempt }).await?;
             ensure!(
@@ -615,4 +637,120 @@ async fn test_should_cancel_a_running_official_ric_and_remove_both_containers() 
     }
     .await;
     environment.finish(result).await
+}
+
+fn json_invocation(event: &Value) -> Result<Invocation> {
+    Ok(Invocation::new(
+        AttemptId::default(),
+        Instant::now() + Duration::from_secs(60),
+        "arn:aws:lambda:us-east-1:000000000000:function:spike:prod".parse()?,
+        local_trace_id()?,
+        Payload::try_from(Bytes::from(serde_json::to_vec(event)?))?,
+    )?)
+}
+
+#[tokio::test]
+#[ignore = "requires the explicit local Docker relay qualification target"]
+async fn test_should_drive_real_ric_through_host_client_and_join_its_streams() -> Result<()> {
+    for cancel in [false, true] {
+        let mut environment = Environment::new().await?;
+        let mut owner = None;
+        let result = async {
+            environment.spawn("600")?;
+            let config = ClientConfig::new(
+                environment.identity,
+                environment.docker.architecture,
+                Duration::from_secs(5),
+            )?;
+            let control = environment.control.as_mut().context("relay control")?;
+            owner = Some(ControlClient::start(
+                config,
+                control.output.take().context("client reader")?,
+                control.input.take().context("client writer")?,
+            )?);
+            let client = owner.as_mut().context("client owner")?;
+            ensure!(
+                client.next(Instant::now() + OPERATION).await? == ClientEvent::RelayReady,
+                "client relay handshake failed"
+            );
+            environment.create_function().await?;
+            ensure!(
+                client.next(Instant::now() + OPERATION).await? == ClientEvent::BootstrapReady,
+                "client bootstrap handshake failed"
+            );
+            for (value, computed, counter) in [(35, 42, 1), (0, 7, 2)] {
+                let call = json_invocation(&json!({"value": value}))?;
+                let expected = call.parts().0;
+                client.invoke(call, Instant::now() + OPERATION).await?;
+                match client.next(Instant::now() + OPERATION).await? {
+                    ClientEvent::InvocationResult {
+                        attempt,
+                        result: RuntimeResult::Success(payload),
+                    } if attempt == expected => {
+                        let result: Value = serde_json::from_slice(payload.as_ref())?;
+                        ensure!(
+                            result["computed"] == computed
+                                && result["counter"] == counter
+                                && result["requestId"] == expected.to_string(),
+                            "client computation/warm metadata mismatch"
+                        );
+                    }
+                    _ => bail!("unexpected client computation event"),
+                }
+                ensure!(
+                    client.is_idle(),
+                    "client did not restore Idle after success"
+                );
+            }
+            let event = if cancel {
+                json!({"sleep": true})
+            } else {
+                json!({"fail": true})
+            };
+            let call = json_invocation(&event)?;
+            let expected = call.parts().0;
+            client.invoke(call, Instant::now() + OPERATION).await?;
+            if cancel {
+                environment.wait_busy(expected).await?;
+                client.cancel(expected, Instant::now() + OPERATION).await?;
+                ensure!(
+                    client.next(Instant::now() + OPERATION).await?
+                        == ClientEvent::Cancelled(expected),
+                    "client cancellation acknowledgement mismatch"
+                );
+            } else {
+                match client.next(Instant::now() + OPERATION).await? {
+                    ClientEvent::InvocationResult {
+                        attempt,
+                        result: RuntimeResult::FunctionError(payload),
+                    } if attempt == expected => {
+                        let result: Value = serde_json::from_slice(payload.as_ref())?;
+                        ensure!(
+                            result["errorType"] == "ValueError",
+                            "client function error mismatch"
+                        );
+                    }
+                    _ => bail!("unexpected client handler error event"),
+                }
+            }
+            ensure!(!client.is_idle(), "failed/cancelled client is reusable");
+            environment.remove_function().await?;
+            client.shutdown(Instant::now() + OPERATION).await?;
+            environment.wait(true).await
+        }
+        .await;
+        // Always join streams, remove/reconcile containers and reap the CLI,
+        // including failures after streams have moved out of Control.
+        let client_cleanup = if let Some(client) = &mut owner {
+            client
+                .shutdown(Instant::now() + OPERATION)
+                .await
+                .map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        let cleanup = environment.cleanup().await;
+        result.and(client_cleanup).and(cleanup)?;
+    }
+    Ok(())
 }

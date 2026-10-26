@@ -7,10 +7,10 @@ use std::{future::pending, io, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite},
+    io::{AsyncRead, AsyncWrite},
     runtime::Handle,
-    sync::{mpsc, oneshot, watch},
-    task::{JoinHandle, JoinSet},
+    sync::{oneshot, watch},
+    task::JoinHandle,
     time::{Instant, sleep_until, timeout_at},
 };
 use tracing::instrument::WithSubscriber;
@@ -21,12 +21,12 @@ use crate::{
     metadata::deadline_from_unix_ms,
     protocol::{
         Acknowledgement, Architecture, AttemptId, EnvironmentId, Frame, Message, Outcome, Payload,
-        ProtocolError, read_frame, write_frame,
+        ProtocolError,
     },
     session::{Invocation, InvocationTicket, RuntimeResult, SessionError},
+    transport::{InputEnd, Settings, Transport, after},
 };
 
-const MAILBOX_CAPACITY: usize = 2;
 const CONTROL_SILENCE: Duration = Duration::from_hours(1);
 
 /// Relay errors contain classes and redacted protocol/IO sources.
@@ -218,18 +218,20 @@ where
 {
     let runtime = Handle::try_current().map_err(|_| RelayError::Worker)?;
     let (stop, stopped) = watch::channel(false);
-    let (input, commands) = mpsc::channel(MAILBOX_CAPACITY);
-    let (output, frames) = mpsc::channel(MAILBOX_CAPACITY);
+    let transport = Transport::start(
+        reader,
+        writer,
+        Settings {
+            silence: config.idle_lease.max(CONTROL_SILENCE),
+            io_budget: config.io_budget,
+            input_end: InputEnd::Close,
+        },
+    )?;
     let initialization_error = api.take_initialization_error();
-    let mut workers = JoinSet::new();
-    workers.spawn(read_input(reader, input, config).with_current_subscriber());
-    workers.spawn(write_output(writer, frames).with_current_subscriber());
     let actor = RelayActor::builder()
         .api(api)
         .config(config)
-        .input(commands)
-        .output(output)
-        .workers(workers)
+        .transport(transport)
         .stop(stopped)
         .initialization_error(initialization_error)
         .build();
@@ -239,66 +241,6 @@ where
         task: Some(task),
         settlement: None,
     })
-}
-
-#[derive(Debug)]
-struct Outbound {
-    frame: Frame,
-    deadline: Instant,
-    written: oneshot::Sender<bool>,
-}
-
-#[derive(Debug)]
-enum WorkerExit {
-    InputClose,
-    OutputClosed,
-}
-
-async fn read_input<R: AsyncRead + Unpin>(
-    mut reader: R,
-    input: mpsc::Sender<Frame>,
-    config: RelayConfig,
-) -> Result<WorkerExit, RelayError> {
-    loop {
-        let deadline = after(config.idle_lease.max(CONTROL_SILENCE))?;
-        let mut first = [0_u8];
-        let count = timeout_at(deadline, reader.read(&mut first))
-            .await
-            .map_err(|_| RelayError::Deadline)??;
-        if count == 0 {
-            return Err(RelayError::Eof);
-        }
-        let mut prefixed = first.as_slice().chain(&mut reader);
-        let frame = read_frame(&mut prefixed, after(config.io_budget)?)
-            .await?
-            .ok_or(RelayError::Eof)?;
-        let close = matches!(frame.message(), Message::Close);
-        timeout_at(after(config.io_budget)?, input.send(frame))
-            .await
-            .map_err(|_| RelayError::Deadline)?
-            .map_err(|_| RelayError::Worker)?;
-        if close {
-            return Ok(WorkerExit::InputClose);
-        }
-    }
-}
-
-async fn write_output<W: AsyncWrite + Unpin>(
-    mut writer: W,
-    mut output: mpsc::Receiver<Outbound>,
-) -> Result<WorkerExit, RelayError> {
-    while let Some(frame) = output.recv().await {
-        let result = write_frame(&mut writer, &frame.frame, frame.deadline).await;
-        let _ = frame.written.send(result.is_ok());
-        result?;
-    }
-    Ok(WorkerExit::OutputClosed)
-}
-
-fn after(duration: Duration) -> Result<Instant, RelayError> {
-    Instant::now()
-        .checked_add(duration)
-        .ok_or(RelayError::Configuration)
 }
 
 #[derive(Debug, Default)]
@@ -323,9 +265,7 @@ impl Phase {
 struct RelayActor {
     api: RuntimeApiHandle,
     config: RelayConfig,
-    input: mpsc::Receiver<Frame>,
-    output: mpsc::Sender<Outbound>,
-    workers: JoinSet<Result<WorkerExit, RelayError>>,
+    transport: Transport,
     stop: watch::Receiver<bool>,
     initialization_error: Option<oneshot::Receiver<Payload>>,
     #[builder(default)]
@@ -341,20 +281,8 @@ impl RelayActor {
         let outcome = self.control().await;
         self.api.session().close();
         let api = self.api.shutdown().await.map_err(RelayError::from);
-        self.workers.abort_all();
-        let mut workers = Ok(());
-        while let Some(result) = self.workers.join_next().await {
-            let result = match result {
-                Ok(Ok(WorkerExit::InputClose)) => Ok(()),
-                Ok(Err(error)) => Err(error),
-                Err(error) if error.is_cancelled() => Ok(()),
-                Ok(Ok(WorkerExit::OutputClosed)) | Err(_) => Err(RelayError::Worker),
-            };
-            if workers.is_ok() {
-                workers = result;
-            }
-        }
-        outcome.and(api).and(workers)
+        let transport = self.transport.shutdown().await;
+        outcome.and(api).and(transport)
     }
 
     async fn emit(&self, message: Message) -> Result<(), RelayError> {
@@ -362,25 +290,15 @@ impl RelayActor {
             Phase::Retiring(until) => after(self.config.io_budget)?.min(until),
             _ => after(self.config.io_budget)?,
         };
-        let (written, receipt) = oneshot::channel();
-        timeout_at(
-            deadline,
-            self.output.send(Outbound {
-                frame: Frame::new(self.config.environment, message),
-                deadline,
-                written,
-            }),
-        )
-        .await
-        .map_err(|_| RelayError::Deadline)?
-        .map_err(|_| RelayError::Output)?;
-        match timeout_at(deadline, receipt).await {
-            Ok(Ok(true)) => Ok(()),
-            _ => Err(RelayError::Output),
-        }
+        self.transport
+            .send(Frame::new(self.config.environment, message), deadline)
+            .await
     }
 
     async fn control(&mut self) -> Result<(), RelayError> {
+        if *self.stop.borrow() {
+            return Ok(());
+        }
         self.emit(Message::Hello {
             architecture: self.config.architecture,
         })
@@ -396,11 +314,8 @@ impl RelayActor {
                 biased;
                 () = async { let _ = self.stop.wait_for(|stopped| *stopped).await; } => return Ok(()),
                 () = retirement_deadline(retirement) => return Err(RelayError::Deadline),
-                worker = self.workers.join_next(), if !self.workers.is_empty() => {
-                    match worker { Some(Ok(Ok(WorkerExit::InputClose))) => {}, Some(Ok(Err(error))) => return Err(error), _ => return Err(RelayError::Worker) }
-                }
-                frame = self.input.recv() => {
-                    let frame = frame.ok_or(RelayError::Eof)?;
+                frame = self.transport.recv() => {
+                    let frame = frame?;
                     if frame.environment() != self.config.environment { return Err(RelayError::Scope); }
                     if self.command(frame.into_message()).await? { return Ok(()); }
                 }

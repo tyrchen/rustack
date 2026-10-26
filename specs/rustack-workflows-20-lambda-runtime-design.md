@@ -237,6 +237,38 @@ Use safe OwnedFd clones of stdin/stdout with Tokio Unix pipe Receiver/Sender::fr
 
 The optional local `test-lambda-runtime-docker` target builds the relay image and explicitly runs the resource-gated process suite against the selected local Unix socket. Missing Docker/images fail this explicit target; ordinary workspace tests do not pretend to provide Docker evidence. The test-only Docker CLI supplies non-TTY binary stdin/stdout; the production executor still requires the separately supervised Docker attach client. Preallocate unique container names and a run label before allocation so setup failures retain reconciliation ownership. Always remove both owned names, reap the CLI process and verify no run-labeled containers remain, even when the assertions fail. Exercise Hello/Ready/Close before a function exists, control EOF/truncation, and an unchanged official RIC image's computed result, warm counter, handler error and busy cancellation. These relay checks do not establish SDK/provider, deployment/pool or full M0 acceptance.
 
+### 3.5 Host control client and shared stream ownership
+
+The runtime crate's client module exposes ClientConfig::new(environment, architecture, io_budget), ControlClient::start(config, reader, writer), next(absolute_deadline), invoke(Invocation, absolute_io_deadline), cancel(attempt, absolute_io_deadline), begin_close(absolute_io_deadline) and shutdown(absolute_cleanup_deadline). Configuration validates a nonzero IO budget≤60s; invocation metadata uses the same checked wall deadline conversion and validated Invocation types as the local session. ClientEvent distinguishes RelayReady, BootstrapReady, InvocationResult(attempt, RuntimeResult), InitError(payload), Cancelled(attempt) and Closed. Payload Debug remains redacted. The client owns protocol state; it never owns or claims termination of external containers.
+
+Share the relay's control-stream workers with the host through an internal transport owner. It owns bounded two-message mailboxes, partial-frame parsing, flush receipts, stop signal and a retained supervisor. The reader stops after queuing its direction's terminal message (Close on relay input, Ack/close on host input), so normal peer EOF cannot overtake a queued terminal acknowledgement. First-byte silence and partial-frame IO remain separate budgets. Drop signals stop; shutdown joins/caches its supervisor by mutable borrow, preserves completed IO failures and awaits every aborted worker. A cancelled next() waits on a cancel-safe mailbox receive; it never drops the worker's partial parser. Relay API shutdown still belongs to RelayHandle, before transport retirement.
+
+Host receive state is AwaitHello→AwaitReady→Initializing→Idle→Busy(attempt)→Idle. Validate environment and advertised architecture before accepting Ready; consume Hello internally and return RelayReady only after the ordered pair. BootstrapReady is accepted once after Ready. Invoke requires Idle and a fresh last-attempt identity. Success restores Idle; FunctionError or InitError enters Retiring. Only one result per attempt is legal; any invocation result proves delivery, after which InitError is causally invalid even during later calls/cancellation. Recheck absolute receive/send deadlines after await and before successful state mutation: an already-ready inner future can win Tokio timeout polling after expiry. Reject duplicate/out-of-order/wrong-direction/foreign-scope frames and mismatched result/ack IDs without echoing their contents; invalidate the transport without replay.
+
+Set a local write-in-progress flag before awaiting a flush receipt, clearing it only after success. If a send future is dropped, that flag makes later business operations fail closed: the invocation may already have reached the relay. The retained writer still owns any partial frame. Cancellation accepts the active or just-completed last attempt, sends Cancel, and waits through next() for its matching acknowledgement. While Cancelling, at most one matching late result/init failure can be discarded before Cancel Ack; it cannot settle the cancelled call. Matching Cancel after completed/error settlement is permitted to cover completion/cancel races. No fresh Invoke is permitted after cancellation.
+
+begin_close sends Close after the Hello/Ready handshake and records closure separately from receive state. Until Ack/close, continue validating already queued bootstrap/result/init/cancel events in their ordinary causal order. Ack/close is illegal before an outstanding Cancel Ack. shutdown completes the handshake if necessary, begins closure once, consumes permitted prior events until Closed, then stops/joins IO. A protocol/IO/deadline error invalidates the session; shutdown still joins transport ownership and caches failure. Dropped shutdown waiters retain ownership and a later call must not turn an uncertain write or failed join into success. The environment owner stops/removes the function independently and retains its allocation reservation through confirmed cleanup or quarantine.
+
+```text
+┌─ Host environment owner ───────────────────────────────────────────────┐
+│ ControlClient: ordered handshake / active attempt / cancellation       │
+│ next() may be selected/cancelled; invoke/cancel/close await flush       │
+│                       │                                               │
+│       ┌───────────────▼─ shared transport supervisor ────────────────┐ │
+│       │ bounded frame mailbox2 ◀── retained partial-frame reader     │ │
+│       │ bounded write mailbox2 ──▶ retained writer + flush receipts  │ │
+│       │ stop / cached join outcome; abort and join both workers      │ │
+│       └──────────────────────┬───────────────────────────────────────┘ │
+└──────────────────────────────┼─────────────────────────────────────────┘
+               demultiplexed Docker attach streams (no reconnect)
+┌──────────────────────────────▼─────────────────────────────────────────┐
+│ Relay transport / RelayHandle ── RuntimeApiHandle ── official RIC       │
+│ Close Ack: API joined + frame flushed; external function still owned  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+Tests pair real relay/shared HTTP with the host client over fragmented duplex streams. Pin ordered readiness, actual HTTP result/error forwarding, warm attempts, wrong scope/architecture/order/IDs, duplicate outcomes, cancellation with a late result, Close with queued events, cancelled next/send/shutdown waiters and cached IO failures. Re-run real Linux relay/RIC qualification after extracting shared IO; a production Docker attach adapter is still required before executor acceptance.
+
 ## 4. Environment states, pooling and cancellation
 
 State enum: Allocating → Initializing → Idle → Busy(attempt) → Idle. Any stage can become Retiring → Removed; failed cleanup becomes Quarantined. PoolActor owns its map and LRU. Bounded Docker IO futures run in a supervised JoinSet; never hold a shared-state lock across IO. Give cancellation a separate priority lane or reserved capacity.

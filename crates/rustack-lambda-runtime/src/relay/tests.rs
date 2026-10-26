@@ -14,7 +14,7 @@ use super::*;
 use crate::{
     http::tests::{Reply, request},
     metadata::{deadline_unix_ms, local_trace_id},
-    protocol::{FunctionArn, Payload},
+    protocol::{FunctionArn, Payload, read_frame, write_frame},
 };
 
 fn deadline() -> Instant {
@@ -379,30 +379,29 @@ async fn test_should_preserve_a_completed_io_failure_when_priority_stop_wins() {
         Duration::from_secs(1),
     )
     .unwrap();
-    let (_input, commands) = mpsc::channel(MAILBOX_CAPACITY);
-    let (output, mut frames) = mpsc::channel::<Outbound>(MAILBOX_CAPACITY);
-    let written = tokio::spawn(async move {
-        for _ in 0..2 {
-            frames.recv().await.unwrap().written.send(true).unwrap();
-        }
-    });
-    let mut workers = JoinSet::new();
-    let failed = workers.spawn(async { Err(RelayError::Eof) });
-    while !failed.is_finished() {
-        tokio::task::yield_now().await;
-    }
+    let (input, reader) = duplex(16);
+    let (writer, _output) = duplex(16);
+    drop(input);
+    let mut transport = Transport::start(
+        reader,
+        writer,
+        Settings {
+            silence: CONTROL_SILENCE,
+            io_budget: config.io_budget,
+            input_end: InputEnd::Close,
+        },
+    )
+    .unwrap();
+    assert!(matches!(transport.recv().await, Err(RelayError::Eof)));
     let (_stop, stopped) = watch::channel(true);
     let actor = RelayActor::builder()
         .api(api)
         .config(config)
-        .input(commands)
-        .output(output)
-        .workers(workers)
+        .transport(transport)
         .stop(stopped)
         .initialization_error(None)
         .build();
     assert!(matches!(actor.run().await, Err(RelayError::Eof)));
-    written.await.unwrap();
     assert!(TcpStream::connect(address).await.is_err());
 }
 

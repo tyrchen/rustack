@@ -132,6 +132,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [relay control supervisor and process entry point](./rustack-workflows-20-lambda-runtime-design.md#34-relay-control-supervisor-and-process-entry-point).
 - Date:2026-10-25.
 
+## D18 — Keep host protocol state separate from retained stream parsing
+
+- Alternatives: let the Docker environment read/write raw frames directly inside cancellation selects; reconnect after attach failure; put container cleanup into the runtime library.
+- Decision: an ordered host ControlClient consumes shared supervised stream workers. Mailbox receive is cancel-safe, partial parsing never restarts, and an interrupted send poisons later business operations until joined retirement. Close preserves ordinary validation of preceding events; cancellation discards only one matching late outcome before its acknowledgement.
+- Why: Docker cancellation can race a flushed result or a partial read/write. The host must preserve framing and exact attempt identity without interpreting uncertain transport state as permission to replay or reuse. Container termination and allocation reservations remain with the environment owner that can prove them.
+- Pinned by: [host control client and shared stream ownership](./rustack-workflows-20-lambda-runtime-design.md#35-host-control-client-and-shared-stream-ownership).
+- Date:2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

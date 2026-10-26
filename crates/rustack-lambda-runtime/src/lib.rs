@@ -6,9 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client;
 mod diagnostics;
 pub mod http;
 pub mod metadata;
 pub mod protocol;
 pub mod relay;
 pub mod session;
+mod transport;

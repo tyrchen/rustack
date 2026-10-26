@@ -108,6 +108,22 @@ Workspace build/fmt/Clippy/rustdoc and1,853 tests pass. The ordinary suite has39
 
 No dependency version/package was added; existing anyhow/serde_json are test dependencies and tracing-subscriber is also used by the relay entry point. Audit/deny report the same16 B01 advisories; bans/licenses/sources pass. B03 remains open. The production host control client, Docker deployment/pool/provider integration and ASL engine remain required; this is not full P1/M0 acceptance.
 
+## P1 task1.2 host client / shared stream ownership review
+
+The independent read-only review found two protocol-validation defects. Both were fixed and the final recheck found no remaining concrete in-slice finding. Self-review also corrected an error-class race exposed by the existing partial-frame regression after extracting stream ownership.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W27 | P2; `crates/rustack-lambda-runtime/src/client.rs`, ControlClient::next | Tokio timeout can poll an already-ready inner receive before its expired timer. Recheck the absolute clock after await and before frame/state mutation; shared send also rechecks after its flush receipt | Paused-clock pending waiter, capacity-one input and a queued valid frame reject after caller expiry; no false BootstrapReady |
+| W28 | P3; same file, InitError handling | InitError was accepted after an earlier result proved delivery. Track proven delivery, including a discarded late cancellation result, and reject later initialization failures | Ordered Idle, later Busy and both cancellation-state cases fail closed after successful delivery |
+| W29 | P2; self-review, `crates/rustack-lambda-runtime/src/transport.rs`, Transport::recv | Reader drops its sender before supervisor settlement, so an empty mailbox could report EOF before the actual parser/deadline failure. Wait for retained supervisor classification on channel closure | Existing paused partial-frame regression still requires Protocol/Deadline; completed EOF/priority-stop test preserves EOF and joined API closure |
+
+The host validates ordered Hello/architecture/Ready and first-poll BootstrapReady, owns one active attempt, rejects foreign/duplicate/out-of-order events and discards at most one matching late outcome while cancelling. A write-in-progress flag prevents reuse after a dropped send future. Closing preserves validation of queued results/bootstrap/cancel acknowledgements; Ack/close cannot precede outstanding Cancel Ack. Cancelled next/shutdown waiters retain parsing and joined IO ownership. The same private transport supervisor now owns both relay and host stream workers, bounded mailboxes, terminal-frame preservation, flush receipts and cached failure settlement; the relay still separately joins its API before transport retirement.
+
+Workspace build/test/fmt/Clippy/rustdoc pass with1,867 tests and397 ignored (392 preexisting plus five explicit Docker tests). Runtime:97 tests,47 doctests and strict production-boundary Clippy pass; the Linux entry point passes cross-target Clippy. All five resource-gated Docker tests explicitly pass with zero ignored on arm64 VZ and amd64/QEMU. The new case transfers actual CLI pipes into production ControlClient, performs computed42/7 and warm1/2, then tests separate real FunctionError and busy Cancel paths, joins streams, removes containers, reaps the CLI and reconciles its run label. This qualifies client/relay composition, not the future production Docker attach/deployment/pool/provider.
+
+No dependency changes landed in this slice. The preceding audit remains unchanged B01 evidence; B01/B03 remain mandatory P1 gates. Docker startup/resource probes, production lifecycle integration and the ASL engine remain required by the complete P0–P5 objective.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |
