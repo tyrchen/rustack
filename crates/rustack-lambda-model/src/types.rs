@@ -227,7 +227,7 @@ pub enum InvokeMode {
 
 /// Function code input for `CreateFunction` and `UpdateFunctionCode`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct FunctionCode {
     /// Base64-encoded zip file contents.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,7 +269,7 @@ pub struct FunctionCodeLocation {
 
 /// Environment variable configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct Environment {
     /// Environment variable key-value pairs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -302,7 +302,7 @@ pub struct EnvironmentError {
 
 /// VPC configuration (stored, not enforced).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct VpcConfig {
     /// Subnet IDs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,7 +329,7 @@ pub struct VpcConfigResponse {
 
 /// Tracing configuration (stored, not enforced).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct TracingConfig {
     /// Tracing mode.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -347,7 +347,7 @@ pub struct TracingConfigResponse {
 
 /// Dead letter queue configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct DeadLetterConfig {
     /// Target ARN (SQS queue or SNS topic).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -356,7 +356,7 @@ pub struct DeadLetterConfig {
 
 /// Ephemeral storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct EphemeralStorage {
     /// Size in MB (512-10240).
     pub size: u32,
@@ -370,7 +370,7 @@ impl Default for EphemeralStorage {
 
 /// Image configuration override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct ImageConfig {
     /// Entry point override.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -409,7 +409,7 @@ pub struct ImageConfigError {
 
 /// Logging configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct LoggingConfig {
     /// Log format.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -427,7 +427,7 @@ pub struct LoggingConfig {
 
 /// SnapStart configuration (stored, not enforced).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct SnapStart {
     /// Apply on.
     #[serde(skip_serializing_if = "Option::is_none")]

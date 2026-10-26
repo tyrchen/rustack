@@ -215,6 +215,7 @@ SERVICE_SMOKE_TESTS := \
 	test_lambda::tests::test_should_create_and_get_function \
 	test_lambda::tests::test_should_invoke_dry_run \
 	test_lambda::tests::test_should_enforce_revision_preconditions_through_the_sdk_wire \
+	test_lambda::tests::test_should_dry_run_code_without_mutation_and_reject_unsupported_deployment_fields \
 	test_lambda::tests::test_should_create_function_with_s3_code \
 	test_lambda::tests::test_should_update_function_code_from_s3_and_read_new_metadata \
 	test_lambda::tests::test_should_fail_create_function_with_missing_s3_bucket \
@@ -267,6 +268,11 @@ test-lambda-revision-wire:
 	@S3_ENDPOINT_URL="$(SMOKE_ENDPOINT)" cargo test -p rustack-integration --lib test_lambda::tests::test_should_enforce_revision_preconditions_through_the_sdk_wire -- --ignored --exact --test-threads=1
 
 .PHONY: test-lambda-revision-wire
+
+test-lambda-validation-wire:
+	@S3_ENDPOINT_URL="$(SMOKE_ENDPOINT)" cargo test -p rustack-integration --lib test_lambda::tests::test_should_dry_run_code_without_mutation_and_reject_unsupported_deployment_fields -- --ignored --exact --test-threads=1
+
+.PHONY: test-lambda-validation-wire
 
 # Deployment state, retained image preparation ownership and provider control-plane tests.
 test-lambda-deployments:

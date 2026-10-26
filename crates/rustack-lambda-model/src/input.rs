@@ -12,7 +12,7 @@ use crate::types::{
 
 /// Input for `CreateFunction`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct CreateFunctionInput {
     /// Function name (1-140 characters).
     pub function_name: String,
@@ -81,8 +81,11 @@ pub struct CreateFunctionInput {
 
 /// Input for `UpdateFunctionCode`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct UpdateFunctionCodeInput {
+    /// Validate parameters without modifying code or publishing a version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
     /// Revision ID precondition for an optimistic update.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<String>,
@@ -114,7 +117,7 @@ pub struct UpdateFunctionCodeInput {
 
 /// Input for `UpdateFunctionConfiguration`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct UpdateFunctionConfigurationInput {
     /// Revision ID precondition for an optimistic update.
     #[serde(skip_serializing_if = "Option::is_none")]

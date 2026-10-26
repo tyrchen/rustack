@@ -682,3 +682,48 @@ async fn test_should_reject_deployment_capacity_larger_than_the_preparation_owne
     images.shutdown(deadline()).await.unwrap();
     fake.close().await;
 }
+
+#[tokio::test]
+async fn test_should_validate_image_code_dry_run_without_preparation_or_state_changes() {
+    let fake = FakePins::new(DaemonMode::Normal).await;
+    let mut images = fake.owner(2, 1);
+    let root = tempfile::tempdir().unwrap();
+    let provider = RustackLambda::with_executor(
+        FunctionStore::new(root.path()),
+        LambdaConfig {
+            executor: ExecutorBackend::Docker,
+            ..Default::default()
+        },
+        Arc::new(ControlPlaneExecutor),
+    )
+    .with_image_preparation(
+        images.port(),
+        ImageDeploymentConfig::new(1, Duration::from_secs(10)).unwrap(),
+    )
+    .unwrap();
+    provider.create_function(input("worker")).await.unwrap();
+    wait_provider(&provider).await;
+    let before = serde_json::to_value(provider.export_snapshot()).unwrap();
+    let response = provider
+        .update_function_code(
+            "worker",
+            UpdateFunctionCodeInput {
+                image_uri: Some("missing:new-image".into()),
+                dry_run: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.last_update_status.as_deref(), Some("Successful"));
+    assert_eq!(
+        serde_json::to_value(provider.export_snapshot()).unwrap(),
+        before
+    );
+    assert_eq!(fake.stats.tags.load(Ordering::Acquire), 1);
+    assert_eq!(fake.stats.absent.load(Ordering::Acquire), 0);
+    provider.shutdown().await;
+    drop(provider);
+    images.shutdown(deadline()).await.unwrap();
+    fake.close().await;
+}

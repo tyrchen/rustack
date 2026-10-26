@@ -30,7 +30,10 @@ use rustack_lambda_model::{
     types::InvocationType,
 };
 
-use crate::provider::{InvokeKind, InvokeOutcome, RustackLambda};
+use crate::{
+    deployment_input::{Profile, decode},
+    provider::{InvokeKind, InvokeOutcome, RustackLambda},
+};
 
 /// Handler that bridges the HTTP layer to the Lambda provider.
 #[derive(Debug)]
@@ -121,7 +124,7 @@ async fn dispatch(
     path_params: &PathParams,
     query: &str,
     headers: &http::HeaderMap,
-    body: &[u8],
+    body: &Bytes,
 ) -> Result<http::Response<LambdaResponseBody>, LambdaError> {
     let query_params = parse_query_params(query);
     let qualifier = get_query_param(&query_params, "Qualifier");
@@ -129,9 +132,8 @@ async fn dispatch(
     match op {
         // ---- Phase 0: Function CRUD ----
         LambdaOperation::CreateFunction => {
-            let input: CreateFunctionInput = serde_json::from_slice(body).map_err(|e| {
-                LambdaError::invalid_parameter(format!("Invalid request body: {e}"))
-            })?;
+            let (input, _input_permit): (CreateFunctionInput, _) =
+                decode(body, Profile::Create).await?;
             let config = provider
                 .create_function(input)
                 .await
@@ -165,11 +167,10 @@ async fn dispatch(
 
         LambdaOperation::UpdateFunctionCode => {
             let function_name = require_path_param(path_params, "FunctionName")?;
-            let input: UpdateFunctionCodeInput = serde_json::from_slice(body).map_err(|e| {
-                LambdaError::invalid_parameter(format!("Invalid request body: {e}"))
-            })?;
+            let (input, input_permit): (UpdateFunctionCodeInput, _) =
+                decode(body, Profile::Code).await?;
             let config = provider
-                .update_function_code(function_name, input)
+                .update_function_code_parsed(function_name, input, input_permit)
                 .await
                 .map_err(LambdaError::from)?;
             wrap_json_response(200, &config)
@@ -177,10 +178,8 @@ async fn dispatch(
 
         LambdaOperation::UpdateFunctionConfiguration => {
             let function_name = require_path_param(path_params, "FunctionName")?;
-            let input: UpdateFunctionConfigurationInput =
-                serde_json::from_slice(body).map_err(|e| {
-                    LambdaError::invalid_parameter(format!("Invalid request body: {e}"))
-                })?;
+            let (input, _input_permit): (UpdateFunctionConfigurationInput, _) =
+                decode(body, Profile::Configuration).await?;
             let config = provider
                 .update_function_configuration(function_name, &input)
                 .map_err(LambdaError::from)?;

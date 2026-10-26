@@ -10,6 +10,8 @@ mod tests {
     use anyhow::{Context, Result, ensure};
     use aws_sdk_lambda::{
         operation::{
+            create_function::CreateFunctionError,
+            get_function::GetFunctionError,
             publish_version::PublishVersionError,
             update_function_code::UpdateFunctionCodeError,
             update_function_configuration::{
@@ -336,6 +338,148 @@ mod tests {
             Ok(())
         }
         .await;
+        cleanup_function(&client, &name).await;
+        result
+    }
+
+    async fn reject_unsupported_creation(
+        client: &aws_sdk_lambda::Client,
+        name: &str,
+    ) -> Result<()> {
+        let error = client
+            .create_function()
+            .function_name(name)
+            .runtime(Runtime::Python312)
+            .role("arn:aws:iam::000000000000:role/test-role")
+            .handler("index.handler")
+            .code(FunctionCode::builder().zip_file(dummy_zip_blob()).build())
+            .kms_key_arn("arn:aws:kms:us-east-1:000000000000:key/unsupported")
+            .send()
+            .await
+            .err()
+            .context("Unsupported creation option was ignored")?;
+        ensure!(
+            error
+                .as_service_error()
+                .is_some_and(CreateFunctionError::is_invalid_parameter_value_exception),
+            "Wrong unsupported-create error"
+        );
+        let missing = client
+            .get_function()
+            .function_name(name)
+            .send()
+            .await
+            .err()
+            .context("Rejected creation inserted a resource")?;
+        ensure!(
+            missing
+                .as_service_error()
+                .is_some_and(GetFunctionError::is_resource_not_found_exception),
+            "Rejected creation was not absent"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_dry_run_code_without_mutation_and_reject_unsupported_deployment_fields()
+    -> Result<()> {
+        let client = lambda_client();
+        let name = create_test_function(&client, "dry-run-code").await;
+        let unsupported = func_name("unsupported-create");
+        let result = async {
+            reject_unsupported_creation(&client, &unsupported).await?;
+            let before = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            let revision = before
+                .revision_id()
+                .filter(|value| !value.is_empty())
+                .context("Missing revision")?;
+            client
+                .update_function_code()
+                .function_name(&name)
+                .revision_id(revision)
+                .zip_file(Blob::new(b"not an archive".to_vec()))
+                .dry_run(true)
+                .publish(true)
+                .send()
+                .await?;
+            client
+                .update_function_code()
+                .function_name(&name)
+                .s3_bucket("missing-bucket")
+                .s3_key("missing.zip")
+                .dry_run(true)
+                .send()
+                .await?;
+            let error = client
+                .update_function_code()
+                .function_name(&name)
+                .zip_file(dummy_zip_blob())
+                .source_kms_key_arn("arn:aws:kms:us-east-1:000000000000:key/unsupported")
+                .dry_run(true)
+                .send()
+                .await
+                .err()
+                .context("Unsupported code option was ignored")?;
+            ensure!(
+                error
+                    .as_service_error()
+                    .is_some_and(UpdateFunctionCodeError::is_invalid_parameter_value_exception),
+                "Wrong unsupported-code error"
+            );
+            let error = client
+                .update_function_configuration()
+                .function_name(&name)
+                .kms_key_arn("arn:aws:kms:us-east-1:000000000000:key/unsupported")
+                .description("must not commit")
+                .send()
+                .await
+                .err()
+                .context("Unsupported configuration option was ignored")?;
+            ensure!(
+                error.as_service_error().is_some_and(
+                    UpdateFunctionConfigurationError::is_invalid_parameter_value_exception
+                ),
+                "Wrong unsupported-config error"
+            );
+            let current = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            ensure!(
+                current.revision_id() == Some(revision),
+                "Validation changed revision"
+            );
+            ensure!(
+                current.code_sha256() == before.code_sha256(),
+                "Validation changed hash"
+            );
+            ensure!(
+                current.code_size() == before.code_size(),
+                "Validation changed size"
+            );
+            ensure!(
+                current.description() == before.description(),
+                "Validation changed configuration"
+            );
+            let versions = client
+                .list_versions_by_function()
+                .function_name(&name)
+                .send()
+                .await?;
+            ensure!(
+                versions.versions().len() == 1,
+                "Validation published a version"
+            );
+            Ok(())
+        }
+        .await;
+        cleanup_function(&client, &unsupported).await;
         cleanup_function(&client, &name).await;
         result
     }

@@ -24,6 +24,9 @@ use tempfile::TempDir;
 
 use crate::storage::compute_sha256;
 
+pub(crate) const MAX_ZIP_BYTES: usize = 50 * 1024 * 1024;
+pub(crate) const MAX_ZIP_BASE64_BYTES: usize = MAX_ZIP_BYTES.div_ceil(3) * 4;
+
 pub(crate) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 #[cfg(test)]
 use crate::{storage::stage_zip, test_zip::minimal_zip};

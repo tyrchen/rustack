@@ -77,6 +77,8 @@ All budgets are validated once; limits below are local defaults and safe configu
 | lambdaDockerCleanupSeconds |10|1..60; bounded by global shutdown remaining time |
 | workflowDrainSeconds |5|0..60; bounded by global shutdown remaining time |
 
+Deployment JSON/base64 workers have a fixed aggregate ceiling of four, retained through completed results and provider dispatch; overload returns429. Code bodies remain capped at96MiB, with only the designated inline ZIP span exempted from the1MiB metadata budget. Unknown fields and malformed/budget-exceeding JSON return static400 errors; worker failure is a static500 error. See [runtime §2.12](./rustack-workflows-20-lambda-runtime-design.md#212-side-effect-free-code-validation-and-bounded-deployment-json). These are compile-time safety ceilings, not YAML tuning fields.
+
 Registry/execution mailbox capacities and per-tick quantum are compile-time implementation constants from the ASL design, not runtime tuning knobs. Function init/idle settings reuse existing validated Lambda configuration. CPU and log limits use the exact environment keys above. Effective memory admission may allow fewer than 32 environments. Lower quotas must reject admission or fail the affected execution explicitly, never silently drop data/work.
 
 ## 2. Deployment topology and readiness

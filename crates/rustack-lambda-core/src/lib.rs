@@ -14,6 +14,7 @@ pub mod artifact;
 pub mod code;
 pub mod config;
 pub mod deployment;
+mod deployment_input;
 #[cfg(unix)]
 pub mod docker;
 pub mod error;

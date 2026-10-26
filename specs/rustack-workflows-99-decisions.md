@@ -197,6 +197,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Pinned by:** [runtime §2.11](./rustack-workflows-20-lambda-runtime-design.md#211-retained-deployment-supervisor-and-provider-admission), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date:** 2026-10-25.
 
+## D25 — Explicit DryRun and bounded deployment parsing ownership
+
+- **Context:** ignored DryRun can mutate code; blindly applying ordinary JSON string limits rejects legitimate inline ZIPs, while parsing the entire code envelope into generic values permits large metadata allocations.
+- **Alternatives considered:** permissive DTOs silently discard unsupported modes; decoding ZIPs for validation adds staging and content inspection; releasing a parse permit at CPU completion permits large ready-result backlogs; acquiring another permit inside an admitted DryRun can throttle every admitted request.
+- **Decision:** model code DryRun explicitly and validate syntax/preconditions without fetching, staging, Docker admission or publication. Reject unknown deployment fields. Borrow the sole allowed ZIP raw span, cap/validate all remaining metadata, and deserialize strict DTOs on at most four pure blocking workers. Carry permits with results through dispatch and reuse the admitted permit for inline validation.
+- **Why:** validation must not produce deployment effects, request cancellation must retain bounded CPU/memory ownership, and supported inline package sizes must not weaken metadata limits. Preserve overload429 and worker-failure500 separately from invalid-input400. This is a deployment boundary change, not a claim of a global parser rewrite or IAM parity.
+- **Pinned by:** [runtime §2.12](./rustack-workflows-20-lambda-runtime-design.md#212-side-effect-free-code-validation-and-bounded-deployment-json), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

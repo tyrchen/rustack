@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 /// Maximum deployment package size (50 MB zipped, per Appendix C).
-const MAX_ZIP_SIZE: u64 = 50 * 1024 * 1024;
+const MAX_ZIP_SIZE: usize = crate::artifact::MAX_ZIP_BYTES;
 
 /// Maximum synchronous invoke payload size (6 MB, per Appendix C).
 const MAX_SYNC_PAYLOAD: usize = 6 * 1024 * 1024;
@@ -53,7 +53,10 @@ use rustack_lambda_model::{
         TracingConfigResponse, VpcConfigResponse,
     },
 };
-use tokio::time::{Instant, timeout_at};
+use tokio::{
+    sync::SemaphorePermit,
+    time::{Instant, timeout_at},
+};
 
 use crate::{
     artifact::{Architecture, DeploymentArtifact, ImageArtifact, ImageReference},
@@ -791,6 +794,24 @@ impl RustackLambda {
         function_ref: &str,
         input: UpdateFunctionCodeInput,
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
+        self.update_code(function_ref, input, None).await
+    }
+
+    pub(crate) async fn update_function_code_parsed(
+        &self,
+        function_ref: &str,
+        input: UpdateFunctionCodeInput,
+        permit: SemaphorePermit<'static>,
+    ) -> Result<FunctionConfiguration, LambdaServiceError> {
+        self.update_code(function_ref, input, Some(permit)).await
+    }
+
+    async fn update_code(
+        &self,
+        function_ref: &str,
+        mut input: UpdateFunctionCodeInput,
+        mut admitted: Option<SemaphorePermit<'static>>,
+    ) -> Result<FunctionConfiguration, LambdaServiceError> {
         let code_source = CodeSource {
             zip_file_b64: input.zip_file.as_deref(),
             s3_bucket: input.s3_bucket.as_deref(),
@@ -800,36 +821,27 @@ impl RustackLambda {
         };
         validate_code_source(&code_source)?;
 
-        // Validate that some code source is provided.
-        if code_source.zip_file_b64.is_none()
-            && code_source.image_uri.is_none()
-            && code_source.s3_bucket.is_none()
-        {
-            return Err(LambdaServiceError::InvalidParameter {
-                message: "Provide at least one of ZipFile, S3Bucket, or ImageUri.".to_owned(),
-            });
-        }
-
-        let (name, _) = resolve_function_ref(function_ref)?;
+        let name = mutable_function_name(function_ref)?;
         let should_publish = input.publish.unwrap_or(false);
         let before = self.get_record(&name)?;
-        check_revision(input.revision_id.as_deref(), &before.latest.revision_id)?;
-        before.latest.deployment.ensure_mutable()?;
-        validate_image_publication(&before.latest.package_type, should_publish)?;
-        if (before.latest.package_type == "Zip" && code_source.image_uri.is_some())
-            || (before.latest.package_type == "Image" && code_source.image_uri.is_none())
-        {
-            return Err(invalid_parameter("Deployment package type cannot change"));
-        }
-        if input.architectures.as_ref().is_some_and(|architectures| {
-            architectures.len() != 1
-                || architectures
-                    .iter()
-                    .any(|architecture| architecture != "arm64" && architecture != "x86_64")
-        }) {
-            return Err(invalid_parameter(
-                "Exactly one supported architecture is required",
-            ));
+        let architecture = validate_code_update(&before, &input, code_source)?;
+
+        if input.dry_run.unwrap_or(false) {
+            if let Some(reference) = code_source.image_uri {
+                reference
+                    .parse::<ImageReference>()
+                    .map_err(|_| invalid_parameter("Invalid ImageUri"))?;
+            }
+            let _inline_permit = if let Some(encoded) = input.zip_file.take() {
+                Some(crate::deployment_input::validate_inline(encoded, admitted.take()).await?)
+            } else {
+                None
+            };
+            let current = self.get_record(&name)?;
+            check_revision(input.revision_id.as_deref(), &current.latest.revision_id)?;
+            check_staged_revision(&current, &before)?;
+            current.latest.deployment.ensure_mutable()?;
+            return Ok(self.build_function_configuration(&current, &current.latest));
         }
 
         if before.latest.package_type == "Image" {
@@ -838,16 +850,6 @@ impl RustackLambda {
                 .ok_or_else(|| invalid_parameter("ImageUri is required"))?
                 .parse()
                 .map_err(|_| invalid_parameter("Invalid ImageUri"))?;
-            let architecture = match input
-                .architectures
-                .as_ref()
-                .and_then(|values| values.first())
-            {
-                Some(value) => value
-                    .parse()
-                    .map_err(|_| invalid_parameter("Invalid architecture"))?,
-                None => crate::function_config::validate_execution_settings(&before.latest)?,
-            };
             return self.update_image_deployment(
                 &before,
                 reference,
@@ -901,7 +903,7 @@ impl RustackLambda {
         function_ref: &str,
         input: &UpdateFunctionConfigurationInput,
     ) -> Result<FunctionConfiguration, LambdaServiceError> {
-        let (name, _) = resolve_function_ref(function_ref)?;
+        let name = mutable_function_name(function_ref)?;
 
         validate_configuration_update(input)?;
 
@@ -3172,6 +3174,61 @@ impl RustackLambda {
 }
 
 /// Reject publication before asynchronous image preparation can begin.
+fn validate_code_update(
+    before: &FunctionRecord,
+    input: &UpdateFunctionCodeInput,
+    code_source: CodeSource<'_>,
+) -> Result<Architecture, LambdaServiceError> {
+    // Validate that some code source is provided.
+    if code_source.zip_file_b64.is_none()
+        && code_source.image_uri.is_none()
+        && code_source.s3_bucket.is_none()
+    {
+        return Err(LambdaServiceError::InvalidParameter {
+            message: "Provide at least one of ZipFile, S3Bucket, or ImageUri.".to_owned(),
+        });
+    }
+
+    check_revision(input.revision_id.as_deref(), &before.latest.revision_id)?;
+    before.latest.deployment.ensure_mutable()?;
+    validate_image_publication(&before.latest.package_type, input.publish.unwrap_or(false))?;
+    if (before.latest.package_type == "Zip" && code_source.image_uri.is_some())
+        || (before.latest.package_type == "Image" && code_source.image_uri.is_none())
+    {
+        return Err(invalid_parameter("Deployment package type cannot change"));
+    }
+    if input.architectures.as_ref().is_some_and(|architectures| {
+        architectures.len() != 1
+            || architectures
+                .iter()
+                .any(|architecture| architecture != "arm64" && architecture != "x86_64")
+    }) {
+        return Err(invalid_parameter(
+            "Exactly one supported architecture is required",
+        ));
+    }
+    match input
+        .architectures
+        .as_ref()
+        .and_then(|values| values.first())
+    {
+        Some(value) => value
+            .parse()
+            .map_err(|_| invalid_parameter("Invalid architecture")),
+        None => crate::function_config::validate_execution_settings(&before.latest),
+    }
+}
+
+fn mutable_function_name(reference: &str) -> Result<String, LambdaServiceError> {
+    let (name, qualifier) = resolve_function_ref(reference)?;
+    if qualifier.as_deref().is_some_and(|value| value != "$LATEST") {
+        return Err(invalid_parameter(
+            "Only the unpublished function configuration can be updated",
+        ));
+    }
+    Ok(name)
+}
+
 fn check_staged_revision(
     record: &FunctionRecord,
     before: &FunctionRecord,
@@ -3347,7 +3404,7 @@ fn validate_code_source(source: &CodeSource<'_>) -> Result<(), LambdaServiceErro
 /// storage or extraction happens, so oversized packages fail fast instead
 /// of materializing onto disk.
 fn check_code_size(size_bytes: usize) -> Result<(), LambdaServiceError> {
-    if size_bytes as u64 > MAX_ZIP_SIZE {
+    if size_bytes > MAX_ZIP_SIZE {
         return Err(LambdaServiceError::InvalidParameter {
             message: format!("Unzipped size must be smaller than {MAX_ZIP_SIZE} bytes"),
         });
@@ -3541,6 +3598,137 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    async fn artifact_count(path: &std::path::Path) -> usize {
+        let mut entries = tokio::fs::read_dir(path).await.unwrap();
+        let mut count = 0usize;
+        while entries.next_entry().await.unwrap().is_some() {
+            count = count.saturating_add(1);
+        }
+        count
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingFetcher(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl S3CodeFetcher for CountingFetcher {
+        async fn fetch_code(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Bytes, S3CodeFetchError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            Err(S3CodeFetchError::Internal(anyhow::anyhow!(
+                "unexpected fetch"
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_validate_code_dry_run_without_staging_fetching_or_publishing() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let root = tempfile::tempdir().unwrap();
+        let fetcher = Arc::new(CountingFetcher::default());
+        let provider =
+            RustackLambda::with_store(FunctionStore::new(root.path()), LambdaConfig::default())
+                .with_code_fetcher(fetcher.clone());
+        provider
+            .create_function(sample_create_input("dry-update"))
+            .await
+            .unwrap();
+        let before = serde_json::to_value(provider.export_snapshot()).unwrap();
+        let count = artifact_count(root.path()).await;
+        for input in [
+            UpdateFunctionCodeInput {
+                zip_file: Some(STANDARD.encode(b"not an archive")),
+                dry_run: Some(true),
+                publish: Some(true),
+                ..Default::default()
+            },
+            UpdateFunctionCodeInput {
+                s3_bucket: Some("bucket".into()),
+                s3_key: Some("missing.zip".into()),
+                dry_run: Some(true),
+                ..Default::default()
+            },
+        ] {
+            let result = provider
+                .update_function_code("dry-update", input)
+                .await
+                .unwrap();
+            assert_eq!(result.version.as_deref(), Some("$LATEST"));
+        }
+        assert_eq!(
+            serde_json::to_value(provider.export_snapshot()).unwrap(),
+            before
+        );
+        assert_eq!(artifact_count(root.path()).await, count);
+        assert_eq!(fetcher.0.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_invalid_or_qualified_code_dry_run_without_mutation() {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("dry-invalid"))
+            .await
+            .unwrap();
+        let before = serde_json::to_value(provider.export_snapshot()).unwrap();
+        for input in [
+            UpdateFunctionCodeInput {
+                zip_file: Some("AB==".into()),
+                dry_run: Some(true),
+                ..Default::default()
+            },
+            UpdateFunctionCodeInput {
+                zip_file: Some("AA==".into()),
+                dry_run: Some(true),
+                revision_id: Some("stale".into()),
+                ..Default::default()
+            },
+            UpdateFunctionCodeInput {
+                zip_file: Some("AA==".into()),
+                dry_run: Some(true),
+                architectures: Some(Vec::new()),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                provider
+                    .update_function_code("dry-invalid", input)
+                    .await
+                    .is_err()
+            );
+        }
+        for reference in ["dry-invalid:1", "dry-invalid:prod"] {
+            assert!(
+                provider
+                    .update_function_code(
+                        reference,
+                        UpdateFunctionCodeInput {
+                            zip_file: Some("AA==".into()),
+                            dry_run: Some(true),
+                            ..Default::default()
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                provider
+                    .update_function_configuration(
+                        reference,
+                        &UpdateFunctionConfigurationInput::default()
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(provider.export_snapshot()).unwrap(),
+            before
+        );
     }
 
     #[tokio::test]
