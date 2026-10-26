@@ -50,6 +50,16 @@ pub(super) type FinalReply = (
 );
 impl Worker {
     #[cfg(test)]
+    pub(super) async fn serve_and_retire_test(
+        &self,
+        io: &mut IoGuard,
+        mailbox: &mut mpsc::Receiver<Call>,
+    ) {
+        let cleaner = self.cleaner();
+        let pending = self.serve(io, &cleaner, mailbox).await;
+        self.finish(io, &cleaner, mailbox, pending).await;
+    }
+    #[cfg(test)]
     pub(super) async fn serve_test(
         &self,
         io: &mut IoGuard,
@@ -81,16 +91,25 @@ impl Worker {
                 None
             }
         };
+        self.finish(&mut io, &cleaner, &mut mailbox, pending).await;
+        Ok(())
+    }
+    async fn finish(
+        &self,
+        io: &mut IoGuard,
+        cleaner: &Cleaner,
+        mailbox: &mut mpsc::Receiver<Call>,
+        pending: Option<FinalReply>,
+    ) {
         self.signals.phase(EnvironmentPhase::Retiring);
         mailbox.close();
         while let Ok(call) = mailbox.try_recv() {
             let _ = call.reply.send(Err(EnvironmentError::Stopped));
         }
-        cleaner.retire(&self.io, Some(&mut io)).await;
+        cleaner.retire(&self.io, Some(io)).await;
         if let Some((reply, result)) = pending {
             let _ = reply.send(result);
         }
-        Ok(())
     }
     fn cleaner(&self) -> Cleaner {
         Cleaner::builder()
@@ -182,10 +201,7 @@ impl Worker {
             .await?;
         match self.next(io, deadline, Some(&self.cleaner()), None).await? {
             ClientEvent::BootstrapReady => Ok(()),
-            ClientEvent::InitError(payload) if payload.as_ref().len() <= 32768 => {
-                Err(EnvironmentError::Initialization(payload))
-            }
-            _ => Err(DockerError::Protocol.into()),
+            event => Err(Self::event_failure(event)),
         }
     }
     async fn next(
@@ -234,7 +250,7 @@ impl Worker {
                 ()=wait_for_stop(&mut stopped)=>return None,
                 ()=sleep_until(idle)=>return None,
                 _=tick.tick()=>{let result=async{cleaner.inspect_health().await?;io.healthy().await}.await;tick.reset();if let Err(error)=result{self.signals.error(error);return None;}continue;},
-                result=io.client().ok()?.next(idle)=>{self.signals.error(result.err().map_or(EnvironmentError::Docker(DockerError::Protocol),EnvironmentError::from));return None;},
+                result=io.client().ok()?.next(idle)=>{self.signals.error(match result {Ok(event)=>Self::event_failure(event),Err(error)=>error.into()});return None;},
                 call=mailbox.recv()=>call,
             };
             let mut call = action?;
@@ -315,7 +331,7 @@ impl Worker {
                 }
                 Ok(EnvironmentResponse { result, logs })
             }
-            Ok(_) => Err(DockerError::Protocol.into()),
+            Ok(event) => Err(Self::event_failure(event)),
             Err(error) => {
                 if io
                     .client()?
@@ -327,6 +343,14 @@ impl Worker {
                 }
                 Err(error)
             }
+        }
+    }
+    fn event_failure(event: ClientEvent) -> EnvironmentError {
+        match event {
+            ClientEvent::InitError(payload) if payload.as_ref().len() <= 32768 => {
+                EnvironmentError::Initialization(payload)
+            }
+            _ => DockerError::Protocol.into(),
         }
     }
 }

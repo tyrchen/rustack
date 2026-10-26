@@ -7,6 +7,8 @@ use crate::docker::{
     tests::Daemon,
 };
 
+mod initialization;
+
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
