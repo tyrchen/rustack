@@ -36,7 +36,11 @@ impl ExecutionDriver {
             StateView::Fail { error, cause } => {
                 let error = self.failure_field(error, 256, source)?;
                 let cause = self.failure_field(cause, 32_768, source)?;
-                Ok(self.settle(ExecutionOutcome::Failed(ExecutionFailure { error, cause })))
+                Ok(
+                    self.settle(ExecutionOutcome::Failed(ExecutionFailure::fields(
+                        error, cause,
+                    ))),
+                )
             }
             StateView::Choice {
                 flow,

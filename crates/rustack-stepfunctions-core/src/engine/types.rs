@@ -69,9 +69,16 @@ impl Default for ExecutionLimits {
 }
 
 /// Opaque attempt identity; meaningful only within its owning execution driver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub struct AttemptId(pub(crate) u64);
+
+#[derive(Debug, Clone)]
+pub(crate) enum FailureOrigin {
+    Business,
+    Evaluation(Arc<AslError>),
+    Safety,
+}
 
 /// Bounded failure fields, preserving omission in a Fail state's terminal record.
 #[derive(Clone)]
@@ -79,6 +86,7 @@ pub struct AttemptId(pub(crate) u64);
 pub struct ExecutionFailure {
     pub(crate) error: Option<String>,
     pub(crate) cause: Option<String>,
+    pub(crate) origin: FailureOrigin,
 }
 impl fmt::Debug for ExecutionFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -104,10 +112,25 @@ impl ExecutionFailure {
     pub fn cause(&self) -> Option<&str> {
         self.cause.as_deref()
     }
+    pub(crate) fn fields(error: Option<String>, cause: Option<String>) -> Self {
+        Self {
+            error,
+            cause,
+            origin: FailureOrigin::Business,
+        }
+    }
+    pub(crate) fn safety(error: &str, cause: &str) -> Self {
+        Self {
+            error: Some(error.into()),
+            cause: Some(cause.into()),
+            origin: FailureOrigin::Safety,
+        }
+    }
     pub(crate) fn named(error: &str, cause: &str) -> Self {
         Self {
             error: Some(error.into()),
             cause: Some(cause.into()),
+            origin: FailureOrigin::Business,
         }
     }
 }
@@ -177,6 +200,7 @@ impl TaskFailure {
         Ok(Self(ExecutionFailure {
             error: Some(error.into()),
             cause: cause.map(str::to_owned),
+            origin: FailureOrigin::Business,
         }))
     }
 }

@@ -278,6 +278,6 @@ impl StopReason {
         {
             return Err(RegistryError::Validation);
         }
-        Ok(Self(TaskFailure(ExecutionFailure { error, cause })))
+        Ok(Self(TaskFailure(ExecutionFailure::fields(error, cause))))
     }
 }

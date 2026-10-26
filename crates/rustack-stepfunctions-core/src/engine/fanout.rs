@@ -5,7 +5,10 @@ use std::{fmt, num::NonZeroUsize, sync::Arc, time::Instant};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use super::{AttemptId, DriverStep, ExecutionDriver, ExecutionFailure, ExecutionSource, Phase};
+use super::{
+    AttemptId, DriverStep, ExecutionDriver, ExecutionFailure, ExecutionSource, Phase,
+    types::FailureOrigin,
+};
 use crate::{
     AslError, CompiledMachine, EvaluationContext, MapConcurrency, Payload, StateId, StateView,
     TaskFailure, UuidSource, payload::encode,
@@ -89,6 +92,32 @@ impl FanoutBranch {
     }
 }
 
+/// A classified child terminal failure retaining its original typed source.
+#[derive(Error)]
+#[error("child workflow evaluation failed")]
+#[non_exhaustive]
+pub struct PropagatedFailure {
+    pub(super) failure: ExecutionFailure,
+    #[source]
+    pub(super) source: Arc<AslError>,
+}
+impl fmt::Debug for PropagatedFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PropagatedFailure(<redacted>)")
+    }
+}
+impl PropagatedFailure {
+    /// Read the child's original bounded terminal classification and fields.
+    ///
+    /// ```
+    /// # fn inspect(failure:&rustack_stepfunctions_core::PropagatedFailure) { let details=failure.details(); }
+    /// ```
+    #[must_use]
+    pub fn details(&self) -> &ExecutionFailure {
+        &self.failure
+    }
+}
+
 /// A failed round, preserving typed interpreter errors separately from branch failures.
 #[derive(Error)]
 #[non_exhaustive]
@@ -98,7 +127,13 @@ pub enum FanoutFailure {
     Branch(ExecutionFailure),
     /// A selector or aggregate failure after the same cleanup boundary.
     #[error("structured evaluation failed")]
-    Evaluation(#[source] AslError),
+    Evaluation(#[source] Arc<AslError>),
+    /// A child interpreter failure whose classification must not be recomputed.
+    #[error("structured child evaluation failed")]
+    Propagated(#[source] PropagatedFailure),
+    /// A local safety failure that bypasses business recovery.
+    #[error("structured safety limit exceeded")]
+    Unrecoverable(ExecutionFailure),
 }
 impl fmt::Debug for FanoutFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -107,17 +142,24 @@ impl fmt::Debug for FanoutFailure {
 }
 impl From<AslError> for FanoutFailure {
     fn from(error: AslError) -> Self {
-        Self::Evaluation(error)
+        Self::Evaluation(Arc::new(error))
     }
 }
 impl From<TaskFailure> for FanoutFailure {
     fn from(failure: TaskFailure) -> Self {
-        Self::Branch(failure.0)
+        failure.0.into()
     }
 }
 impl From<ExecutionFailure> for FanoutFailure {
     fn from(failure: ExecutionFailure) -> Self {
-        Self::Branch(failure)
+        match &failure.origin {
+            FailureOrigin::Business => Self::Branch(failure),
+            FailureOrigin::Evaluation(source) => {
+                let source = source.clone();
+                Self::Propagated(PropagatedFailure { failure, source })
+            }
+            FailureOrigin::Safety => Self::Unrecoverable(failure),
+        }
     }
 }
 

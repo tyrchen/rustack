@@ -33,8 +33,9 @@ pub use engine::{
     AttemptId, CleanupState, ClockSample, DriverStep, DriverUpdate, ExecutionDriver,
     ExecutionError, ExecutionFailure, ExecutionHandle, ExecutionHistory, ExecutionLimits,
     ExecutionOutcome, ExecutionSource, ExecutionSupervisor, ExecutionView, FanoutBranch,
-    FanoutFailure, FanoutPlan, HistoryLimits, HistoryPage, RuntimeLimits, TaskDispatch,
-    TaskFailure,
+    FanoutFailure, FanoutPlan, FrameCallId, FrameCapacity, FrameError, FrameId, FrameLimits,
+    FrameParent, FrameScheduler, FrameTransition, FrameUpdate, HistoryLimits, HistoryPage,
+    PropagatedFailure, RuntimeLimits, TaskDispatch, TaskFailure,
 };
 pub use error::AslError;
 pub use expression::{Expression, SystemUuidSource, UuidSource};

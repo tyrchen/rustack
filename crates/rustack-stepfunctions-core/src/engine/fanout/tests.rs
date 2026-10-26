@@ -608,10 +608,7 @@ fn test_should_match_omitted_branch_error_without_rewriting_unhandled_failure_fi
     let plan = plan(&mut handled, start, &mut source)?;
     let _ = handled.complete_fanout(
         plan.attempt(),
-        Err(FanoutFailure::Branch(ExecutionFailure {
-            error: None,
-            cause: None,
-        })),
+        Err(FanoutFailure::Branch(ExecutionFailure::fields(None, None))),
         start,
         &mut source,
     );
@@ -621,10 +618,10 @@ fn test_should_match_omitted_branch_error_without_rewriting_unhandled_failure_fi
     let plan = self::plan(&mut unhandled, start, &mut source)?;
     let _ = unhandled.complete_fanout(
         plan.attempt(),
-        Err(FanoutFailure::Branch(ExecutionFailure {
-            error: None,
-            cause: Some("secret-cause".into()),
-        })),
+        Err(FanoutFailure::Branch(ExecutionFailure::fields(
+            None,
+            Some("secret-cause".into()),
+        ))),
         start,
         &mut source,
     );

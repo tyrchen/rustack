@@ -668,6 +668,17 @@ The reviewer highlighted two binding owner-composition obligations, now explicit
 
 Final gates: `make test-stepfunctions-core` passes525 default units/193 doctests plus89 compiler and35 structured-effect cases under preserve_order; standard and strict production Clippy pass. Feature-enabled workspace build/all-target tests pass3,084 cases with427 explicitly gated, followed by Clippy, denied-warning rustdoc and nightly format checks. Actual Rust SDK, boto3 and forced-runner cleanup acceptance pass3 cases with no ignored tests. Evidence: `/tmp/rustack-p3-effects-{core-final,build,workspace,clippy,docs,format,sdk}.log`. Six changed documents have244 resolvable local links; diff whitespace checks pass. No dependency versions or Docker experiments changed. B06 and the remaining P3/M3/M4/image/platform requirements remain open.
 
+## P3 bounded frame scheduler independent review
+
+ASL§3.4/D57 define the synchronous frame-tree owner, shared deadlines/transitions, bounded admission/aggregate slots, causal metadata and call-retirement protocol. The default supervisor/API remain gated until asynchronous ownership, panic retention and concurrent history integrate these updates. Independent final read-only review reports no remaining in-slice findings after the following corrections.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W156 | P2; `crates/rustack-stepfunctions-core/src/engine/scheduler/control.rs`, independent ownership review | Distinguish Waiting/Queued/Emitted notifications and retain frame/slot charges until queued metadata is emitted; pruning cannot release retained internal outcomes early | A large business-successful sibling is cancelled before normal notification, both calls retire, and global capacity remains fully charged until emission |
+| W157 | P2; `crates/rustack-stepfunctions-core/src/engine/fanout.rs`, independent error-provenance review | Retain classified terminal failure and typed source together; parent propagation must not reclassify an internal recovery-source error or rewrite its cause | Nested Task FULL-retry WorkLimit remains Rustack.InternalError/Task recovery failed with the original typed source; handled historical diagnostics do not change a later business Fail |
+
+Final gates: default core547 units/221 doctests, plus89 compiler/35 frame-effect/22 scheduler preserve_order cases pass via `make test-stepfunctions-core`, followed by standard and strict production Clippy. Feature-enabled workspace build and all-target tests pass3,106 cases with427 explicitly gated; Clippy, denied-warning rustdoc and nightly format checks pass. Actual Rust SDK/boto3/forced-runner acceptance passes3 cases without ignored tests. Evidence: `/tmp/rustack-p3-scheduler-{core-final,build,workspace,clippy,docs,format,sdk}.log`. Six changed documents have248 resolvable local links and whitespace checks pass. No dependency versions changed. Fresh audit still scans481 dependencies/1,378 advisories and reports the existing B06 four vulnerabilities/ten warnings; deny advisories fail while bans/licenses/sources pass. No new ignores or Docker experiments were introduced. These gates do not establish actual concurrent resource/history/API or full P3/M2 acceptance.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

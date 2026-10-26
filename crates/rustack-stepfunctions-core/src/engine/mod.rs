@@ -13,6 +13,7 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use rustack_core::json::JsonError;
 use serde_json::{Value, json};
+use types::FailureOrigin;
 
 use crate::{
     AslError, CompiledMachine, EvaluationContext, Payload, StateId, StateView, Transition,
@@ -22,12 +23,17 @@ mod fanout;
 mod history;
 mod recovery;
 mod runtime;
+mod scheduler;
 mod states;
 #[cfg(test)]
 mod tests;
 mod types;
 
-pub use fanout::{FanoutBranch, FanoutFailure, FanoutPlan};
+pub use fanout::{FanoutBranch, FanoutFailure, FanoutPlan, PropagatedFailure};
+pub use scheduler::{
+    FrameCallId, FrameCapacity, FrameError, FrameId, FrameLimits, FrameParent, FrameScheduler,
+    FrameTransition, FrameUpdate,
+};
 pub use types::{
     AttemptId, ClockSample, DriverStep, DriverUpdate, ExecutionFailure, ExecutionLimits,
     ExecutionOutcome, ExecutionSource, TaskDispatch, TaskFailure,
@@ -151,6 +157,19 @@ impl ExecutionDriver {
             .monotonic
             .checked_add(duration)
             .ok_or(AslError::InvalidExecution)?;
+        Self::frame(machine, input, base, started, deadline, limits.transitions)
+    }
+    fn frame(
+        machine: Arc<CompiledMachine>,
+        input: Payload,
+        base: EvaluationContext,
+        started: ClockSample,
+        deadline: Instant,
+        remaining: u32,
+    ) -> Result<Self, AslError> {
+        if !base.value().is_object() || started.monotonic >= deadline {
+            return Err(AslError::InvalidExecution);
+        }
         Ok(Self {
             state: machine.start(),
             started: false,
@@ -165,7 +184,7 @@ impl ExecutionDriver {
             generation: 0,
             retries: Vec::new(),
             retry_count: 0,
-            remaining: limits.transitions,
+            remaining,
             diagnostic: None,
         })
     }
@@ -310,9 +329,19 @@ impl ExecutionDriver {
         }
         self.phase = Phase::Ready { entry: false };
         let step = match result {
-            Err(FanoutFailure::Branch(failure)) => self.recover(failure, now, source),
+            Err(FanoutFailure::Branch(failure)) => match &failure.origin {
+                FailureOrigin::Business => self.recover(failure, now, source),
+                FailureOrigin::Evaluation(_) => self.propagate_failure(failure, now, source),
+                FailureOrigin::Safety => self.settle(ExecutionOutcome::Failed(failure)),
+            },
+            Err(FanoutFailure::Propagated(failure)) => {
+                self.propagate_failure(failure.failure, now, source)
+            }
             Err(FanoutFailure::Evaluation(error)) => {
-                self.evaluation_failure(error, now, source, true)
+                self.evaluation_failure_shared(error, now, source, true)
+            }
+            Err(FanoutFailure::Unrecoverable(failure)) => {
+                self.settle(ExecutionOutcome::Failed(failure))
             }
             Ok(result) => {
                 let result = if result
@@ -441,11 +470,12 @@ impl ExecutionDriver {
         }
         if now.monotonic < self.observed {
             let cancel = self.active();
-            self.diagnostic = Some(Arc::new(AslError::InvalidExecution));
-            let step = self.settle(ExecutionOutcome::Failed(ExecutionFailure::named(
-                "Rustack.InternalError",
-                "Monotonic clock regressed",
-            )));
+            let error = Arc::new(AslError::InvalidExecution);
+            self.diagnostic = Some(error.clone());
+            let mut failure =
+                ExecutionFailure::named("Rustack.InternalError", "Monotonic clock regressed");
+            failure.origin = FailureOrigin::Evaluation(error);
+            let step = self.settle(ExecutionOutcome::Failed(failure));
             return Some(DriverUpdate { step, cancel });
         }
         self.observed = now.monotonic;
@@ -526,7 +556,7 @@ impl ExecutionDriver {
         update(step)
     }
     fn transition_limit(&mut self) -> DriverStep {
-        self.settle(ExecutionOutcome::Failed(ExecutionFailure::named(
+        self.settle(ExecutionOutcome::Failed(ExecutionFailure::safety(
             "Rustack.TransitionLimitExceeded",
             "Execution transition limit exceeded",
         )))
@@ -538,7 +568,31 @@ impl ExecutionDriver {
         source: &mut S,
         recover: bool,
     ) -> DriverStep {
-        let name = match &error {
+        self.evaluation_failure_shared(Arc::new(error), now, source, recover)
+    }
+    fn propagate_failure<S: ExecutionSource + ?Sized>(
+        &mut self,
+        failure: ExecutionFailure,
+        now: ClockSample,
+        source: &mut S,
+    ) -> DriverStep {
+        if let FailureOrigin::Evaluation(error) = &failure.origin {
+            self.diagnostic = Some(error.clone());
+        }
+        if failure.error() == Some("States.DataLimitExceeded") {
+            self.recover(failure, now, source)
+        } else {
+            self.settle(ExecutionOutcome::Failed(failure))
+        }
+    }
+    fn evaluation_failure_shared<S: ExecutionSource + ?Sized>(
+        &mut self,
+        error: Arc<AslError>,
+        now: ClockSample,
+        source: &mut S,
+        recover: bool,
+    ) -> DriverStep {
+        let name = match error.as_ref() {
             AslError::DataLimit
             | AslError::Json(JsonError::Bytes | JsonError::String | JsonError::Key) => {
                 "States.DataLimitExceeded"
@@ -551,8 +605,9 @@ impl ExecutionDriver {
             | AslError::InvalidExecution => "Rustack.InternalError",
             _ => "States.Runtime",
         };
-        let failure = ExecutionFailure::named(name, "State evaluation failed");
-        self.diagnostic = Some(Arc::new(error));
+        let mut failure = ExecutionFailure::named(name, "State evaluation failed");
+        failure.origin = FailureOrigin::Evaluation(error.clone());
+        self.diagnostic = Some(error);
         if recover && name == "States.DataLimitExceeded" {
             self.recover(failure, now, source)
         } else {

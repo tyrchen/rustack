@@ -13,7 +13,7 @@ Production Docker selection remains unavailable until the production startup coo
 | 00 | [Workflows PRD](./rustack-workflows-00-prd.md) | Product goals, compatibility profile and complete M0–M4 scope |
 | 10 | [API and data model](./rustack-workflows-10-api-design.md) | Smithy protocol, resource/revision identity, idempotency and execution history |
 | 20 | [Lambda runtime](./rustack-workflows-20-lambda-runtime-design.md) | Image resolution, Docker relay/runtime, immutable revisions, pooling and cleanup |
-| 30 | [ASL engine](./rustack-workflows-30-asl-design.md) | Scoped compiler, lazy frame effects, JSONPath data flow, retries and deadlines |
+| 30 | [ASL engine](./rustack-workflows-30-asl-design.md) | Scoped compiler, bounded frame scheduler, JSONPath data flow, retries and deadlines |
 | 40 | [Task integrations](./rustack-workflows-40-integrations-design.md) | Real Lambda invocation, nested `.sync`/`.sync:2`, callbacks and heartbeats |
 | 60 | [Operations](./rustack-workflows-60-operations-design.md) | YAML configuration, budgets, topology, shutdown and snapshots |
 | 70 | [Verification plan](./rustack-workflows-70-verification-plan.md) | Acceptance matrix, security boundaries, SDK/platform coverage and performance budgets |

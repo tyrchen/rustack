@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use super::{
     ClockSample, Continuation, DriverStep, ExecutionDriver, ExecutionFailure, ExecutionOutcome,
-    ExecutionSource, Phase,
+    ExecutionSource, Phase, types::FailureOrigin,
 };
 use crate::{AslError, CatchResult, Jitter, Payload, RetryTiming, StateId, StateView, Transition};
 
@@ -54,11 +54,12 @@ impl ExecutionDriver {
             }
             Err(error) => {
                 // Recovery entropy/invariant failures are internal, not user errors.
-                self.diagnostic = Some(Arc::new(error));
-                self.settle(ExecutionOutcome::Failed(ExecutionFailure::named(
-                    "Rustack.InternalError",
-                    "Task recovery failed",
-                )))
+                let source = Arc::new(error);
+                self.diagnostic = Some(source.clone());
+                let mut failure =
+                    ExecutionFailure::named("Rustack.InternalError", "Task recovery failed");
+                failure.origin = FailureOrigin::Evaluation(source);
+                self.settle(ExecutionOutcome::Failed(failure))
             }
         }
     }

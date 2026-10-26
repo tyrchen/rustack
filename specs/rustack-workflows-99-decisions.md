@@ -496,3 +496,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: a single semantics implementation serves Parallel and Map, normalizes legacy selectors correctly and prevents a late child result from settling a retry or an elapsed execution. Effects carry the original deadline; owners remain responsible for shared transitions, result-retention charges and cancellation joins.
 - **Pinned by**: [ASL§3.3](./rustack-workflows-30-asl-design.md#33-deterministic-structured-frame-effect-protocol), [AWS item selection](https://docs.aws.amazon.com/step-functions/latest/dg/input-output-itemselector.html), [AWS Inline Map](https://docs.aws.amazon.com/step-functions/latest/dg/state-map-inline.html).
 - **Date**: 2026-10-26. The concurrent frame owner, causal history, sibling cleanup and child integrations remain required. Docker work remains deferred by user priority.
+
+## D57 — Own a bounded frame tree and separate business notification from retirement
+
+- **Context**: nested fanout needs one transition/deadline budget, failure cleanup barriers and capacity accounting that cannot deadlock or release ownership on business completion.
+- **Decision**: one synchronous frame scheduler emits typed history/resource updates, lazily seeds descendants, charges global/local frame and aggregate-slot pools, and requires explicit call retirement. Successful outputs may propagate before cleanup; failed rounds recover only after complete subtree retirement. Preserve terminal failure origin independently of historical diagnostics. Queued notifications retain their frame slots until emission; propagated evaluation failures retain their original classification/cause with the typed source.
+- **Why**: frame/attempt identities reject stale work, failed joins cannot replay uncertain siblings, and a join-only capacity cycle fails explicitly. Slot byte charges bound intermediate aggregation separately from frame payloads and official history.
+- **Pinned by**: [ASL§3.4](./rustack-workflows-30-asl-design.md#34-bounded-frame-scheduler-and-retirement-protocol), [P3](./rustack-workflows-90-impl-plan.md#6-p3--structured-fan-out-and-nested-jobs-closes-m2).
+- **Date**: 2026-10-26. Actual asynchronous task ownership, concurrent causal history and nested integrations remain required; Docker work remains deferred by user priority.
