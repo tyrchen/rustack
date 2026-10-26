@@ -83,6 +83,9 @@ Local image resolution now extends `test-lambda-docker-wire` with a second real 
 
 Owned image preparation now extends the same real wire suite: acquire private aliases/live PinnedImages, prove selected unpacked size, retain leases through handler/container lifetime, remove containers, release/join pins, then stop DockerWire. Both retained architecture lanes pass and subsequent scoped image queries find no private aliases. The33 additional cases cover size proof, shared lease release, precommit rejection, complete outer500 with delayed nested commit, initial404 uncertainty, discarded successful responses, conflicting aliases, lost/failed DELETE, capacity observation and retained shutdown/worker/root recovery including off-runtime Drop. Source-pinned exceptions treat only exact fresh-alias400/404 and wire Busy as no-effect; HTTP500 remains uncertain. These gates do not establish provider publication/CAS, snapshot live-lease reacquisition, previous-run reconciliation or a production executor.
 
+
+Deployment settlement foundation (§2.10) must independently prove resource/revision/generation CAS, simultaneous duplicate completion, preservation of old code through updates/failure, pending mutation/publication rejection, static public reasons, fallible transaction rollback, and real lease capture/revocation. Tampered resolved snapshot hash/size must reject atomically; saved pending work must restore as failure with metadata-only images. A private-builder compile-fail doctest prevents arbitrary external candidate construction. These are store/capture proofs; they do not close L01/provider admission, retained deployment supervision or Docker executor acceptance.
+
 ## 4. Security acceptance
 
 | Boundary | Required proof |

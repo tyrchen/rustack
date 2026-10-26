@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    artifact::{ResolvedImage, ValidatedArtifact},
+    artifact::{ImageArtifact, ResolvedImage, ValidatedArtifact},
+    deployment::DeploymentState,
     error::LambdaServiceError,
     identity::FunctionResourceId,
 };
@@ -156,12 +157,12 @@ pub struct VersionRecord {
     pub code_path: Option<PathBuf>,
     /// Container image URI.
     pub image_uri: Option<String>,
-    /// Immutable inspected image metadata, absent until deployment resolution.
-    pub resolved_image: Option<ResolvedImage>,
+    /// Unresolved, restored metadata, or shared live image availability.
+    pub image: ImageArtifact,
     /// Raw zip bytes.
     pub zip_bytes: Option<Bytes>,
-    /// Function state (`Active`, `Pending`, etc.).
-    pub state: String,
+    /// Authoritative readiness and update progress.
+    pub deployment: DeploymentState,
     /// ISO 8601 last-modified timestamp.
     pub last_modified: String,
     /// Supported architectures.
@@ -681,8 +682,11 @@ pub struct VersionRecordSnapshot {
     pub resolved_image: Option<ResolvedImage>,
     /// Raw zip bytes encoded as standard base64.
     pub zip_bytes_base64: Option<String>,
-    /// Function state.
+    /// Legacy function state, derived from deployment on new exports.
     pub state: String,
+    /// Authoritative deployment state in current snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentState>,
     /// ISO 8601 last-modified timestamp.
     pub last_modified: String,
     /// Supported architectures.
@@ -783,12 +787,13 @@ impl VersionRecordSnapshot {
             environment: record.environment,
             package_type: record.package_type,
             image_uri: record.image_uri,
-            resolved_image: record.resolved_image,
+            resolved_image: record.image.resolved().cloned(),
             zip_bytes_base64: record
                 .zip_bytes
                 .as_ref()
                 .map(|bytes| STANDARD.encode(bytes.as_ref())),
-            state: record.state,
+            state: record.deployment.state().into(),
+            deployment: Some(record.deployment),
             last_modified: record.last_modified,
             architectures: record.architectures,
             ephemeral_storage_size: record.ephemeral_storage_size,
@@ -848,9 +853,11 @@ impl VersionRecordSnapshot {
                 package_type: self.package_type,
                 code_path,
                 image_uri: self.image_uri,
-                resolved_image: self.resolved_image,
+                image: self
+                    .resolved_image
+                    .map_or(ImageArtifact::Unresolved, ImageArtifact::Restored),
                 zip_bytes,
-                state: self.state,
+                deployment: DeploymentState::restore(&self.state, self.deployment)?,
                 last_modified: self.last_modified,
                 architectures: self.architectures,
                 ephemeral_storage_size: self.ephemeral_storage_size,
@@ -895,7 +902,11 @@ impl FunctionStore {
             return Err(invalid("Invalid function version or concurrency"));
         }
         for (number, version) in &record.versions {
-            if *number == 0 || version.version != number.to_string() {
+            if *number == 0
+                || version.version != number.to_string()
+                || version.deployment != DeploymentState::Ready
+                || (version.package_type == "Image" && version.image.resolved().is_none())
+            {
                 return Err(invalid("Published version number mismatch"));
             }
         }
@@ -1012,6 +1023,32 @@ impl FunctionStore {
     where
         F: FnOnce(&mut FunctionRecord) -> R,
     {
+        self.try_update_if_revision(name, expected, |record| Ok(f(record)))
+    }
+
+    /// Apply a fallible mutation to a private candidate and commit only on success.
+    ///
+    /// # Errors
+    /// Rejects stale revisions, invalid records, missing functions or closure failures;
+    /// a closure error leaves all live metadata unchanged.
+    ///
+    /// ```no_run
+    /// # fn update(store: &rustack_lambda_core::storage::FunctionStore) -> Result<(), rustack_lambda_core::error::LambdaServiceError> {
+    /// store.try_update_if_revision("worker", None, |record| {
+    ///     record.latest.description = "updated".into();
+    ///     Ok(())
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    pub fn try_update_if_revision<F, R>(
+        &self,
+        name: &str,
+        expected: Option<&str>,
+        f: F,
+    ) -> Result<R, LambdaServiceError>
+    where
+        F: FnOnce(&mut FunctionRecord) -> Result<R, LambdaServiceError>,
+    {
         crate::resolver::FunctionName::parse(name)?;
         match self.functions.get_mut(name) {
             Some(mut entry) => {
@@ -1021,7 +1058,7 @@ impl FunctionStore {
                     });
                 }
                 let mut candidate = entry.value().clone();
-                let result = f(&mut candidate);
+                let result = f(&mut candidate)?;
                 if candidate.name != name || candidate.resource_id != entry.resource_id {
                     return Err(LambdaServiceError::InvalidParameter {
                         message: "Function identity is immutable".into(),
@@ -1875,9 +1912,9 @@ mod tests {
             package_type: "Zip".to_owned(),
             code_path: None,
             image_uri: None,
-            resolved_image: None,
+            image: ImageArtifact::Unresolved,
             zip_bytes: None,
-            state: "Active".to_owned(),
+            deployment: DeploymentState::Ready,
             last_modified: "2024-01-01T00:00:00.000+0000".to_owned(),
             architectures: vec!["x86_64".to_owned()],
             ephemeral_storage_size: 512,

@@ -143,9 +143,18 @@ pub(crate) fn validate_execution_settings(
         &version.package_type,
         version.zip_bytes.is_some(),
         version.code_path.is_some(),
-        version.resolved_image.as_ref(),
+        version.image.resolved(),
         architecture,
         version.image_uri.as_deref(),
+    )?;
+    validate_image_fingerprint(
+        version.image.resolved(),
+        &version.code_sha256,
+        version.code_size,
+        version
+            .image
+            .pinned()
+            .map(|image| image.unpacked_size().get()),
     )?;
     Ok(architecture)
 }
@@ -173,7 +182,33 @@ pub(crate) fn validate_snapshot_settings(
         version.resolved_image.as_ref(),
         architecture,
         version.image_uri.as_deref(),
+    )?;
+    validate_image_fingerprint(
+        version.resolved_image.as_ref(),
+        &version.code_sha256,
+        version.code_size,
+        None,
     )
+}
+
+fn validate_image_fingerprint(
+    image: Option<&ResolvedImage>,
+    hash: &str,
+    size: u64,
+    pinned_size: Option<u64>,
+) -> Result<(), LambdaServiceError> {
+    if let Some(image) = image {
+        if hash
+            != image
+                .code_sha256()
+                .map_err(|_| invalid("Invalid image fingerprint"))?
+            || !(1..=crate::artifact::MAX_IMAGE_BYTES).contains(&size)
+            || pinned_size.is_some_and(|proven| proven != size)
+        {
+            return Err(invalid("Image deployment metadata mismatch"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_layout(

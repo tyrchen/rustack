@@ -31,4 +31,4 @@ uuid = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

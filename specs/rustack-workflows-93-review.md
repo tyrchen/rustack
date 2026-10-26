@@ -197,6 +197,21 @@ The real Docker wire harness now acquires PinnedImages, keeps them through actua
 
 Next consume these artifacts in provider deployment/status/CAS and invocation capture, followed by pool/environment actors, startup directory ownership/previous-run reconciliation, allowed pulls, remaining stream/network/probe consumers and complete P1/M0 acceptance. No Docker execution capability is advertised by the current binary yet.
 
+## P1 task1.3 deployment settlement and capture review
+
+Independent read-only review covers typed deployment state, store-issued candidates, atomic settlement and fallible mutation rollback, snapshot migration, public status projection and leased invocation capture. It explicitly excludes the still-pending retained deployment supervisor and provider Image Create/Update admission/API wiring.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W43 | P2; `deployment.rs`, generated candidate builder | Public TypedBuilder generation bypassed store-issued candidate construction despite private fields. Builder method, type and final build are now module-private | Compile-fail external construction doctest plus independent recheck |
+| W44 | P2; `function_config.rs`, resolved-image hash/size | Imported or mutated resolved records could claim an unrelated CodeSha256/CodeSize. Central canonical base64 fingerprint validation now covers store/import/capture; live sizes must match unpacked proof and restored sizes remain bounded | Tampered hash/zero/oversize snapshot rejection, live-size mismatch rollback and capture corruption tests |
+| W45 | P3; `rustack-core/src/http.rs:375`, workspace validation | The existing2ms-progress/10ms-idle real-clock test can legitimately hit Idle when host scheduling stalls, defeating its total-deadline-only expectation. Pure timer tests now use Tokio paused time, with test-util explicitly enabled only for core dev builds | All five HTTP tests pass, including identical idle/tie/absolute-deadline assertions, without changing production behavior |
+| W46 | P2; `provider.rs`, self-review of publication guard integration | Rejecting publication only inside PublishVersion would let Image Create(Publish=true) insert before returning an error. Create/Update now reject this unsupported asynchronous combination before code processing or mutation; initial candidates clear unverified hash/size | Create leaves no resource; update preserves old revision/hash/status; initial Pending omits CodeSha256 |
+
+Twenty-five new Lambda core cases cover initial success/failure/retry, preserving old revisions during/after updates, independent resource/revision/generation CAS, two concurrent completion results, stale lease release, pending mutation/publication rejection, effective-entry rollback, published lease lifetime and resolved URI, snapshot state reconciliation and metadata-only availability. Invocation captures live leases through its captured request and rejects revoked/restored/tampered artifacts. The final independent recheck found no remaining in-slice issue. All25 new cases pass within346 Lambda core tests;92 core doctests pass, including the external builder rejection. Workspace build/test/fmt/Clippy/rustdoc pass with2,022 tests and399 explicitly resource-gated cases. Native SDK/DryRun regressions pass; the separately gated Squib case is not VM execution evidence. Fresh target-only strict boundary validation reports the same65 preexisting Lambda findings and no finding in new deployment/artifact/fingerprint paths; the unfiltered attempt also exposes seven existing model documentation findings. These remain B03, not a green strict gate. B01 remains the16 recorded dependency advisories; no package/version/lock change or new ignore was introduced.
+
+This foundation is not an accepted asynchronous deployment owner: it cannot prove bounded work-slot reservation, joined worker cancellation/panic or provider Pending admission until the next consumer lands. Docker capability remains unavailable; directory ownership/reconciliation, pulls, pool/environment ownership and P1 security/strict checks remain required. No new package/version is introduced; the core test-only Tokio feature reuses the existing version.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

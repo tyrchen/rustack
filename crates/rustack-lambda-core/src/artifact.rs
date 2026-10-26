@@ -34,8 +34,49 @@ use crate::{storage::stage_zip, test_zip::minimal_zip};
 pub enum DeploymentArtifact {
     /// Successfully staged ZIP, with shared lifetime ownership.
     Zip(ValidatedArtifact),
-    /// Resolved Linux image, pinned to immutable daemon content.
-    Image(ResolvedImage),
+    /// Live Linux image lease, retained through backend cleanup.
+    Image(PinnedImage),
+}
+
+/// Image deployment availability; snapshot metadata never grants a live lease.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub enum ImageArtifact {
+    /// No image has been prepared.
+    #[default]
+    Unresolved,
+    /// Immutable restored metadata requiring availability reacquisition.
+    Restored(ResolvedImage),
+    /// Prepared image with shared availability ownership.
+    Pinned(PinnedImage),
+}
+impl ImageArtifact {
+    /// Captured metadata, whether or not runtime availability has been acquired.
+    ///
+    /// ```
+    /// assert!(rustack_lambda_core::artifact::ImageArtifact::Unresolved.resolved().is_none());
+    /// ```
+    #[must_use]
+    pub fn resolved(&self) -> Option<&ResolvedImage> {
+        match self {
+            Self::Unresolved => None,
+            Self::Restored(image) => Some(image),
+            Self::Pinned(image) => Some(image.resolved()),
+        }
+    }
+
+    /// Live artifact ownership, absent for restored metadata alone.
+    ///
+    /// ```
+    /// assert!(rustack_lambda_core::artifact::ImageArtifact::Unresolved.pinned().is_none());
+    /// ```
+    #[must_use]
+    pub fn pinned(&self) -> Option<&PinnedImage> {
+        match self {
+            Self::Pinned(image) => Some(image),
+            Self::Unresolved | Self::Restored(_) => None,
+        }
+    }
 }
 
 /// Shared ownership of a ZIP archive and the extracted code it produced.

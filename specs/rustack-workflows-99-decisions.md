@@ -177,6 +177,16 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [owned image preparation](./rustack-workflows-20-lambda-runtime-design.md#29-owned-image-pins-and-deployment-preparation), [transport/source study](../docs/research/study-bollard-docker-transport-boundaries.md).
 - Date:2026-10-25. Provider status/CAS, allowed pulls, directory ownership and previous-run reconciliation remain separate required consumers.
 
+## D23 — Store-issued deployment generations and live captured images
+
+- **Context:** image preparation completes asynchronously while the old function may still execute, be updated, deleted or recreated. Snapshot metadata does not retain daemon availability.
+- **Alternatives considered:** independently mutable status strings allow contradictory readiness/progress; revision-only settlement cannot distinguish repeated failed attempts with the same old code; deserializing an executable image from metadata invents ownership.
+- **Decision:** use one typed DeploymentState, a module-private builder for store-issued ImageDeployment candidates, and resource UUID/original revision/generation checks in one commit transaction. ImageArtifact distinguishes unresolved/restored/live states; invocation and publication require a live PinnedImage.
+- **Why:** failed updates preserve old executable code, stale/duplicate results cannot publish, and a snapshot cannot authorize an unowned Docker execution. One canonical base64 image fingerprint and proven unpacked size bind API metadata to captured content. A fallible store mutation commits only after its closure and record validation both succeed.
+- **Migration:** snapshots retain a derived legacy state plus optional typed deployment; contradictory states reject, and abandoned in-progress work restores as a closed failure. Metadata requires exact-content availability reacquisition in P5.
+- **Pinned by:** [runtime §2.10](./rustack-workflows-20-lambda-runtime-design.md#210-deployment-state-and-atomic-settlement), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

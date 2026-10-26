@@ -121,7 +121,8 @@ Snapshot coverage:
 | Name tombstones | Yes | Retain remaining90-day reservations; reject overflow rather than shorten retention |
 | RUNNING records in imported/unexpected archives | No resumption | Convert to ABORTED/Rustack.ExecutionInterrupted before serving; never replay uncertain side effects |
 | Callback tokens/live handles/pagination handles | No | Fresh runtime epoch invalidates old handles; no plaintext token archive |
-| Lambda image content references/config | Yes | Validate same digest/content availability before image execution; no tag re-resolution |
+| Lambda image content references/config | Yes | Validate same digest/content availability before image execution; no tag re-resolution; serialized metadata never grants a live PinnedImage |
+| Lambda deployment readiness/update state | Yes | Apply [runtime §2.10](./rustack-workflows-20-lambda-runtime-design.md#210-deployment-state-and-atomic-settlement): reject contradictory legacy/typed status; abandoned initial/update work becomes failure, retaining prior update code |
 | Docker image layers, containers, tmpfs and code-process state | No | Images must be preloaded/allowed pulls must fetch exact digest; environments start cold |
 
 Use the existing versioned service archives: `services/stepfunctions/meta.ss.zst` and `data.ss.zst` for definitions/indices and bounded history payloads. Store durable DTOs, not Arc/compiler heap/channel layouts. Recompile definitions with an archived profile version. Unknown profile versions or invalid references fail import atomically. Add versioned Lambda image metadata to its existing archive, preserving the existing artifact protections. Imported run records do not authorize deletion of containers from another owner.

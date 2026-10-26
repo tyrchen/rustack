@@ -75,6 +75,21 @@ impl fmt::Debug for PinnedImage {
     }
 }
 impl PinnedImage {
+    #[cfg(test)]
+    pub(crate) fn fixture(resolved: ResolvedImage) -> Self {
+        let (release, _) = watch::channel(());
+        let (_, stop) = watch::channel(false);
+        let size = UnpackedImageSize::try_from(resolved.metadata().size_bytes)
+            .expect("validated unit image size");
+        Self::new(
+            resolved,
+            size,
+            release,
+            Arc::new(AtomicBool::new(true)),
+            stop,
+        )
+    }
+
     pub(crate) fn new(
         resolved: ResolvedImage,
         size: UnpackedImageSize,

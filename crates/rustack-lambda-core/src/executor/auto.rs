@@ -90,8 +90,9 @@ mod tests {
     #[test]
     fn test_should_not_use_squib_for_image_package() {
         let mut request = InvokeRequest::fixture();
-        Arc::make_mut(&mut request.revision).artifact =
-            DeploymentArtifact::Image(ResolvedImage::fixture(Architecture::Arm64));
+        Arc::make_mut(&mut request.revision).artifact = DeploymentArtifact::Image(
+            crate::artifact::PinnedImage::fixture(ResolvedImage::fixture(Architecture::Arm64)),
+        );
         assert!(!AutoExecutor::should_use_squib(&request));
     }
 }

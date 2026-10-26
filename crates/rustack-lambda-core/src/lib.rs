@@ -13,6 +13,7 @@
 pub mod artifact;
 pub mod code;
 pub mod config;
+pub mod deployment;
 #[cfg(unix)]
 pub mod docker;
 pub mod error;

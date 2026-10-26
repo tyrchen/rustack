@@ -2,6 +2,7 @@
 
 use std::{fmt, net::Ipv6Addr, str::FromStr};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use typed_builder::TypedBuilder;
@@ -516,6 +517,28 @@ impl ResolvedImage {
             .try_into()
             .expect("valid unit image metadata")
     }
+    /// Base64 SHA-256 of canonical inspected execution metadata, independent of a tag.
+    ///
+    /// # Errors
+    /// Rejects a malformed canonical fingerprint before decoding it.
+    ///
+    /// ```no_run
+    /// # fn hash(image: &rustack_lambda_core::artifact::ResolvedImage) -> Result<(), rustack_lambda_core::artifact::ArtifactError> {
+    /// let code_hash = image.code_sha256()?;
+    /// assert_eq!(code_hash.len(), 44);
+    /// # Ok(()) }
+    /// ```
+    pub fn code_sha256(&self) -> Result<String, ArtifactError> {
+        let digest = self
+            .0
+            .inspection_hash
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or(ArtifactError::Inspection)?;
+        let bytes = hex::decode(digest).map_err(|_| ArtifactError::Inspection)?;
+        Ok(STANDARD.encode(bytes))
+    }
+
     /// Immutable inspected metadata; Invoke must use `image_id` rather than a tag.
     ///
     /// ```
