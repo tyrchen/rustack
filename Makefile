@@ -908,3 +908,12 @@ test-lambda-timeouts:
 test-lambda-timeouts-docker: test-lambda-environments-docker
 
 .PHONY: test-lambda-timeouts test-lambda-timeouts-docker
+
+# Invocation log capabilities/receipts and independent diagnostic capture.
+test-lambda-log-windows:
+	@cargo test -p rustack-lambda-core --lib docker::logs::tests
+
+# Includes requested/silent/uncaptured warm-call log isolation on actual images.
+test-lambda-log-windows-docker: test-lambda-environments-docker
+
+.PHONY: test-lambda-log-windows test-lambda-log-windows-docker

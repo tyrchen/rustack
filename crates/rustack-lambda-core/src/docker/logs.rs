@@ -1,9 +1,11 @@
 //! Independent function output capture; socket reads never wait for a consumer.
 
+mod window;
+
 use std::{collections::VecDeque, fmt, time::Duration};
 
 use bytes::Bytes;
-use rustack_lambda_runtime::diagnostics::runtime_dispatch;
+use rustack_lambda_runtime::{diagnostics::runtime_dispatch, protocol::AttemptId};
 use tokio::{
     io::AsyncRead,
     runtime::Handle,
@@ -12,6 +14,8 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tracing::instrument::WithSubscriber;
+pub use window::LogWindow;
+use window::{ActiveWindow, PendingReceipt, ReceiptGuard, WindowKey, changed};
 
 use super::{
     DockerAttachment, DockerError, DockerOutputReader, OutputChannel, OutputChunk, check_deadline,
@@ -48,7 +52,13 @@ impl fmt::Debug for LogSnapshot {
     }
 }
 
-struct SnapshotRequest {
+enum Action {
+    Snapshot,
+    Begin(ActiveWindow, PendingReceipt),
+    Finish(WindowKey, PendingReceipt),
+}
+struct Request {
+    action: Action,
     deadline: Instant,
     reply: oneshot::Sender<Result<LogSnapshot, DockerError>>,
 }
@@ -56,10 +66,11 @@ struct SnapshotRequest {
 /// Retained log actor; its environment owns the independent container lifetime.
 #[non_exhaustive]
 pub struct FunctionLogs {
-    requests: mpsc::Sender<SnapshotRequest>,
+    requests: mpsc::Sender<Request>,
     stop: watch::Sender<bool>,
     task: Option<JoinHandle<Result<LogSnapshot, DockerError>>>,
     settled: Option<Result<LogSnapshot, DockerError>>,
+    window_mutating: bool,
 }
 impl fmt::Debug for FunctionLogs {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -67,6 +78,7 @@ impl fmt::Debug for FunctionLogs {
             .debug_struct("FunctionLogs")
             .field("stopping", &*self.stop.borrow())
             .field("settled", &self.settled)
+            .field("window_mutation_uncertain", &self.window_mutating)
             .finish_non_exhaustive()
     }
 }
@@ -109,6 +121,7 @@ impl FunctionLogs {
             stop,
             task: Some(task),
             settled: None,
+            window_mutating: false,
         })
     }
 
@@ -127,12 +140,84 @@ impl FunctionLogs {
         if let Some(result) = &self.settled {
             return result.clone();
         }
+        self.request(Action::Snapshot, deadline).await
+    }
+
+    /// Open an empty invocation window before sending its runtime event.
+    ///
+    /// # Errors
+    /// Returns expired/invalid budget, overload, overlapping/uncertain mutation,
+    /// stopped/closed capture or retained IO failure. An accepted mutation's
+    /// failure or cancellation forbids further window mutations; retire the owner.
+    ///
+    /// ```no_run
+    /// # async fn begin(logs: &mut rustack_lambda_core::docker::FunctionLogs) {
+    /// let window = logs.begin(Default::default(), tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await;
+    /// # }
+    /// ```
+    pub async fn begin(
+        &mut self,
+        attempt: AttemptId,
+        deadline: Instant,
+    ) -> Result<LogWindow, DockerError> {
+        check_deadline(deadline)?;
+        if self.window_mutating {
+            return Err(DockerError::Stopped);
+        }
+        self.window_mutating = true;
+        let (window, active) = LogWindow::new(attempt);
+        let (mut receipt, pending) = ReceiptGuard::new(deadline);
+        self.request(Action::Begin(active, pending), deadline)
+            .await?;
+        receipt.consume(deadline)?;
+        self.window_mutating = false;
+        Ok(window)
+    }
+
+    /// Close exactly that window and return its bounded observed tail/status.
+    ///
+    /// # Errors
+    /// Returns budget/admission failure, foreign/stale capability, uncertain
+    /// mutation or retained capture failure. Caller cancellation requires owner
+    /// retirement. Environment diagnostic discard counters remain cumulative.
+    ///
+    /// ```no_run
+    /// # async fn finish(logs: &mut rustack_lambda_core::docker::FunctionLogs, window: rustack_lambda_core::docker::LogWindow) {
+    /// let tail = logs.finish(window, tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await;
+    /// # }
+    /// ```
+    pub async fn finish(
+        &mut self,
+        mut window: LogWindow,
+        deadline: Instant,
+    ) -> Result<LogSnapshot, DockerError> {
+        check_deadline(deadline)?;
+        if self.window_mutating {
+            return Err(DockerError::Stopped);
+        }
+        self.window_mutating = true;
+        let (mut receipt, pending) = ReceiptGuard::new(deadline);
+        let snapshot = self
+            .request(Action::Finish(window.key, pending), deadline)
+            .await?;
+        receipt.consume(deadline)?;
+        window.complete();
+        self.window_mutating = false;
+        Ok(snapshot)
+    }
+
+    async fn request(&self, action: Action, deadline: Instant) -> Result<LogSnapshot, DockerError> {
+        check_deadline(deadline)?;
         if *self.stop.borrow() {
             return Err(DockerError::Stopped);
         }
         let (reply, response) = oneshot::channel();
         self.requests
-            .try_send(SnapshotRequest { deadline, reply })
+            .try_send(Request {
+                action,
+                deadline,
+                reply,
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => DockerError::Busy,
                 mpsc::error::TrySendError::Closed(_) => DockerError::Worker,
@@ -219,6 +304,9 @@ struct Capture {
     stdout: Ring,
     stderr: Ring,
     tail: Ring,
+    window_tail: Ring,
+    active: Option<ActiveWindow>,
+    receipt: Option<PendingReceipt>,
     closed: bool,
     failure: Option<DockerError>,
 }
@@ -228,6 +316,9 @@ impl Capture {
             stdout: Ring::new(capacity)?,
             stderr: Ring::new(capacity)?,
             tail: Ring::new(TAIL)?,
+            window_tail: Ring::new(TAIL)?,
+            active: None,
+            receipt: None,
             closed: false,
             failure: None,
         })
@@ -237,34 +328,107 @@ impl Capture {
             OutputChannel::Stdout => self.stdout.push(&chunk.bytes)?,
             OutputChannel::Stderr => self.stderr.push(&chunk.bytes)?,
         }
-        self.tail.push(&chunk.bytes)
+        self.tail.push(&chunk.bytes)?;
+        if self.active.is_some() {
+            self.window_tail.push(&chunk.bytes)?;
+        }
+        Ok(())
     }
     fn snapshot(&self) -> LogSnapshot {
+        self.snapshot_of(&self.tail)
+    }
+    fn window_snapshot(&self) -> LogSnapshot {
+        self.snapshot_of(&self.window_tail)
+    }
+    fn snapshot_of(&self, ring: &Ring) -> LogSnapshot {
         LogSnapshot {
-            tail: Bytes::from(self.tail.bytes.iter().copied().collect::<Vec<_>>()),
+            tail: Bytes::from(ring.bytes.iter().copied().collect::<Vec<_>>()),
             stdout_discarded: self.stdout.discarded,
             stderr_discarded: self.stderr.discarded,
             closed: self.closed,
             failure: self.failure.clone(),
         }
     }
-    fn reply(&self, request: SnapshotRequest) {
+    fn fail_window(&mut self, error: DockerError) {
+        self.active = None;
+        self.receipt = None;
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+    }
+    fn reconcile(&mut self) -> bool {
+        if let Some(receipt) = &self.receipt {
+            match receipt.consumed() {
+                Ok(true) => {
+                    self.receipt = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail_window(error);
+                    return true;
+                }
+            }
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|window| *window.revoked.borrow() || window.revoked.has_changed().is_err())
+        {
+            self.fail_window(DockerError::Protocol);
+            true
+        } else {
+            false
+        }
+    }
+    fn revocation(&self) -> Option<watch::Receiver<bool>> {
+        self.active.as_ref().map(|window| window.revoked.clone())
+    }
+    fn reply(&mut self, request: Request) {
+        self.reconcile();
         if request.reply.is_closed() {
             return;
         }
+        let mut committed = false;
         let result = if Instant::now() >= request.deadline {
             Err(DockerError::Deadline)
         } else {
-            Ok(self.snapshot())
+            match request.action {
+                Action::Snapshot => Ok(self.snapshot()),
+                _ if self.failure.is_some() => {
+                    Err(self.failure.clone().unwrap_or(DockerError::Worker))
+                }
+                _ if self.receipt.is_some() => Err(DockerError::Busy),
+                Action::Begin(_, _) if self.closed => Err(DockerError::Stopped),
+                Action::Begin(_, _) if self.active.is_some() => Err(DockerError::Busy),
+                Action::Begin(window, receipt) => {
+                    self.window_tail.bytes.clear();
+                    self.window_tail.discarded = 0;
+                    self.active = Some(window);
+                    self.receipt = Some(receipt);
+                    committed = true;
+                    Ok(self.window_snapshot())
+                }
+                Action::Finish(key, receipt)
+                    if self.active.as_ref().map(|window| window.key) == Some(key) =>
+                {
+                    self.active = None;
+                    self.receipt = Some(receipt);
+                    committed = true;
+                    Ok(self.window_snapshot())
+                }
+                Action::Finish(_, _) => Err(DockerError::Protocol),
+            }
         };
-        let _ = request.reply.send(result);
+        if request.reply.send(result).is_err() && committed {
+            self.fail_window(DockerError::Protocol);
+        }
     }
 }
 
 async fn capture<R: AsyncRead + Unpin>(
     reader: DockerOutputReader<R>,
     mut state: Capture,
-    mut requests: mpsc::Receiver<SnapshotRequest>,
+    mut requests: mpsc::Receiver<Request>,
     mut stop: watch::Receiver<bool>,
 ) -> Result<LogSnapshot, DockerError> {
     let mut reader = Some(reader);
@@ -273,16 +437,22 @@ async fn capture<R: AsyncRead + Unpin>(
         if *stop.borrow() {
             break;
         }
+        if state.reconcile() {
+            reader.take();
+        }
         if state.closed || state.failure.is_some() {
+            let receipt = state.receipt.clone();
+            let revocation = state.revocation();
             tokio::select! {
                 biased;
                 () = super::connection::stopped(&mut stop) => break,
+                () = changed(receipt, revocation) => { state.reconcile(); },
                 request = requests.recv() => match request { Some(request) => state.reply(request), None => break },
             }
             continue;
         }
         let result = match &mut reader {
-            Some(reader) => read_next(reader, &state, &mut requests, &mut stop).await,
+            Some(reader) => read_next(reader, &mut state, &mut requests, &mut stop).await,
             None => return Err(DockerError::Worker),
         };
         match result {
@@ -307,8 +477,13 @@ async fn capture<R: AsyncRead + Unpin>(
     drop(reader);
     requests.close();
     while let Ok(request) = requests.try_recv() {
-        state.reply(request);
+        if matches!(request.action, Action::Snapshot) {
+            state.reply(request);
+        } else {
+            let _ = request.reply.send(Err(DockerError::Stopped));
+        }
     }
+    state.reconcile();
     match state.failure.clone() {
         Some(error) => Err(error),
         None => Ok(state.snapshot()),
@@ -317,23 +492,33 @@ async fn capture<R: AsyncRead + Unpin>(
 
 async fn read_next<R: AsyncRead + Unpin>(
     reader: &mut DockerOutputReader<R>,
-    state: &Capture,
-    requests: &mut mpsc::Receiver<SnapshotRequest>,
+    state: &mut Capture,
+    requests: &mut mpsc::Receiver<Request>,
     stop: &mut watch::Receiver<bool>,
 ) -> Option<Result<Option<OutputChunk>, DockerError>> {
-    // This future survives snapshot traffic. Only terminal stop drops it.
+    // Requests retain this read; only stop or terminal capture failure drops it.
     let next = reader.next(Instant::now() + SILENCE);
     tokio::pin!(next);
     loop {
         if *stop.borrow() {
             return None;
         }
+        state.reconcile();
+        if let Some(error) = &state.failure {
+            return Some(Err(error.clone()));
+        }
         if let Ok(request) = requests.try_recv() {
             state.reply(request);
         }
+        if let Some(error) = &state.failure {
+            return Some(Err(error.clone()));
+        }
+        let receipt = state.receipt.clone();
+        let revocation = state.revocation();
         tokio::select! {
             biased;
             () = super::connection::stopped(stop) => return None,
+            () = changed(receipt, revocation) => { state.reconcile(); },
             result = &mut next => return Some(result),
             request = requests.recv() => match request { Some(request) => state.reply(request), None => return None },
         }

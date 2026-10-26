@@ -299,3 +299,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: HTTP metadata and actor enforcement share one delivery instant, abandoned offers remain recoverable, and handler versus outer timeout preserves error semantics without replay.
 - **Pinned by**: [runtime §3.8](./rustack-workflows-20-lambda-runtime-design.md#38-delivery-based-handler-clock-and-protocol-v2), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26.
+
+## D34 — Separate invocation log windows from environment diagnostics
+
+- **Context**: Warm reuse must not return already collected logs from an earlier call; independent stdout/control streams lack a causal flush barrier.
+- **Alternatives considered**: returning the global tail leaks prior collected bytes; clearing diagnostic rings loses health evidence; inserting sleeps or rewriting images cannot establish a reliable producer-side boundary.
+- **Decision**: use acknowledged Begin/Finish actor commands and an opaque per-attempt capability around one bounded reusable4KiB window, alongside existing diagnostic rings.
+- **Why**: current-call observed output has bounded explicit ownership, silent calls cannot inherit the cached tail, and uncertain mutations forbid reuse. The advertised stream timing limit preserves honest compatibility.
+- **Pinned by**: [runtime §3.9](./rustack-workflows-20-lambda-runtime-design.md#39-invocation-scoped-log-windows), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26.

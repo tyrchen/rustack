@@ -477,3 +477,39 @@ async fn test_should_enforce_captured_handler_timeout_and_replace_the_retired_po
     let cleanup = fixture.cleanup().await;
     result.and(retired.map_err(Into::into)).and(cleanup)
 }
+
+#[tokio::test]
+#[ignore = "requires explicit Docker environment images/socket"]
+async fn test_should_isolate_requested_log_tails_across_logging_silent_and_uncaptured_warm_calls()
+-> Result<()> {
+    let mut fixture = Fixture::new().await?;
+    let mut pool = EnvironmentPool::start(fixture.owner.port(), PoolConfig::default())?;
+    let result = async {
+        let revision = fixture.revision()?;
+        let port = pool.port();
+        for (capture, emit, counter) in [(true, true, 1), (false, true, 2), (true, false, 3), (true, true, 4)] {
+            let response = port.invoke(
+                fixture.plan_revision(revision.clone())?,
+                invocation(&json!({"value":35,"logs":emit,"response_bytes":if emit {1024*1024} else {0}}))?,
+                capture,
+            ).await?;
+            let RuntimeResult::Success(payload) = response.result else {
+                anyhow::bail!("logging fixture invocation failed");
+            };
+            let value: Value = serde_json::from_slice(payload.as_ref())?;
+            ensure!(value["computed"] == 42 && value["counter"] == counter, "log windows prevented actual warm reuse");
+            ensure!(response.logs.len() <= 4096, "log window exceeds response bound");
+            if capture && emit {
+                for marker in [b"WIRE_STDOUT_CAPTURE".as_slice(), b"WIRE_STDERR_CAPTURE".as_slice()] {
+                    ensure!(response.logs.windows(marker.len()).any(|bytes| bytes == marker), "observed invocation marker missing");
+                }
+            } else {
+                ensure!(response.logs.is_empty(), "silent or uncaptured invocation inherited earlier logs");
+            }
+        }
+        Ok(())
+    }.await;
+    let retired = pool.shutdown(deadline()).await;
+    let cleanup = fixture.cleanup().await;
+    result.and(retired.map_err(Into::into)).and(cleanup)
+}

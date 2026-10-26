@@ -6,7 +6,7 @@ use bytes::Bytes;
 use rustack_lambda_runtime::{
     client::{ClientConfig, ControlClient},
     diagnostics::runtime_dispatch,
-    protocol::{Architecture, EnvironmentId},
+    protocol::{Architecture, AttemptId, EnvironmentId},
     relay::RelayError,
 };
 use tokio::{
@@ -21,7 +21,7 @@ use tracing::instrument::WithSubscriber;
 use super::{EnvironmentConfig, EnvironmentError, actor::Signals};
 use crate::{
     docker::{
-        DockerAttachment, DockerError, FunctionLogs, OutputChannel,
+        DockerAttachment, DockerError, FunctionLogs, LogSnapshot, LogWindow, OutputChannel,
         connection::stopped as wait_for_stop,
     },
     executor::ExecutorError,
@@ -124,6 +124,24 @@ impl IoGuard {
     pub(super) async fn tail(&mut self) -> Result<Bytes, EnvironmentError> {
         let logs = self.streams.logs.as_ref().ok_or(EnvironmentError::Worker)?;
         let snapshot = logs.snapshot(self.config.deadline()).await?;
+        self.observe(snapshot)
+    }
+    pub(super) async fn begin_logs(
+        &mut self,
+        attempt: AttemptId,
+    ) -> Result<LogWindow, EnvironmentError> {
+        let logs = self.streams.logs.as_mut().ok_or(EnvironmentError::Worker)?;
+        Ok(logs.begin(attempt, self.config.deadline()).await?)
+    }
+    pub(super) async fn finish_logs(
+        &mut self,
+        window: LogWindow,
+    ) -> Result<Bytes, EnvironmentError> {
+        let logs = self.streams.logs.as_mut().ok_or(EnvironmentError::Worker)?;
+        let snapshot = logs.finish(window, self.config.deadline()).await?;
+        self.observe(snapshot)
+    }
+    fn observe(&mut self, snapshot: LogSnapshot) -> Result<Bytes, EnvironmentError> {
         if let Some(error) = snapshot.failure {
             return Err(error.into());
         }

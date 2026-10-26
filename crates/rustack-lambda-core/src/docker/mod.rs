@@ -39,7 +39,7 @@ use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 pub use image::ImageResolver;
 pub use lease::{ImageLeaseConfig, ImageLeaseManager, ImageLeasePort, ImageLeaseStatus};
-pub use logs::{FunctionLogs, LogSnapshot};
+pub use logs::{FunctionLogs, LogSnapshot, LogWindow};
 use models::{
     ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, ContainerSummary,
     ContainerWaitResponse, ImageInspect, SystemInfo, SystemVersion,

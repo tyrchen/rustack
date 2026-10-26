@@ -381,6 +381,20 @@ Final production-relay images were rebuilt for protocol v2 on both retained Engi
 Per-invocation log attribution, real Docker Executor/provider envelope mapping, historical reconciliation, allowed pulls/network/resource probes and final startup acceptance remain mandatory M0 work. The ASL engine and P2–P5 remain required by the full objective.
 
 
+## P1 task1.3 invocation log window review
+
+Independent design and implementation review covers §3.9/D34: separate bounded diagnostic/window tails, opaque capabilities and direct revocation, consumption receipts/deadlines, exact window identity, partial-read retention/fairness, EOF handling and environment Tail/None lifecycle integration. The final read-only implementation review has no concrete in-slice finding. Preflight explicitly required capability Drop and cross-owner misuse to revoke the originating capture. Self-review corrected the unconsumed-reply case below before final review.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W85 | P2; self-review, `crates/rustack-lambda-core/src/docker/logs/window.rs:71`, mutation receipts | Sending a reply cannot prove consumption, especially after Finish removed the active capability. Retain a separate actor-owned consumption receipt and deadline until the public mutation acknowledges | Ready-but-unconsumed Begin/Finish abandonment and live/unpolled expiry require quiet-socket closure before another diagnostic request; on-time ACK processed later remains valid |
+
+Final-source standard workspace build/test/fmt/Clippy/rustdoc pass with2,273 tests, zero failures and407 separately resource-gated cases. Lambda core has571 unit tests/134 doctests; the log target passes36 cases (18 additions). The six-library strict boundary target passes857 unit tests/201 doctests (1,058 total),13 separately gated Docker cases and all strict production checks. Fresh audit scans474 dependencies without vulnerabilities; deny advisories/bans/licenses/sources all pass. No dependency/version or advisory exception was introduced.
+
+Each retained Engine29.5.2 daemon explicitly passes owner/pool6, wire2 and shared runtime5 cases with zero ignored (13 per daemon), on arm64 VZ and amd64/QEMU. Actual image code alternates Tail/logging, None/logging, Tail/silent and Tail/logging, retaining warm counters1..4, computed42 responses, observed stdout/stderr markers, bounded tails and empty silent/uncaptured output. Existing timeout/replacement/FunctionError/cancel/large-frame/Close regressions pass with joined log/container/image cleanup. Read-only post-run queries find no owner/test-labeled containers or internal image aliases. QEMU is not native-x86 platform acceptance.
+
+Window attribution follows observed completed chunks, with the independent-stream timing limit advertised in runtime/operations specs. Production Executor/provider base64 header wiring, historical reconciliation, allowed pulls/network/probes and M0 SDK acceptance remain required; P2–P5 remain pending.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |
@@ -389,6 +403,7 @@ Per-invocation log attribution, real Docker Executor/provider envelope mapping, 
 | B02 | P2; `crates/rustack-kms-model/src/epoch_seconds.rs:39` | Existing optional epoch helper truncates negative fractional seconds and casts a negative fraction to u32; it is unsuitable as the generator's new codec | Do not reuse it in P2. Existing KMS correction is outside this workflow feature; retain as a repository follow-up without claiming it fixed |
 | B03 | P2; Lambda model/HTTP/core and shared auth/core/runtime production libraries | **Closed:** the six-library strict target passes without new ignores after correcting123 fresh baseline findings, including typed MAC initialization errors, guarded indexing and method-specific Errors contracts | Retain `make test-lambda-boundaries` through P1 acceptance; this is not global workspace strict-lint or Docker executor acceptance |
 | B04 | P2; `crates/rustack-lambda-model/src/input.rs`, `provider.rs` code-update dispatch | **Closed:** explicit DryRun, strict deployment DTOs and bounded decoder implemented; ZIP/S3/image nonmutation and live SDK rejection/absence/publication checks pass | Retain regressions through P1 acceptance; this fix does not establish Docker Image Invoke |
+| B05 | P2; `crates/rustack-lambda-core/src/docker/environment/worker.rs:318`, call/idle event mapping | **Open M0 integration gate:** BootstrapReady does not prove event consumption; after an abandoned poll a first queued invocation may legally receive InitError. Busy/idle fallback currently erases that bounded initialization class into Protocol | Before Executor/provider acceptance, preserve <=32KiB InitError as EnvironmentError::Initialization in both paths, retain joined retirement and add a post-bootstrap/pre-delivery regression |
 
 The P0 record distinguishes unchanged workspace advisory failures from the clean probe dependency graph; it never reports a fully green security baseline.
 

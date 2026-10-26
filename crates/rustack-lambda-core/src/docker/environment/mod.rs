@@ -182,7 +182,7 @@ pub struct EnvironmentCapacity {
 pub struct EnvironmentResponse {
     /// Unmodified handler success or `FunctionError` payload.
     pub result: RuntimeResult,
-    /// Combined captured final 4 KiB when requested; per-invocation attribution is separate.
+    /// Combined observed invocation-window tail when requested, at most 4 KiB.
     pub logs: Bytes,
 }
 impl fmt::Debug for EnvironmentResponse {

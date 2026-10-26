@@ -278,6 +278,11 @@ impl Worker {
         if *call.cancellation.borrow() || call.reply.is_closed() {
             return Err(EnvironmentError::Cancelled);
         }
+        let log_window = io.begin_logs(attempt).await?;
+        self.check(deadline)?;
+        if *call.cancellation.borrow() || call.reply.is_closed() {
+            return Err(EnvironmentError::Cancelled);
+        }
         io.client()?
             .invoke(
                 call.invocation.clone().with_handler_timeout(
@@ -298,7 +303,7 @@ impl Worker {
                 attempt: returned,
                 result,
             }) if returned == attempt => {
-                let tail = io.tail().await?;
+                let tail = io.finish_logs(log_window).await?;
                 let logs = if call.capture_logs {
                     tail
                 } else {
