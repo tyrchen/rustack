@@ -1,6 +1,6 @@
 [package]
 name = "rustack-stepfunctions-core"
-description = "Bounded pure ASL data semantics for the Rustack workflow engine"
+description = "Compiled ASL semantics and supervised Step Functions execution for Rustack"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,9 @@ workspace = true
 
 [dependencies]
 rustack-core = { workspace = true }
+rustack-stepfunctions-model = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 getrandom = { workspace = true }

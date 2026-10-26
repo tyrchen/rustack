@@ -4200,9 +4200,12 @@ dependencies = [
  "proptest",
  "rstest",
  "rustack-core",
+ "rustack-stepfunctions-model",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tracing",
  "uuid",
  "winnow",
 ]

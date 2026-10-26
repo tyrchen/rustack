@@ -1,6 +1,9 @@
 //! First-matching policy selection, bounded backoff and unbiased jitter.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use serde_json::{Map, Value};
 
@@ -51,7 +54,7 @@ impl ExecutionDriver {
             }
             Err(error) => {
                 // Recovery entropy/invariant failures are internal, not user errors.
-                self.diagnostic = Some(error);
+                self.diagnostic = Some(Arc::new(error));
                 self.settle(ExecutionOutcome::Failed(ExecutionFailure::named(
                     "Rustack.InternalError",
                     "Task recovery failed",

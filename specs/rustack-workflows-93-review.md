@@ -554,6 +554,18 @@ ASL§3.1/D48 implements six-state deterministic execution, explicit dispatch/tim
 
 Core365 unit cases/89 doctests and strict production/all-targets checks pass, including50 new cases and a512-case arbitrary-control-order property. Catch merge errors are Runtime, explicit parameter/result expansion limits recover, and Stop/timeout/stale results settle once. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,870 tests/415 gated, including retained deferred Docker changes. No dependencies changed; B06 audit/deny remains open and was not rerun for this slice. Async actor/cleanup ownership, history, registry, real Lambda bridge and complete M1 acceptance remain required; Docker-image completion remains deferred under the user's priority.
 
+## P2 supervised runtime/history independent review
+
+ASL§3.2/D49 implements a registry-owned JoinSet supervisor, retained bounded CPU proposals, watch control/read publication, separate business/cleanup receipts and persistent official history with terminal/global accounting. Root slots retain a dispatch lease ledger independently of execution-worker lifetime. The same supervisor/drain continues after waiter expiry; no business execution is restarted. Typed diagnostics are retained behind redacted Debug. The final independent read-only review reports no remaining in-slice findings.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W115 | P2; `crates/rustack-stepfunctions-core/src/engine/runtime/mod.rs:356` | FallbackOwner Drop preserves unresolved state on unpolled/cancelled fallback, panic or runtime shutdown | Adapter responder outlives stopped execution runtime; open/dispatch permits and history remain charged |
+| W116 | P2; `crates/rustack-stepfunctions-core/src/engine/runtime/actor.rs:383` | Sample admission return once, recheck control/deadline, use that same sample for history/completion | Stop during synchronous rejection omits invalidated admission failure; expired rejection follows Task timeout history |
+| W117 | P3; `crates/rustack-stepfunctions-core/src/engine/runtime/tests.rs:765` | Separate RAII controller releases test-only blocking gates on failure paths | Stop/deadline/panic CPU fixtures cannot strand spawn_blocking during failed assertions |
+
+Core404 unit cases/129 doctests and strict production/all-targets checks pass, including39 additions. Final current-worktree workspace build/test/fmt/Clippy/rustdoc pass with2,909 tests/415 gated, including the retained deferred Docker checkpoint. Newly direct model/Tokio/tracing edges add no package/version. Audit still reports4 existing vulnerabilities/10 unsound warnings; deny passes bans/licenses/sources and fails advisories under open B06. These channel-based invocation tests qualify core ownership, not actual Lambda/image execution. Registry, real bridge, SDK/main registration and complete M1 remain required. Docker-image work remains deferred under the user's workflow-first priority.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

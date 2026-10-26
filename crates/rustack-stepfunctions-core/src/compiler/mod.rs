@@ -146,6 +146,7 @@ impl AslCompiler {
         Ok(Compilation {
             machine: Arc::new(CompiledMachine {
                 original: Bytes::copy_from_slice(input),
+                scope: self.scope.clone(),
                 rows,
                 start,
                 timeout,

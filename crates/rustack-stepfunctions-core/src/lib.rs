@@ -1,8 +1,9 @@
-//! Pure, bounded ASL payload and compiled-path semantics.
+//! Bounded ASL compilation and supervised local workflow execution.
 //!
-//! This crate has no network, SDK, Lambda or HTTP dependency. Immutable payloads
-//! preserve source bytes and compiled paths distinguish missing values from null.
-//! No registry or execution-service capability is implied by these data APIs.
+//! Immutable payloads and scoped IR feed actor-owned execution/history. Concrete
+//! task ports keep Lambda/runtime ownership outside this crate; there is no SDK,
+//! Lambda-core, Docker or HTTP dependency. Registry and main-service registration
+//! remain the embedding application's responsibility.
 
 #![forbid(unsafe_code)]
 
@@ -14,6 +15,7 @@ mod error;
 mod expression;
 mod path;
 mod payload;
+mod task;
 mod template;
 mod wait;
 
@@ -25,12 +27,18 @@ pub use compiler::{
 };
 pub use dataflow::DataFlow;
 pub use engine::{
-    AttemptId, ClockSample, DriverStep, DriverUpdate, ExecutionDriver, ExecutionFailure,
-    ExecutionLimits, ExecutionOutcome, ExecutionSource, TaskDispatch, TaskFailure,
+    AttemptId, CleanupState, ClockSample, DriverStep, DriverUpdate, ExecutionDriver,
+    ExecutionError, ExecutionFailure, ExecutionHandle, ExecutionHistory, ExecutionLimits,
+    ExecutionOutcome, ExecutionSource, ExecutionSupervisor, ExecutionView, HistoryLimits,
+    HistoryPage, RuntimeLimits, TaskDispatch, TaskFailure,
 };
 pub use error::AslError;
 pub use expression::{Expression, SystemUuidSource, UuidSource};
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};
 pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
+pub use task::{
+    LambdaTaskCommand, LambdaTaskPort, QuarantinedTask, TaskCall, TaskChannelError, TaskEvent,
+    TaskResponder, TaskSettlement,
+};
 pub use template::Template;
 pub use wait::WaitSource;

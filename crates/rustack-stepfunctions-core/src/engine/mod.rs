@@ -18,7 +18,9 @@ use crate::{
     AslError, CompiledMachine, EvaluationContext, Payload, StateId, StateView, Transition,
 };
 
+mod history;
 mod recovery;
+mod runtime;
 mod states;
 #[cfg(test)]
 mod tests;
@@ -29,7 +31,7 @@ pub use types::{
     ExecutionOutcome, ExecutionSource, TaskDispatch, TaskFailure,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Phase {
     Ready {
         entry: bool,
@@ -44,7 +46,7 @@ enum Phase {
     },
     Terminal(Arc<ExecutionOutcome>),
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Continuation {
     Retry,
     Wait { output: Payload, next: Transition },
@@ -52,8 +54,10 @@ enum Continuation {
 
 /// One captured machine's sequential frame, with no asynchronous resource owner.
 #[non_exhaustive]
+#[derive(Clone)]
 pub struct ExecutionDriver {
     machine: Arc<CompiledMachine>,
+    started: bool,
     input: Payload,
     base: EvaluationContext,
     context: EvaluationContext,
@@ -66,7 +70,7 @@ pub struct ExecutionDriver {
     retries: Vec<u32>,
     retry_count: u32,
     remaining: u32,
-    diagnostic: Option<AslError>,
+    diagnostic: Option<Arc<AslError>>,
 }
 impl fmt::Debug for ExecutionDriver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -114,6 +118,7 @@ impl ExecutionDriver {
             .ok_or(AslError::InvalidExecution)?;
         Ok(Self {
             state: machine.start(),
+            started: false,
             machine,
             input,
             context: base.clone(),
@@ -143,6 +148,7 @@ impl ExecutionDriver {
         now: ClockSample,
         source: &mut S,
     ) -> DriverUpdate {
+        self.started = true;
         if let Some(update) = self.guard(now) {
             return update;
         }
@@ -205,6 +211,7 @@ impl ExecutionDriver {
         now: ClockSample,
         source: &mut S,
     ) -> DriverUpdate {
+        self.started = true;
         if let Some(update) = self.guard(now) {
             return update;
         }
@@ -250,6 +257,7 @@ impl ExecutionDriver {
     /// # Ok(()) }
     /// ```
     pub fn stop(&mut self, reason: TaskFailure, now: ClockSample) -> DriverUpdate {
+        self.started = true;
         if let Some(update) = self.guard(now) {
             return update;
         }
@@ -310,7 +318,7 @@ impl ExecutionDriver {
     /// ```
     #[must_use]
     pub fn diagnostic(&self) -> Option<&AslError> {
-        self.diagnostic.as_ref()
+        self.diagnostic.as_deref()
     }
     /// Read the stable terminal outcome, if any; cleanup is independently owned.
     ///
@@ -331,7 +339,7 @@ impl ExecutionDriver {
         }
         if now.monotonic < self.observed {
             let cancel = self.active();
-            self.diagnostic = Some(AslError::InvalidExecution);
+            self.diagnostic = Some(Arc::new(AslError::InvalidExecution));
             let step = self.settle(ExecutionOutcome::Failed(ExecutionFailure::named(
                 "Rustack.InternalError",
                 "Monotonic clock regressed",
@@ -437,7 +445,7 @@ impl ExecutionDriver {
             _ => "States.Runtime",
         };
         let failure = ExecutionFailure::named(name, "State evaluation failed");
-        self.diagnostic = Some(error);
+        self.diagnostic = Some(Arc::new(error));
         if recover && name == "States.DataLimitExceeded" {
             self.recover(failure, now, source)
         } else {
@@ -448,3 +456,9 @@ impl ExecutionDriver {
 fn update(step: DriverStep) -> DriverUpdate {
     DriverUpdate { step, cancel: None }
 }
+
+pub use history::{ExecutionHistory, HistoryLimits, HistoryPage};
+pub use runtime::{
+    CleanupState, ExecutionError, ExecutionHandle, ExecutionSupervisor, ExecutionView,
+    RuntimeLimits,
+};

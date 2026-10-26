@@ -429,3 +429,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: injected clock/random/completion inputs make deadline, stale-result and recovery behavior independently testable; the same frame can later be scheduled with Parallel/Map siblings.
 - **Pinned by**: [ASL§3.1](./rustack-workflows-30-asl-design.md#31-sequential-transition-driver), [integrations§1](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction).
 - **Date**: 2026-10-26. Keep Docker-image work deferred under the user's workflow-first priority.
+
+## D49 — Retain invocation cleanup and atomically publish bounded persistent history
+
+- **Context**: the deterministic driver needs an asynchronous owner that survives caller loss, deadline races and uncertain cleanup.
+- **Decision**: use a registry-owned JoinSet supervisor, watch control/read lanes, retained bounded CPU proposals with final deadline checks, and synchronous object-safe task admission whose adapter already owns start lifetime. Keep business completion separate from cleanup and retain permits through quarantine. Publish official history and outcome as one immutable read view over shared64-event pages, with terminal capacity reserved above worker lifetime.
+- **Why**: neither dropping a waiter nor a closed response lane establishes cleanup; copied full histories scale quadratically; independent outcome/history writes expose inconsistent termination.
+- **Pinned by**: [ASL§3.2](./rustack-workflows-30-asl-design.md#32-supervised-sequential-runtime-and-history-publication), [integrations§1](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction), [API§6](./rustack-workflows-10-api-design.md#6-history-and-pagination).
+- **Date**: 2026-10-26. Reuse resolved Tokio/model dependencies; main registration, registry, real bridge and final image acceptance remain required.

@@ -57,6 +57,7 @@ All budgets are validated once; limits below are local defaults and safe configu
 | Budget field | Default | Allowed range / relationship |
 |---|---:|---|
 | workflowOpenExecutions |128|1..4,096, including children |
+| workflowEvaluations |8|1..128; retained blocking evaluation/entropy workers |
 | workflowDispatches |32|1..1,024; released while waiting on child/callback |
 | workflowFrames / workflowFramesPerExecution |4,096 /512|1..65,536 /1..4,096; per-execution≤global |
 | workflowMaxDurationSeconds |3,600|1..31,536,000; independent local ceiling even without ASL TimeoutSeconds |

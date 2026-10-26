@@ -5,7 +5,7 @@ use std::{fmt, num::NonZeroU32, sync::Arc};
 use bytes::Bytes;
 use serde_json::Value;
 
-use super::{Catcher, Diagnostic, Integration, RecoveryPolicy};
+use super::{Catcher, Diagnostic, Integration, RecoveryPolicy, TenantScope};
 use crate::{AslError, DataFlow, Expression, Predicate, ReferencePath, ResultPath, WaitSource};
 
 /// State index constructible only by the compiler; interpreted in its machine.
@@ -296,6 +296,7 @@ pub struct CompiledMachine {
     pub(super) rows: Vec<Row>,
     pub(super) start: StateId,
     pub(super) timeout: Option<NonZeroU32>,
+    pub(super) scope: TenantScope,
 }
 impl fmt::Debug for CompiledMachine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -303,6 +304,13 @@ impl fmt::Debug for CompiledMachine {
     }
 }
 impl CompiledMachine {
+    pub(crate) fn uses_lambda(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|row| matches!(&row.node, Node::Task { .. }))
+    }
+
+    read!(CompiledMachine,scope,&TenantScope,s=>&s.scope,"Read the validated scope captured during compilation.");
     read!(CompiledMachine,start,StateId,s=>s.start,"Read the validated entry ID.");
     read!(CompiledMachine,state_count,usize,s=>s.rows.len(),"Read the bounded number of compiled states.");
     read!(CompiledMachine,original_bytes,&[u8],s=>s.original.as_ref(),"Read the exact successfully compiled source bytes.");

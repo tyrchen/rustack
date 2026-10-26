@@ -255,7 +255,10 @@ pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, AslError
     encode_with_limit(value, MAX_PAYLOAD_BYTES)
 }
 
-fn encode_with_limit<T: Serialize + ?Sized>(value: &T, limit: usize) -> Result<Bytes, AslError> {
+pub(crate) fn encode_with_limit<T: Serialize + ?Sized>(
+    value: &T,
+    limit: usize,
+) -> Result<Bytes, AslError> {
     let mut writer = LimitedWriter {
         bytes: Vec::new(),
         full: false,
