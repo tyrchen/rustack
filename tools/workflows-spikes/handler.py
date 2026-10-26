@@ -48,6 +48,7 @@ def handler(event, context):
         response["taskRoot"] = os.environ.get("LAMBDA_TASK_ROOT")
         response["functionName"] = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
         response["functionVersion"] = os.environ.get("AWS_LAMBDA_FUNCTION_VERSION")
+        response["invokedArn"] = context.invoked_function_arn
         response["region"] = os.environ.get("AWS_REGION")
         response["configuredValue"] = os.environ.get("TEST_VALUE")
     return response

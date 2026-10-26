@@ -899,6 +899,16 @@ test-lambda-pool-docker: test-lambda-environments-docker
 
 .PHONY: test-lambda-pool test-lambda-pool-docker
 
+# Actual Docker Executor/provider/HTTP composition via pinned ordinary boto3.
+test-lambda-executor:
+	@cargo test -p rustack-lambda-core --lib docker::executor::tests
+	@cargo test -p rustack-lambda-core --lib handler::tests
+
+test-lambda-executor-docker: lambda-runtime-image lambda-runtime-fixture-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --test docker_executor -- --ignored --test-threads=1
+
+.PHONY: test-lambda-executor test-lambda-executor-docker
+
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:
 	@cargo test -p rustack-lambda-runtime --lib

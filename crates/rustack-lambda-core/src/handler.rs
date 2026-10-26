@@ -208,11 +208,21 @@ async fn dispatch(
             let function_name = require_path_param(path_params, "FunctionName")?;
 
             // Parse InvocationType from header.
-            let invocation_type = headers
-                .get("x-amz-invocation-type")
-                .and_then(|v| v.to_str().ok())
-                .and_then(InvocationType::from_str_value)
-                .unwrap_or(InvocationType::RequestResponse);
+            let invocation_type = match single_invoke_header(headers, "x-amz-invocation-type")? {
+                None => InvocationType::RequestResponse,
+                Some(value) => value
+                    .to_str()
+                    .ok()
+                    .and_then(InvocationType::from_str_value)
+                    .ok_or_else(|| LambdaError::invalid_parameter("Invalid InvocationType"))?,
+            };
+            let capture_logs = match single_invoke_header(headers, "x-amz-log-type")?
+                .map(http::HeaderValue::as_bytes)
+            {
+                None | Some(b"None") => false,
+                Some(b"Tail") => true,
+                Some(_) => return Err(LambdaError::invalid_parameter("Invalid LogType")),
+            };
             let kind = match invocation_type {
                 InvocationType::RequestResponse => InvokeKind::RequestResponse,
                 InvocationType::Event => InvokeKind::Event,
@@ -220,7 +230,7 @@ async fn dispatch(
             };
 
             let outcome = provider
-                .invoke(function_name, qualifier, body, kind)
+                .invoke_with_logs(function_name, qualifier, body, kind, capture_logs)
                 .await
                 .map_err(LambdaError::from)?;
 
@@ -712,6 +722,20 @@ fn require_path_param<'a>(params: &'a PathParams, name: &str) -> Result<&'a str,
         .ok_or_else(|| LambdaError::invalid_parameter(format!("Missing path parameter: {name}")))
 }
 
+fn single_invoke_header<'a>(
+    headers: &'a http::HeaderMap,
+    name: &'static str,
+) -> Result<Option<&'a http::HeaderValue>, LambdaError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(LambdaError::invalid_parameter(
+            "Duplicate invocation header",
+        ));
+    }
+    Ok(value)
+}
+
 /// Wrap a serializable value into a JSON `LambdaResponseBody` response.
 fn wrap_json_response(
     status: u16,
@@ -737,7 +761,64 @@ fn wrap_empty_response(status: u16) -> Result<http::Response<LambdaResponseBody>
 
 #[cfg(test)]
 mod tests {
+    use http::{HeaderMap, HeaderValue, Method};
+    use rustack_lambda_http::router::resolve_operation;
+    use rustack_lambda_model::error::LambdaErrorCode;
+
     use super::*;
+    use crate::config::LambdaConfig;
+
+    #[rstest::rstest]
+    #[case::log_case("x-amz-log-type", b"tail".as_slice())]
+    #[case::log_unknown("x-amz-log-type", b"private-invalid-log-type".as_slice())]
+    #[case::log_nonascii("x-amz-log-type", b"\xff".as_slice())]
+    #[case::invocation_case("x-amz-invocation-type", b"event".as_slice())]
+    #[case::invocation_unknown("x-amz-invocation-type", b"private-invalid-invocation-type".as_slice())]
+    #[case::invocation_nonascii("x-amz-invocation-type", b"\xff".as_slice())]
+    #[tokio::test]
+    async fn test_should_reject_invalid_invoke_headers_before_resource_lookup(
+        #[case] key: &'static str,
+        #[case] value: &[u8],
+    ) {
+        let provider = RustackLambda::new(LambdaConfig::default());
+        let (operation, params, _) =
+            resolve_operation(&Method::POST, "/2015-03-31/functions/missing/invocations").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(key, HeaderValue::from_bytes(value).unwrap());
+        let error = dispatch(&provider, operation, &params, "", &headers, &Bytes::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, LambdaErrorCode::InvalidParameterValueException);
+        assert!(!format!("{error:?}").contains("private-invalid"));
+        provider.shutdown().await;
+    }
+
+    #[rstest::rstest]
+    #[case::tail_none("x-amz-log-type", "Tail", "None")]
+    #[case::none_tail("x-amz-log-type", "None", "Tail")]
+    #[case::tail_invalid("x-amz-log-type", "Tail", "private-invalid-value")]
+    #[case::sync_event("x-amz-invocation-type", "RequestResponse", "Event")]
+    #[case::event_sync("x-amz-invocation-type", "Event", "RequestResponse")]
+    #[case::sync_invalid("x-amz-invocation-type", "RequestResponse", "private-invalid-value")]
+    #[tokio::test]
+    async fn test_should_reject_duplicate_invoke_enum_headers_before_resource_lookup(
+        #[case] key: &'static str,
+        #[case] first: &'static str,
+        #[case] second: &'static str,
+    ) {
+        let provider = RustackLambda::new(LambdaConfig::default());
+        let (operation, params, _) =
+            resolve_operation(&Method::POST, "/2015-03-31/functions/missing/invocations").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.append(key, HeaderValue::from_static(first));
+        headers.append(key, HeaderValue::from_static(second));
+        let error = dispatch(&provider, operation, &params, "", &headers, &Bytes::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, LambdaErrorCode::InvalidParameterValueException);
+        assert!(!format!("{error:?}").contains("private-invalid"));
+        provider.shutdown().await;
+    }
 
     #[test]
     fn test_should_parse_empty_query() {

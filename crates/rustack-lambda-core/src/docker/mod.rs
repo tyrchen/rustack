@@ -5,6 +5,7 @@
 
 mod connection;
 mod environment;
+mod executor;
 mod framing;
 mod image;
 mod lease;
@@ -32,6 +33,10 @@ pub use environment::{
     EnvironmentCapacity, EnvironmentConfig, EnvironmentError, EnvironmentHandle,
     EnvironmentManager, EnvironmentPhase, EnvironmentPort, EnvironmentResponse,
     EnvironmentSettings, EnvironmentStatus,
+};
+pub use executor::{
+    DockerExecutor, DockerExecutorConfig, DockerExecutorError, DockerExecutorSettings,
+    DockerReadiness,
 };
 pub use framing::{DockerOutputReader, MAX_DOCKER_RECORD, OutputChannel, OutputChunk};
 use http::{Method, StatusCode};

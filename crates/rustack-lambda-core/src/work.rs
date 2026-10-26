@@ -426,7 +426,7 @@ async fn execute(
 ) -> Result<InvokeResponse, ExecutorError> {
     let acquired = async {
         match permits {
-            Some(permits) => Ok(permits),
+            Some(permits) => Ok::<_, ExecutorError>(permits),
             None => Ok((
                 function.acquire(limit).await,
                 global

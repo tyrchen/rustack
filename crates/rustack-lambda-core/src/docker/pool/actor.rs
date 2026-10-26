@@ -420,7 +420,7 @@ async fn invoke(
 }
 
 #[cfg(test)]
-pub(super) fn testing_start(
+pub(in crate::docker) fn testing_start(
     environments: EnvironmentPort,
     config: PoolConfig,
     warm: Vec<(String, EnvironmentHandle)>,

@@ -33,6 +33,22 @@ pub(in crate::docker) fn pair() -> (EnvironmentHandle, Peer) {
     )
 }
 impl Peer {
+    pub(in crate::docker) async fn serve_pending(
+        mut self,
+        entered: oneshot::Sender<Invocation>,
+        release: oneshot::Receiver<()>,
+        stopping: oneshot::Sender<()>,
+    ) {
+        let call = self.calls.recv().await.unwrap();
+        entered.send(call.invocation.clone()).unwrap();
+        let mut stop = self.signals.stop.subscribe();
+        let _ = stop.wait_for(|stop| *stop).await;
+        let _ = stopping.send(());
+        let _ = release.await;
+        self.signals.phase(EnvironmentPhase::Removed);
+        self.done.send_replace(Some(Ok(())));
+        drop(call);
+    }
     pub(in crate::docker) async fn serve(self, count: Arc<AtomicUsize>) {
         self.serve_inner(count, None, None).await;
     }

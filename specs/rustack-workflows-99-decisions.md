@@ -318,3 +318,13 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: upper-layer admission can await a positive reusable/retired proof without owning or aborting lower-layer resources. Failed supervision remains uncertain even after physical recovery; queued no-allocation rejection can settle cleanly.
 - **Pinned by**: [runtime §4.5](./rustack-workflows-20-lambda-runtime-design.md#45-supervised-pool-invocation-receipt), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. This receipt does not enable production Docker or complete Executor/provider integration.
+
+
+## D36 — Compose Docker execution through the retained pool and trusted readiness port
+
+- **Context**: the Lambda provider already captures immutable revisions and supervises invocation permits; the Docker environment/pool owners now expose reusable/retired settlement proof.
+- **Alternatives considered**: HTTP loopback invocation duplicates protocol/admission; a per-call Docker client loses bounded ownership; advertising readiness from a connected socket or a directory lease bypasses required startup qualification; rewriting handler outcomes into synthetic JSON breaks byte fidelity.
+- **Decision**: implement the existing Executor using one pool call and independent settlement, with raw outcomes/resolved-version headers and one base64 tail encoding; inject a bounded synchronous readiness port from the trusted startup coordinator.
+- **Why**: actual code execution and provider response composition can be verified independently while ordinary CLI selection remains unavailable until all production reconciliation/probes are implemented. The readiness interface shares the existing trusted Rust custom-Executor boundary and is never supplied through AWS requests. Pool/environment quota rejection is distinct from Docker wire saturation that may occur after side effects; only the former maps to429, while both retain no-replay behavior.
+- **Pinned by**: [runtime §4.6](./rustack-workflows-20-lambda-runtime-design.md#46-docker-executor-and-provider-composition), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. No new dependency is required; this does not close M0 startup/platform acceptance.

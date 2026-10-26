@@ -185,7 +185,8 @@ pub struct InvokeResponse {
     pub payload: Bytes,
     /// `Some("Unhandled")` when the bootstrap posted to `/error`.
     pub function_error: Option<String>,
-    /// Base64-encoded last 4KB of stderr, if `capture_logs` was set.
+    /// Base64-encoded final bounded log bytes when requested. Docker combines
+    /// observed stdout/stderr in its invocation window; Native uses stderr.
     pub log_tail: Option<String>,
     /// What the executor actually invoked (echoes back the qualifier).
     pub executed_version: String,

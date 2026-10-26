@@ -1,6 +1,6 @@
 # Rustack Workflows: Step Functions and Real Lambda Execution
 
-Status: implementation contract; not implemented · Date: 2026-10-25 · Delivery: M0–M4
+Status: implementation in progress; full M0–M4 incomplete · Date: 2026-10-25 · Delivery: M0–M4
 
 ## 1. Problem and vision
 

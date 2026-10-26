@@ -1113,6 +1113,32 @@ impl RustackLambda {
         payload: &[u8],
         invocation_type: InvokeKind,
     ) -> Result<InvokeOutcome, LambdaServiceError> {
+        self.invoke_with_logs(function_ref, qualifier, payload, invocation_type, false)
+            .await
+    }
+
+    /// Invoke through shared admission with an optional synchronous log tail.
+    ///
+    /// Event and `DryRun` calls never capture response logs. The HTTP adapter passes
+    /// only its already-validated `LogType` choice; internal adapters default to None.
+    ///
+    /// # Errors
+    /// Returns the same validation, admission and backend errors as `invoke`.
+    ///
+    /// ```no_run
+    /// # async fn call(provider: &rustack_lambda_core::provider::RustackLambda) {
+    /// use rustack_lambda_core::provider::InvokeKind;
+    /// let result = provider.invoke_with_logs("worker", None, b"{}", InvokeKind::RequestResponse, true).await;
+    /// # }
+    /// ```
+    pub async fn invoke_with_logs(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+        payload: &[u8],
+        invocation_type: InvokeKind,
+        capture_logs: bool,
+    ) -> Result<InvokeOutcome, LambdaServiceError> {
         validate_invoke_payload(
             payload,
             if invocation_type == InvokeKind::Event {
@@ -1133,6 +1159,7 @@ impl RustackLambda {
                 payload,
                 invocation_type == InvokeKind::Event,
                 None,
+                capture_logs && invocation_type == InvokeKind::RequestResponse,
             )
             .await?;
         if invocation_type == InvokeKind::Event {
@@ -1172,8 +1199,15 @@ impl RustackLambda {
     ) -> Result<InvocationHandle, LambdaServiceError> {
         validate_invoke_payload(payload, MAX_SYNC_PAYLOAD)?;
         let (record, qualifier) = self.resolve_invocation(function_ref, qualifier)?;
-        self.admit_invocation(&record, qualifier.as_deref(), payload, false, deadline)
-            .await
+        self.admit_invocation(
+            &record,
+            qualifier.as_deref(),
+            payload,
+            false,
+            deadline,
+            false,
+        )
+        .await
     }
 
     fn resolve_invocation(
@@ -1214,16 +1248,18 @@ impl RustackLambda {
         payload: &[u8],
         asynchronous: bool,
         deadline: Option<Instant>,
+        capture_logs: bool,
     ) -> Result<InvocationHandle, LambdaServiceError> {
         let version = resolve_version(record, qualifier)?;
         let capture = self.build_invoke_request(record, version, qualifier, payload);
-        let request = if let Some(deadline) = deadline {
+        let mut request = if let Some(deadline) = deadline {
             timeout_at(deadline, capture).await.map_err(|_| {
                 LambdaServiceError::from(crate::executor::ExecutorError::DeadlineExceeded)
             })??
         } else {
             capture.await?
         };
+        request.capture_logs = capture_logs;
         self.work
             .submit(
                 Arc::clone(&self.executor),

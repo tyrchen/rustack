@@ -404,6 +404,10 @@ impl fmt::Debug for EnvironmentPort {
     }
 }
 impl EnvironmentPort {
+    pub(super) fn same_scope(&self, directory: &DirectoryLease) -> bool {
+        self.directory.owner_id() == directory.owner_id()
+            && self.directory.run_id() == directory.run_id()
+    }
     /// Reserve count/memory and register a plan before any container operation.
     ///
     /// # Errors

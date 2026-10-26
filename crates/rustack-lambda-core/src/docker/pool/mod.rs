@@ -1,7 +1,6 @@
 //! Bounded warm dispatch; external resource ownership stays with `EnvironmentManager`.
 
 mod actor;
-
 use std::{
     fmt,
     sync::{
@@ -10,6 +9,8 @@ use std::{
     },
 };
 
+#[cfg(test)]
+pub(super) use actor::testing_start;
 use rustack_lambda_runtime::session::Invocation;
 use tokio::{
     runtime::Handle,

@@ -660,6 +660,41 @@ Lambda work owner          PoolInvocation          Pool actor registry       Env
 
 Tests must hold retirement behind a channel barrier and prove cancellation does not return early, including invocation expiry and dropped cleanup waiters. Cover queued no-allocation rejection, consumed-success bookkeeping without retiring warm reuse, root/worker abort recovery and closed-receipt uncertainty. These ownership tests do not establish actual Docker/provider acceptance.
 
+### 4.6 Docker Executor and provider composition
+
+`executor::DockerExecutor` implements the existing object-safe Executor over EnvironmentPool. `DockerExecutorConfig` is a typed-builder input containing the retained DirectoryLease, live pinned relay, ContainerPolicy, matching EnvironmentPort, trusted readiness port and validated DockerExecutorSettings. Settings contain PoolConfig and an independent cleanup budget (whole seconds1..60, default10). Construction validates scope, lease availability, settings and an entered Tokio runtime before creating the bounded pool; it performs no daemon mutation. Native/Squib/Auto remain independent. The binary's ordinary Docker selection remains rejected until task1.4 startup acceptance is implemented.
+
+The synchronous object-safe `DockerReadiness::check()` port returns a typed DockerExecutorError. It is supplied by the **trusted in-process startup coordinator**, which owns reconciliation/probe evidence for the exact directory/relay/policy it injects; checks are bounded, nonblocking and contain no daemon IO. This is the existing trusted Rust dependency-injection boundary (which already permits custom Executors), not a user-request field or a helper that proves readiness from booleans/socket connectivity. Tests may supply a controlled readiness fixture and must label that narrower evidence. Production must supply the actual historical-reconciliation, pull/network/resource probe consumer before CLI enablement. Revocation rejects new admission; explicit runtime shutdown separately retires accepted work.
+
+`image_available` requires the readiness port, a live relay, accepting/healthy environment service and pool, and an executor that has not begun shutdown. `available` additionally constructs/validates a pure EnvironmentPlan and validates bounded raw payload and FunctionArn, the captured function name and region, and the requested qualifier versus resolved version. Bare/$LATEST ARNs require captured $LATEST; numeric qualifiers must equal the resolved version; aliases require a published numeric revision. Preserve alias text for Runtime API metadata. No admission probe pulls/resolves/inspects an image, starts code or contacts a public endpoint.
+
+Invoke rechecks availability and InvocationContext, creates one Invocation with the context's UUID/deadline, local trace and original Bytes, then calls PoolPort::start once. Select the cancel-safe wait against context cancellation. On every accepted call, await the separate pool settlement with the independent cleanup budget before returning a response/error to WorkSupervisor. A consumed successful response only waits for bookkeeping; it cannot cancel an environment reused by another call. Unresolved/uncertain settlement becomes existing ExecutorError::CleanupFailed, so WorkSupervisor cannot report clean quiescence. The retained pool/environment owners keep physical cleanup after waiter expiry or Executor Drop. Never replay a request following uncertain transport or function failure.
+
+HTTP Invoke strictly accepts InvocationType RequestResponse/Event/DryRun and LogType None/Tail (omission defaults to RequestResponse/None); repeated scalar headers and invalid/non-ASCII values return a static InvalidParameter error before admission. Preserve existing provider.invoke as the default no-tail convenience entry point and add invoke_with_logs to carry the validated capture request through immutable admission. Only RequestResponse requests return tails; Event/DryRun do not capture response logs. Internal start_invocation retains its no-tail default.
+
+Successful raw `/response` bytes produce InvokeResponse HTTP200. A raw `/error` produces HTTP200 with FunctionError=Unhandled and unchanged payload. ExecutedVersion is the captured resolved qualifier, while metadata receives the requested alias ARN. LogType=Tail base64-encodes the already bounded invocation window exactly once, including Some("") for an empty requested tail; None produces no log header. Reject an oversized internal tail rather than accidentally encoding diagnostic history. RuntimeResult::InitError is defensively classified as bounded initialization failure, never successful output. Environment Timeout/Deadline/Cancelled retain their existing ExecutorError categories; pool/environment admission Busy maps to Lambda TooManyRequests; nested Docker wire Busy remains a typed infrastructure error (HTTP500), because it can arise after handler side effects and does not prove pre-execution quota rejection; initialization/early-exit/OOM/protocol/transport errors remain distinct typed sources under DockerExecutorError::Environment. Invalid request/clock/session metadata have typed source variants and static redacted diagnostics. Infrastructure errors never become fabricated handler output.
+
+Shutdown first closes executor admission synchronously, then transfers its pool root into a retained CleanupTask before awaiting. The owned cleanup operation retries timed-out pool joins without losing its root; public shutdown waiters use the independent budget and can resume. Physical pool settlement precedes environment-manager shutdown, image-owner revocation and wire shutdown in the startup coordinator. Do not hold a mutex over IO; a short owner-slot mutex only transfers the root once. Shutdown and Drop share the same path and keep the cached supervision outcome.
+
+```text
+┌─ Lambda HTTP/provider ──────────────────────────────────────────────────┐
+│ immutable revision + requested ARN → WorkSupervisor (retains permits)   │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 ▼ Executor::invoke
+┌─ DockerExecutor ────────────────────────────────────────────────────────┐
+│ pure plan/metadata validation ◀── trusted startup readiness check       │
+│ raw result + one base64 tail   │ cancellation → wait settlement        │
+│ retained CleanupTask owns pool shutdown after waiter/Executor loss     │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 ▼ one accepted PoolInvocation
+┌─ retained pool/environment actors ──────────────────────────────────────┐
+│ bounded FIFO / warm checkout → actual relay + handler → raw outcome    │
+│ explicit result consumption │ resource/IO retirement → cleanup receipt │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Verification includes pure rejection before allocation, dynamic readiness/pin revocation, alias/resolved-version metadata, binary response/FunctionError/tail preservation, typed failures, context cancellation with delayed settlement, dropped shutdown waiters and actual Image create→Active→publish/alias→Invoke through provider/HTTP. A real Docker fixture readiness adapter proves execution composition only; final production startup/probe/platform acceptance remains separately required.
+
 ## 5. Isolation and resource limits
 
 - Initial Docker transport is a local Unix socket only. Disable implicit TCP/SSH fallback. Explicit docker configuration requires a startup daemon/version/relay-image/resource-limit probe; failure aborts startup. Default remains disabled. Auto does not acquire a new Docker fallback; Image on native/squib/auto fails explicitly.

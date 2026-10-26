@@ -1,17 +1,15 @@
 //! Real container lifecycle qualification of the retained environment owner.
 #![cfg(unix)]
 #![forbid(unsafe_code)]
-use std::{collections::HashMap, env, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use rustack_lambda_core::{
-    artifact::{Architecture, DeploymentArtifact, PinnedImage},
+    artifact::DeploymentArtifact,
     docker::{
-        ContainerPolicy, DirectoryLease, DockerWire, EnvironmentConfig, EnvironmentError,
-        EnvironmentHandle, EnvironmentManager, EnvironmentPlan, EnvironmentPool,
-        EnvironmentSettings, FunctionLogs, ImageLeaseConfig, ImageLeaseManager, ImagePinScope,
-        OwnerFilter, PoolConfig, RelayBudgets,
+        ContainerPolicy, EnvironmentError, EnvironmentHandle, EnvironmentPlan, EnvironmentPool,
+        FunctionLogs, PoolConfig, RelayBudgets,
     },
     executor::{ExecutionRevision, ExecutorBackend},
     identity::FunctionResourceId,
@@ -22,97 +20,15 @@ use rustack_lambda_runtime::{
     session::{Invocation, RuntimeResult},
 };
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use tokio::time::{Instant, timeout};
 use uuid::Uuid;
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
 }
-struct Fixture {
-    owner: EnvironmentManager,
-    images: ImageLeaseManager,
-    wire: DockerWire,
-    lease: DirectoryLease,
-    relay: Option<PinnedImage>,
-    function: Option<PinnedImage>,
-    directory: Option<TempDir>,
-}
+mod common;
+use common::docker::Fixture;
 impl Fixture {
-    async fn new() -> Result<Self> {
-        let socket =
-            env::var("RUSTACK_RUNTIME_DOCKER_SOCKET").context("explicit Docker socket required")?;
-        let wire = DockerWire::connect(format!("unix://{socket}").parse()?, deadline()).await?;
-        let directory = tempfile::tempdir()?;
-        let lease = DirectoryLease::acquire(directory.path().into(), deadline()).await?;
-        let images = ImageLeaseManager::start(
-            wire.port(),
-            ImagePinScope::new(lease.clone()),
-            ImageLeaseConfig::default(),
-        )?;
-        let arch = match env::var("RUSTACK_RUNTIME_ARCH")?.as_str() {
-            "arm64" => Architecture::Arm64,
-            "amd64" => Architecture::X86_64,
-            _ => anyhow::bail!("unknown architecture"),
-        };
-        let config = EnvironmentConfig::try_from(
-            EnvironmentSettings::builder()
-                .environments(1)
-                .memory_bytes(256 * 1024 * 1024)
-                .io(Duration::from_secs(60))
-                .start(Duration::from_secs(60))
-                .build(),
-        )?;
-        let owner = EnvironmentManager::start(wire.port(), lease.clone(), config)?;
-        let mut fixture = Self {
-            owner,
-            images,
-            wire,
-            lease,
-            relay: None,
-            function: None,
-            directory: Some(directory),
-        };
-        if let Err(error) = fixture.prepare(arch).await {
-            let cleanup = fixture.cleanup().await;
-            return Err(error.context(format!(
-                "setup cleanup: {}",
-                if cleanup.is_ok() {
-                    "confirmed"
-                } else {
-                    "unresolved"
-                }
-            )));
-        }
-        Ok(fixture)
-    }
-    async fn prepare(&mut self, arch: Architecture) -> Result<()> {
-        let relay_reference = env::var("RUSTACK_RUNTIME_IMAGE")?.parse()?;
-        let relay = self
-            .images
-            .port()
-            .prepare(&relay_reference, arch, None, deadline())
-            .await?;
-        self.relay = Some(relay);
-        let suffix = if arch == Architecture::Arm64 {
-            "arm64"
-        } else {
-            "amd64"
-        };
-        let function = self
-            .images
-            .port()
-            .prepare(
-                &format!("rustack-p0-handler:{suffix}").parse()?,
-                arch,
-                None,
-                deadline(),
-            )
-            .await?;
-        self.function = Some(function);
-        Ok(())
-    }
-
-    fn revision(&self) -> Result<Arc<ExecutionRevision>> {
+    pub(crate) fn revision(&self) -> Result<Arc<ExecutionRevision>> {
         let revision = ExecutionRevision::builder()
             .resource_id(FunctionResourceId::new())
             .revision_id(Uuid::new_v4().to_string())
@@ -143,10 +59,13 @@ impl Fixture {
             .build();
         Ok(Arc::new(revision))
     }
-    fn plan(&self) -> Result<EnvironmentPlan> {
+    pub(crate) fn plan(&self) -> Result<EnvironmentPlan> {
         self.plan_revision(self.revision()?)
     }
-    fn plan_revision(&self, revision: Arc<ExecutionRevision>) -> Result<EnvironmentPlan> {
+    pub(crate) fn plan_revision(
+        &self,
+        revision: Arc<ExecutionRevision>,
+    ) -> Result<EnvironmentPlan> {
         Ok(EnvironmentPlan::new(
             self.lease.clone(),
             self.relay.as_ref().context("relay image")?.clone(),
@@ -164,37 +83,8 @@ impl Fixture {
             )?,
         )?)
     }
-    async fn cleanup(&mut self) -> Result<()> {
-        let result = async {
-            self.owner.shutdown(deadline()).await?;
-            ensure!(
-                self.owner.port().status().allocated == 0,
-                "allocation reservation remains"
-            );
-            let containers = self
-                .wire
-                .port()
-                .list_containers(
-                    OwnerFilter::new(self.lease.owner_id(), Some(self.lease.run_id()), None)?,
-                    deadline(),
-                )
-                .await?;
-            ensure!(containers.is_empty(), "owned containers remain");
-            self.relay.take();
-            self.function.take();
-            self.images.shutdown(deadline()).await?;
-            self.wire.shutdown().await?;
-            Ok(())
-        }
-        .await;
-        if result.is_err() {
-            if let Some(directory) = self.directory.take() {
-                let _ = directory.keep();
-            }
-        }
-        result
-    }
 }
+
 fn invocation(event: &Value) -> Result<Invocation> {
     Ok(Invocation::new(
         AttemptId::default(),

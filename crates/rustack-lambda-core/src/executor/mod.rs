@@ -7,7 +7,8 @@
 //! - [`NativeExecutor`] runs trusted host-matching bootstraps without isolation.
 //! - [`SquibExecutor`] runs arm64 Zip functions through a microVM guest agent.
 //!
-//! Docker execution is not supported; it never falls back to native or successful echo.
+//! On Unix, `DockerExecutor` composes the retained image runtime using a trusted
+//! readiness port. Ordinary CLI Docker selection requires the startup coordinator.
 //!
 //! Native instances expose a host Runtime API socket; Squib delegates the
 //! bootstrap-side protocol to its guest agent.
@@ -33,6 +34,11 @@ pub use noop::NoopExecutor;
 pub use squib::{SquibExecutor, SquibExecutorConfig};
 pub use types::{ExecutionRevision, ExecutorBackend, InvokeRequest, InvokeResponse};
 
+#[cfg(unix)]
+pub use crate::docker::{
+    DockerExecutor, DockerExecutorConfig, DockerExecutorError, DockerExecutorSettings,
+    DockerReadiness,
+};
 use crate::invocation::InvocationContext;
 
 /// Backend that turns an [`InvokeRequest`] into an [`InvokeResponse`].
