@@ -1,0 +1,24 @@
+[package]
+name = "rustack-lambda-runtime"
+description = "Shared Lambda runtime session and bounded relay protocol for Rustack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true, features = ["serde"] }
+ciborium = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

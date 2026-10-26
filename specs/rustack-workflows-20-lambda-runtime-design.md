@@ -155,6 +155,36 @@ Provider             Environment actor          Docker/relay             RIC
 
 Ready means the relay is listening; bootstrap-ready means the RIC issued its first GET /next. They are different signals. Image deployment, relay start, function initialization, handler execution and cleanup have separate budgets. Synchronous Invoke's outer total includes cold start. Function handler timeout starts at event delivery and is additionally bounded by the caller's Task absolute deadline: cold start must not extend that Task deadline. Idle `/next` uses the environment idle/shutdown lease, not the short control-request timeout; this is bounded long polling.
 
+### 3.1 Shared runtime crate and control schema
+
+Add the host-portable library and Linux relay binary in `crates/rustack-lambda-runtime`. Lambda core depends on its library; the runtime crate never depends on lambda-core, Squib, the AWS SDK or Docker. Its protocol module owns framing and validated message types, its session module owns the single-invocation state machine, and transport adapters own HTTP/stdio IO and supervision. Deliver these contracts before the Docker consumer.
+
+Protocol version1 encodes one definite-length CBOR map with exactly `version` (unsigned1), `environment` (canonical nonnil UUID string) and `message` (adjacently tagged `kind`/`data` map). Unit messages omit data. All identifiers are canonical lowercase hyphenated UUID strings. The message kind and data schema are:
+
+| kind | Direction | data fields |
+|---|---|---|
+| hello | Relay→host | architecture: x86_64/arm64 |
+| ready | Relay→host | None |
+| bootstrapReady | Relay→host | None |
+| invoke | Host→relay | attempt (UUID), deadlineUnixMs (nonzero u64), functionArn (validated Lambda ARN), traceId (bounded printable ASCII), payload (CBOR byte string≤6 MiB) |
+| invocationResult | Relay→host | attempt, outcome: success/functionError, payload |
+| initError | Relay→host | payload |
+| cancel | Host→relay | attempt |
+| close | Host→relay | None |
+| ack | Relay→host | operation: cancel/close; attempt is required for cancel and forbidden for close |
+
+Unknown fields/variants, duplicate keys, absent required values and mismatched per-variant fields reject. The decoder preflights the complete bounded byte slice before Serde allocation: definite maps only, at most16 nesting levels and128 total map members; text≤2,048 bytes; text map keys≤64 bytes; no arrays, negative integers, tags, floats, indefinite strings/collections or trailing items. Byte strings are allowed only as a single payload field; its bytes are excluded from the64 KiB metadata budget. Enforce the6 MiB payload and6 MiB+64 KiB frame limits separately. UUID, ARN, trace and deadline validation runs again during deserialization. Bytes uses serialize_bytes; a CBOR array/base64 string is not a valid payload. Debug and protocol-error displays omit payload bytes and invalid peer input.
+
+Read/write helpers operate on an owned reader/writer task. Clean EOF is distinct from a truncated prefix/body; a partial-frame timeout invalidates that transport rather than retrying from the middle. Callers supply an absolute IO deadline consistent with startup, invocation or idle leases. Cancellation of a helper authorizes retirement of that connection only; reconnect/replay is forbidden. The protocol has no registry credentials or arbitrary commands. Cancel Ack proves session invalidation, not termination of user code; the environment owner must still kill/reap the function before cleanup settlement.
+
+The existing workspace [Ciborium0.2.2](https://docs.rs/ciborium/0.2.2/ciborium/) provides CBOR/Serde encoding after preflight. Byte payload serialization uses the existing Bytes implementation; no second byte-buffer abstraction is required. Tests cover every variant, binary payloads, fragmented transport, clean/truncated EOF, malicious lengths/depth/duplicates/unknown fields, metadata/payload limits, canonical identities, timed partial IO and redacted Debug/errors.
+
+### 3.2 Runtime session ownership
+
+RuntimeSession is the single owner of idle/queued/delivered/closed invocation state and the first-poll readiness signal. HTTP adapters validate routes/headers/body budgets before sending typed commands over a bounded mailbox; the relay adapter validates protocol/environment/attempt before submitting the same commands. Only one queued or delivered attempt and one waiting GET /next are retained per environment. Concurrent polls/invocations reject explicitly. The first valid GET emits BootstrapReady exactly once, even when no job is queued. Completing an unknown/expired/already completed attempt cannot consume another attempt's response sender. Init failure and cancellation close the session; cancelled environments cannot accept another invocation.
+
+The native HTTP adapter keeps its127.0.0.1 ephemeral socket and public executor module reexports. The relay binds127.0.0.1:9001. Both use identical session metadata/result/deadline rules, and adapter shutdown joins all connection/session tasks. Native init timeout waits for first-poll readiness rather than treating process creation as readiness. The relay's outer process supervisor owns stdio/HTTP tasks and exits on malformed control input, EOF, parent lease expiry or closed session; no transport failure silently recreates a session.
+
 ## 4. Environment states, pooling and cancellation
 
 State enum: Allocating → Initializing → Idle → Busy(attempt) → Idle. Any stage can become Retiring → Removed; failed cleanup becomes Quarantined. PoolActor owns its map and LRU. Bounded Docker IO futures run in a supervised JoinSet; never hold a shared-state lock across IO. Give cancellation a separate priority lane or reserved capacity.

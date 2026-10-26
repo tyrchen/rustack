@@ -67,7 +67,9 @@ Every row needs positive and failure-path assertions where applicable. Tests inv
 
 Add future Makefile targets: `codegen-stepfunctions`, `test-stepfunctions`, `test-lambda-docker`, `smoke-workflows`, and `verify-workflows`. Add image provisioning/build targets instead of shell scripts. Pin fixture-image digests/content IDs and expected test manifest entries. `verify-workflows` runs the exact required suites and checks that none were silently skipped. Reuse the existing build/fmt/clippy/audit/deny targets.
 
-For Rust-relevant implementation work run cargo build, cargo test, cargo +nightly fmt, and cargo clippy -- -D warnings, plus the repository's stricter pedantic/boundary lint selection and existing applicable targets. Run cargo audit and cargo deny check when dependencies land. This documents future implementation gates; the current spec-only task changes no executable/toolchain behavior and does not require Rust compilation.
+For Rust-relevant implementation work run cargo build, cargo test, cargo +nightly fmt, and cargo clippy -- -D warnings, plus the repository's stricter pedantic/boundary lint selection and existing applicable targets. Run cargo audit and cargo deny check when dependencies land. Specification-only edits use text/link checks per AGENTS.md.
+
+The shared runtime contract suite is available as `make test-lambda-runtime`; it runs the library tests/doctests and strict production boundary Clippy without lint ignores. Protocol property tests use [proptest1.12](https://docs.rs/proptest/1.12.0/proptest/) with512 cases per property, exercising bounded malformed bytes, mutations of valid envelopes and arbitrary binary payloads. Only its std feature is enabled; subprocess/fork machinery is unnecessary for these deterministic bounded parser checks. Runtime-session/relay tests extend this same target as their consumers land; a passing codec suite alone does not satisfy Docker acceptance.
 
 ## 4. Security acceptance
 

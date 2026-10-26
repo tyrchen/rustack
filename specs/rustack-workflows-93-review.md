@@ -55,6 +55,16 @@ The independent read-only review found three lifecycle/admission defects. All we
 
 ExecutionRevision uses shared Arc ownership; InvocationHandle and the bounded work actor preserve UUID/deadline/cancellation through backend cleanup. Waiter cancellation never aborts backend workers. Native child supervisors retain artifact leases and process reservations through reaping, including executor Drop. Tests cover late-result rejection, cleanup timeout/aborted waiters, worker panic,128 accepted/32 running/default8 function limits and permit release after cleanup. The workspace suite passes1,767 tests (392 preexisting ignored), including215 Lambda core tests and five real Native fixture tests. Lambda doctests, standard workspace build/Clippy/rustdoc and the native SDK target pass. Its separately gated Squib test remains excluded as VM evidence. Full Docker and workflow milestones, plus B01/B03, remain required.
 
+## P1 task1.2 protocol slice review
+
+The independent read-only review verified bounded preflight before Serde, typed variants, duplicate/unknown-field rejection, independent metadata/payload budgets, canonical identities, redacted diagnostics, absolute IO deadlines and clean/truncated EOF handling. Its final recheck found no remaining in-slice finding.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W16 | P3; `crates/rustack-lambda-runtime/src/protocol/types.rs`, FunctionArn parsing | Numeric qualifier zero/overflow differed from the provider's validated qualifier. Runtime ARN parsing now enforces the same positive-u64 rule | Direct parse and full envelope deserialization reject0 and18446744073709551616 |
+
+The shared runtime crate has39 passing codec tests, including512-case properties for malformed bytes, mutated valid envelopes and arbitrary binary payloads, plus eight passing doctests. The workspace suite passes1,806 tests (392 preexisting ignored); build/fmt/Clippy/rustdoc and strict runtime production-boundary checks pass. `make test-lambda-runtime` runs the reusable contract suite. Proptest1.12 uses only std; its three added dev packages introduce no audit finding. The same16 B01 advisories remain; deny bans/licenses/sources pass. This approval covers the protocol only: shared RuntimeSession, HTTP migration, relay executable, Docker execution and workflow engine remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |
