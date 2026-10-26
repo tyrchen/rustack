@@ -13,10 +13,10 @@ use super::*;
 use crate::{metadata::local_trace_id, session::RuntimeResult};
 
 #[derive(Debug)]
-struct Reply {
-    status: u16,
+pub(crate) struct Reply {
+    pub(crate) status: u16,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    pub(crate) body: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +80,13 @@ async fn raw(addr: SocketAddr, request: Vec<u8>) -> Reply {
     .unwrap()
 }
 
-async fn request(addr: SocketAddr, method: &str, path: &str, headers: &str, body: &[u8]) -> Reply {
+pub(crate) async fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &str,
+    body: &[u8],
+) -> Reply {
     let mut bytes = format!(
         "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: \
          {}\r\n{headers}\r\n",

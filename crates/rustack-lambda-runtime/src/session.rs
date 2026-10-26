@@ -181,19 +181,56 @@ impl InvocationTicket {
     /// # }
     /// ```
     pub async fn wait(mut self) -> Result<RuntimeResult, SessionError> {
-        check_deadline(self.deadline)?;
-        if *self.cancellation.borrow() {
+        self.result().await
+    }
+
+    /// Await while retaining ticket ownership across a cancelled select branch.
+    ///
+    /// # Errors
+    /// Returns cancellation, expiry or session failure. Repeated calls after a
+    /// terminal result return Unavailable, without polling the consumed channel.
+    ///
+    /// ```no_run
+    /// # async fn inspect(ticket: &mut rustack_lambda_runtime::session::InvocationTicket) {
+    /// let result = ticket.result().await;
+    /// # }
+    /// ```
+    pub async fn result(&mut self) -> Result<RuntimeResult, SessionError> {
+        if !self.attached {
+            return Err(SessionError::Unavailable);
+        }
+        if let Err(error) = check_deadline(self.deadline) {
+            self.cancel();
+            self.attached = false;
+            return Err(error);
+        }
+        let cancelled = *self.cancellation.borrow();
+        if cancelled {
+            self.attached = false;
             return Err(SessionError::Cancelled);
         }
-        let result = timeout_at(self.deadline, &mut self.response)
-            .await
-            .map_err(|_| SessionError::Deadline)?
-            .map_err(|_| SessionError::Unavailable)?;
-        check_deadline(self.deadline)?;
-        if *self.cancellation.borrow() {
-            return Err(SessionError::Cancelled);
-        }
+        let result = timeout_at(self.deadline, &mut self.response).await;
+        // The response channel has either settled or the attempt has expired.
+        // Keep a completed receiver from ever being polled a second time.
         self.attached = false;
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.cancel();
+                return Err(SessionError::Unavailable);
+            }
+            Err(_) => {
+                self.cancel();
+                return Err(SessionError::Deadline);
+            }
+        };
+        if let Err(error) = check_deadline(self.deadline) {
+            self.cancel();
+            return Err(error);
+        }
+        if *self.cancellation.borrow() {
+            return Err(SessionError::Cancelled);
+        }
         result
     }
 }

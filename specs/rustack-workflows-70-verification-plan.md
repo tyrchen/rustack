@@ -71,6 +71,8 @@ For Rust-relevant implementation work run cargo build, cargo test, cargo +nightl
 
 The shared runtime contract suite is available as `make test-lambda-runtime`; it runs the library tests/doctests and strict production boundary Clippy without lint ignores. Protocol property tests use [proptest1.12](https://docs.rs/proptest/1.12.0/proptest/) with512 cases per property, exercising bounded malformed bytes, mutations of valid envelopes and arbitrary binary payloads. Only its std feature is enabled; subprocess/fork machinery is unnecessary for these deterministic bounded parser checks. Runtime-session/relay tests extend this same target as their consumers land; a passing codec suite alone does not satisfy Docker acceptance.
 
+`make test-lambda-runtime-docker` builds the selected architecture's relay and pinned official Python RIC fixture images, then explicitly executes every resource-gated test in the shared runtime's Docker suite. It requires WORKFLOWS_DOCKER_SOCKET and a matching WORKFLOWS_ARCH; missing prerequisites fail rather than skip. The CLI is only the test transport. Assert computed42/7, warm counter1/2, request metadata, cgroup/user/rootfs restrictions, distinct FunctionError, running-handler cancellation, pre-function Close, EOF/truncated/partial frames, idle expiry, failed setup and expired helper reaping. Every case reconciles its preallocated owned names/run label and joins its CLI process. These are relay qualification checks, not provider/deployment/pool acceptance for L01–L09. Native x86, Docker Desktop and rootless qualification still require their M4 lanes.
+
 ## 4. Security acceptance
 
 | Boundary | Required proof |

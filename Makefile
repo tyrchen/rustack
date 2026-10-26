@@ -6,6 +6,23 @@ WORKFLOWS_SPIKE_DIR ?= /tmp/rustack-spikes
 WORKFLOWS_DOCKER_SOCKET ?= /var/run/docker.sock
 WORKFLOWS_ARCH ?= $(if $(filter arm64 aarch64,$(shell uname -m)),arm64,amd64)
 WORKFLOWS_IMAGE_BUILDER ?= docker buildx
+LAMBDA_RUNTIME_DIR ?= /tmp/rustack-lambda-runtime
+LAMBDA_RUNTIME_IMAGE ?= rustack/lambda-runtime:integration-$(WORKFLOWS_ARCH)
+
+lambda-runtime-build:
+	@case "$(WORKFLOWS_ARCH)" in arm64|amd64) ;; *) echo "WORKFLOWS_ARCH must be arm64 or amd64" >&2; exit 1;; esac
+	@cargo lambda build -p rustack-lambda-runtime --bin rustack-lambda-runtime --target "$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu" --release --lambda-dir "$(LAMBDA_RUNTIME_DIR)/$(WORKFLOWS_ARCH)"
+
+lambda-runtime-image: lambda-runtime-build
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --platform "linux/$(WORKFLOWS_ARCH)" --file assets/lambda/runtime/Dockerfile --tag "$(LAMBDA_RUNTIME_IMAGE)" "$(LAMBDA_RUNTIME_DIR)/$(WORKFLOWS_ARCH)/rustack-lambda-runtime"
+
+lambda-runtime-fixture-image:
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --platform "linux/$(WORKFLOWS_ARCH)" --file tools/workflows-spikes/Handler.Dockerfile --tag "rustack-p0-handler:$(WORKFLOWS_ARCH)" tools/workflows-spikes
+
+test-lambda-runtime-docker: lambda-runtime-image lambda-runtime-fixture-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-runtime --test docker -- --ignored --test-threads=1
+
+.PHONY: lambda-runtime-build lambda-runtime-image lambda-runtime-fixture-image test-lambda-runtime-docker
 
 workflows-model-check:
 	@python3 -c 'import hashlib,json,pathlib; p=pathlib.Path("codegen/smithy-model"); m=json.loads((p/"stepfunctions.provenance.json").read_text()); raw=(p/"stepfunctions.json").read_bytes(); assert len(raw)==m["bytes"] and hashlib.sha256(raw).hexdigest()==m["sha256"], "SFN source hash mismatch"; s=json.loads(raw)["shapes"][m["service"]]; assert s["version"]=="2016-11-23" and "aws.protocols#awsJson1_0" in s["traits"] and s["traits"]["aws.auth#sigv4"]["name"]=="states"; print("Pinned SFN model verified:",len(s["operations"]),"operations")'

@@ -91,6 +91,23 @@ The shared adapter replaces the old pending-map implementation while preserving 
 
 Workspace build/fmt/Clippy/rustdoc and1,841 tests pass (392 preexisting ignored). Shared runtime:71 tests,34 doctests and strict production-boundary Clippy; Lambda core:212 tests and26 doctests. Three old core HTTP tests moved into the shared adapter's stronger wire suite. Cargo audit still finds the same16 B01 advisories; no new dependency version/package landed, and deny bans/licenses/sources pass. B03 remains open for old core boundaries. The relay executable/client, Docker executor and ASL engine remain required before milestone completion.
 
+## P1 task1.2 Linux relay slice review
+
+The independent read-only review found one documentation mismatch and two test-harness ownership gaps. A self-review also found a completed-worker error masking race; its fix was independently rechecked. The final review found no remaining concrete in-slice issue.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W23 | P3; `specs/rustack-workflows-20-lambda-runtime-design.md` §3.4 | Retiring was described as Close-only while duplicate matching Cancel was deliberately idempotent. The contract now documents that exception without refreshing the lease, and distinguishes fatal session/attempt expiry from the bounded retirement handshake | Repeated busy/post-completion Cancel tests plus explicit real RIC cancellation qualification |
+| W24 | P2; self-review, `crates/rustack-lambda-runtime/src/relay.rs`, RelayActor::run | Priority stop could win while a completed IO error remained in JoinSet; teardown ignored that error. Drain now preserves completed IO failure/unexpected writer exit and ignores only joined abort cancellation or the expected queued-Close reader exit | Deterministic pre-completed EOF worker with priority stop requires EOF failure and a closed API listener |
+| W25 | P2; `crates/rustack-lambda-runtime/tests/docker.rs`, busy-marker loop | An outer timeout could cancel a CLI helper before explicit kill/reap. Forward one absolute deadline into the helper owner instead | Real docker wait helper expires and is reaped while the relay remains usable for Close/Ack |
+| W26 | P2; same file, Environment::cleanup | A CLI reaping timeout returned before independent label reconciliation. Record cleanup errors, retain process ownership through reaping and still perform the label check before combining results | Every successful/failed setup, scope, pipe and handler case verifies no run-labeled container remains; final independent review confirms error aggregation order |
+
+The relay binary uses safe nonblocking owned Linux pipe descriptors, task-bound tracing, bounded two-frame mailboxes and confirmed flush receipts. It separates relay Ready from first-RIC-poll BootstrapReady, retains borrowed attempt tickets across select cancellation, rejects invalid scope/order/direction, distinguishes runtime error payloads, and joins the shared API and control workers on every exit. Close and cancellation do not claim external function termination. Pinned provided.al2023 relay images are built by Make targets for both supported Linux architectures.
+
+Workspace build/fmt/Clippy/rustdoc and1,853 tests pass. The ordinary suite has396 ignored tests:392 preexisting resource tests plus four explicitly gated Docker relay tests. Runtime:83 unit tests,39 doctests and strict production-boundary Clippy pass; the actual Linux entry point also passes cross-target Clippy. `make test-lambda-runtime-docker` explicitly ran all four tests with zero ignored on each arm64 VZ and amd64/QEMU daemon (eight executed test cases overall), proving official Python RIC computed42/7, warm counter1/2, request metadata, nonroot/read-only/cgroup limits, handler error, busy cancellation, Close/EOF/truncated/partial/idle exits, failed allocation and CLI helper timeout cleanup. Both daemons have zero remaining test-labeled containers. Native x86, Desktop and rootless qualification remain M4.
+
+No dependency version/package was added; existing anyhow/serde_json are test dependencies and tracing-subscriber is also used by the relay entry point. Audit/deny report the same16 B01 advisories; bans/licenses/sources pass. B03 remains open. The production host control client, Docker deployment/pool/provider integration and ASL engine remain required; this is not full P1/M0 acceptance.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

@@ -124,6 +124,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [shared HTTP adapter and Native startup](./rustack-workflows-20-lambda-runtime-design.md#33-shared-http-adapter-and-native-startup), [review W20–W22](./rustack-workflows-93-review.md#p1-task12-shared-http--native-migration-review).
 - Date:2026-10-25. The separate mandatory Bollard filter W01 remains required when Docker is implemented.
 
+## D17 — Retain relay IO ownership through bounded control settlement
+
+- Alternatives: read stdin through Tokio's blocking adapter; read control frames inside a cancel-and-restart select branch; treat channel enqueue as successful emission; discard completed worker errors when priority stop wins.
+- Decision: Linux nonblocking owned pipe descriptors, dedicated supervised reader/writer tasks, bounded two-message mailboxes and explicit flush receipts. Retain attempt tickets across cancelled result polls, join the API on every exit, and preserve completed IO failures while draining aborted workers. Matching duplicate Cancel is idempotent and never refreshes retirement.
+- Why: a blocking stdin read can hold process shutdown open; restarting a partial read corrupts framing; an enqueued Ack does not prove it reached the host. Cancellation only invalidates the session, so the separate host owner must still terminate/remove the function. Real relay/RIC process tests complement the in-memory contract tests without claiming deployment/pool or SDK acceptance.
+- Pinned by: [relay control supervisor and process entry point](./rustack-workflows-20-lambda-runtime-design.md#34-relay-control-supervisor-and-process-entry-point).
+- Date:2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

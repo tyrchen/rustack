@@ -540,6 +540,35 @@ fn transition_actor() -> SessionActor {
         .build()
 }
 
+#[tokio::test]
+async fn test_should_resume_a_borrowed_ticket_result_after_select_cancellation_and_reject_repolling()
+ {
+    let mut session = RuntimeSession::start(Duration::from_secs(60)).unwrap();
+    let handle = session.handle().clone();
+    let mut ticket = handle.submit(invocation(), deadline()).await.unwrap();
+    let mut result = Box::pin(ticket.result());
+    assert!(poll_once(&mut result).is_pending());
+    drop(result);
+    assert!(!*ticket.cancellation.borrow());
+    handle.next(deadline()).await.unwrap();
+    handle
+        .complete(
+            ticket.attempt(),
+            None,
+            Outcome::Success,
+            payload(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ticket.result().await.unwrap(),
+        RuntimeResult::Success(payload())
+    );
+    assert_eq!(ticket.result().await, Err(SessionError::Unavailable));
+    session.shutdown().await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn test_should_revalidate_cancellation_closed_owners_and_expiry_at_every_delivery_transition()
 {

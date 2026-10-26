@@ -535,4 +535,4 @@ fn invalid_invocation_id() -> Response<Full<Bytes>> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
