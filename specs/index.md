@@ -4,7 +4,7 @@
 
 ## Step Functions and Lambda Runtime — new specification set
 
-Status: implementation contract dated 2026-10-25; P0 evidence and P1 invocation/artifact/cancellation foundations are implemented. Docker execution and the ASL engine remain pending; see the implementation ledger for verified scope. All documents in this set are in English. Start here for the requested ASL engine and actual Docker image Lambda execution.
+Status: implementation contract dated 2026-10-25; P0 evidence and P1 invocation/artifact/cancellation plus shared Native/relay/client runtime contracts are implemented. Production Docker execution and the ASL engine remain pending; see the implementation ledger for verified scope. All documents in this set are in English. Start here for the requested ASL engine and actual Docker image Lambda execution.
 
 | Order | Specification | Type / purpose |
 |---|---|---|
@@ -21,6 +21,8 @@ Status: implementation contract dated 2026-10-25; P0 evidence and P1 invocation/
 | 99 | [Key decisions and glossary](./rustack-workflows-99-decisions.md) | Alternatives, rationale, ownership and overloaded terms |
 
 Read 00 → 10 → 20 → 30 → 40; apply 60/70 throughout. Read 80 for delivery planning and 90 for the next engineering step. The [supporting survey](../docs/research/survey-stepfunctions-lambda-container-runtime.md) records source verification and remaining runtime experiments.
+
+The [pinned Docker transport study](../docs/research/study-bollard-docker-transport-boundaries.md) refines the P1 consumer boundary: reuse generated Docker types with bounded, supervised Unix HTTP/attach IO. It supersedes the initial ordinary Bollard pipe-client recommendation; it does not change the relay architecture or establish executor acceptance.
 
 ```text
 ┌─ P0: runtime experiment + semantic fixtures + pinned sources ───────┐

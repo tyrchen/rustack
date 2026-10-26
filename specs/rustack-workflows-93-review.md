@@ -124,6 +124,17 @@ Workspace build/test/fmt/Clippy/rustdoc pass with1,867 tests and397 ignored (392
 
 No dependency changes landed in this slice. The preceding audit remains unchanged B01 evidence; B01/B03 remain mandatory P1 gates. Docker startup/resource probes, production lifecycle integration and the ASL engine remain required by the complete P0–P5 objective.
 
+## P1 task1.3 transport design preflight
+
+The pinned [source study](../docs/research/study-bollard-docker-transport-boundaries.md) and runtime §3.6/D19 refine the forthcoming Docker consumer before production code. Independent read-only review confirmed the response collection, timeout, attach decoder and diagnostic facts. These are design/source checks, not runtime acceptance.
+
+| ID | Priority / source | Finding and resolution | Remaining gate |
+|---|---|---|---|
+| W30 | P2; runtime §3.6 capacity | An eight-connection limit was ambiguous when32 environments each retain control/log streams. Management now uses six business/two reserved cleanup slots and32/8 mailboxes; supervised stream handoff releases management slots and retains independent environment/deployment reservations | Implement saturation/cleanup-lane tests and prove long-lived streams cannot starve kill/remove |
+| W31 | P3; source study citations | Several references named enclosing methods instead of exact collection/length/trace expressions. Corrected to the vendored release's verified lines | Source/link/pin checks; no runtime behavior claim |
+
+The final independent review found no remaining load-bearing design gap. W01 remains a mandatory consumer/filter/TRACE gate under the refined model-only production path. No Rust production/dependency source changed in this preflight; bounded fake-daemon and actual Docker wire/large-payload evidence remain required before the consumer lands.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

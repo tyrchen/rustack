@@ -140,6 +140,16 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [host control client and shared stream ownership](./rustack-workflows-20-lambda-runtime-design.md#35-host-control-client-and-shared-stream-ownership).
 - Date:2026-10-25.
 
+## D19 — Bound Docker transport before generated-model materialization
+
+- Context: P1 consumer source review of pinned Bollard0.21.1 found whole-body collection, response-body work outside the header timeout, an attach decoder without a Rustack frame cap and console/trailing-EOF fallback.
+- Alternatives: ordinary pipe client with post-deserialization checks; a counted custom connector plus a second raw attach transport; a local forwarding proxy; duplicate Docker model definitions.
+- Decision: reuse model-only bollard-stubs1.53.1-rc.29.3.1 and implement the narrow, bounded Unix HTTP/upgrade boundary over the workspace Hyper/Tokio stack. Keep generated wire contracts, strict pre-materialization bounds, joined drivers and the mandatory dependency diagnostic filter.
+- Why: checking after collection cannot bound earlier allocation, and an outer CBOR decoder cannot validate opaque Docker buffering first. The custom transport's Response<Incoming> type does not directly accept a Limited body wrapper. Owning the small required operation set avoids a proxy/second connector while preserving explicit cleanup and no-replay semantics.
+- Supersedes: the initial recommendation to enable Bollard's ordinary pipe client in runtime §7; D2's relay architecture and the P0 feasibility evidence remain unchanged.
+- Pinned by: [bounded Docker API boundary](./rustack-workflows-20-lambda-runtime-design.md#36-bounded-docker-api-boundary), [pinned source study](../docs/research/study-bollard-docker-transport-boundaries.md).
+- Date:2026-10-25. Production acceptance still requires the specified fake-daemon and real image tests; source inspection alone closes no runtime gate.
+
 ## Glossary
 
 | Term | Meaning in this specification |
