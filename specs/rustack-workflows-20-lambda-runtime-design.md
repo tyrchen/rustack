@@ -542,6 +542,35 @@ Provider / future Pool         Environment root               Environment worker
  │                             │ retain records until proven clean │
 ```
 
+### 4.4 Warm checkout and retained pool dispatch
+
+`EnvironmentPool` owns a bounded FIFO of accepted calls, a JoinSet of at most32 invocation/retirement jobs and an LRU of exclusive idle EnvironmentHandles. It consumes validated EnvironmentPlans and runtime Invocations through a cloneable PoolPort; executor/provider wiring remains a required consumer. PoolConfig bounds globally retained warm environments0..32, warm retention per identity0..32 (default1), and accepted waiting calls1..256 (default256). The EnvironmentManager remains the authoritative allocation/memory/quarantine owner. A separate queue permit spans channel admission and the actor's pending queue, and releases only on dispatch/rejection. Calls cannot build an unbounded second queue behind the mailbox.
+
+Warm identity is a SHA-256 of canonical typed allocation inputs: directory owner/run, resource/revision/name/resolved version/backend, architecture, function and relay resolved image metadata, complete ImageConfig, sorted captured environment, timeout/memory/ephemeral storage and operator container policy/relay budgets. Hash raw validated values, never redacted Debug output. Equivalent HashMap insertion orders match. Fresh environment UUIDs/names/log streams are excluded; configuration, image, scope or policy changes do not share environments. Construct the identity before admission and recheck live image leases on dispatch, including the warm path.
+
+The actor services stop and completions before new admissions and periodically expires cancelled/deadline-exhausted calls, reaps dead idle handles and revisits capacity. Dispatch FIFO head to a matching healthy Idle handle or perform one cold allocation. Known no-effect Busy admission may wait and retry; never retry a successfully admitted environment's startup or invocation. If another identity occupies idle capacity, retire the least-recently-used idle handle, await its settlement, then retry allocation. Do not evict busy environments or release their authoritative reservation early. Idle environments retain the manager's independent idle deadline. Per-identity/global warm limits apply on successful return; excess environments retire. A retired handle's identity is not transferable to another function.
+
+Every dispatched call has a separate cancellation lane. Caller timeout/Drop, including a ready-but-unconsumed result, retires its environment. After a successful runtime result the worker waits for the public receiver's synchronous consumption receipt before returning an Idle handle to the LRU. Keep the absolute deadline and cancellation authoritative through offering and receipt waiting even when the public future remains alive but unpolled; worker-side expiry retires that environment. Receipt readiness precedes sender-closed cancellation because successful consumption synchronously acknowledges before dropping its cancellation sender. A valid FunctionError remains a business result but its environment retires. An unsuccessful invocation is not replayed. A waiting public future does not own cleanup: accepted dispatch remains with the actor until resources are reusable or retired. Supplied runtime absolute deadlines govern queue/init/invoke; delivery-based handler timeout and invocation log attribution still require the executor/runtime integration specified in §3.
+
+Before spawning any environment task, retain a cloneable retirement receipt (priority stop, status and cached settlement) above the JoinSet. Worker panic aborts admission and retires that receipt even though its exclusive handle was dropped. Root Drop transfers the JoinSet, all receipts and idle handles into captured-runtime emergency cleanup; abort/join workers before awaiting environment retirement. Normal shutdown closes admission, rejects queued calls, cancels dispatched calls and joins every active/idle retirement. Cancelled/timed-out shutdown waiters retain that operation; cached worker failure cannot become success after physical cleanup. Underlying quarantined resources remain accounted by EnvironmentManager and prevent clean pool shutdown. Infrastructure diagnostics never include payload, environment variables or unhashed allocation inputs.
+
+```text
+Caller                   Pool actor / retained registry       Environment owner
+ │ queue permit + plan + call      │                                │
+ │────────────────────────────────▶│ FIFO + immutable warm identity  │
+ │                                 │ matching Idle ──────┐           │
+ │                                 │ cold spawn ────────┼──────────▶│ reserve/create
+ │                                 │ retain receipt     │           │
+ │                                 │ supervised call ◀──┘           │
+ │◀──────── offered result ────────│                                │
+ │ consumed receipt ──────────────▶│ success → bounded warm LRU      │
+ │ Drop / expiry ─────────────────▶│ stop → join retirement ───────▶│ retained cleanup
+ │                                 │ worker/root panic              │
+ │                                 │ abort/join → receipt cleanup ─▶│ quarantine/settle
+```
+
+Tests must pin identity isolation/order normalization, queue+active bounds, FIFO capacity waiting, LRU and per-identity retention, dead idle handles, cancellation before/after dispatch and at ready-result receipt, no replay after startup failure, root/worker abort recovery and cancelled/repeated shutdown. Actual image-RIC qualification must prove warm counter reuse, independent-function/revision cold counters, bounded capacity eviction and no owned allocations after joined shutdown. This pool does not establish startup reconciliation, registry/network/resource probes or production backend readiness.
+
 ## 5. Isolation and resource limits
 
 - Initial Docker transport is a local Unix socket only. Disable implicit TCP/SSH fallback. Explicit docker configuration requires a startup daemon/version/relay-image/resource-limit probe; failure aborts startup. Default remains disabled. Auto does not acquire a new Docker fallback; Image on native/squib/auto fails explicitly.

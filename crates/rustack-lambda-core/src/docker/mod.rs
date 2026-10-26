@@ -13,6 +13,7 @@ mod mutation;
 mod ownership;
 mod pin;
 mod plan;
+mod pool;
 mod types;
 
 use std::{
@@ -47,6 +48,7 @@ pub use ownership::{DirectoryLease, DirectoryLeaseError};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub use pin::{ImagePin, ImagePinScope};
 pub use plan::{ContainerPolicy, EnvironmentPlan, NetworkSelection, RelayBudgets};
+pub use pool::{EnvironmentPool, PoolConfig, PoolPort, PoolSettings, PoolStatus};
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};

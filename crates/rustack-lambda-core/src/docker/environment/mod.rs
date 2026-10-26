@@ -227,6 +227,13 @@ impl fmt::Debug for EnvironmentHandle {
     }
 }
 impl EnvironmentHandle {
+    pub(super) fn retirement(&self) -> Retirement {
+        Retirement {
+            stop: self.signals.stop.clone(),
+            status: self.signals.status.subscribe(),
+            settlement: self.settlement.clone(),
+        }
+    }
     /// Read the fresh immutable environment identity.
     ///
     /// ```no_run
@@ -408,6 +415,13 @@ impl EnvironmentPort {
         plan: EnvironmentPlan,
         deadline: Instant,
     ) -> Result<EnvironmentHandle, EnvironmentError> {
+        self.spawn_shared(Arc::new(plan), deadline)
+    }
+    pub(super) fn spawn_shared(
+        &self,
+        plan: Arc<EnvironmentPlan>,
+        deadline: Instant,
+    ) -> Result<EnvironmentHandle, EnvironmentError> {
         let deadline = deadline.min(Instant::now() + self.config.0.start);
         check_deadline(deadline)?;
         if !plan.same_scope(&self.directory) {
@@ -420,7 +434,6 @@ impl EnvironmentPort {
             return Err(DockerError::Quarantined.into());
         }
         let reservation = self.budget.reserve(plan.memory_bytes())?;
-        let plan = Arc::new(plan);
         let (calls, mailbox) = mpsc::channel(4);
         let signals = Signals::new();
         let (done, settlement) = watch::channel(None);
@@ -461,6 +474,31 @@ impl EnvironmentPort {
                 && self.health.quarantined.load(Ordering::Acquire) == 0,
             worker_failed: self.health.failed.load(Ordering::Acquire),
         }
+    }
+}
+
+/// A pool keeps this receipt above workers which own exclusive handles.
+#[derive(Debug, Clone)]
+pub(super) struct Retirement {
+    stop: watch::Sender<bool>,
+    status: watch::Receiver<EnvironmentStatus>,
+    settlement: watch::Receiver<Option<Result<(), EnvironmentError>>>,
+}
+impl Retirement {
+    pub(super) fn cancel(&self) {
+        self.stop.send_replace(true);
+    }
+    pub(super) async fn settle(mut self) -> Result<(), EnvironmentError> {
+        self.cancel();
+        self.settlement
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| EnvironmentError::Worker)?
+            .clone()
+            .ok_or(EnvironmentError::Worker)?
+    }
+    pub(super) fn removed(&self) -> bool {
+        self.status.borrow().phase == EnvironmentPhase::Removed
     }
 }
 
@@ -583,3 +621,6 @@ impl Drop for EnvironmentManager {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::docker) mod test_peer;

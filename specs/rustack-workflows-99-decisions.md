@@ -281,3 +281,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why:** every accepted effect retains an owner, while validation/connect/queue failures can settle without permanent false uncertainty. Health checks reschedule after completion to avoid backlog starvation; log EOF permits an already-observed valid result but forbids reuse. Known protocol failures remain business failures once IO joins; uncertain supervision cannot be masked by an earlier protocol error.
 - **Pinned by:** [runtime §4.3](./rustack-workflows-20-lambda-runtime-design.md#43-retained-environment-owner-and-allocation-reservations), [verification](./rustack-workflows-70-verification-plan.md), [implementation](./rustack-workflows-90-impl-plan.md).
 - **Date:** 2026-10-26. This low-level owner does not replace provider admission, warm/LRU pooling, startup reconciliation/probes or exact Lambda timeout/log integration. Production Docker stays disabled until those M0 consumers pass.
+
+## D32 — Pool dispatch retains receipt-based ownership through warm return
+
+- **Context**: §4.4 warm execution must not reuse an environment after a caller abandons a ready result or a dispatch worker fails.
+- **Alternatives considered**: transferring handles to HTTP futures loses cleanup ownership; returning to the LRU immediately after send loses result-consumption cancellation; keying by redacted Debug hides configuration differences.
+- **Decision**: retain pool tasks and environment retirement receipts above the JoinSet, require a consumption receipt before warm return and hash canonical typed allocation inputs.
+- **Why**: queue, execution, warm retention and cleanup have explicit bounded owners; underlying EnvironmentManager reservations remain authoritative through quarantine.
+- **Pinned by**: [runtime §4.4](./rustack-workflows-20-lambda-runtime-design.md#44-warm-checkout-and-retained-pool-dispatch), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26.

@@ -10,6 +10,7 @@ use std::{
 
 use rustack_lambda_model::types::ImageConfig;
 use rustack_lambda_runtime::protocol::EnvironmentId;
+use serde::Serialize;
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -37,7 +38,7 @@ pub(super) enum ContainerRole {
 }
 
 /// Operator network selection; a bridge still requires daemon startup validation.
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 #[non_exhaustive]
 pub struct NetworkSelection(String);
 impl fmt::Debug for NetworkSelection {
@@ -60,7 +61,7 @@ impl FromStr for NetworkSelection {
 }
 
 /// Integral relay session budgets independent of handler and deployment budgets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[non_exhaustive]
 pub struct RelayBudgets {
     io: Duration,
@@ -103,7 +104,7 @@ impl RelayBudgets {
 }
 
 /// Validated operator limits, independent of user function configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct ContainerPolicy {
     network: NetworkSelection,
@@ -166,6 +167,7 @@ pub struct EnvironmentPlan {
     revision: Arc<ExecutionRevision>,
     identity: Identity,
     bodies: Bodies,
+    warm_key: String,
 }
 impl fmt::Debug for EnvironmentPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -177,6 +179,9 @@ impl fmt::Debug for EnvironmentPlan {
     }
 }
 impl EnvironmentPlan {
+    pub(super) fn warm_key(&self) -> &str {
+        &self.warm_key
+    }
     pub(super) fn same_scope(&self, directory: &DirectoryLease) -> bool {
         self.directory.owner_id() == directory.owner_id()
             && self.directory.run_id() == directory.run_id()
@@ -283,13 +288,6 @@ impl EnvironmentPlan {
         relay_body.attach_stdin = Some(true);
         relay_body.open_stdin = Some(true);
         relay_body.stdin_once = Some(true);
-        relay_body.host_config = Some(limits(
-            policy.network.0,
-            RELAY_MEMORY,
-            100_000_000,
-            64,
-            MIB,
-        )?);
         let selected_user = image_user(
             &function.resolved().metadata().execution.metadata().user,
             &user,
@@ -302,6 +300,15 @@ impl EnvironmentPlan {
             "function",
         )?;
         function_body.env = Some(function_environment(&revision, environment)?);
+        let warm_key = warm_identity(&directory, &relay, &revision, &policy)?;
+        relay_body.host_config = Some(limits(
+            policy.network.0,
+            RELAY_MEMORY,
+            100_000_000,
+            64,
+            MIB,
+        )?);
+
         let memory = u64::from(revision.memory_mb)
             .checked_mul(MIB)
             .ok_or(DockerError::Configuration)?;
@@ -327,6 +334,7 @@ impl EnvironmentPlan {
                 function: function_body,
                 memory,
             },
+            warm_key,
         })
     }
 
@@ -450,7 +458,7 @@ impl EnvironmentPlan {
         )
         .await
     }
-    fn live(&self) -> Result<(), DockerError> {
+    pub(super) fn live(&self) -> Result<(), DockerError> {
         match &self.revision.artifact {
             DeploymentArtifact::Image(function) if self.relay.is_live() && function.is_live() => {
                 Ok(())
@@ -459,6 +467,43 @@ impl EnvironmentPlan {
             DeploymentArtifact::Zip(_) => Err(DockerError::Configuration),
         }
     }
+}
+
+fn warm_identity(
+    directory: &DirectoryLease,
+    relay: &PinnedImage,
+    revision: &ExecutionRevision,
+    policy: &ContainerPolicy,
+) -> Result<String, DockerError> {
+    let function = image(revision)?;
+    let environment: BTreeMap<_, _> = revision.environment.iter().collect();
+    let encoded = serde_json::to_vec(&(
+        (
+            directory.owner_id().to_string(),
+            directory.run_id().to_string(),
+        ),
+        (
+            revision.resource_id.to_string(),
+            &revision.revision_id,
+            &revision.function_name,
+            &revision.qualifier,
+        ),
+        (
+            revision.architecture,
+            function.resolved().metadata(),
+            relay.resolved().metadata(),
+        ),
+        (
+            &revision.image_config,
+            environment,
+            revision.timeout,
+            revision.memory_mb,
+            revision.ephemeral_storage_mb,
+        ),
+        &policy,
+    ))
+    .map_err(|_| DockerError::Configuration)?;
+    Ok(crate::storage::compute_sha256(&encoded))
 }
 
 fn image(revision: &ExecutionRevision) -> Result<&PinnedImage, DockerError> {

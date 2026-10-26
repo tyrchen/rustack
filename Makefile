@@ -889,3 +889,12 @@ test-lambda-environments:
 	@cargo test -p rustack-lambda-runtime --lib test_should_preserve_transport_worker_failure_after_a_prior_scope_error
 
 .PHONY: test-lambda-environments
+
+# Warm checkout ownership, bounded FIFO, LRU and result-consumption regressions.
+test-lambda-pool:
+	@cargo test -p rustack-lambda-core --lib docker::pool::tests
+
+# Includes the real warm-counter/revision-eviction case and owner regressions.
+test-lambda-pool-docker: test-lambda-environments-docker
+
+.PHONY: test-lambda-pool test-lambda-pool-docker

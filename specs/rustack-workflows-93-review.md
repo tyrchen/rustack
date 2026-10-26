@@ -347,6 +347,23 @@ Actual owner2, wire2 and shared runtime5 tests explicitly pass with zero ignored
 
 The owner remains a lower-level runtime consumer. It enforces supplied invocation deadlines and retains cleanup, while exact handler timeout starting at delivery, per-invocation log attribution, warm/LRU checkout limits, startup reconciliation/pulls/network/probes and final provider/executor wiring remain mandatory M0 integration work. No production backend capability is enabled by this change; P2–P5 remain required.
 
+## P1 task1.3 warm pool dispatch review
+
+Independent read-only review covers §4.4/D32: bounded admission/FIFO dispatch, canonical warm identity, exclusive handles, receipt-gated return, LRU eviction and retained root/worker retirement. The final source recheck has no remaining findings. This remains a runtime consumer, not production Docker executor acceptance.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W78 | P2; spec preflight, runtime §4.4 | A live but unpolled public receiver cannot enforce its own timeout. The worker retains the absolute deadline through result offering and consumption receipt waiting | Ready reply stays unpolled past deadline; assert environment Removed before polling that public future again |
+| W79 | P2; `docker/plan.rs`, warm identity | Hashing before complete boundary validation allocated for unbounded captured environment/ImageConfig inputs. Build bounded image bodies and validate function environment before fingerprint serialization | Independent source-order recheck plus separate oversized-input rejection regressions |
+| W80 | P2; `docker/pool/actor.rs`, capacity eviction | Repeated Busy before slow cleanup completed could evict the entire LRU for one waiter. Retain one eviction task barrier and await its settlement before retrying dispatch | Two idle peers with a deliberately held first retirement; repeated ticks keep the second idle handle alive |
+| W81 | P3; `tests/docker_environment.rs`, pooled busy-cancel observer | Fallible plan/invocation construction after attaching the observer could leave it only dropped on error. Move both constructions before observer startup | Final read-only recheck confirms every post-attach path reaches explicit call abort/join and pool/log shutdown before propagating observation failure |
+
+Final-source workspace build/test/fmt/Clippy/rustdoc all pass:2,233 tests, zero failed,405 separately resource-gated. Lambda core has553 unit tests and132 doctests. The18 pool cases cover runtime zero/global/per-identity retention, queued cancellation/capacity/FIFO, ready/unpolled results, exact warm counts, slow LRU cleanup and root/worker/shutdown ownership. The six-library boundary target passes818 unit tests/196 doctests (1,014 total),11 separately gated Docker cases and strict production Clippy. Fresh audit scans474 dependencies without vulnerabilities; all deny categories pass. No dependency or advisory exception was added.
+
+Four explicit owner/pool real-RIC cases pass with zero ignored on each retained Engine29.5.2 daemon (arm64 VZ and amd64/QEMU). Actual evidence includes near6MiB owner results, warm counters1/2, revision isolation and one-slot capacity eviction, real FunctionError followed by replacement counter1, and independent busy-marker observation before aborting a pooled invocation. Both cancellation cases require a cancelled join and attempt every call/pool/log cleanup before propagating observation errors. Final read-only daemon/image queries find no owner-labeled containers or internal image aliases. Native-x86/Desktop/rootless and full SDK/executor qualification remain required; QEMU is not native-x86 acceptance.
+
+Exact handler timeout from Runtime API delivery, per-invocation log attribution, historical reconciliation, pulls/network/resource probes and real Executor/provider composition remain mandatory M0 work. P2–P5 remain required by the complete objective.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

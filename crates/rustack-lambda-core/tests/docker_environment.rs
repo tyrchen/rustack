@@ -9,8 +9,9 @@ use rustack_lambda_core::{
     artifact::{Architecture, DeploymentArtifact, PinnedImage},
     docker::{
         ContainerPolicy, DirectoryLease, DockerWire, EnvironmentConfig, EnvironmentError,
-        EnvironmentHandle, EnvironmentManager, EnvironmentPlan, EnvironmentSettings, FunctionLogs,
-        ImageLeaseConfig, ImageLeaseManager, ImagePinScope, OwnerFilter, RelayBudgets,
+        EnvironmentHandle, EnvironmentManager, EnvironmentPlan, EnvironmentPool,
+        EnvironmentSettings, FunctionLogs, ImageLeaseConfig, ImageLeaseManager, ImagePinScope,
+        OwnerFilter, PoolConfig, RelayBudgets,
     },
     executor::{ExecutionRevision, ExecutorBackend},
     identity::FunctionResourceId,
@@ -111,7 +112,7 @@ impl Fixture {
         Ok(())
     }
 
-    fn plan(&self) -> Result<EnvironmentPlan> {
+    fn revision(&self) -> Result<Arc<ExecutionRevision>> {
         let revision = ExecutionRevision::builder()
             .resource_id(FunctionResourceId::new())
             .revision_id(Uuid::new_v4().to_string())
@@ -140,10 +141,16 @@ impl Fixture {
             .memory_mb(192)
             .ephemeral_storage_mb(512)
             .build();
+        Ok(Arc::new(revision))
+    }
+    fn plan(&self) -> Result<EnvironmentPlan> {
+        self.plan_revision(self.revision()?)
+    }
+    fn plan_revision(&self, revision: Arc<ExecutionRevision>) -> Result<EnvironmentPlan> {
         Ok(EnvironmentPlan::new(
             self.lease.clone(),
             self.relay.as_ref().context("relay image")?.clone(),
-            Arc::new(revision),
+            revision,
             ContainerPolicy::new(
                 "none".parse()?,
                 1000,
@@ -274,4 +281,151 @@ async fn test_should_retire_running_code_after_abandoned_call_and_join_all_owned
     .await;
     let cleanup = fixture.cleanup().await;
     result.and(cleanup)
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Docker environment images/socket"]
+async fn test_should_pool_real_warm_calls_and_evict_capacity_across_revision_changes() -> Result<()>
+{
+    let mut fixture = Fixture::new().await?;
+    let mut pool = EnvironmentPool::start(fixture.owner.port(), PoolConfig::default())?;
+    let result = async {
+        let original = fixture.revision()?;
+        let port = pool.port();
+        for expected in 1..=2 {
+            let response = port
+                .invoke(
+                    fixture.plan_revision(original.clone())?,
+                    invocation(&json!({"value":35}))?,
+                    false,
+                )
+                .await?;
+            let RuntimeResult::Success(payload) = response.result else {
+                anyhow::bail!("unexpected function failure");
+            };
+            let value: Value = serde_json::from_slice(payload.as_ref())?;
+            ensure!(
+                value["computed"] == 42 && value["counter"] == expected,
+                "pool did not preserve warm counter"
+            );
+        }
+        let mut changed = (*original).clone();
+        changed.revision_id = Uuid::new_v4().to_string();
+        changed
+            .environment
+            .insert("TEST_VALUE".into(), "changed".into());
+        let changed = Arc::new(changed);
+        for revision in [changed, original.clone()] {
+            let response = port
+                .invoke(
+                    fixture.plan_revision(revision)?,
+                    invocation(&json!({"value":0,"policy":true}))?,
+                    false,
+                )
+                .await?;
+            let RuntimeResult::Success(payload) = response.result else {
+                anyhow::bail!("unexpected function failure");
+            };
+            let value: Value = serde_json::from_slice(payload.as_ref())?;
+            ensure!(
+                value["computed"] == 7 && value["counter"] == 1,
+                "revision or evicted environment was reused"
+            );
+        }
+        let failed = port
+            .invoke(
+                fixture.plan_revision(original.clone())?,
+                invocation(&json!({"fail":true}))?,
+                false,
+            )
+            .await?;
+        let RuntimeResult::FunctionError(payload) = failed.result else {
+            anyhow::bail!("pool hid FunctionError");
+        };
+        let error: Value = serde_json::from_slice(payload.as_ref())?;
+        ensure!(
+            error["errorType"] == "ValueError",
+            "pool error payload differs"
+        );
+        let response = port
+            .invoke(
+                fixture.plan_revision(original)?,
+                invocation(&json!({"value":0}))?,
+                false,
+            )
+            .await?;
+        let RuntimeResult::Success(payload) = response.result else {
+            anyhow::bail!("replacement invocation failed");
+        };
+        let value: Value = serde_json::from_slice(payload.as_ref())?;
+        ensure!(
+            value["counter"] == 1,
+            "failed environment was returned to warm pool"
+        );
+        Ok(())
+    }
+    .await;
+    let retired = pool.shutdown(deadline()).await;
+    let cleanup = fixture.cleanup().await;
+    result.and(retired.map_err(Into::into)).and(cleanup)
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Docker environment images/socket"]
+async fn test_should_join_pool_retirement_after_abandoning_an_observed_running_handler()
+-> Result<()> {
+    let mut fixture = Fixture::new().await?;
+    let mut pool = EnvironmentPool::start(fixture.owner.port(), PoolConfig::default())?;
+    let result = async {
+        let revision = fixture.revision()?;
+        let plan = fixture.plan_revision(revision.clone())?;
+        let key = plan.function_key().clone();
+        let port = pool.port();
+        let initial = port
+            .invoke(plan, invocation(&json!({"value":0}))?, false)
+            .await?;
+        ensure!(
+            matches!(initial.result, RuntimeResult::Success(_)),
+            "warm setup failed"
+        );
+        let plan = fixture.plan_revision(revision)?;
+        let invocation = invocation(&json!({"value":1,"sleep":true}))?;
+        let mut observed = FunctionLogs::start(
+            fixture.wire.port().attach_logs(&key, deadline()).await?,
+            Duration::from_secs(60),
+            262_144,
+        )?;
+        let call = tokio::spawn(async move { port.invoke(plan, invocation, false).await });
+        let observation = timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = observed.snapshot(deadline()).await?;
+                if snapshot
+                    .tail
+                    .windows(14)
+                    .any(|part| part == b"P0_BUSY_START=")
+                {
+                    break Ok::<(), anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("pooled handler did not start");
+        call.abort();
+        let joined = call.await;
+        let retired = pool.shutdown(deadline()).await;
+        let logs = observed.shutdown().await;
+        observation??;
+        ensure!(
+            matches!(joined,Err(ref error) if error.is_cancelled()),
+            "pooled invocation task was not cancelled"
+        );
+        retired?;
+        logs?;
+        Ok(())
+    }
+    .await;
+    let retired = pool.shutdown(deadline()).await;
+    let cleanup = fixture.cleanup().await;
+    result.and(retired.map_err(Into::into)).and(cleanup)
 }
