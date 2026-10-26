@@ -1,6 +1,6 @@
 //! AWS Signature Version 4 verification.
 //!
-//! This module implements the core SigV4 signature verification flow:
+//! This module implements the core `SigV4` signature verification flow:
 //!
 //! 1. Parse the `Authorization` header to extract the algorithm, credential scope, signed headers,
 //!    and provided signature.
@@ -32,7 +32,7 @@ const SUPPORTED_ALGORITHM: &str = "AWS4-HMAC-SHA256";
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// The result of a successful SigV4 verification.
+/// The result of a successful `SigV4` verification.
 #[derive(Debug, Clone)]
 pub struct AuthResult {
     /// The access key ID that signed the request.
@@ -45,7 +45,7 @@ pub struct AuthResult {
     pub signed_headers: Vec<String>,
 }
 
-/// Parsed components of an AWS SigV4 `Authorization` header.
+/// Parsed components of an AWS `SigV4` `Authorization` header.
 ///
 /// Format:
 /// ```text
@@ -71,7 +71,7 @@ pub struct ParsedAuth {
     pub signature: String,
 }
 
-/// Parse an AWS SigV4 `Authorization` header value into its components.
+/// Parse an AWS `SigV4` `Authorization` header value into its components.
 ///
 /// # Errors
 ///
@@ -108,25 +108,25 @@ pub fn parse_authorization_header(header: &str) -> Result<ParsedAuth, AuthError>
 
     // Parse credential: AKID/date/region/service/aws4_request
     let cred_parts: Vec<&str> = credential.splitn(5, '/').collect();
-    if cred_parts.len() != 5 || cred_parts[4] != "aws4_request" {
+    let [access_key_id, date, region, service, "aws4_request"] = cred_parts.as_slice() else {
         return Err(AuthError::InvalidCredential);
-    }
+    };
 
     let parsed_signed_headers: Vec<String> =
         signed_headers.split(';').map(ToOwned::to_owned).collect();
 
     Ok(ParsedAuth {
         algorithm: algorithm.to_owned(),
-        access_key_id: cred_parts[0].to_owned(),
-        date: cred_parts[1].to_owned(),
-        region: cred_parts[2].to_owned(),
-        service: cred_parts[3].to_owned(),
+        access_key_id: (*access_key_id).to_owned(),
+        date: (*date).to_owned(),
+        region: (*region).to_owned(),
+        service: (*service).to_owned(),
         signed_headers: parsed_signed_headers,
         signature: signature.to_owned(),
     })
 }
 
-/// Build the SigV4 string to sign.
+/// Build the `SigV4` string to sign.
 ///
 /// Format:
 /// ```text
@@ -157,7 +157,7 @@ pub fn build_string_to_sign(
     format!("{SUPPORTED_ALGORITHM}\n{timestamp}\n{credential_scope}\n{canonical_request_hash}")
 }
 
-/// Derive the SigV4 signing key using HMAC-SHA256 chain.
+/// Derive the `SigV4` signing key using HMAC-SHA256 chain.
 ///
 /// ```text
 /// DateKey              = HMAC-SHA256("AWS4" + secret_key, date)
@@ -170,33 +170,51 @@ pub fn build_string_to_sign(
 ///
 /// ```
 /// use rustack_auth::sigv4::derive_signing_key;
+/// # fn example() -> Result<(), rustack_auth::AuthError> {
 ///
 /// let key = derive_signing_key(
 ///     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 ///     "20130524",
 ///     "us-east-1",
 ///     "s3",
-/// );
+/// )?;
 /// assert!(!key.is_empty());
+/// # Ok(()) }
 /// ```
-#[must_use]
-pub fn derive_signing_key(secret_key: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
-    let date_key = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
-    let date_region_key = hmac_sha256(&date_key, region.as_bytes());
-    let date_region_service_key = hmac_sha256(&date_region_key, service.as_bytes());
+///
+/// # Errors
+/// Returns [`AuthError::CryptoInitialization`] if the MAC provider rejects a key.
+pub fn derive_signing_key(
+    secret_key: &str,
+    date: &str,
+    region: &str,
+    service: &str,
+) -> Result<Vec<u8>, AuthError> {
+    let date_key = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes())?;
+    let date_region_key = hmac_sha256(&date_key, region.as_bytes())?;
+    let date_region_service_key = hmac_sha256(&date_region_key, service.as_bytes())?;
     hmac_sha256(&date_region_service_key, b"aws4_request")
 }
 
 /// Compute the HMAC-SHA256 signature of `data` using the given `signing_key`.
 ///
 /// Returns the hex-encoded signature.
-#[must_use]
-pub fn compute_signature(signing_key: &[u8], data: &str) -> String {
-    let sig = hmac_sha256(signing_key, data.as_bytes());
-    hex::encode(sig)
+///
+/// # Errors
+/// Returns [`AuthError::CryptoInitialization`] if the MAC provider rejects the key.
+///
+/// ```
+/// # fn example() -> Result<(), rustack_auth::AuthError> {
+/// let signature = rustack_auth::sigv4::compute_signature(b"secret", "message")?;
+/// assert_eq!(signature.len(), 64);
+/// # Ok(()) }
+/// ```
+pub fn compute_signature(signing_key: &[u8], data: &str) -> Result<String, AuthError> {
+    let sig = hmac_sha256(signing_key, data.as_bytes())?;
+    Ok(hex::encode(sig))
 }
 
-/// Verify an AWS SigV4-signed HTTP request.
+/// Verify an AWS `SigV4`-signed HTTP request.
 ///
 /// This function:
 /// 1. Parses the `Authorization` header
@@ -207,7 +225,7 @@ pub fn compute_signature(signing_key: &[u8], data: &str) -> String {
 ///
 /// The query string is verified exactly as it appears on the wire
 /// (raw-preserving). Unlike [`verify_s3_sigv4`], this does NOT attempt the
-/// SigV4-normalized fallback: the normalized form asserts that alternate
+/// `SigV4`-normalized fallback: the normalized form asserts that alternate
 /// wire encodings are equivalent, which is only true when the serving
 /// endpoint percent-decodes query parameters before acting on them. Whether
 /// the fallback is safe is a property of the serving endpoint, never of the
@@ -222,6 +240,7 @@ pub fn compute_signature(signing_key: &[u8], data: &str) -> String {
 /// - The access key is not found
 /// - Required signed headers are missing
 /// - The signature does not match
+/// - The MAC provider rejects initialization
 pub fn verify_sigv4(
     parts: &http::request::Parts,
     body_hash: &str,
@@ -230,13 +249,13 @@ pub fn verify_sigv4(
     verify_sigv4_with_policy(parts, body_hash, credential_provider, false, false)
 }
 
-/// Verify S3 SigV4, allowing the explicit unsigned-payload protocol exception.
+/// Verify S3 `SigV4`, allowing the explicit unsigned-payload protocol exception.
 ///
 /// This verifies the seed signature only for streaming markers. Callers MUST additionally
 /// verify every chunk and signed trailer with [`StreamingVerifier`] before publishing data.
 ///
 /// In addition to the raw-preserving attempt, this accepts the
-/// SigV4-normalized canonical query string as a fallback (see
+/// `SigV4`-normalized canonical query string as a fallback (see
 /// [`build_canonical_query_string_normalized`]): spec-compliant S3 clients
 /// such as Transmit 5 sign the encoded form even when the wire carries the
 /// raw value. This endpoint entry point is the opt-in — S3 percent-decodes
@@ -244,12 +263,13 @@ pub fn verify_sigv4(
 /// (`rustack-s3-http/src/router.rs::parse_query_params`), so the normalized
 /// equivalence holds. Do NOT use this entry point for an endpoint that reads
 /// query parameters from the raw query string without decoding (e.g.
-/// CloudFront's `DeleteRealtimeLogConfig` reading `Name`): a verified
+/// `CloudFront`'s `DeleteRealtimeLogConfig` reading `Name`): a verified
 /// signature could then authorize a different effective value than the one
 /// acted upon. Such endpoints must use [`verify_sigv4`].
 ///
 /// # Errors
-/// Returns an authentication error for invalid signatures or payload declarations.
+/// Returns an authentication error for invalid signatures, payload declarations,
+/// credential/header failures or MAC provider initialization failures.
 pub fn verify_s3_sigv4(
     parts: &http::request::Parts,
     body_hash: &str,
@@ -324,26 +344,26 @@ fn verify_sigv4_with_policy(
         parsed.date, parsed.region, parsed.service
     );
     let signing_key =
-        derive_signing_key(&secret_key, &parsed.date, &parsed.region, &parsed.service);
+        derive_signing_key(&secret_key, &parsed.date, &parsed.region, &parsed.service)?;
     let provided_bytes = parsed.signature.as_bytes();
 
     // Check the provided signature against the canonical request built from
     // `query_string`. Returns true on a constant-time match.
     #[rustfmt::skip]
-    let signature_matches = |query_string: &str| -> bool {
+    let signature_matches = |query_string: &str| -> Result<bool, AuthError> {
         let canonical_request = format!(
             "{method}\n{canonical_uri}\n{query_string}\n{canonical_headers}\n\n{signed_headers_str}\n{payload_hash}"
         );
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
-        let expected_signature = compute_signature(&signing_key, &string_to_sign);
-        bool::from(provided_bytes.ct_eq(expected_signature.as_bytes()))
+        let expected_signature = compute_signature(&signing_key, &string_to_sign)?;
+        Ok(bool::from(provided_bytes.ct_eq(expected_signature.as_bytes())))
     };
 
     // First attempt: raw query string values preserved as-is. This matches
     // clients that sign whatever encoding appears on the wire (e.g. AWS SDKs
     // with pre-encoded values, minio-java via OkHttp with raw values).
-    if signature_matches(&canonical_query) {
+    if signature_matches(&canonical_query)? {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded");
         return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
@@ -377,9 +397,10 @@ fn verify_sigv4_with_policy(
     // the signature mismatch below.
     let normalized_matches = allow_normalized_fallback
         && !query.contains('+')
-        && build_canonical_query_string_normalized(query).is_ok_and(|normalized| {
-            normalized != canonical_query && signature_matches(&normalized)
-        });
+        && match build_canonical_query_string_normalized(query) {
+            Ok(normalized) if normalized != canonical_query => signature_matches(&normalized)?,
+            _ => false,
+        };
     if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Signature verification succeeded (normalized query string)");
         return Ok(AuthResult {
@@ -394,7 +415,7 @@ fn verify_sigv4_with_policy(
     Err(AuthError::SignatureDoesNotMatch)
 }
 
-/// SigV4 streaming HMAC chain, including terminal chunks and signed trailers.
+/// `SigV4` streaming HMAC chain, including terminal chunks and signed trailers.
 pub struct StreamingVerifier {
     key: Vec<u8>,
     timestamp: String,
@@ -411,7 +432,7 @@ impl std::fmt::Debug for StreamingVerifier {
 impl StreamingVerifier {
     /// Authenticate the seed and initialize the chunk chain.
     /// # Errors
-    /// Returns seed signature or header validation failures.
+    /// Returns seed signature/header validation or MAC provider initialization failures.
     pub fn new(
         parts: &http::request::Parts,
         provider: &dyn CredentialProvider,
@@ -421,7 +442,7 @@ impl StreamingVerifier {
         let parsed = parse_authorization_header(&header)?;
         let secret = provider.get_secret_key(&parsed.access_key_id)?;
         Ok(Self {
-            key: derive_signing_key(&secret, &parsed.date, &parsed.region, &parsed.service),
+            key: derive_signing_key(&secret, &parsed.date, &parsed.region, &parsed.service)?,
             timestamp: extract_header_value(parts, "x-amz-date")?,
             scope: format!(
                 "{}/{}/{}/aws4_request",
@@ -433,7 +454,8 @@ impl StreamingVerifier {
 
     /// Verify a data chunk, including the final zero-size chunk.
     /// # Errors
-    /// Rejects a missing, malformed or mismatching chunk signature.
+    /// Rejects a missing, malformed or mismatching chunk signature, or MAC provider
+    /// initialization failure. Failure leaves the previous signature unchanged.
     pub fn verify_chunk(&mut self, actual_sha256: &str, signature: &str) -> Result<(), AuthError> {
         let text = format!(
             "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
@@ -448,7 +470,8 @@ impl StreamingVerifier {
 
     /// Verify the canonical declared trailer block after the terminal chunk.
     /// # Errors
-    /// Returns an error if the trailer signature does not match.
+    /// Returns an error if the trailer signature does not match or MAC provider
+    /// initialization fails. Failure leaves the previous signature unchanged.
     pub fn verify_trailer(&mut self, canonical: &str, signature: &str) -> Result<(), AuthError> {
         let text = format!(
             "AWS4-HMAC-SHA256-TRAILER\n{}\n{}\n{}\n{}",
@@ -461,7 +484,7 @@ impl StreamingVerifier {
     }
 
     fn verify_next(&mut self, text: &str, signature: &str) -> Result<(), AuthError> {
-        let expected = compute_signature(&self.key, text);
+        let expected = compute_signature(&self.key, text)?;
         if !bool::from(expected.as_bytes().ct_eq(signature.as_bytes())) {
             return Err(AuthError::SignatureDoesNotMatch);
         }
@@ -537,10 +560,11 @@ fn collect_signed_headers<'a>(
 }
 
 /// Compute HMAC-SHA256 and return the raw bytes.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can accept keys of any length");
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, AuthError> {
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|source| AuthError::CryptoInitialization { source })?;
     mac.update(data);
-    mac.finalize().into_bytes().to_vec()
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 /// Compute the SHA-256 hash of the given payload and return it as a hex string.
@@ -585,10 +609,26 @@ mod tests {
     }
 
     #[test]
-    fn test_should_derive_signing_key_matching_aws_test_vector() {
-        let key = derive_signing_key(TEST_SECRET_KEY, TEST_DATE, TEST_REGION, TEST_SERVICE);
-        // The signing key itself is not published as hex in the AWS docs,
-        // but we can verify it produces the correct signature when used.
+    fn test_should_match_rfc4231_sha256_vectors_with_short_and_long_keys() {
+        // https://www.rfc-editor.org/rfc/rfc4231.html sections 4.2 and 4.7.
+        assert_eq!(
+            compute_signature(&[0x0b; 20], "Hi There").unwrap(),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            compute_signature(
+                &[0xaa; 131],
+                "Test Using Larger Than Block-Size Key - Hash Key First"
+            )
+            .unwrap(),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn test_should_derive_a_32_byte_signing_key() {
+        let key =
+            derive_signing_key(TEST_SECRET_KEY, TEST_DATE, TEST_REGION, TEST_SERVICE).unwrap();
         assert_eq!(key.len(), 32); // SHA-256 produces 32 bytes
     }
 
@@ -651,7 +691,8 @@ mod tests {
     #[test]
     fn test_should_compute_correct_signature_for_aws_get_object_example() {
         // Full end-to-end test using the AWS GET Object example.
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, TEST_DATE, TEST_REGION, TEST_SERVICE);
+        let signing_key =
+            derive_signing_key(TEST_SECRET_KEY, TEST_DATE, TEST_REGION, TEST_SERVICE).unwrap();
 
         #[rustfmt::skip]
         let string_to_sign = "AWS4-HMAC-SHA256\n\
@@ -659,7 +700,7 @@ mod tests {
                               20130524/us-east-1/s3/aws4_request\n\
                               7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972";
 
-        let signature = compute_signature(&signing_key, string_to_sign);
+        let signature = compute_signature(&signing_key, string_to_sign).unwrap();
         assert_eq!(
             signature,
             "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
@@ -684,9 +725,10 @@ mod tests {
             &hash_payload(canonical.as_bytes()),
         );
         let signature = compute_signature(
-            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3").unwrap(),
             &text,
-        );
+        )
+        .unwrap();
         parts.headers.insert(
             "authorization",
             format!(
@@ -766,7 +808,7 @@ mod tests {
             hash_payload(b""),
             digest
         );
-        let signature = compute_signature(&verifier.key, &text);
+        let signature = compute_signature(&verifier.key, &text).unwrap();
         assert!(
             verifier
                 .verify_chunk(&hash_payload(b"wrong"), &signature)
@@ -877,9 +919,10 @@ mod tests {
             &hash_payload(canonical.as_bytes()),
         );
         let signature = compute_signature(
-            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3").unwrap(),
             &string_to_sign,
-        );
+        )
+        .unwrap();
 
         let auth_value = format!(
             "AWS4-HMAC-SHA256 \
@@ -929,9 +972,10 @@ mod tests {
             &hash_payload(canonical.as_bytes()),
         );
         let signature = compute_signature(
-            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", service),
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", service).unwrap(),
             &string_to_sign,
-        );
+        )
+        .unwrap();
         let auth_value = format!(
             "AWS4-HMAC-SHA256 \
              Credential={TEST_ACCESS_KEY}/20130524/us-east-1/{service}/aws4_request,\
@@ -1067,9 +1111,10 @@ mod tests {
             &hash_payload(canonical.as_bytes()),
         );
         let signature = compute_signature(
-            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3"),
+            &derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3").unwrap(),
             &string_to_sign,
-        );
+        )
+        .unwrap();
 
         let auth_value = format!(
             "AWS4-HMAC-SHA256 \

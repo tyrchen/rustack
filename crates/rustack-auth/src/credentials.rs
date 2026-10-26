@@ -44,7 +44,7 @@ pub struct StaticCredentialProvider {
 }
 
 impl StaticCredentialProvider {
-    /// Create a new `StaticCredentialProvider` from an iterable of (access_key_id, secret_key)
+    /// Create a new `StaticCredentialProvider` from an iterable of (`access_key_id`, `secret_key`)
     /// pairs.
     pub fn new(credentials: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {

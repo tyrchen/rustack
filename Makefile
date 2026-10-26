@@ -289,6 +289,16 @@ test-lambda-runtime:
 
 .PHONY: test-json-boundaries test-lambda-runtime
 
+# Strict production-library boundary gate; unit, integration and doctest regressions.
+test-lambda-boundaries:
+	@cargo test -p rustack-auth -p rustack-core -p rustack-lambda-model -p rustack-lambda-http -p rustack-lambda-core -p rustack-lambda-runtime
+	@cargo clippy -p rustack-auth -p rustack-core -p rustack-lambda-model -p rustack-lambda-http -p rustack-lambda-core -p rustack-lambda-runtime --lib --no-deps -- \
+		-D warnings -W clippy::pedantic -W clippy::missing_errors_doc \
+		-W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used \
+		-W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: test-lambda-boundaries
+
 # Real-execution Lambda invoke tests (native backend).
 # Builds a Rust bootstrap fixture and invokes it through the rustack provider.
 test-lambda-invoke-native:

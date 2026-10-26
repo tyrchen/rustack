@@ -1,6 +1,6 @@
 //! AWS Signature Version 2 verification.
 //!
-//! SigV2 is an older signing mechanism that uses HMAC-SHA1. The `Authorization`
+//! `SigV2` is an older signing mechanism that uses HMAC-SHA1. The `Authorization`
 //! header has the format:
 //!
 //! ```text
@@ -30,18 +30,18 @@ use crate::{credentials::CredentialProvider, error::AuthError, sigv4::AuthResult
 
 type HmacSha1 = Hmac<Sha1>;
 
-/// Check whether the `Authorization` header uses SigV2 format (`AWS AKID:sig`).
+/// Check whether the `Authorization` header uses `SigV2` format (`AWS AKID:sig`).
 #[must_use]
 pub fn is_sigv2(auth_header: &str) -> bool {
     auth_header.starts_with("AWS ") && !auth_header.starts_with("AWS4-")
 }
 
-/// Verify an AWS SigV2-signed HTTP request.
+/// Verify an AWS `SigV2`-signed HTTP request.
 ///
 /// # Errors
 ///
 /// Returns an [`AuthError`] if the header is malformed, the access key is not
-/// found, or the signature does not match.
+/// found, the MAC provider rejects initialization, or the signature does not match.
 pub fn verify_sigv2(
     parts: &http::request::Parts,
     credential_provider: &dyn CredentialProvider,
@@ -63,7 +63,7 @@ pub fn verify_sigv2(
 
     debug!("Built SigV2 string to sign");
 
-    let expected_signature = compute_sigv2_signature(&secret_key, &string_to_sign);
+    let expected_signature = compute_sigv2_signature(&secret_key, &string_to_sign)?;
 
     if provided_signature
         .as_bytes()
@@ -83,7 +83,7 @@ pub fn verify_sigv2(
     }
 }
 
-/// Parse a SigV2 `Authorization` header: `AWS AKID:Signature`.
+/// Parse a `SigV2` `Authorization` header: `AWS AKID:Signature`.
 fn parse_sigv2_header(header: &str) -> Result<(String, String), AuthError> {
     let rest = header
         .strip_prefix("AWS ")
@@ -98,7 +98,7 @@ fn parse_sigv2_header(header: &str) -> Result<(String, String), AuthError> {
     Ok((access_key_id.to_owned(), signature.to_owned()))
 }
 
-/// Build the SigV2 string to sign from the request parts.
+/// Build the `SigV2` string to sign from the request parts.
 ///
 /// ```text
 /// HTTP-Verb + "\n" +
@@ -126,7 +126,7 @@ fn build_string_to_sign(parts: &http::request::Parts) -> String {
     format!("{method}\n{content_md5}\n{content_type}\n{date}\n{amz_headers}{resource}")
 }
 
-/// Build the CanonicalizedAmzHeaders string.
+/// Build the `CanonicalizedAmzHeaders` string.
 ///
 /// All x-amz-* headers are lowercased, sorted, and joined with newlines.
 /// Each header is formatted as `name:value\n`.
@@ -155,7 +155,7 @@ fn build_canonicalized_amz_headers(parts: &http::request::Parts) -> String {
     result
 }
 
-/// Build the CanonicalizedResource string.
+/// Build the `CanonicalizedResource` string.
 ///
 /// This is the URI path plus any sub-resource query parameters (sorted).
 fn build_canonicalized_resource(parts: &http::request::Parts) -> String {
@@ -228,13 +228,13 @@ fn build_canonicalized_resource(parts: &http::request::Parts) -> String {
     }
 }
 
-/// Compute the SigV2 signature: Base64(HMAC-SHA1(secret, string_to_sign)).
-fn compute_sigv2_signature(secret_key: &str, string_to_sign: &str) -> String {
-    let mut mac =
-        HmacSha1::new_from_slice(secret_key.as_bytes()).expect("HMAC can accept any key length");
+/// Compute the `SigV2` signature: Base64(HMAC-SHA1(secret, `string_to_sign`)).
+fn compute_sigv2_signature(secret_key: &str, string_to_sign: &str) -> Result<String, AuthError> {
+    let mut mac = HmacSha1::new_from_slice(secret_key.as_bytes())
+        .map_err(|source| AuthError::CryptoInitialization { source })?;
     mac.update(string_to_sign.as_bytes());
     let result = mac.finalize().into_bytes();
-    BASE64.encode(result)
+    Ok(BASE64.encode(result))
 }
 
 /// Extract a header value as a string, returning empty string if missing.
@@ -285,11 +285,26 @@ mod tests {
     }
 
     #[test]
+    fn test_should_match_rfc2202_sha1_vectors() {
+        // https://www.rfc-editor.org/rfc/rfc2202.html section 3, cases 1 and 2.
+        let first = compute_sigv2_signature(&"\u{b}".repeat(20), "Hi There").unwrap();
+        assert_eq!(
+            hex::encode(BASE64.decode(first).unwrap()),
+            "b617318655057264e28bc0b6fb378c8ef146be00"
+        );
+        let second = compute_sigv2_signature("Jefe", "what do ya want for nothing?").unwrap();
+        assert_eq!(
+            hex::encode(BASE64.decode(second).unwrap()),
+            "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
+        );
+    }
+
+    #[test]
     fn test_should_compute_sigv2_signature() {
-        let sig = compute_sigv2_signature("secret", "data");
+        let sig = compute_sigv2_signature("secret", "data").unwrap();
         assert_ne!(sig, "");
         // Base64(HMAC-SHA1) produces a deterministic output.
-        let sig2 = compute_sigv2_signature("secret", "data");
+        let sig2 = compute_sigv2_signature("secret", "data").unwrap();
         assert_eq!(sig, sig2);
     }
 
@@ -300,7 +315,7 @@ mod tests {
         // Build a simple GET request.
         let date = "Sat, 28 Feb 2026 12:00:00 GMT";
         let string_to_sign = format!("GET\n\n\n{date}\n/test-bucket/");
-        let signature = compute_sigv2_signature(TEST_SECRET_KEY, &string_to_sign);
+        let signature = compute_sigv2_signature(TEST_SECRET_KEY, &string_to_sign).unwrap();
 
         let auth_header = format!("AWS {TEST_ACCESS_KEY}:{signature}");
 

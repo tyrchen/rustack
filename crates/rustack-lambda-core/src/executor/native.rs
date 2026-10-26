@@ -482,7 +482,14 @@ where
         match reader.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                buf.lock().push(&chunk[..n]);
+                let Some(bytes) = chunk.get(..n) else {
+                    warn!(
+                        stream = label,
+                        "lambda runtime reader returned an invalid byte count"
+                    );
+                    break;
+                };
+                buf.lock().push(bytes);
                 debug!(stream = label, bytes = n, "lambda runtime output");
             }
             Err(e) => {

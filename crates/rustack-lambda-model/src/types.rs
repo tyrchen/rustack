@@ -97,7 +97,7 @@ pub enum PackageType {
 /// Function architecture.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Architecture {
-    /// x86_64 architecture.
+    /// `x86_64` architecture.
     #[serde(rename = "x86_64")]
     #[default]
     X86_64,
@@ -425,7 +425,7 @@ pub struct LoggingConfig {
     pub log_group: Option<String>,
 }
 
-/// SnapStart configuration (stored, not enforced).
+/// `SnapStart` configuration (stored, not enforced).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct SnapStart {
@@ -434,7 +434,7 @@ pub struct SnapStart {
     pub apply_on: Option<String>,
 }
 
-/// SnapStart response.
+/// `SnapStart` response.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SnapStartResponse {
@@ -627,7 +627,7 @@ pub struct FunctionConfiguration {
     /// Logging configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart response.
+    /// `SnapStart` response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_start: Option<SnapStartResponse>,
     /// Image configuration response.

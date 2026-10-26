@@ -248,9 +248,10 @@ mod tests {
                 &rustack_auth::hash_payload(canonical.as_bytes()),
             );
             let signature = compute_signature(
-                &derive_signing_key("secret", "20260101", "us-east-1", "sqs"),
+                &derive_signing_key("secret", "20260101", "us-east-1", "sqs").unwrap(),
                 &text,
-            );
+            )
+            .unwrap();
             request.headers_mut().insert(
                 "authorization",
                 format!(

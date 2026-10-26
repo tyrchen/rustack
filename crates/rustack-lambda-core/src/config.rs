@@ -50,6 +50,11 @@ impl LambdaConfig {
     /// - `LAMBDA_IDLE_TIMEOUT_SECS` (default: `600`)
     /// - `LAMBDA_INIT_TIMEOUT_SECS` (default: `5`)
     /// - `LAMBDA_SQUIB_*` variables documented by [`SquibExecutorConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed environment values, invalid budgets, unavailable Docker selection,
+    /// conflicting executor settings or invalid Squib configuration.
     pub fn from_env() -> Result<Self, crate::error::LambdaServiceError> {
         Self::from_lookup(|key| match rustack_core::settings::var(key) {
             Ok(value) => Some(value),
@@ -59,6 +64,11 @@ impl LambdaConfig {
     }
 
     /// Parse an explicit environment lookup without changing process globals.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed scalar values, invalid budgets/identifiers, conflicting executor
+    /// settings, unavailable Docker selection or invalid Squib configuration.
     pub fn from_lookup(
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, crate::error::LambdaServiceError> {

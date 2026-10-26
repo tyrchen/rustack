@@ -71,7 +71,7 @@ pub struct CreateFunctionInput {
     /// Logging configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart configuration.
+    /// `SnapStart` configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_start: Option<SnapStart>,
     /// Code signing config ARN (stored, not enforced).
@@ -164,7 +164,7 @@ pub struct UpdateFunctionConfigurationInput {
     /// Logging configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart configuration.
+    /// `SnapStart` configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_start: Option<SnapStart>,
 }
@@ -313,7 +313,7 @@ pub struct PublishLayerVersionInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CreateEventSourceMappingInput {
-    /// ARN of the event source (e.g., SQS queue, DynamoDB stream, Kinesis stream).
+    /// ARN of the event source (e.g., SQS queue, `DynamoDB` stream, Kinesis stream).
     pub event_source_arn: String,
     /// Function name or ARN.
     pub function_name: String,

@@ -206,6 +206,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Pinned by:** [runtime §2.12](./rustack-workflows-20-lambda-runtime-design.md#212-side-effect-free-code-validation-and-bounded-deployment-json), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date:** 2026-10-25.
 
+## D26 — Propagate cryptographic initialization errors through signing APIs
+
+- **Context:** strict production checks expose two HMAC expect calls on a formally fallible provider API; authentication is part of the Lambda gateway dependency boundary.
+- **Alternatives considered:** retaining panic/adding lint ignores violates the boundary contract; fabricating a signature or interpreting an initialization failure as a mismatch hides infrastructure failure; hand-rolling key normalization solely to obtain an infallible constructor duplicates cryptographic logic.
+- **Decision:** keep RustCrypto HMAC0.13/digest0.11 computations, return typed CryptoInitialization with its InvalidLength source, and make public derive_signing_key/compute_signature return Result. Update callers/examples directly; provide no deprecated infallible shim. Header/presigned/streaming verifiers propagate failure before comparison/fallback or chain advancement.
+- **Why:** no request/key can reach an explicit panic, source errors remain available without embedding credentials, and successful signatures retain their published-vector semantics. Existing S3-only normalized-fallback eligibility and constant-time comparison remain intact.
+- **Pinned by:** [runtime §7.1](./rustack-workflows-20-lambda-runtime-design.md#71-strict-production-boundary-closure-b03), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25. This is an internal-library API migration for direct consumers, not a new AWS wire mode or a dependency upgrade.
+
 ## Glossary
 
 | Term | Meaning in this specification |

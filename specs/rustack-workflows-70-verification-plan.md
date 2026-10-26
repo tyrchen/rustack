@@ -94,6 +94,8 @@ Retained deployment ownership (§2.11) now has19 additional actor/provider cases
 
 The deployment decoder (§2.12) has exact-limit, escaped/duplicate-key, wrong-path blob, malformed/unknown-field and depth/member/string/key/metadata tests. Inline base64 covers canonical padding and the exact50MiB decoded boundary without allocation of decoded bytes. Capacity remains owned after waiter cancellation and after a result becomes ready; four concurrent admitted inline validators reuse permits. Worker panic releases capacity and surfaces a bounded error; capacity429 must not be downgraded to400. Current395 core tests and101 doctests pass; workspace2,072 tests pass,401 resource-gated cases remain separately selected.
 
+`make test-lambda-boundaries` runs unit/integration/doctest regressions and strict production-library Clippy for authentication, shared core, Lambda model/HTTP/core and shared runtime. Require pedantic, missing Errors docs, doc formatting, unwrap/expect, indexing/slicing and panic checks without new ignores. Current catalog has659 unit tests and165 doctests (824 passes); seven Docker cases remain resource-gated and must run via their explicit real-daemon targets for executor qualification. Four fixed RFC2202/RFC4231 HMAC vectors complement existing signature/query/streaming regressions; changing signing helpers to Result must preserve every computed output and propagate provider errors rather than treating them as mismatches. This closes B03 for these production libraries, not every repository test or service.
+
 ## 4. Security acceptance
 
 | Boundary | Required proof |

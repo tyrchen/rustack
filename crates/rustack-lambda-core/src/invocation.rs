@@ -224,7 +224,7 @@ impl InvocationHandle {
     /// Request cancellation and await confirmed cleanup, independently of the call deadline.
     ///
     /// # Errors
-    /// Returns CleanupFailed when the cleanup waiter expires or settlement is uncertain.
+    /// Returns `CleanupFailed` when the cleanup waiter expires or settlement is uncertain.
     /// Cleanup remains owned after this method returns an error or is dropped.
     ///
     /// ```no_run

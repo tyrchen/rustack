@@ -495,6 +495,11 @@ impl RustackLambda {
     ///
     /// Validates the input, stores the deployment package, and inserts
     /// the function record into the store.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid deployment settings, duplicate functions, unavailable image execution,
+    /// exhausted deployment admission, or ZIP/S3 staging and storage failures.
     #[allow(clippy::too_many_lines)]
     pub async fn create_function(
         &self,
@@ -717,6 +722,11 @@ impl RustackLambda {
     }
 
     /// Get function information including configuration, code location, and tags.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references or qualifiers, and missing functions, versions or
+    /// aliases.
     pub fn get_function(
         &self,
         function_ref: &str,
@@ -758,6 +768,11 @@ impl RustackLambda {
     }
 
     /// Get function configuration only.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references or qualifiers, and missing functions, versions or
+    /// aliases.
     pub fn get_function_configuration(
         &self,
         function_ref: &str,
@@ -775,6 +790,10 @@ impl RustackLambda {
     }
 
     /// Get the code signing config association for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references and missing functions.
     pub fn get_function_code_signing_config(
         &self,
         function_ref: &str,
@@ -789,6 +808,13 @@ impl RustackLambda {
     }
 
     /// Update function code.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid or immutable references, incompatible code sources/settings, stale
+    /// revisions, in-progress deployments or unavailable/exhausted image preparation. ZIP/S3
+    /// staging and validation failures propagate; `DryRun` preserves metadata and performs no
+    /// deployment effects.
     pub async fn update_function_code(
         &self,
         function_ref: &str,
@@ -898,6 +924,11 @@ impl RustackLambda {
     }
 
     /// Update function configuration (handler, runtime, env vars, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid or immutable references/settings, stale revisions, in-progress deployments,
+    /// missing functions or changes that violate the stored execution configuration.
     pub fn update_function_configuration(
         &self,
         function_ref: &str,
@@ -984,6 +1015,12 @@ impl RustackLambda {
     }
 
     /// Delete a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references, nonnumeric deletion qualifiers, missing functions/versions,
+    /// or artifact-root preflight failures. Final cleanup revalidates the root and can fail
+    /// after metadata removal if the root changes or filesystem inspection fails.
     pub async fn delete_function(
         &self,
         function_ref: &str,
@@ -1068,7 +1105,7 @@ impl RustackLambda {
     ///
     /// # Errors
     /// Rejects invalid payload/reference, missing resources, unavailable execution,
-    /// exhausted capacity and mapped backend errors. DryRun starts no runtime.
+    /// exhausted capacity and mapped backend errors. `DryRun` starts no runtime.
     pub async fn invoke(
         &self,
         function_ref: &str,
@@ -1301,6 +1338,11 @@ impl RustackLambda {
     // ---------------------------------------------------------------
 
     /// Publish a version from `$LATEST`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references, missing functions, stale revision/hash preconditions,
+    /// unsuccessful deployments, unavailable image leases or invalid stored publication settings.
     pub fn publish_version(
         &self,
         function_ref: &str,
@@ -1354,6 +1396,10 @@ impl RustackLambda {
     }
 
     /// List versions of a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references and missing functions.
     pub fn list_versions_by_function(
         &self,
         function_ref: &str,
@@ -1395,6 +1441,11 @@ impl RustackLambda {
     }
 
     /// Create an alias.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references, missing functions, duplicate aliases, invalid target versions
+    /// or targets that do not exist; invalid resulting store records also reject.
     pub fn create_alias(
         &self,
         function_ref: &str,
@@ -1464,6 +1515,10 @@ impl RustackLambda {
     }
 
     /// Get an alias.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references, missing functions and missing aliases.
     pub fn get_alias(
         &self,
         function_ref: &str,
@@ -1507,6 +1562,11 @@ impl RustackLambda {
     }
 
     /// Update an alias.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references, missing functions/aliases, invalid target versions
+    /// or targets that do not exist; invalid resulting store records also reject.
     pub fn update_alias(
         &self,
         function_ref: &str,
@@ -1582,6 +1642,10 @@ impl RustackLambda {
     }
 
     /// Delete an alias.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references, missing functions and missing aliases.
     pub fn delete_alias(
         &self,
         function_ref: &str,
@@ -1603,6 +1667,10 @@ impl RustackLambda {
     }
 
     /// List aliases for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references and missing functions.
     pub fn list_aliases(
         &self,
         function_ref: &str,
@@ -1667,6 +1735,11 @@ impl RustackLambda {
     // ---------------------------------------------------------------
 
     /// Add a permission to a function's resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions, missing required permission
+    /// fields or duplicate statement IDs; store validation failures also propagate.
     pub fn add_permission(
         &self,
         function_ref: &str,
@@ -1743,6 +1816,10 @@ impl RustackLambda {
     }
 
     /// Remove a permission from a function's resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and absent statement IDs.
     pub fn remove_permission(
         &self,
         function_ref: &str,
@@ -1770,6 +1847,10 @@ impl RustackLambda {
     }
 
     /// Get the resource policy for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and empty resource policies.
     pub fn get_policy(
         &self,
         function_ref: &str,
@@ -1815,6 +1896,11 @@ impl RustackLambda {
     }
 
     /// Tag a resource.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed resource references, missing functions, a merged tag count above50,
+    /// or resulting records that fail store validation.
     pub fn tag_resource(
         &self,
         resource_arn: &str,
@@ -1843,6 +1929,10 @@ impl RustackLambda {
     }
 
     /// Remove tags from a resource.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed resource references, missing functions and store validation failures.
     pub fn untag_resource(
         &self,
         resource_arn: &str,
@@ -1860,6 +1950,10 @@ impl RustackLambda {
     }
 
     /// List tags for a resource.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed resource references and missing functions.
     pub fn list_tags(&self, resource_arn: &str) -> Result<ListTagsOutput, LambdaServiceError> {
         let name = Self::extract_function_name_from_arn(resource_arn)?;
         let record = self.get_record(&name)?;
@@ -1899,6 +1993,11 @@ impl RustackLambda {
     // ---------------------------------------------------------------
 
     /// Create a function URL configuration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions, duplicate URL configurations
+    /// or resulting records that fail store validation.
     pub fn create_function_url_config(
         &self,
         function_ref: &str,
@@ -1966,6 +2065,10 @@ impl RustackLambda {
     }
 
     /// Get function URL configuration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and absent URL configurations.
     pub fn get_function_url_config(
         &self,
         function_ref: &str,
@@ -2001,6 +2104,11 @@ impl RustackLambda {
     }
 
     /// Update function URL configuration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions, absent URL configurations
+    /// or resulting records that fail store validation.
     pub fn update_function_url_config(
         &self,
         function_ref: &str,
@@ -2054,6 +2162,10 @@ impl RustackLambda {
     }
 
     /// Delete function URL configuration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and absent URL configurations.
     pub fn delete_function_url_config(
         &self,
         function_ref: &str,
@@ -2080,6 +2192,10 @@ impl RustackLambda {
     }
 
     /// List function URL configurations.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references and missing functions.
     pub fn list_function_url_configs(
         &self,
         function_ref: &str,
@@ -2114,6 +2230,11 @@ impl RustackLambda {
     // ---------------------------------------------------------------
 
     /// Publish a new layer version.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized layer names, oversized license text, invalid inline base64,
+    /// or a layer version that disappears before its assigned metadata is updated.
     pub fn publish_layer_version(
         &self,
         layer_name: &str,
@@ -2213,6 +2334,10 @@ impl RustackLambda {
     }
 
     /// Get a specific layer version.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidParameter` when the requested layer version does not exist.
     pub fn get_layer_version(
         &self,
         layer_name: &str,
@@ -2229,6 +2354,10 @@ impl RustackLambda {
     }
 
     /// Get a layer version by its full ARN.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed layer-version ARNs and missing layer versions.
     pub fn get_layer_version_by_arn(
         &self,
         arn: &str,
@@ -2238,6 +2367,10 @@ impl RustackLambda {
     }
 
     /// List versions of a layer.
+    ///
+    /// # Errors
+    ///
+    /// This implementation returns no errors; an unknown layer produces an empty page.
     pub fn list_layer_versions(
         &self,
         layer_name: &str,
@@ -2355,6 +2488,10 @@ impl RustackLambda {
     }
 
     /// Delete a layer version.
+    ///
+    /// # Errors
+    ///
+    /// This implementation returns no errors; deleting an absent version succeeds.
     pub fn delete_layer_version(
         &self,
         layer_name: &str,
@@ -2367,6 +2504,10 @@ impl RustackLambda {
     }
 
     /// Add a permission to a layer version's resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing required fields, duplicate statement IDs or missing layer versions.
     pub fn add_layer_version_permission(
         &self,
         layer_name: &str,
@@ -2444,6 +2585,10 @@ impl RustackLambda {
     }
 
     /// Get the resource policy for a layer version.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing layer versions and empty layer resource policies.
     pub fn get_layer_version_policy(
         &self,
         layer_name: &str,
@@ -2490,6 +2635,10 @@ impl RustackLambda {
     }
 
     /// Remove a permission from a layer version's resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing layer versions and absent statement IDs.
     pub fn remove_layer_version_permission(
         &self,
         layer_name: &str,
@@ -2793,6 +2942,10 @@ impl RustackLambda {
     // -----------------------------------------------------------------
 
     /// Put (set) reserved concurrency for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references, missing functions and store validation failures.
     pub fn put_function_concurrency(
         &self,
         function_ref: &str,
@@ -2811,6 +2964,10 @@ impl RustackLambda {
     }
 
     /// Get reserved concurrency for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references and missing functions.
     pub fn get_function_concurrency(
         &self,
         function_ref: &str,
@@ -2823,6 +2980,10 @@ impl RustackLambda {
     }
 
     /// Delete reserved concurrency for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references, missing functions and store validation failures.
     pub fn delete_function_concurrency(
         &self,
         function_ref: &str,
@@ -2840,6 +3001,10 @@ impl RustackLambda {
     // -----------------------------------------------------------------
 
     /// Put (create/replace) an event invoke config for a function qualifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and store validation failures.
     pub fn put_function_event_invoke_config(
         &self,
         function_ref: &str,
@@ -2874,6 +3039,11 @@ impl RustackLambda {
     }
 
     /// Get an event invoke config for a function qualifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and absent event invoke
+    /// configurations.
     pub fn get_function_event_invoke_config(
         &self,
         function_ref: &str,
@@ -2897,6 +3067,11 @@ impl RustackLambda {
     }
 
     /// Update (merge) an event invoke config for a function qualifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions or resulting records
+    /// that fail store validation. An absent configuration is created before merging.
     pub fn update_function_event_invoke_config(
         &self,
         function_ref: &str,
@@ -2942,6 +3117,11 @@ impl RustackLambda {
     }
 
     /// Delete an event invoke config for a function qualifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed references/qualifiers, missing functions and store validation failures.
+    /// Deleting an absent event invoke configuration succeeds.
     pub fn delete_function_event_invoke_config(
         &self,
         function_ref: &str,
@@ -2959,6 +3139,10 @@ impl RustackLambda {
     }
 
     /// List all event invoke configs for a function.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed function references and missing functions.
     pub fn list_function_event_invoke_configs(
         &self,
         function_ref: &str,

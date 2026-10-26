@@ -67,6 +67,10 @@ pub struct SquibExecutorConfig {
 
 impl SquibExecutorConfig {
     /// Read Squib executor configuration from environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid paths, instance IDs, ports, timeouts, response limits or run budgets.
     pub fn from_env() -> Result<Self, ExecutorError> {
         Self::from_env_reader(|key| match rustack_core::settings::var(key) {
             Ok(value) => Some(value),

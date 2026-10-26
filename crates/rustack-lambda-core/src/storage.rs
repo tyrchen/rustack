@@ -189,7 +189,7 @@ pub struct VersionRecord {
     pub image_config: Option<ImageConfig>,
     /// Logging configuration.
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart configuration.
+    /// `SnapStart` configuration.
     pub snap_start: Option<SnapStart>,
 }
 
@@ -461,7 +461,7 @@ pub struct LayerStoreSnapshot {
 pub struct EventSourceMappingRecord {
     /// Unique identifier for the mapping.
     pub uuid: String,
-    /// ARN of the event source (e.g., SQS queue, DynamoDB stream).
+    /// ARN of the event source (e.g., SQS queue, `DynamoDB` stream).
     pub event_source_arn: String,
     /// ARN of the target Lambda function.
     pub function_arn: String,
@@ -713,7 +713,7 @@ pub struct VersionRecordSnapshot {
     pub image_config: Option<ImageConfig>,
     /// Logging configuration.
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart configuration.
+    /// `SnapStart` configuration.
     pub snap_start: Option<SnapStart>,
 }
 
@@ -994,12 +994,20 @@ impl FunctionStore {
     }
 
     /// Get a clone of a function record by name.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid logical function name; an absent valid name returns `None`.
     pub fn get(&self, name: &str) -> Result<Option<FunctionRecord>, LambdaServiceError> {
         crate::resolver::FunctionName::parse(name)?;
         Ok(self.functions.get(name).map(|r| r.value().clone()))
     }
 
     /// Check whether a function exists.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid logical function name.
     pub fn contains(&self, name: &str) -> Result<bool, LambdaServiceError> {
         crate::resolver::FunctionName::parse(name)?;
         Ok(self.functions.contains_key(name))
@@ -1087,6 +1095,10 @@ impl FunctionStore {
     /// Remove a function from the store.
     ///
     /// Returns the removed record, or `None` if it did not exist.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid logical function name before changing the store.
     pub fn remove(&self, name: &str) -> Result<Option<FunctionRecord>, LambdaServiceError> {
         crate::resolver::FunctionName::parse(name)?;
         let removed = self.functions.remove(name).map(|(_, v)| v);
@@ -1264,12 +1276,23 @@ impl FunctionStore {
     ///
     /// Immutable artifacts are retained until store drop so published/in-flight
     /// references remain valid. No name-derived directory is ever deleted.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid function name, a symlink/non-directory artifact root, or
+    /// filesystem inspection failures.
     pub async fn cleanup_code(&self, function_name: &str) -> Result<(), LambdaServiceError> {
         crate::resolver::FunctionName::parse(function_name)?;
         self.validate_root().await
     }
 
     /// Check an immutable artifact before handing it to an executor.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unowned artifacts, replaced roots, symlinked artifact components/bootstrap,
+    /// paths outside the root, or filesystem inspection/canonicalization failures.
+    /// An absent bootstrap is accepted here; execution performs its own readiness check.
     pub async fn validate_artifact(&self, path: &Path) -> Result<(), LambdaServiceError> {
         self.validate_root().await?;
         let owned_root = self
@@ -1366,6 +1389,11 @@ impl FunctionStore {
     }
 
     /// Reject a symlink at the operator-selected artifact root.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a symlink/non-directory root or filesystem inspection errors; an absent
+    /// root is valid before first staging.
     pub async fn validate_root(&self) -> Result<(), LambdaServiceError> {
         match tokio::fs::symlink_metadata(&self.code_dir).await {
             Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
@@ -1429,7 +1457,7 @@ const MAX_EXTRACTED_SIZE: u64 = 250 * 1024 * 1024;
 /// and archives whose entries would expand beyond [`MAX_EXTRACTED_SIZE`]
 /// (zip bombs). ZIP and filesystem failures are always returned to the caller.
 ///
-/// Synchronous std::fs is intentional: this runs inside `spawn_blocking` and
+/// Synchronous `std::fs` is intentional: this runs inside `spawn_blocking` and
 /// the `zip` crate's reader API is itself blocking, so wrapping each I/O in
 /// tokio would only add overhead.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]

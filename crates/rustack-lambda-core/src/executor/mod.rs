@@ -94,7 +94,7 @@ pub trait Executor: std::fmt::Debug + Send + Sync + 'static {
     /// Stop all warm instances and release resources.
     ///
     /// # Errors
-    /// Returns CleanupFailed if owned resource cleanup cannot be confirmed.
+    /// Returns `CleanupFailed` if owned resource cleanup cannot be confirmed.
     /// Dropping a shutdown waiter must retain the underlying cleanup operation.
     ///
     /// ```no_run

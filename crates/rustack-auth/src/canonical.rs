@@ -22,7 +22,7 @@ use crate::error::AuthError;
 
 /// The set of characters that must be percent-encoded in URI path segments.
 ///
-/// Per AWS SigV4 spec, all characters except unreserved characters
+/// Per AWS `SigV4` spec, all characters except unreserved characters
 /// (A-Z, a-z, 0-9, `-`, `_`, `.`, `~`) must be encoded.
 /// Forward slashes in the path are preserved (not encoded).
 const URI_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
@@ -116,7 +116,7 @@ pub fn build_canonical_uri(path: &str) -> String {
 /// Parameters are sorted by key name first, then by value for duplicate keys.
 /// The raw query string values are preserved as-is (no decode/re-encode) because
 /// different clients use different encoding rules when signing. For example,
-/// AWS SDKs percent-encode `:` and `*` but minio-java (via OkHttp) leaves them
+/// AWS SDKs percent-encode `:` and `*` but minio-java (via `OkHttp`) leaves them
 /// raw. The server must use the exact same encoding the client used for signing,
 /// which is whatever appears in the HTTP request.
 ///
@@ -187,10 +187,10 @@ pub(crate) fn validate_unique_query_names(query: &str) -> Result<(), AuthError> 
     Ok(())
 }
 
-/// Build the canonical query string following the AWS SigV4 specification.
+/// Build the canonical query string following the AWS `SigV4` specification.
 ///
 /// Each parameter name and value is first percent-decoded (so already-encoded
-/// input is not double-encoded) and then re-encoded using the SigV4 encoding
+/// input is not double-encoded) and then re-encoded using the `SigV4` encoding
 /// rules: every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`,
 /// `_`, `.`, `~`) is percent-encoded with uppercase hex. Parameters are then
 /// sorted by encoded name. Duplicate decoded names are rejected because S3
@@ -209,7 +209,7 @@ pub(crate) fn validate_unique_query_names(query: &str) -> Result<(), AuthError> 
 /// signature collisions where tampered parameters still verify.
 ///
 /// A literal `+` is treated as a literal plus (re-encoded as `%2B`), per the
-/// SigV4 encoding rules. Note that downstream decoders disagree on the
+/// `SigV4` encoding rules. Note that downstream decoders disagree on the
 /// meaning of a raw `+` (S3 decodes a literal plus, API Gateway and Lambda
 /// decode a space), so verification callers must NOT attempt the normalized
 /// fallback when the wire query contains a raw `+`: no single normalized
@@ -275,7 +275,7 @@ pub fn build_canonical_query_string_normalized(query: &str) -> Result<String, Au
 }
 
 /// Percent-decode one query parameter name or value for normalization, then
-/// re-encode it per the SigV4 rules.
+/// re-encode it per the `SigV4` rules.
 ///
 /// A literal `+` is treated as a literal plus (re-encoded as `%2B`). This is
 /// only unambiguous because verification callers skip the normalized fallback
@@ -366,7 +366,7 @@ pub fn build_signed_headers_string(signed_headers: &[&str]) -> String {
     sorted.join(";")
 }
 
-/// Percent-encode a string using the AWS SigV4 encoding rules.
+/// Percent-encode a string using the AWS `SigV4` encoding rules.
 ///
 /// Every character except the unreserved set (`A-Z`, `a-z`, `0-9`, `-`, `_`,
 /// `.`, `~`) is percent-encoded with uppercase hexadecimal digits.
@@ -374,7 +374,7 @@ fn sigv4_encode(input: &str) -> String {
     utf8_percent_encode(input, URI_ENCODE_SET).to_string()
 }
 
-/// URI-encode a single path segment using the AWS SigV4 encoding rules.
+/// URI-encode a single path segment using the AWS `SigV4` encoding rules.
 fn uri_encode(input: &str) -> String {
     sigv4_encode(input)
 }
