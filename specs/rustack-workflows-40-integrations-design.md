@@ -123,7 +123,38 @@ FAILED/TIMED_OUT/ABORTED children fail the parent Task with States.TaskFailed an
 
 The default 128 open-execution limit includes parents and children; nesting depth≤16. **A waiting parent holds no dispatch slot or Lambda permit**, preventing parents from exhausting all capacity required by children. If open-execution admission is exhausted, return ExecutionLimitExceeded rather than queue a child forever. Recursive workflows are allowed within depth/history/duration limits. Retry creates another child attempt; a user-supplied fixed Name still obeys normal idempotency/name-retention rules.
 
-### 4.1 Example: wait for a real child workflow
+### 4.1 Atomic child-execution registry port
+
+Before ASL resource admission is enabled, implement the concrete `ChildExecutionPort` returned by `Registry::child_port()`. It holds a Weak reference to the registry admission state, never an Arc cycle through execution owners. `ChildStartParameters::parse(scope, payload)` immediately validates the exact StateMachineArn/Input/Name fields. Reuse scoped ARN/name newtypes; reject other fields and nonstring Name/ARN. Omitted/null Input becomes `{}`; string Input is validated serialized JSON with original bytes retained, other JSON values are compact encoded. Invalid dynamic parameters map to States.Runtime; input/envelope quota violations map to States.DataLimitExceeded.
+
+`ExecutionSnapshot::child_parent()` yields an opaque capability retaining that exact charged parent record. Registry admission verifies Arc identity against its own retained record, fresh RUNNING state and scope; same-scope records from another registry cannot authorize a child. Accepted commands capture this capability, a deadline clamped to the parent's captured absolute deadline, typed RequestResponse/Sync/Sync2 pattern, cancellation control and independent admission lease. Every execution records a bounded immutable lineage (root depth0, children at most16); owned replay edges also enforce the longest active dependency path≤16. No business Input mutation supplies lineage. A fresh child extends the parent lineage; idempotent RUNNING replay preserves its original identity/lineage. Public names and ordinary Start continue using the existing atomic registration/idempotency rules.
+
+The registry owns a separate bounded child-request lane and retained pending request before entropy work. The root retains its own admission state until joined shutdown, so losing external registry handles does not orphan execution-side requests. Its live child-call ceiling equals the runtime open-execution ceiling; it uses a separate semaphore, never the ordinary command-admission lane or a Task/Lambda dispatch permit. Requests reject saturation rather than waiting forever. At commit, recheck cancellation, absolute deadline, parent identity/liveness and depth. Reserve relation identity and reject self or active dependency-graph cycles before creating an owned edge. Active owned relations form a bounded directed acyclic graph; idempotent replay may join the same RUNNING child, and each owned relation can request cancellation of that selected execution. A graph-cycle attempt is a local States.Runtime safety failure; depth/call/open saturation maps to StepFunctions.ExecutionLimitExceeded. Failed starts publish neither a new record nor a name claim.
+
+Synchronous command transfer returns `ChildSubmission` before awaiting admission. `admitted(&mut self, deadline)` retains its receiver on observer expiry/cancellation and caches the one accepted child or typed rejection, with fresh pre/post observer deadline fences even when the reply was already ready; `into_execution(self)` transfers the unique cancellation owner. Drop/cancel before commit prevents issuance. Drop/cancel after owned commit signals the registry; a lost reply still drops the returned child capability and requests owned cleanup. RequestResponse detaches at acceptance, so later caller/parent loss cannot cancel that child. `ChildExecution` keeps snapshot/terminal/cleanup observations independent and cancellation-safe; observer deadlines never release unsettled ownership. `result()` is pure bounded envelope mapping for an embedding CPU owner, and requires an observed terminal result for Sync/Sync2.
+
+Start and subscription are one non-awaiting registry transaction: install the owned relation before returning a captured watch handle, including when the child already terminated. The registry retains the relation/admission lease until child cleanup is Clean. Notify wakes cancellation promptly; monotonic maintenance checks parent termination and child deadlines without HTTP polling. Propagate cancellation through all owned descendant relations in one bounded graph traversal; detached edges are excluded. Alternate ready ordinary/child intake, allowing at most one child turn before a ready ordinary command. While any UUID worker is retained, continue selecting cancellation notifications, monotonic maintenance and close alongside its join; closed intake must promptly stop roots and reject unissued queued children even before that worker returns. Root shutdown closes both intake lanes, rejects queued child requests, stops/joins all roots through the existing runtime drain, and retains pending/unknown state on failure or observer loss.
+
+Use integer epoch milliseconds from captured accepted/stopped dates for optimized envelopes. Include PascalCase execution/machine ARN, Name/Status, Input/Output and Included details for successful Sync variants. Map unsuccessful child terminal status to States.TaskFailed with bounded JSON ARN/status/error/cause; never flatten a child's timeout into the parent's States.Timeout. Record only actual values; never invent cloud metadata. Validate exact string-versus-JSON/null/raw-input mapping, quotas, dates, foreign/closed parents, replay/collision/cycle/depth/call/open limits, fast completion, lost/cancelled/expired admission observers, detached survival, nested cancellation, retained cleanup and actual Native child execution before using this port in ASL actors. The Native cancel scenario uses a300s relation deadline,3600s parent Wait,900s Lambda timeout and180s handler gate around a30s business scenario, so unrelated clocks cannot masquerade as explicit cancellation. Probe the consumed PID before global cleanup; retain/reap the exact probe process on timeout and exercise that forced-reap path independently. This dependency alone does not enable `.sync` resources or advertise nested service capability.
+
+```text
+┌─ caller / parent observer ────────────────────────────────────────────┐
+│ exact snapshot capability → ChildExecutionPort (Weak admission)        │
+│ ChildSubmission → ChildExecution → result / independent cleanup views │
+└───────────────────┬───────────────────────────────────▲───────────────┘
+                    │ bounded transfer                  │ captured watch
+┌─ retained registry root ───────────────────────────────┴───────────────┐
+│ ordinary lane ⇄ fair intake ⇄ child lane + independent call quota      │
+│ retained pending → UUID worker join ⇄ cancel / deadline / close        │
+│ fresh identity/depth/cycle/control checks → atomic Start + owned edge  │
+│ Notify + maintenance → cancel owned DAG → retain edge until Clean      │
+└───────────────────┬───────────────────────────────────────────────────┘
+                    ▼ runtime owns every root, with no wait dispatch slot
+              child actor → actual Lambda port → retained IO settlement
+RequestResponse detaches at acceptance; unknown joins retain ownership.
+```
+
+### 4.2 Example: wait for a real child workflow
 
 The child can be the image-Lambda machine from the PRD. The parent definition is:
 

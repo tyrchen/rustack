@@ -1,12 +1,17 @@
 //! Immutable shared revisions and captured high-water read views.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant as StdInstant},
+};
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::{sync::OwnedSemaphorePermit, time::Instant};
 
-use super::{ExecutionArn, RegistryError, RoleArn, StateMachineArn, Tags, domain::redacted};
+use super::{
+    ExecutionArn, RegistryError, RoleArn, StateMachineArn, Tags, child::Lineage, domain::redacted,
+};
 use crate::{
     CompiledMachine, ExecutionError, ExecutionFailure, ExecutionHandle, ExecutionView, Payload,
     TaskFailure,
@@ -186,6 +191,8 @@ pub(super) struct ExecutionIdentity {
 }
 redacted!(ExecutionIdentity);
 pub(super) struct ExecutionRecord {
+    pub(super) lineage: Lineage,
+    pub(super) deadline: StdInstant,
     pub(super) identity: ExecutionIdentity,
     pub(super) input: Payload,
     pub(super) revision: Arc<DefinitionRevision>,

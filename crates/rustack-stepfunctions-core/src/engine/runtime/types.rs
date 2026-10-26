@@ -169,13 +169,39 @@ impl ExecutionHandle {
     /// # }
     /// ```
     pub async fn wait(&mut self, deadline: Instant) -> Result<Arc<ExecutionView>, ExecutionError> {
+        self.wait_view(deadline, false).await
+    }
+    /// Await confirmed cleanup independently of committed business termination.
+    ///
+    /// # Errors
+    /// Returns Deadline, Quarantined or Unavailable without cancelling ownership.
+    ///
+    /// ```no_run
+    /// # async fn join(h:&mut rustack_stepfunctions_core::ExecutionHandle,d:tokio::time::Instant){let result=h.wait_cleanup(d).await;}
+    /// ```
+    pub async fn wait_cleanup(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Arc<ExecutionView>, ExecutionError> {
+        self.wait_view(deadline, true).await
+    }
+    async fn wait_view(
+        &mut self,
+        deadline: Instant,
+        cleanup: bool,
+    ) -> Result<Arc<ExecutionView>, ExecutionError> {
         if Instant::now() >= deadline {
             return Err(ExecutionError::Deadline);
         }
         let wait = async {
             loop {
                 let view = self.snapshot();
-                if view.outcome.is_some() {
+                if cleanup && view.cleanup == CleanupState::Quarantined {
+                    return Err(ExecutionError::Quarantined);
+                }
+                if (cleanup && view.cleanup == CleanupState::Clean)
+                    || (!cleanup && view.outcome.is_some())
+                {
                     return Ok::<Arc<ExecutionView>, ExecutionError>(view);
                 }
                 self.view

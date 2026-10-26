@@ -17,6 +17,9 @@ use crate::{
     TaskFailure, TaskResponder, TaskSupport,
 };
 
+#[path = "tests/children.rs"]
+mod children;
+
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }

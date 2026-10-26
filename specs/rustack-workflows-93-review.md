@@ -707,6 +707,24 @@ Final gates: core560 units/226 doctests plus89 compiler/35 frame-effect/22 sched
 
 The completed service gate enables Parallel/Map API execution; nested `.sync`, callbacks, persistence, B06 and final image/platform acceptance remain required. No dependency versions, lint/advisory ignores or Docker experiments change.
 
+## P3 atomic child registry port independent review
+
+Integrations§4.1/D60 implement the concrete child registry dependency. Independent final read-only review reports no remaining finding after all six corrections below. ASL child resources, TaskSubmitted projection and nested service SDK acceptance remain gated.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W166 | P1; `crates/rustack-stepfunctions-core/src/registry/actor.rs`, independent cancellation review | While retaining an entropy join, select child Notify, maintenance and close; stop roots/reject unissued children promptly without losing the CPU worker | A gated UUID worker stays blocked while existing child cancel, child deadline and shutdown each reach terminal/Clean; the root join remains live until gate release |
+| W167 | P2; same actor intake, independent fairness review | Alternate ready ordinary/child lanes, with idempotent cancel wakeups | A continuously ready child lane yields an already accepted ordinary read after at most one child turn |
+| W168 | P2; `registry/child/parameters.rs` and `registry/child/mod.rs`, independent boundary review | Map malformed/scoped ARN/name validation to States.Runtime, preserving distinct service admission errors | Invalid ARN, foreign scope, invalid/null Name, malformed serialized Input and unknown fields all fail through the public Task error mapping |
+| W169 | P2; `registry/child/mod.rs`, independent observer review | Fresh pre/post deadline fences apply even to cached results; retain accepted child or typed rejection on late-ready observation | Paused manual-poll tests cover expired ready success/error, lost waiter and resumed observation without another start |
+| W170 | P2; `apps/rustack/src/stepfunctions_bridge/tests/native.rs`, independent evidence review | Extend relation and parent deadlines beyond the bounded scenario, excluding natural expiry from explicit cancellation proof | Consumed-event child cancellation with relation300s/parent3600s/Lambda900s/gate180s and scenario30s; PID absence precedes global cleanup |
+| W171 | P3; same Native helper, independent probe ownership review | Retain the exact spawned probe through wait timeout, kill and explicit reap; preserve unknown retirement rather than claiming success | An actual60s sleep probe hits its10ms observation timeout, is reaped, and its PID is confirmed absent before the timeout error is accepted |
+| W172 | P2; `registry/child/mod.rs`, self-review | Preserve established DataLimitExceeded classification for typed JSON Bytes/String/Key limits as well as encoded byte exhaustion | Direct typed-error matrix and a real combined Input/Output envelope overflow regression |
+
+Shared admission construction is reused by production and controlled tests. Parent identity/liveness/control/deadline checks refresh again after graph validation at the registration boundary. The weak port, retained root admission, independent child-call permits, OwnerLost distinction and cleanup graph have no remaining independent review finding. Final gates: `make test-stepfunctions-core` passes581 units/243 doctests plus89 compiler/35 frame-effect/22 scheduler/10 asynchronous/19 child/2 controlled preserve_order cases and standard/strict production checks. Feature-enabled workspace build/all-target tests pass3,144 cases with430 separately gated, followed by Clippy, denied-warning rustdoc and nightly formatting. Full/minimal main gates pass77/57 cases with strict production checks. Required Native12 and ordinary SDK/runner3 cases execute with no ignored case. Evidence: `/tmp/rustack-p3-child-{core-final,build-final,workspace-final,clippy-final,docs,format-final,runtime,native-final,sdk}.log`.
+
+No new package versions or lint/advisory ignores are introduced; Tokio test-util is enabled only for deterministic core development tests. Fresh audit scans481 dependencies/1,378 advisories and still fails the unchanged B06 four vulnerabilities with ten warnings. Fresh deny reports advisories FAILED while bans/licenses/sources pass. Evidence: `/tmp/rustack-p3-child-{audit,deny}.log`. B06 remains required before full goal acceptance.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

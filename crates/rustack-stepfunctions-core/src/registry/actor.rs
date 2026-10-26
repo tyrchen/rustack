@@ -2,6 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt,
+    future::pending,
     sync::Arc,
     time::Duration,
 };
@@ -18,12 +20,18 @@ use super::{
     DefinitionRevision, Envelope, ExecutionArn, ExecutionName, ExecutionSnapshot, MachineSnapshot,
     MachineStatus, PreparedDefinition, Profile, RegistryCommand, RegistryError, RegistryLimits,
     RegistryResult, RegistryStatus, Reply, RoleArn, StateMachineArn, TenantScope,
+    child::{
+        ChildError, Lineage, Request,
+        owner::{Inbox as ChildInbox, Owner as ChildOwner},
+    },
     types::{ExecutionIdentity, ExecutionRecord, MachineIdentity, RevisionData, TagAllocation},
 };
 use crate::{
     CleanupState, ClockSample, EvaluationContext, ExecutionDriver, ExecutionError, ExecutionLimits,
     ExecutionSupervisor, Payload, StateSupport, SystemUuidSource, UuidSource,
 };
+
+mod child;
 
 const NAME_RETENTION: Duration = Duration::from_hours(2160);
 struct Resources {
@@ -45,6 +53,7 @@ struct Executions {
     limits: ExecutionLimits,
 }
 struct Io {
+    children: mpsc::Receiver<Request>,
     receiver: mpsc::Receiver<Envelope>,
     closing: watch::Sender<bool>,
     status: watch::Sender<RegistryStatus>,
@@ -54,6 +63,7 @@ struct Io {
     entropy_hook: Option<clock_tests::EntropyHook>,
 }
 struct State {
+    children: ChildOwner,
     resources: Resources,
     executions: Executions,
     runtime: ExecutionSupervisor,
@@ -69,12 +79,20 @@ impl Owner {
         limits: RegistryLimits,
         runtime: ExecutionSupervisor,
         profile: Profile,
-        receiver: mpsc::Receiver<Envelope>,
+        channels: (mpsc::Receiver<Envelope>, ChildInbox),
         closing: watch::Sender<bool>,
         status: watch::Sender<RegistryStatus>,
     ) -> Self {
+        let (
+            receiver,
+            ChildInbox {
+                requests: children,
+                registry,
+            },
+        ) = channels;
         Self {
             state: Some(State {
+                children: ChildOwner::new(registry),
                 resources: Resources {
                     scope,
                     states: profile.states,
@@ -91,6 +109,7 @@ impl Owner {
                 },
                 runtime,
                 io: Io {
+                    children,
                     receiver,
                     closing,
                     status,
@@ -119,6 +138,10 @@ impl Drop for Owner {
         if let Some(mut state) = self.state.take() {
             state.io.closing.send_replace(true);
             state.runtime.close();
+            state.io.children.close();
+            while let Ok(request) = state.io.children.try_recv() {
+                let _sent = request.reply.send(Err(ChildError::Unavailable));
+            }
             state.io.receiver.close();
             while let Ok(envelope) = state.io.receiver.try_recv() {
                 reply(envelope, Err(RegistryError::Unavailable));
@@ -138,9 +161,42 @@ fn reply(envelope: Envelope, result: Result<RegistryResult, RegistryError>) {
 fn uuid() -> Result<String, RegistryError> {
     Ok(SystemUuidSource::default().next_uuid()?.to_string())
 }
+enum Incoming {
+    Command(Option<Envelope>),
+    Child(Option<Request>),
+}
+impl fmt::Debug for Incoming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RegistryIncoming(<redacted>)")
+    }
+}
+async fn receive(
+    commands: &mut mpsc::Receiver<Envelope>,
+    children: &mut mpsc::Receiver<Request>,
+    prefer_child: bool,
+    commands_open: bool,
+    children_open: bool,
+) -> Incoming {
+    if !commands_open && !children_open {
+        return pending().await;
+    }
+    if prefer_child {
+        tokio::select! {biased;
+            request=children.recv(),if children_open=>Incoming::Child(request),
+            command=commands.recv(),if commands_open=>Incoming::Command(command),
+        }
+    } else {
+        tokio::select! {biased;
+            command=commands.recv(),if commands_open=>Incoming::Command(command),
+            request=children.recv(),if children_open=>Incoming::Child(request),
+        }
+    }
+}
 impl State {
     async fn run(&mut self, mut stop: watch::Receiver<bool>) -> Result<(), RegistryError> {
         let mut commands_open = true;
+        let mut children_open = true;
+        let mut prefer_child = false;
         let mut timer = interval(Duration::from_secs(1));
         timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -149,11 +205,16 @@ impl State {
             }
             tokio::select! {biased;
                 _=stop.changed()=>{},
-                envelope=self.io.receiver.recv(),if commands_open=>match envelope{Some(envelope)=>self.dispatch(envelope).await,None=>commands_open=false},
+                ()=self.children.registry.child_wake.notified()=>self.maintain(Instant::now()),
+                input=receive(&mut self.io.receiver,&mut self.io.children,prefer_child,commands_open,children_open)=>match input {
+                    Incoming::Command(envelope)=>{prefer_child=true;match envelope {Some(envelope)=>self.dispatch(envelope).await,None=>commands_open=false}},
+                    Incoming::Child(request)=>{prefer_child=false;match request {Some(request)=>self.dispatch_child(request).await,None=>children_open=false}},
+                },
                 _=timer.tick()=>self.maintain(Instant::now()),
             }
         }
         self.io.closing.send_replace(true);
+        self.close_child_intake();
         self.io.receiver.close();
         while let Some(envelope) = self.io.receiver.recv().await {
             self.dispatch(envelope).await;
@@ -190,15 +251,7 @@ impl State {
                 }
                 Ok(VecDeque::from([uuid()?, uuid()?]))
             });
-            match self.entropy.join_next().await {
-                Some(Ok(Ok(values))) => {
-                    self.io.ready = values;
-                    Ok(())
-                }
-                Some(Ok(Err(error))) => Err(error),
-                Some(Err(error)) => Err(RegistryError::Worker(error)),
-                None => Err(RegistryError::Unavailable),
-            }
+            self.await_entropy().await
         } else {
             Ok(())
         };
@@ -213,6 +266,37 @@ impl State {
                 .and_then(|()| self.command(&envelope.command));
             self.maintain(Instant::now());
             reply(envelope, result);
+        }
+    }
+    fn close_child_intake(&mut self) {
+        self.io.children.close();
+        while let Ok(request) = self.io.children.try_recv() {
+            let _sent = request.reply.send(Err(ChildError::Unavailable));
+        }
+    }
+    async fn await_entropy(&mut self) -> Result<(), RegistryError> {
+        let mut closing = self.io.closing.subscribe();
+        let mut maintenance = interval(Duration::from_secs(1));
+        maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut closed = false;
+        loop {
+            if !closed && *closing.borrow_and_update() {
+                self.runtime.close();
+                self.close_child_intake();
+                self.maintain(Instant::now());
+                closed = true;
+            }
+            tokio::select! { biased;
+                _=closing.changed()=>{},
+                ()=self.children.registry.child_wake.notified()=>self.maintain(Instant::now()),
+                _=maintenance.tick()=>self.maintain(Instant::now()),
+                joined=self.entropy.join_next()=>return match joined {
+                    Some(Ok(Ok(values)))=>{self.io.ready=values;Ok(())},
+                    Some(Ok(Err(error)))=>Err(error),
+                    Some(Err(error))=>Err(RegistryError::Worker(error)),
+                    None=>Err(RegistryError::Unavailable),
+                },
+            }
         }
     }
     fn next_uuid(&mut self) -> Result<String, RegistryError> {
@@ -272,9 +356,13 @@ impl State {
                 });
                 Ok(RegistryResult::Machines(machines))
             }
-            RegistryCommand::Start(arn, name, input, trace) => {
-                self.start(arn, name.as_ref(), input, trace.as_deref())
-            }
+            RegistryCommand::Start(arn, name, input, trace) => self.start(
+                arn,
+                name.as_ref(),
+                input,
+                trace.as_deref(),
+                Lineage::default(),
+            ),
             RegistryCommand::Execution(arn) => {
                 Ok(RegistryResult::Execution(self.snapshot(arn.as_str())?))
             }
@@ -398,6 +486,7 @@ impl State {
         name: Option<&ExecutionName>,
         input: &Payload,
         trace: Option<&str>,
+        lineage: Lineage,
     ) -> Result<RegistryResult, RegistryError> {
         let machine = self.resources.active(arn)?.clone();
         let name = match name {
@@ -441,6 +530,7 @@ impl State {
             ClockSample::new(Instant::now().into_std(), now),
             self.executions.limits,
         )?;
+        let absolute_deadline = driver.deadline();
         // No await between runtime registration and the atomic record/name commit.
         let handle = if structured {
             self.runtime.start_structured(driver)?
@@ -449,6 +539,8 @@ impl State {
         };
         let view = handle.snapshot();
         let record = Arc::new(ExecutionRecord {
+            lineage,
+            deadline: absolute_deadline,
             identity: ExecutionIdentity {
                 arn: arn.clone(),
                 machine: machine.identity,
@@ -474,6 +566,7 @@ impl State {
         }))
     }
     fn maintain(&mut self, now: Instant) {
+        self.children.maintain(now);
         self.runtime.reap_ready();
         self.io.status.send_replace(RegistryStatus {
             ready: self.runtime.is_ready(),
@@ -551,13 +644,14 @@ impl Resources {
 
 #[cfg(test)]
 mod clock_tests {
+    mod children;
     use std::{
         future::{Future, poll_fn},
         task::Poll,
     };
 
     use super::{
-        super::{RegistryCapacities, Tags},
+        super::{Admission, RegistryCapacities, Tags, admission},
         *,
     };
     use crate::{
@@ -586,20 +680,21 @@ mod clock_tests {
             port,
         )
         .unwrap();
-        let (_, receiver) = mpsc::channel(8);
-        let (closing, _) = watch::channel(false);
+        let limits = RegistryLimits::new(capacities, Duration::from_secs(60), 8).unwrap();
+        let Admission { shared, channels } = admission(
+            TenantScope::default(),
+            limits,
+            StateSupport::Sequential,
+            runtime.open_limit(),
+        );
         Owner::new(
             TenantScope::default(),
-            RegistryLimits::new(capacities, Duration::from_secs(60), 8).unwrap(),
+            limits,
             runtime,
             Profile::default(),
-            receiver,
-            closing,
-            watch::channel(RegistryStatus {
-                ready: true,
-                owned_executions: 0,
-            })
-            .0,
+            channels,
+            shared.closing.clone(),
+            shared.status.clone(),
         )
     }
     fn create(state: &mut State, definition: PreparedDefinition) -> StateMachineArn {
@@ -627,6 +722,7 @@ mod clock_tests {
             Some(&name.parse().unwrap()),
             &Payload::parse(b"{}").unwrap(),
             None,
+            Lineage::default(),
         )?
         else {
             panic!("execution")

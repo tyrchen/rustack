@@ -520,3 +520,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: one trusted composition root governs Create/Update/Validate and execution; no client-supplied profile or unimplemented quota is accepted. Independent real SDK structured/lifecycle cases gate eight-state capability reporting.
 - **Pinned by**: [ASL§3.6](./rustack-workflows-30-asl-design.md#36-structured-service-composition-and-capability-binding), [operations budgets](./rustack-workflows-60-operations-design.md#12-tunable-budgets).
 - **Date**: 2026-10-26. Nested jobs/callbacks/persistence and final Docker image/platform gates remain required; Docker work remains deferred by user priority.
+
+## D60 — Atomically start and subscribe to owned child executions without a registry cycle
+
+- **Context**: nested Tasks need fast-child observation, bounded independent waiting and cancellation ownership before ASL admission can be enabled.
+- **Decision**: a Weak registry port transfers a retained child request with an exact parent-record capability. Registry commit validates lineage/cycles and publishes Start plus captured watch/owned relation atomically. An independent child-call pool mirrors the runtime open ceiling and holds no ordinary command/Task/Lambda dispatch permit. Observe business outcome and cleanup separately; detach RequestResponse at acceptance.
+- **Why**: caller loss cannot orphan accepted owned work, subscription cannot miss a fast child, and waiting parents cannot starve child dispatch or metadata/Stop admission. Explicit DAG checks reject idempotent self/ancestor cycles while preserving ordinary replay/name rules.
+- **Pinned by**: [integrations§4.1](./rustack-workflows-40-integrations-design.md#41-atomic-child-execution-registry-port), [nested semantic oracle](../docs/research/spike-stepfunctions-semantic-oracle.md), [AWS nested retry error](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-nested-workflows.html).
+- **Date**: 2026-10-26. Qualify the registry port before ASL child dispatch/history/service SDK integration. Docker remains deferred by user priority.

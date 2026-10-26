@@ -5,7 +5,7 @@ use std::{
     env,
     error::Error,
     path::Path,
-    process,
+    process::{self, ExitStatus, Stdio},
     time::{Duration, SystemTime},
 };
 
@@ -15,13 +15,16 @@ use rustack_lambda_model::input::{
     CreateAliasInput, UpdateAliasInput, UpdateFunctionCodeInput, UpdateFunctionConfigurationInput,
 };
 use rustack_stepfunctions_core::{
-    ExecutionSnapshot, PreparedDefinition, Registry, RegistryCommand, RegistryError,
-    RegistryLimits, RegistryResult, StateSupport, Tags,
+    ChildPattern, ChildStartParameters, ExecutionSnapshot, PreparedDefinition, Registry,
+    RegistryCommand, RegistryError, RegistryLimits, RegistryResult, StateMachineArn, StateSupport,
+    Tags,
 };
 use rustack_stepfunctions_http::{RequestScope, StepFunctionsHttpConfig, StepFunctionsHttpService};
 use tokio::{
     fs,
-    time::{sleep, timeout_at},
+    io::AsyncReadExt,
+    process::{Child, Command},
+    time::{error::Elapsed, sleep, timeout, timeout_at},
 };
 
 use super::*;
@@ -374,16 +377,7 @@ async fn native_e2e_should_cancel_actual_process_on_stop_and_task_timeout() {
                 .len(),
             36
         );
-        let probe = tokio::process::Command::new("/bin/kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .output()
-            .await
-            .unwrap();
-        assert!(
-            !probe.status.success(),
-            "actual Native PID remains present after joined cleanup"
-        );
+        verify_absent_probe(pid).await.unwrap();
         let view = result.unwrap();
         if stop {
             assert!(matches!(
@@ -836,4 +830,267 @@ async fn consumed_invocations(directory: &Path) -> Result<BTreeSet<(u64, String)
         }
         sleep(Duration::from_millis(1)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires actual host bootstrap; run make test-stepfunctions-bridge-native"]
+async fn native_e2e_should_execute_and_cancel_real_child_through_atomic_registry_port()
+-> Result<(), Box<dyn Error>> {
+    for cancel in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let release = directory.path().join("release");
+        let mut fixture = NativeFixture::new(
+            &[
+                ("WORKFLOW_MODE", "1"),
+                ("WORKFLOW_GATE_FILE", release.to_str().ok_or("gate path")?),
+            ],
+            false,
+        )
+        .await;
+        let runtime = ExecutionSupervisor::new(
+            RuntimeLimits::new(8, 1, 4)?,
+            HistoryLimits::default(),
+            256 * 1024 * 1024,
+            Some(fixture.port.clone()),
+        )?;
+        let (registry, mut owner) = Registry::new(
+            TenantScope::default(),
+            RegistryLimits::default(),
+            runtime,
+            ExecutionLimits::default(),
+        )?;
+        let result = match timeout(
+            Duration::from_secs(30),
+            run_native_child_port(&fixture, &registry, &release, cancel),
+        )
+        .await
+        {
+            Ok(Ok(Some(pid))) => verify_absent_probe(pid).await,
+            Ok(Ok(None)) => Ok(()),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(Box::<dyn Error>::from(error)),
+        };
+        let cleanup = owner
+            .shutdown(Instant::now() + Duration::from_secs(15))
+            .await;
+        let released = fs::write(&release, b"release").await;
+        fixture.cleanup().await;
+        cleanup?;
+        released?;
+        result?;
+    }
+    Ok(())
+}
+async fn child_port_machine(
+    registry: &Registry,
+    name: &str,
+    definition: &Value,
+) -> Result<StateMachineArn, Box<dyn Error>> {
+    let compiled = AslCompiler::new(TenantScope::default(), TaskSupport::Lambda)
+        .compile(&serde_json::to_vec(definition)?)?;
+    let result = registry
+        .submit(RegistryCommand::Create(
+            name.parse()?,
+            PreparedDefinition::new(compiled.machine().clone()),
+            "arn:aws:iam::000000000000:role/Workflows".parse()?,
+            Tags::default(),
+        ))?
+        .wait(deadline())
+        .await?;
+    match result {
+        RegistryResult::Machine(machine) => Ok(machine.arn().clone()),
+        _ => Err("machine".into()),
+    }
+}
+async fn run_native_child_port(
+    fixture: &NativeFixture,
+    registry: &Registry,
+    release: &Path,
+    cancel: bool,
+) -> Result<Option<u64>, Box<dyn Error>> {
+    fixture.provider.update_function_configuration(
+        "Worker",
+        &UpdateFunctionConfigurationInput {
+            timeout: Some(900),
+            ..UpdateFunctionConfigurationInput::default()
+        },
+    )?;
+    let parent = child_port_machine(
+        registry,
+        "PortParent",
+        &json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":3600,"End":true}}}),
+    )
+    .await?;
+    let target = child_port_machine(registry, "PortChild", &workflow(false)).await?;
+    let RegistryResult::Execution(parent) = registry
+        .submit(RegistryCommand::Start(
+            parent,
+            Some("parent".parse()?),
+            Payload::parse(b"{}")?,
+            None,
+        ))?
+        .wait(deadline())
+        .await?
+    else {
+        return Err("parent".into());
+    };
+    let parameters = ChildStartParameters::parse(
+        &TenantScope::default(),
+        &Payload::from_value(&json!({"StateMachineArn":target.as_str(),"Input":{"n":21}}))?,
+    )?;
+    let mut submission = registry.child_port().start(
+        parent.child_parent(),
+        parameters,
+        ChildPattern::Sync2,
+        Instant::now() + Duration::from_secs(300),
+    )?;
+    submission.admitted(deadline()).await?;
+    let mut child = submission.into_execution()?;
+    let marker = child_port_marker(fixture).await?;
+    let pid = marker
+        .get("pid")
+        .and_then(Value::as_u64)
+        .filter(|pid| *pid > 1 && *pid != u64::from(process::id()))
+        .ok_or("handler PID")?;
+    let request = marker
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() == 36)
+        .ok_or("request ID")?;
+    if child.snapshot().handle().snapshot().outcome().is_some() {
+        return Err("child completed before consumed gate release".into());
+    }
+    if cancel {
+        child.cancel();
+    } else {
+        fs::write(release, b"release").await?;
+    }
+    child.wait(deadline()).await?;
+    child.wait_cleanup(deadline()).await?;
+    let result = child.result()?;
+    if cancel {
+        let failure = result.err().ok_or("cancelled child succeeded")?;
+        if failure.details().error() != Some("States.TaskFailed") {
+            return Err("child cancellation error class".into());
+        }
+        let cause: Value = serde_json::from_str(failure.details().cause().ok_or("cause")?)?;
+        if cause.get("Status").and_then(Value::as_str) != Some("ABORTED") {
+            return Err("child was not aborted".into());
+        }
+        return Ok(Some(pid));
+    }
+    let result = result.map_err(|_| "child failed")?;
+    let output = result.value().get("Output").ok_or("Output")?;
+    if output.get("computed") != Some(&json!(42))
+        || output.get("pid").and_then(Value::as_u64) != Some(pid)
+        || output.get("request_id").and_then(Value::as_str) != Some(request)
+    {
+        return Err("child result did not match consumed Native invocation".into());
+    }
+    Ok(None)
+}
+
+async fn child_port_marker(fixture: &NativeFixture) -> Result<Value, Box<dyn Error>> {
+    let marker = fixture
+        .directory
+        .as_ref()
+        .ok_or("directory")?
+        .path()
+        .join("invocation.json");
+    timeout_at(deadline(), async {
+        loop {
+            match fs::read(&marker).await {
+                Ok(bytes) => {
+                    if bytes.len() > 1024 {
+                        return Err("marker size".into());
+                    }
+                    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                        return Ok::<_, Box<dyn Error>>(value);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await?
+}
+
+async fn verify_absent_probe(pid: u64) -> Result<(), Box<dyn Error>> {
+    let child = Command::new("/bin/kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let (mut child, status) = reap_probe(child, deadline()).await?;
+    let stderr = child.stderr.take().ok_or("probe stderr")?;
+    let mut text = Vec::new();
+    timeout_at(deadline(), stderr.take(1025).read_to_end(&mut text)).await??;
+    if status.success()
+        || text.len() > 1024
+        || !String::from_utf8_lossy(&text).contains("No such process")
+    {
+        return Err("owned cancellation did not retire consumed PID before global cleanup".into());
+    }
+    Ok(())
+}
+
+async fn reap_probe(
+    mut child: Child,
+    until: Instant,
+) -> Result<(Child, ExitStatus), Box<dyn Error>> {
+    let status = match timeout_at(until, child.wait()).await {
+        Ok(Ok(status)) => status,
+        observed => {
+            let saved: Box<dyn Error> = match observed {
+                Ok(Err(error)) => Box::new(error),
+                Err(error) => Box::new(error),
+                Ok(Ok(_)) => return Err("probe wait invariant".into()),
+            };
+            let killed = child.start_kill();
+            match timeout_at(deadline(), child.wait()).await {
+                Ok(Ok(_)) => {}
+                failed => {
+                    // Unproven helper retirement retains the exact process handle.
+                    let _retained = Box::leak(Box::new(child));
+                    return Err(format!("PID probe retirement unproven: {failed:?}").into());
+                }
+            }
+            killed?;
+            return Err(saved);
+        }
+    };
+    if Instant::now() >= until {
+        return Err("PID probe observation expired after joined exit".into());
+    }
+    Ok((child, status))
+}
+
+#[tokio::test]
+#[ignore = "requires Unix process tools; run make test-stepfunctions-bridge-native"]
+async fn native_e2e_should_kill_and_reap_timed_out_owned_probe_before_returning_error()
+-> Result<(), Box<dyn Error>> {
+    let child = Command::new("/bin/sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let pid = child.id().ok_or("owned probe PID")?;
+    let result = reap_probe(child, Instant::now() + Duration::from_millis(10)).await;
+    verify_absent_probe(u64::from(pid)).await?;
+    let error = result
+        .err()
+        .ok_or("slow probe did not report its observation timeout")?;
+    if error.downcast_ref::<Elapsed>().is_none() {
+        return Err("probe failed without observing its execution timeout".into());
+    }
+    Ok(())
 }

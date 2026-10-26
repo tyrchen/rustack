@@ -7,7 +7,7 @@ use std::{fmt, sync::Arc};
 
 use tokio::{
     runtime::Handle,
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
@@ -17,12 +17,18 @@ use crate::{
 };
 
 mod actor;
+mod child;
 mod domain;
 mod error;
 #[cfg(test)]
 mod tests;
 mod types;
 
+use child::owner::Inbox as ChildInbox;
+pub use child::{
+    ChildError, ChildExecution, ChildExecutionPort, ChildParent, ChildPattern,
+    ChildStartParameters, ChildSubmission,
+};
 pub use domain::{ExecutionArn, ExecutionName, RoleArn, StateMachineArn, StateMachineName, Tags};
 pub use error::RegistryError;
 pub use types::{
@@ -102,6 +108,9 @@ struct Profile {
     states: StateSupport,
 }
 struct Shared {
+    child_sender: mpsc::Sender<child::Request>,
+    child_capacity: Arc<Semaphore>,
+    child_wake: Arc<Notify>,
     scope: TenantScope,
     states: StateSupport,
     sender: mpsc::Sender<Envelope>,
@@ -112,6 +121,46 @@ struct Shared {
 impl fmt::Debug for Shared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("RegistryShared(<redacted>)")
+    }
+}
+#[derive(Debug)]
+struct Admission {
+    shared: Arc<Shared>,
+    channels: (mpsc::Receiver<Envelope>, ChildInbox),
+}
+fn admission(
+    scope: TenantScope,
+    limits: RegistryLimits,
+    support: StateSupport,
+    child_limit: usize,
+) -> Admission {
+    let (sender, receiver) = mpsc::channel(limits.commands);
+    let (child_sender, children) = mpsc::channel(child_limit);
+    let (closing, _) = watch::channel(false);
+    let (status, _) = watch::channel(RegistryStatus {
+        ready: true,
+        owned_executions: 0,
+    });
+    let shared = Arc::new(Shared {
+        child_sender,
+        child_capacity: Arc::new(Semaphore::new(child_limit)),
+        child_wake: Arc::new(Notify::new()),
+        scope,
+        states: support,
+        sender,
+        capacity: Arc::new(Semaphore::new(limits.commands)),
+        closing,
+        status,
+    });
+    Admission {
+        channels: (
+            receiver,
+            ChildInbox {
+                requests: children,
+                registry: shared.clone(),
+            },
+        ),
+        shared,
     }
 }
 /// Admission-independent registry supervisor observation.
@@ -204,20 +253,11 @@ impl Registry {
         support: StateSupport,
     ) -> Result<(Self, RegistrySupervisor), RegistryError> {
         Handle::try_current().map_err(|_| RegistryError::Unavailable)?;
-        let (sender, receiver) = mpsc::channel(limits.commands);
-        let (closing, stop) = watch::channel(false);
-        let (status, _) = watch::channel(RegistryStatus {
-            ready: true,
-            owned_executions: 0,
-        });
-        let shared = Arc::new(Shared {
-            scope: scope.clone(),
-            states: support,
-            sender,
-            capacity: Arc::new(Semaphore::new(limits.commands)),
-            closing: closing.clone(),
-            status: status.clone(),
-        });
+        let Admission { shared, channels } =
+            admission(scope.clone(), limits, support, runtime.open_limit());
+        let closing = shared.closing.clone();
+        let stop = closing.subscribe();
+        let status = shared.status.clone();
         // Install Drop protection before spawn: an unpolled root still owns data.
         let owner = actor::Owner::new(
             scope,
@@ -227,7 +267,7 @@ impl Registry {
                 execution,
                 states: support,
             },
-            receiver,
+            channels,
             closing.clone(),
             status,
         );

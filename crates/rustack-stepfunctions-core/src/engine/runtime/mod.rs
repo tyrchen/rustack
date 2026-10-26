@@ -30,6 +30,7 @@ pub use types::{CleanupState, ExecutionHandle, ExecutionView, RuntimeLimits};
 
 #[derive(Debug)]
 struct Pools {
+    open_limit: usize,
     open: Arc<Semaphore>,
     dispatch: Arc<Semaphore>,
     cpu: Arc<Semaphore>,
@@ -88,6 +89,9 @@ pub struct ExecutionSupervisor {
     state: OwnerState,
 }
 impl ExecutionSupervisor {
+    pub(crate) fn open_limit(&self) -> usize {
+        self.shared.pools.open_limit
+    }
     /// Construct bounded pools/history accounting without spawning or enabling APIs.
     ///
     /// # Errors
@@ -137,6 +141,7 @@ impl ExecutionSupervisor {
                 #[cfg(test)]
                 worker_hook: None,
                 pools: Pools {
+                    open_limit: limits.open,
                     open: Arc::new(Semaphore::new(limits.open)),
                     dispatch: Arc::new(Semaphore::new(limits.dispatch)),
                     cpu: Arc::new(Semaphore::new(limits.cpu)),

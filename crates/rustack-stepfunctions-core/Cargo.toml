@@ -27,5 +27,6 @@ winnow = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 rstest = { workspace = true }
 proptest = { workspace = true }
