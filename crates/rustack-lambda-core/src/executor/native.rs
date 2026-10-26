@@ -5,13 +5,24 @@
 //! match the host. The auto executor keeps macOS Zip functions on Squib and
 //! leaves unsupported image packages for the future Docker backend.
 
-use std::{net::SocketAddr, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    future::poll_fn,
+    net::SocketAddr,
+    path::Path,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use parking_lot::Mutex as PMutex;
 use tokio::{
     io::AsyncReadExt,
     process::Command,
+    runtime::Handle,
     sync::{Semaphore, oneshot, watch},
     task::JoinSet,
 };
@@ -21,7 +32,10 @@ use super::{
     Executor, ExecutorError, InvokeRequest, InvokeResponse,
     instance::{BackendHandle, BackendHandleObj, InstanceBackend, InstancePool, spawn_reaper},
 };
-use crate::artifact::{Architecture, DeploymentArtifact};
+use crate::{
+    artifact::{Architecture, DeploymentArtifact},
+    invocation::{CleanupTask, InvocationContext, Settlement},
+};
 
 /// Native process executor.
 #[derive(Debug)]
@@ -29,16 +43,52 @@ pub struct NativeExecutor {
     pool: Arc<InstancePool>,
     cancel_tx: watch::Sender<bool>,
     reaper: PMutex<Option<tokio::task::JoinHandle<()>>>,
-    processes: Arc<PMutex<JoinSet<()>>>,
+    processes: Arc<NativeProcesses>,
+}
+
+#[derive(Debug)]
+struct NativeProcesses {
+    tasks: PMutex<JoinSet<()>>,
+    cleanup: CleanupTask,
+    accepting: AtomicBool,
+    capacity: Arc<Semaphore>,
+    runtime: Handle,
+}
+
+impl NativeProcesses {
+    fn start_cleanup(self: &Arc<Self>) {
+        let processes = Arc::clone(self);
+        self.cleanup.start_on(&self.runtime, move || async move {
+            let mut failed = false;
+            while let Some(result) =
+                poll_fn(|context| processes.tasks.lock().poll_join_next(context)).await
+            {
+                if result.is_err() {
+                    failed = true;
+                }
+            }
+            if failed {
+                Err(ExecutorError::CleanupFailed(
+                    "Native process supervisor failed".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+    }
 }
 
 impl Drop for NativeExecutor {
     fn drop(&mut self) {
+        self.processes.accepting.store(false, Ordering::Release);
+        self.cancel_tx.send_replace(true);
         self.pool.shutdown();
         if let Some(reaper) = self.reaper.lock().take() {
             reaper.abort();
         }
-        self.processes.lock().abort_all();
+        // Process supervisors retain children, artifact leases and reservations
+        // until exit. Dropping the executor must not abort these owners.
+        self.processes.start_cleanup();
     }
 }
 
@@ -46,10 +96,17 @@ impl NativeExecutor {
     /// Build a new native executor.
     #[must_use]
     pub fn new(max_warm: usize, idle_timeout: Duration, init_timeout: Duration) -> Self {
-        let processes = Arc::new(PMutex::new(JoinSet::new()));
+        let processes = Arc::new(NativeProcesses {
+            tasks: PMutex::new(JoinSet::new()),
+            cleanup: CleanupTask::default(),
+            accepting: AtomicBool::new(true),
+            capacity: Arc::new(Semaphore::new(32)),
+            runtime: Handle::current(),
+        });
+        let (cancel_tx, cancel_rx) = watch::channel(false);
         let backend = Arc::new(NativeBackend {
             processes: Arc::clone(&processes),
-            capacity: Arc::new(Semaphore::new(32)),
+            shutdown: cancel_rx.clone(),
         });
         let pool = Arc::new(InstancePool::new(
             backend,
@@ -57,7 +114,6 @@ impl NativeExecutor {
             idle_timeout,
             init_timeout,
         ));
-        let (cancel_tx, cancel_rx) = watch::channel(false);
         let reaper = spawn_reaper(Arc::clone(&pool), Duration::from_secs(30), cancel_rx);
         Self {
             pool,
@@ -70,16 +126,43 @@ impl NativeExecutor {
 
 #[async_trait]
 impl Executor for NativeExecutor {
-    async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
-        let DeploymentArtifact::Zip(artifact) = &req.artifact else {
+    fn available(&self, request: &InvokeRequest) -> Result<(), ExecutorError> {
+        if !self.processes.accepting.load(Ordering::Acquire) {
+            return Err(ExecutorError::Cancelled);
+        }
+        if !matches!(request.revision.artifact, DeploymentArtifact::Zip(_)) {
+            return Err(ExecutorError::Unsupported(
+                "native backend only supports Zip packages".into(),
+            ));
+        }
+        if request.revision.architecture.as_str() != host_architecture() {
+            return Err(ExecutorError::Unsupported(
+                "native backend requires the host architecture".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn invoke(
+        &self,
+        req: InvokeRequest,
+        context: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
+        self.available(&req)?;
+        context.check()?;
+        let DeploymentArtifact::Zip(artifact) = &req.revision.artifact else {
             return Err(ExecutorError::Unsupported(
                 "native backend only supports Zip packages".into(),
             ));
         };
         let code_root = artifact.code_root();
         let bootstrap = code_root.join("bootstrap");
-        ensure_executable(&bootstrap).await?;
-        if !bootstrap_runs_on_host(&bootstrap, req.architecture).await? {
+        let supported = tokio::select! {
+            biased;
+            reason = context.cancelled() => return Err(reason.error()),
+            result = async { ensure_executable(&bootstrap).await?; bootstrap_runs_on_host(&bootstrap, req.revision.architecture).await } => result?,
+        };
+        if !supported {
             return Err(ExecutorError::Unsupported(format!(
                 "bootstrap {} cannot run on host {}/{}; use docker backend",
                 bootstrap.display(),
@@ -87,44 +170,41 @@ impl Executor for NativeExecutor {
                 std::env::consts::ARCH,
             )));
         }
-        self.pool.invoke(req).await
+        self.pool.invoke(req, context).await
     }
 
-    async fn shutdown(&self) {
-        let _ = self.cancel_tx.send(true);
-        let reaper = self.reaper.lock().take();
-        if let Some(r) = reaper {
-            if let Err(error) = r.await {
-                warn!(%error, "Lambda idle reaper failed");
-            }
-        }
+    async fn shutdown(&self) -> Result<(), ExecutorError> {
+        self.processes.accepting.store(false, Ordering::Release);
+        self.cancel_tx.send_replace(true);
         self.pool.shutdown();
-        let mut processes = std::mem::take(&mut *self.processes.lock());
-        while let Some(result) = processes.join_next().await {
-            if let Err(error) = result {
-                warn!(%error, "Lambda process supervisor failed");
-            }
+        self.processes.start_cleanup();
+        let reaper = self.reaper.lock().take();
+        if let Some(reaper) = reaper {
+            reaper
+                .await
+                .map_err(|_| ExecutorError::CleanupFailed("Native reaper failed".into()))?;
         }
+        self.processes.cleanup.wait().await
     }
 }
 
 #[derive(Debug)]
 struct NativeBackend {
-    processes: Arc<PMutex<JoinSet<()>>>,
-    capacity: Arc<Semaphore>,
+    processes: Arc<NativeProcesses>,
+    shutdown: watch::Receiver<bool>,
 }
 
 #[async_trait]
 impl InstanceBackend for NativeBackend {
     fn has_capacity(&self) -> bool {
-        self.capacity.available_permits() != 0
+        self.processes.capacity.available_permits() != 0
     }
     async fn spawn(
         &self,
         req: &InvokeRequest,
         runtime_api_addr: SocketAddr,
     ) -> Result<BackendHandle, ExecutorError> {
-        let DeploymentArtifact::Zip(artifact) = &req.artifact else {
+        let DeploymentArtifact::Zip(artifact) = &req.revision.artifact else {
             return Err(ExecutorError::Unsupported(
                 "native backend only supports Zip packages".into(),
             ));
@@ -143,6 +223,14 @@ impl InstanceBackend for NativeBackend {
             cmd.env(k, v);
         }
 
+        let permit = Arc::clone(&self.processes.capacity)
+            .acquire_owned()
+            .await
+            .map_err(|_| ExecutorError::Cancelled)?;
+        let mut processes = self.processes.tasks.lock();
+        if !self.processes.accepting.load(Ordering::Acquire) {
+            return Err(ExecutorError::Cancelled);
+        }
         let mut child = cmd
             .spawn()
             .map_err(|e| ExecutorError::Io(format!("spawn bootstrap: {e}")))?;
@@ -158,24 +246,46 @@ impl InstanceBackend for NativeBackend {
         }
         let (cancel, cancelled) = oneshot::channel();
         let artifact_lease = artifact.clone();
-        let mut processes = self.processes.lock();
         while let Some(result) = processes.try_join_next() {
             if let Err(error) = result {
                 warn!(%error, "Lambda process supervisor failed");
             }
         }
+        let (completion, completed) = watch::channel(Settlement::Pending);
+        let mut shutdown = self.shutdown.clone();
         processes.spawn(async move {
-            // Keep code and resources alive until the child exit has been reaped.
-            let _artifact_lease = artifact_lease;
-            tokio::select! {
-                _ = cancelled => { if let Err(error) = child.kill().await { warn!(%error, "Lambda process cancellation failed"); } },
-                result = child.wait() => { if let Err(error) = result { warn!(%error, "Lambda process wait failed"); } },
+            {
+                let _artifact_lease = artifact_lease;
+                let _permit = permit;
+                let result = tokio::select! {
+                    biased;
+                    () = async { let _ = shutdown.wait_for(|stopped| *stopped).await; } => child.kill().await,
+                    _ = cancelled => child.kill().await,
+                    result = child.wait() => result.map(|_| ()),
+                };
+                if result.is_err() {
+                    completion.send_replace(Settlement::Uncertain);
+                    // Preserve child/lease/allocation ownership until reaping is confirmed.
+                    loop {
+                        let _ = child.start_kill();
+                        match child.wait().await {
+                            Ok(_) => break,
+                            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                        }
+                    }
+                }
+                logs.abort_all();
+                while let Some(result) = logs.join_next().await {
+                    if result.is_err_and(|error| !error.is_cancelled()) {
+                        warn!("Native log task failed");
+                    }
+                }
             }
-            logs.abort_all();
-            while let Some(result) = logs.join_next().await { if let Err(error) = result { if !error.is_cancelled() { warn!(%error, "Lambda log task failed"); } } }
+            completion.send_replace(Settlement::Clean);
         });
         Ok(BackendHandle::new(NativeHandle {
             cancel: Some(cancel),
+            completion: completed,
         }))
     }
 }
@@ -183,9 +293,28 @@ impl InstanceBackend for NativeBackend {
 #[derive(Debug)]
 struct NativeHandle {
     cancel: Option<oneshot::Sender<()>>,
+    completion: watch::Receiver<Settlement>,
 }
 
+#[async_trait]
 impl BackendHandleObj for NativeHandle {
+    fn running(&self) -> bool {
+        *self.completion.borrow() == Settlement::Pending
+    }
+
+    async fn wait(&mut self) -> Result<(), ExecutorError> {
+        match self
+            .completion
+            .wait_for(|state| *state != Settlement::Pending)
+            .await
+        {
+            Ok(state) if *state == Settlement::Clean => Ok(()),
+            _ => Err(ExecutorError::CleanupFailed(
+                "Native child exit is not confirmed".into(),
+            )),
+        }
+    }
+
     fn kill(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             if cancel.send(()).is_err() {
@@ -208,12 +337,7 @@ async fn bootstrap_runs_on_host(
 ) -> Result<bool, ExecutorError> {
     // Architecture check first — declared `architectures` must include the
     // host arch.
-    let host_arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "arm64",
-        other => other,
-    };
-    if architecture.as_str() != host_arch {
+    if architecture.as_str() != host_architecture() {
         return Ok(false);
     }
     let mut file = tokio::fs::File::open(path)
@@ -231,6 +355,13 @@ async fn bootstrap_runs_on_host(
     let host_is_macos = std::env::consts::OS == "macos";
     let host_is_linux = std::env::consts::OS == "linux";
     Ok((elf && host_is_linux) || (macho && host_is_macos))
+}
+
+fn host_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        other => other,
+    }
 }
 
 /// Require a regular executable bootstrap without modifying immutable artifacts.
@@ -254,31 +385,40 @@ async fn ensure_executable(_path: &Path) -> Result<(), ExecutorError> {
 }
 
 fn lambda_env_vars(req: &InvokeRequest, runtime_api: SocketAddr) -> Vec<(String, String)> {
-    let mut env = Vec::with_capacity(16 + req.environment.len());
-    let task_root = match &req.artifact {
+    let mut env = Vec::with_capacity(16 + req.revision.environment.len());
+    let task_root = match &req.revision.artifact {
         DeploymentArtifact::Zip(artifact) => artifact.code_root().display().to_string(),
         DeploymentArtifact::Image(_) => String::new(),
     };
     env.push(("AWS_LAMBDA_RUNTIME_API".into(), runtime_api.to_string()));
-    env.push(("AWS_LAMBDA_FUNCTION_NAME".into(), req.function_name.clone()));
-    env.push(("AWS_LAMBDA_FUNCTION_VERSION".into(), req.qualifier.clone()));
+    env.push((
+        "AWS_LAMBDA_FUNCTION_NAME".into(),
+        req.revision.function_name.clone(),
+    ));
+    env.push((
+        "AWS_LAMBDA_FUNCTION_VERSION".into(),
+        req.revision.qualifier.clone(),
+    ));
     env.push((
         "AWS_LAMBDA_FUNCTION_MEMORY_SIZE".into(),
-        req.memory_mb.to_string(),
+        req.revision.memory_mb.to_string(),
     ));
     env.push((
         "AWS_LAMBDA_FUNCTION_TIMEOUT".into(),
-        req.timeout.as_secs().to_string(),
+        req.revision.timeout.as_secs().to_string(),
     ));
     env.push((
         "AWS_LAMBDA_LOG_GROUP_NAME".into(),
-        format!("/aws/lambda/{}", req.function_name),
+        format!("/aws/lambda/{}", req.revision.function_name),
     ));
     env.push((
         "AWS_LAMBDA_LOG_STREAM_NAME".into(),
         uuid::Uuid::new_v4().to_string(),
     ));
-    env.push(("_HANDLER".into(), req.handler.clone().unwrap_or_default()));
+    env.push((
+        "_HANDLER".into(),
+        req.revision.handler.clone().unwrap_or_default(),
+    ));
     env.push(("LAMBDA_TASK_ROOT".into(), task_root.clone()));
     env.push(("LAMBDA_RUNTIME_DIR".into(), task_root));
     env.push(("TZ".into(), ":UTC".into()));
@@ -288,7 +428,7 @@ fn lambda_env_vars(req: &InvokeRequest, runtime_api: SocketAddr) -> Vec<(String,
     env.push(("AWS_SECRET_ACCESS_KEY".into(), "test".into()));
     env.push(("AWS_SESSION_TOKEN".into(), "test".into()));
     // User env overrides last, but do not let it shadow the runtime API var.
-    for (k, v) in &req.environment {
+    for (k, v) in &req.revision.environment {
         if k == "AWS_LAMBDA_RUNTIME_API" || k == "_HANDLER" || k == "LAMBDA_TASK_ROOT" {
             warn!(key = %k, "ignoring user override for reserved Lambda env var");
             continue;

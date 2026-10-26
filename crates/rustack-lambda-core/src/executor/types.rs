@@ -1,6 +1,6 @@
 //! Shared executor request/response/config types.
 
-use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
+use std::{collections::HashMap, fmt, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use rustack_lambda_model::types::ImageConfig;
@@ -45,85 +45,133 @@ impl FromStr for ExecutorBackend {
     }
 }
 
-/// Everything an executor needs to run one invocation.
+/// Validated function configuration captured before invocation admission.
+///
+/// Requests share this value through Arc; updates create another captured revision.
 #[derive(Clone, TypedBuilder)]
 #[non_exhaustive]
-pub struct InvokeRequest {
-    /// Function lifetime identity; deletion/recreation never reuses it.
+pub struct ExecutionRevision {
+    /// Stable function lifetime identity.
     pub resource_id: FunctionResourceId,
-    /// Captured configuration revision, independent of the invoked alias.
+    /// Captured configuration revision identifier.
     pub revision_id: String,
-    /// Complete Docker entry configuration; omitted and empty argv differ.
-    pub image_config: Option<ImageConfig>,
-    /// Ephemeral storage size in MiB, captured with this invocation's revision.
-    pub ephemeral_storage_mb: u32,
-    /// Qualified ARN — used for `Lambda-Runtime-Invoked-Function-Arn`.
-    pub function_arn: String,
+    /// Backend selection policy captured at admission.
+    pub backend: ExecutorBackend,
     /// Bare function name.
     pub function_name: String,
-    /// Resolved version string, e.g. `"$LATEST"` or `"3"`.
+    /// Resolved numeric version or `$LATEST`, never an invoked alias.
     pub qualifier: String,
-    /// Lambda runtime identifier, e.g. `"provided.al2023"`.
+    /// Runtime identifier for ZIP code.
     pub runtime: Option<String>,
-    /// Handler string from the function config.
+    /// Configured ZIP handler.
     pub handler: Option<String>,
-    /// Validated single Lambda architecture.
+    /// One validated architecture.
     pub architecture: Architecture,
-    /// Exactly one immutable deployment artifact, with lifetime ownership.
+    /// One immutable artifact, with shared lifetime ownership.
     pub artifact: DeploymentArtifact,
-    /// User-supplied environment variables.
+    /// Complete image entry configuration; missing and empty argv differ.
+    pub image_config: Option<ImageConfig>,
+    /// Captured user and provider-injected environment.
     pub environment: HashMap<String, String>,
-    /// Function timeout. Excess => `Sandbox.Timedout`.
+    /// Function handler time limit.
     pub timeout: Duration,
-    /// Memory size in MB (used as the container memory cap).
+    /// Function memory in MiB.
     pub memory_mb: u32,
-    /// Raw invocation payload (typically JSON, but not required).
-    pub payload: Bytes,
-    /// When set, the executor captures the last 4KB of stderr as `log_tail`.
-    pub capture_logs: bool,
+    /// Ephemeral storage in MiB.
+    pub ephemeral_storage_mb: u32,
 }
 
-impl fmt::Debug for InvokeRequest {
+impl fmt::Debug for ExecutionRevision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InvokeRequest")
+        f.debug_struct("ExecutionRevision")
             .field("resource_id", &self.resource_id)
             .field("revision_id", &self.revision_id)
-            .field("function_arn", &self.function_arn)
+            .field("backend", &self.backend)
+            .field("function_name", &self.function_name)
             .field("qualifier", &self.qualifier)
             .field("artifact", &self.artifact)
             .field("architecture", &self.architecture)
             .field("environment", &"[REDACTED]")
             .field("image_config", &"[REDACTED]")
-            .field("payload", &"[REDACTED]")
             .field("timeout", &self.timeout)
             .field("memory_mb", &self.memory_mb)
             .field("ephemeral_storage_mb", &self.ephemeral_storage_mb)
-            .field("capture_logs", &self.capture_logs)
             .finish_non_exhaustive()
+    }
+}
+
+/// One invocation of an immutable captured revision.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct InvokeRequest {
+    /// Shared captured configuration and artifact ownership.
+    pub revision: Arc<ExecutionRevision>,
+    /// Canonical requested ARN, preserving the invoked qualifier.
+    pub function_arn: String,
+    /// Original event bytes.
+    pub payload: Bytes,
+    /// Whether to return the final runtime log bytes.
+    pub capture_logs: bool,
+}
+
+impl InvokeRequest {
+    /// Create an invocation without copying its captured configuration.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bytes::Bytes;
+    /// # use rustack_lambda_core::executor::{ExecutionRevision, InvokeRequest};
+    /// # fn capture(revision: Arc<ExecutionRevision>, arn: String) {
+    /// let request = InvokeRequest::new(Arc::clone(&revision), arn, Bytes::new());
+    /// assert!(Arc::ptr_eq(&request.revision, &revision));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn new(revision: Arc<ExecutionRevision>, function_arn: String, payload: Bytes) -> Self {
+        Self {
+            revision,
+            function_arn,
+            payload,
+            capture_logs: false,
+        }
+    }
+}
+
+impl fmt::Debug for InvokeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InvokeRequest")
+            .field("revision", &self.revision)
+            .field("function_arn", &self.function_arn)
+            .field("payload", &"[REDACTED]")
+            .field("capture_logs", &self.capture_logs)
+            .finish()
     }
 }
 
 #[cfg(test)]
 impl InvokeRequest {
     pub(crate) fn fixture() -> Self {
-        Self::builder()
+        let revision = ExecutionRevision::builder()
             .resource_id(FunctionResourceId::default())
             .revision_id("fixture-revision".into())
-            .image_config(None)
-            .ephemeral_storage_mb(512)
-            .function_arn("arn:aws:lambda:us-east-1:000000000000:function:fixture".into())
+            .backend(ExecutorBackend::Native)
             .function_name("fixture".into())
             .qualifier("$LATEST".into())
             .runtime(Some("provided.al2023".into()))
             .handler(Some("bootstrap".into()))
             .architecture(Architecture::Arm64)
             .artifact(DeploymentArtifact::Zip(ValidatedArtifact::fixture()))
+            .image_config(None)
             .environment(HashMap::new())
             .timeout(Duration::from_secs(3))
             .memory_mb(128)
-            .payload(Bytes::new())
-            .capture_logs(false)
-            .build()
+            .ephemeral_storage_mb(512)
+            .build();
+        Self::new(
+            Arc::new(revision),
+            "arn:aws:lambda:us-east-1:000000000000:function:fixture".into(),
+            Bytes::new(),
+        )
     }
 }
 
@@ -174,12 +222,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_should_share_captured_revisions_and_isolate_separately_updated_configuration() {
+        let original = InvokeRequest::fixture();
+        let mut updated = original.clone();
+        assert!(Arc::ptr_eq(&original.revision, &updated.revision));
+        Arc::make_mut(&mut updated.revision).memory_mb = 512;
+        assert_eq!(original.revision.memory_mb, 128);
+        assert_eq!(updated.revision.memory_mb, 512);
+        assert!(!Arc::ptr_eq(&original.revision, &updated.revision));
+    }
+
+    #[test]
     fn test_should_redact_invocation_request_and_response_debug() {
         let secret = "fixture-secret-should-never-be-rendered";
         let mut request = InvokeRequest::fixture();
-        request.environment.insert("SECRET".into(), secret.into());
+        Arc::make_mut(&mut request.revision)
+            .environment
+            .insert("SECRET".into(), secret.into());
         request.payload = Bytes::from(secret);
-        request.image_config = Some(ImageConfig {
+        Arc::make_mut(&mut request.revision).image_config = Some(ImageConfig {
             entry_point: Some(vec![secret.into()]),
             command: Some(vec![secret.into()]),
             working_directory: Some(format!("/{secret}")),

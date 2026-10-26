@@ -93,6 +93,36 @@ An Image variant carries ResolvedImage, never a mutable tag alone. Its validated
 
 Artifact replacement does not change public AWS wire shapes. Native and Squib accept only Zip and consume its lease; Docker accepts Image in M0 and adds Zip in M4. The resolved architecture is a closed x86_64/arm64 enum, not an unchecked list. Capture validates numeric settings and full image overrides before work admission. No per-invoke image inspection or pulling is introduced by this contract.
 
+### 2.6 Execution revision ownership
+
+ExecutionRevision groups resource/revision identity, resolved version, artifact, architecture, runtime/handler, complete image overrides, environment, timeout, memory, ephemeral storage and selected backend policy. InvokeRequest carries an Arc of that captured revision plus the requested invocation ARN, payload Bytes and log-capture flag. Cloning a request shares revision storage; aliases and subsequent function updates cannot modify captured configuration. Runtime API metadata uses the requested ARN while backend results use the revision's resolved version. Warm identity includes the captured backend policy as well as resource/configuration identity. Debug on both types redacts user environment, argv, code and payload data. Native/Squib consume the same revision object.
+
+### 2.7 Cancellable invocation and supervisor contract
+
+Provider start_invocation returns an InvocationHandle after shared admission. The handle exposes its attempt UUID, wait, cancel, cancel_and_wait(cleanup deadline) and detach. Waiting returns typed ExecutorError outcomes; the existing HTTP Invoke maps these through its existing Lambda service error conversion. Event Invoke detaches only after admission succeeds. Dropping an attached handle signals cancellation, never aborts the worker. A wait deadline may return before cleanup; cancel_and_wait reports success only after cleanup and permit release. Its timeout returns CleanupFailed while ownership remains with the supervisor.
+
+InvocationContext carries the same attempt UUID to the backend/Runtime API, an absolute monotonic deadline and a dedicated cancellation watch channel. The total deadline starts at admission, includes queue/cold start and is bounded by any caller Task deadline. Handler timeout remains separate. Admission checks backend availability against the captured request before accepting work. Unsupported backend/artifact combinations cannot return an accepted Event response.
+
+A lazily started WorkSupervisor actor owns the bounded submission mailbox, JoinSet and cancellation registry. Existing limits remain128 accepted jobs,32 executing jobs and default8 per logical function across versions. A priority shutdown signal cannot be starved by submissions. Draining closes admission, finishes accepted work, and requests cancellation if its deadline expires. The actor continues owning cleanup after a quiesce waiter is dropped or times out. Worker panic or uncertain cleanup stops admission and prevents successful quiescence. Supervisor Drop signals stop; normal shutdown awaits settlement.
+
+Native cancellation kills and reaps the owned child, drains log tasks and releases its process reservation before signaling clean settlement. Successful instances rejected by a full/disabled warm pool also retire before invocation settlement. Admission rejects declared host-architecture mismatches before accepting an Event; executable-file validation remains asynchronous. Executor Drop initiates retained process cleanup rather than aborting child supervisors.
+
+Squib cancellation must retain its startup/VM ownership and await VM shutdown; never cancel/drop SquibBuilder::spawn or Squib::shutdown as a cleanup strategy. Inspection of the pinned Squib0.2.0 facade shows startup and shutdown temporarily own join handles across awaits, so dropping those futures is not a join/cleanup proof. A caller deadline does not authorize losing those futures. Squib guest cancellation retires/poisons that VM rather than reusing a possibly busy guest. Idle and busy VM owners use the same retained shutdown path, including executor Drop. Cleanup owners capture the parent Tokio runtime handle so transfer does not require Drop to run in an entered runtime context; normal service shutdown must await cleanup before stopping that runtime. The configured Squib shutdown budget bounds waiters, never the owned shutdown future. Expiry returns CleanupFailed, retains shutdown ownership and prevents successful quiescence.
+
+```text
+Caller / HTTP            WorkSupervisor actor             Backend supervisor
+ │ start ───────────────▶│ reserve / capture attempt             │
+ │◀── handle + UUID ─────│ spawn owned worker ──────────────────▶│
+ │ drop/cancel ──────────┼── watch signal ──────────────────────▶│
+ │ wait deadline → error │ worker remains owned                 │
+ │ cancel_and_wait ─────▶│                         kill / shutdown / reap
+ │                      │◀── confirmed cleanup ────────────────│
+ │                      │ release execution + accepted permits │
+ │◀── clean settlement ─│                                      │
+ │ cleanup deadline     │ retain worker or backend quarantine   │
+ │◀── CleanupFailed ────│ prevent false successful quiescence   │
+```
+
 ## 3. Runtime API and relay transport
 
 Implement the four basic 2018-06-01 routes: GET invocation/next, POST invocation/{requestId}/response, POST invocation/{requestId}/error and POST init/error. Each environment processes one invocation at a time. Managed Instances concurrency, extensions, streaming and SnapStart restore are excluded.

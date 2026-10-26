@@ -100,6 +100,14 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - Pinned by: [artifact representation and ownership sequence](./rustack-workflows-20-lambda-runtime-design.md#25-captured-artifact-representation).
 - Date: 2026-10-25.
 
+## D14 — Separate cancellation, caller response and resource settlement
+
+- Alternatives: abort backend futures at the HTTP/Task deadline; release capacity as soon as a caller returns; rely on Squib's best-effort RAII shutdown.
+- Decision: immutable Arc execution revisions, one attempt UUID/deadline, attached invocation handles and a bounded work actor. Backend cleanup survives dropped/expired waiters, and clean settlement follows resource cleanup and permit release. Idle VM Drop and Native warm-retention rejection follow the same ownership rule.
+- Why: a caller timeout does not prove a process/VM has stopped. The pinned Squib0.2.0 startup/shutdown futures temporarily own VMM join handles; its raw Drop only attempts a shutdown message. Cancelling those futures cannot establish cleanup. Capture the parent Tokio handle for retained cleanup and shut down that runtime only after service settlement.
+- Pinned by: [execution revision](./rustack-workflows-20-lambda-runtime-design.md#26-execution-revision-ownership), [cancellation and supervisor contract](./rustack-workflows-20-lambda-runtime-design.md#27-cancellable-invocation-and-supervisor-contract).
+- Date: 2026-10-25.
+
 ## Glossary
 
 | Term | Meaning in this specification |

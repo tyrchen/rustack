@@ -43,6 +43,18 @@ The independent review against commit `7915281` identified two implementation fi
 
 The slice also preserves extracted ZIP roots in Native warm keys and retains code in Native child supervision through exit. The standard workspace suite passes 1,752 tests (392 preexisting ignored), including 203 Lambda core tests; twelve Lambda doctests and six native/DryRun cases pass. The separately gated Squib case selected by the native Make target is not Squib execution evidence. New winnow/rstest dependency use introduces no audit finding; the same 16 baseline advisories remain B01. Strict production boundary lint debt remains B03; no ignore was added. ExecutionRevision ownership, cooperative invocation cancellation, deployment resolution and Docker remain required before P1/M0 completion.
 
+## P1 task1.1 cancellation/revision slice review
+
+The independent read-only review found three lifecycle/admission defects. All were fixed; its final recheck found no further concrete in-slice finding.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W13 | P1; `crates/rustack-lambda-core/src/executor/squib.rs:170` | Dropping an idle Squib executor relied on the facade's best-effort Drop and detached VMM handle. OwnedVm now transfers idle/busy VM shutdown into retained CleanupTask, using the captured parent Tokio handle | Generic owned-VM seam test drops off-runtime, expires a cleanup waiter and proves allocation retention until shutdown completes. This is not actual VM execution evidence |
+| W14 | P2; `crates/rustack-lambda-core/src/executor/instance.rs:276` | A full/disabled warm pool dropped a successful instance before reaping. Release now returns rejected ownership; Invoke awaits API shutdown and backend termination before settlement | Two overlapping real Native calls with warm retention0/1 require exactly0/1 surviving child after both responses |
+| W15 | P2; `crates/rustack-lambda-core/src/executor/native.rs:129` | Known host-architecture mismatch failed only after Event acceptance. Availability now checks architecture before work admission | Real fixture Event rejects the mismatch, then quiesces cleanly without starting the foreign bootstrap |
+
+ExecutionRevision uses shared Arc ownership; InvocationHandle and the bounded work actor preserve UUID/deadline/cancellation through backend cleanup. Waiter cancellation never aborts backend workers. Native child supervisors retain artifact leases and process reservations through reaping, including executor Drop. Tests cover late-result rejection, cleanup timeout/aborted waiters, worker panic,128 accepted/32 running/default8 function limits and permit release after cleanup. The workspace suite passes1,767 tests (392 preexisting ignored), including215 Lambda core tests and five real Native fixture tests. Lambda doctests, standard workspace build/Clippy/rustdoc and the native SDK target pass. Its separately gated Squib test remains excluded as VM evidence. Full Docker and workflow milestones, plus B01/B03, remain required.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

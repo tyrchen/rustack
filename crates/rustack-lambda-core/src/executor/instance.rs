@@ -21,7 +21,7 @@ use super::{
     runtime_api::{self, Job, RuntimeApiHandle, RuntimeResult},
     types::{InvokeRequest, InvokeResponse},
 };
-use crate::artifact::DeploymentArtifact;
+use crate::{artifact::DeploymentArtifact, invocation::InvocationContext};
 
 /// Identifier for the pool slot — a function/version pair.
 pub(crate) type PoolKey = (String, String);
@@ -47,8 +47,11 @@ pub(crate) trait InstanceBackend: Send + Sync + std::fmt::Debug {
 
 /// Opaque handle to a backend-specific running thing (process or container).
 /// Drop must clean it up; the pool also calls `kill` on graceful shutdown.
+#[async_trait]
 pub(crate) trait BackendHandleObj: Send + Sync + std::fmt::Debug {
     fn kill(&mut self);
+    fn running(&self) -> bool;
+    async fn wait(&mut self) -> Result<(), ExecutorError>;
 }
 
 /// Wrapper for object-safety + Drop.
@@ -59,8 +62,15 @@ impl BackendHandle {
         Self(Box::new(handle))
     }
 
-    pub(crate) fn kill(mut self) {
+    fn running(&self) -> bool {
+        self.0.running()
+    }
+    async fn wait(&mut self) -> Result<(), ExecutorError> {
+        self.0.wait().await
+    }
+    async fn terminate(mut self) -> Result<(), ExecutorError> {
         self.0.kill();
+        self.0.wait().await
     }
 }
 
@@ -119,101 +129,136 @@ impl InstancePool {
     }
 
     pub(crate) fn key(req: &InvokeRequest) -> PoolKey {
-        let mut environment: Vec<_> = req.environment.iter().collect();
+        let mut environment: Vec<_> = req.revision.environment.iter().collect();
         environment.sort();
-        let code_root = match &req.artifact {
+        let code_root = match &req.revision.artifact {
             DeploymentArtifact::Zip(artifact) => Some(artifact.code_root()),
             DeploymentArtifact::Image(_) => None,
         };
         let identity = format!(
             "{:?}",
             (
-                (req.resource_id, &req.revision_id, &req.qualifier),
-                (&req.artifact, code_root),
-                (&req.runtime, &req.handler, req.architecture),
+                (
+                    req.revision.resource_id,
+                    &req.revision.revision_id,
+                    &req.revision.qualifier,
+                    req.revision.backend,
+                ),
+                (&req.revision.artifact, code_root),
+                (
+                    &req.revision.runtime,
+                    &req.revision.handler,
+                    req.revision.architecture
+                ),
                 environment,
-                (req.timeout, req.memory_mb, req.ephemeral_storage_mb),
-                &req.image_config,
+                (
+                    req.revision.timeout,
+                    req.revision.memory_mb,
+                    req.revision.ephemeral_storage_mb
+                ),
+                &req.revision.image_config,
             )
         );
         (
-            req.function_name.clone(),
+            req.revision.function_name.clone(),
             crate::storage::compute_sha256(identity.as_bytes()),
         )
     }
 
     /// Run a single invocation against an acquired (or freshly spawned) instance.
-    pub(crate) async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
+    pub(crate) async fn invoke(
+        &self,
+        req: InvokeRequest,
+        context: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
+        context.check()?;
         let key = Self::key(&req);
-        let mut instance = match self.try_acquire(&key) {
-            Some(inst) => inst,
-            None => self.spawn_new(&req).await?,
+        let mut instance = if let Some(instance) = self.try_acquire(&key) {
+            instance
+        } else {
+            tokio::select! {
+                biased;
+                reason = context.cancelled() => return Err(reason.error()),
+                result = self.spawn_new(&req) => result?,
+            }
         };
-
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let deadline = Instant::now() + req.timeout;
+        let Some(handler_deadline) = Instant::now().checked_add(req.revision.timeout) else {
+            instance.api.shutdown().await;
+            instance.backend.terminate().await?;
+            return Err(ExecutorError::InvalidCode("Invalid handler timeout".into()));
+        };
+        let deadline = handler_deadline.min(context.deadline().into_std());
         let (resp_tx, resp_rx) = oneshot::channel();
         let job = Job {
-            request_id: request_id.clone(),
+            request_id: context.id().to_string(),
             function_arn: req.function_arn.clone(),
             deadline,
             payload: req.payload.clone(),
             response_tx: resp_tx,
         };
-        instance
-            .api
-            .submit(job)
-            .await
-            .map_err(|e| ExecutorError::Io(e.to_string()))?;
-
-        let response = async {
-            match instance.init_error.take() {
-                Some(mut init) => tokio::select! {
-                    response = resp_rx => response,
-                    error = &mut init => error.map(RuntimeResult::InitError),
-                },
-                None => resp_rx.await,
+        let result = {
+            let response = async {
+                instance
+                    .api
+                    .submit(job)
+                    .await
+                    .map_err(|error| ExecutorError::Io(error.into()))?;
+                let response = async {
+                    match instance.init_error.take() {
+                        Some(mut init) => {
+                            tokio::select! { response = resp_rx => response, error = &mut init => error.map(RuntimeResult::InitError) }
+                        }
+                        None => resp_rx.await,
+                    }
+                };
+                match tokio::time::timeout(req.revision.timeout, response).await {
+                    Ok(Ok(response)) => Ok(response),
+                    Ok(Err(_)) => Err(ExecutorError::RuntimeExited(
+                        "Runtime response channel closed".into(),
+                    )),
+                    Err(_) => Err(ExecutorError::Timeout(req.revision.timeout)),
+                }
+            };
+            tokio::select! {
+                biased;
+                reason = context.cancelled() => Err(reason.error()),
+                result = response => result,
+                exit = instance.backend.wait() => {
+                    exit.and(Err(ExecutorError::RuntimeExited("Bootstrap exited before completing invocation".into())))
+                }
             }
         };
-        let result = match tokio::time::timeout(req.timeout, response).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(_)) => {
-                // Bootstrap died before responding.
-                instance.backend.kill();
-                return Err(ExecutorError::RuntimeExited(
-                    "bootstrap exited mid-invocation".to_owned(),
-                ));
-            }
-            Err(_) => {
-                instance.backend.kill();
-                return Err(ExecutorError::Timeout(req.timeout));
-            }
+        let result = match context.check() {
+            Ok(()) => result,
+            Err(error) => Err(error),
         };
-
-        if !matches!(result, RuntimeResult::InitError(_)) {
+        let reusable =
+            matches!(&result, Ok(RuntimeResult::Success(_))) && instance.backend.running();
+        if reusable {
             instance.last_used = Instant::now();
-            self.release(key, instance);
+            if let Some(mut instance) = self.release(key, instance) {
+                instance.api.shutdown().await;
+                instance.backend.terminate().await?;
+            }
+        } else {
+            instance.api.shutdown().await;
+            instance.backend.terminate().await?;
         }
-
-        match result {
-            RuntimeResult::Success(payload) => Ok(InvokeResponse {
-                status: 200,
+        match result? {
+            RuntimeResult::Success(payload) => Ok(InvokeResponse::success(
                 payload,
-                function_error: None,
-                log_tail: None,
-                executed_version: req.qualifier,
-            }),
+                req.revision.qualifier.clone(),
+            )),
             RuntimeResult::Error(payload) => Ok(InvokeResponse {
                 status: 200,
                 payload,
-                function_error: Some("Unhandled".to_owned()),
+                function_error: Some("Unhandled".into()),
                 log_tail: None,
-                executed_version: req.qualifier,
+                executed_version: req.revision.qualifier.clone(),
             }),
-            RuntimeResult::InitError(payload) => {
-                let msg = String::from_utf8_lossy(&payload).into_owned();
-                Err(ExecutorError::InitFailed(msg))
-            }
+            RuntimeResult::InitError(payload) => Err(ExecutorError::InitFailed(
+                String::from_utf8_lossy(&payload).into_owned(),
+            )),
         }
     }
 
@@ -228,14 +273,17 @@ impl InstancePool {
         Some(instance)
     }
 
-    fn release(&self, key: PoolKey, mut instance: Instance) {
+    fn release(&self, key: PoolKey, mut instance: Instance) -> Option<Instance> {
         let Ok(permit) = Arc::clone(&self.idle_capacity).try_acquire_owned() else {
-            return;
+            return Some(instance);
         };
         let mut bucket = self.pools.entry(key.0).or_default();
         if bucket.len() < self.max_warm.min(1) {
             instance.idle_permit = Some(permit);
             bucket.push((key.1, instance));
+            None
+        } else {
+            Some(instance)
         }
     }
 
@@ -269,7 +317,7 @@ impl InstancePool {
             idle_permit: None,
             init_error,
         };
-        debug!(function = %req.function_name, addr = %addr, "spawned new lambda instance");
+        debug!(function = %req.revision.function_name, addr = %addr, "spawned new lambda instance");
         Ok(inst)
     }
 
@@ -331,40 +379,51 @@ mod tests {
         assert_eq!(InstancePool::key(&alias), original);
 
         let mut recreated = request.clone();
-        recreated.resource_id = crate::identity::FunctionResourceId::default();
+        Arc::make_mut(&mut recreated.revision).resource_id =
+            crate::identity::FunctionResourceId::default();
         assert_ne!(InstancePool::key(&recreated), original);
         let mut updated = request.clone();
-        updated.revision_id = "new-revision".into();
+        Arc::make_mut(&mut updated.revision).revision_id = "new-revision".into();
         assert_ne!(InstancePool::key(&updated), original);
         let mut rehydrated = request.clone();
-        rehydrated.artifact =
+        Arc::make_mut(&mut rehydrated.revision).artifact =
             DeploymentArtifact::Zip(crate::artifact::ValidatedArtifact::fixture());
         assert_ne!(InstancePool::key(&rehydrated), original);
         let mut storage = request.clone();
-        storage.ephemeral_storage_mb = 1024;
+        Arc::make_mut(&mut storage.revision).ephemeral_storage_mb = 1024;
         assert_ne!(InstancePool::key(&storage), original);
         let mut image = request.clone();
-        image.image_config = Some(ImageConfig {
+        Arc::make_mut(&mut image.revision).image_config = Some(ImageConfig {
             command: Some(vec![]),
             ..ImageConfig::default()
         });
         assert_ne!(InstancePool::key(&image), original);
         let explicitly_empty = InstancePool::key(&image);
-        image.image_config = Some(ImageConfig::default());
+        Arc::make_mut(&mut image.revision).image_config = Some(ImageConfig::default());
         assert_ne!(InstancePool::key(&image), explicitly_empty);
     }
 
     #[test]
     fn test_should_fingerprint_environment_independently_of_hashmap_iteration_order() {
         let mut first = InvokeRequest::fixture();
-        first.environment.insert("FIRST".into(), "one".into());
-        first.environment.insert("SECOND".into(), "two".into());
+        Arc::make_mut(&mut first.revision)
+            .environment
+            .insert("FIRST".into(), "one".into());
+        Arc::make_mut(&mut first.revision)
+            .environment
+            .insert("SECOND".into(), "two".into());
         let mut second = first.clone();
-        second.environment.clear();
-        second.environment.insert("SECOND".into(), "two".into());
-        second.environment.insert("FIRST".into(), "one".into());
+        Arc::make_mut(&mut second.revision).environment.clear();
+        Arc::make_mut(&mut second.revision)
+            .environment
+            .insert("SECOND".into(), "two".into());
+        Arc::make_mut(&mut second.revision)
+            .environment
+            .insert("FIRST".into(), "one".into());
         assert_eq!(InstancePool::key(&first), InstancePool::key(&second));
-        second.environment.insert("SECOND".into(), "changed".into());
+        Arc::make_mut(&mut second.revision)
+            .environment
+            .insert("SECOND".into(), "changed".into());
         assert_ne!(InstancePool::key(&first), InstancePool::key(&second));
     }
 }

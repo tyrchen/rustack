@@ -2,6 +2,7 @@
 use async_trait::async_trait;
 
 use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse};
+use crate::invocation::InvocationContext;
 
 /// Explicit unavailable backend for metadata-only operation.
 #[derive(Debug, Default, Clone)]
@@ -29,11 +30,17 @@ impl NoopExecutor {
 }
 #[async_trait]
 impl Executor for NoopExecutor {
-    fn available(&self) -> Result<(), ExecutorError> {
+    fn available(&self, _request: &InvokeRequest) -> Result<(), ExecutorError> {
         Err(self.error())
     }
-    async fn invoke(&self, _req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
+    async fn invoke(
+        &self,
+        _req: InvokeRequest,
+        _context: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
         Err(self.error())
     }
-    async fn shutdown(&self) {}
+    async fn shutdown(&self) -> Result<(), ExecutorError> {
+        Ok(())
+    }
 }

@@ -213,3 +213,162 @@ async fn test_should_cancel_and_reap_native_event_on_quiesce_deadline() {
     );
     provider.shutdown().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_reap_cancelled_invocations_and_share_attempt_identity_with_runtime_api() {
+    let root = tempfile::tempdir().unwrap();
+    let started = root.path().join("started");
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path().join("code")),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            ..Default::default()
+        },
+    );
+    let mut input = create("cancellable");
+    input.timeout = Some(120);
+    input.environment = Some(Environment {
+        variables: Some(HashMap::from([
+            ("SLEEP_SECS".into(), "60".into()),
+            (
+                "STARTED_FILE".into(),
+                started.to_string_lossy().into_owned(),
+            ),
+        ])),
+    });
+    provider.create_function(input).await.unwrap();
+    let handle = provider
+        .start_invocation("revision-test", None, b"{}", None)
+        .await
+        .unwrap();
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match tokio::fs::read_to_string(&started).await {
+                Ok(pid) if !pid.is_empty() => break pid,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => {}
+                Err(error) => panic!("Read start marker: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    handle
+        .cancel_and_wait(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let status = tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.trim())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert!(
+        !status.success(),
+        "cancel acknowledgement must follow process reaping"
+    );
+
+    provider
+        .update_function_configuration(
+            "revision-test",
+            &UpdateFunctionConfigurationInput {
+                environment: Some(Environment {
+                    variables: Some(HashMap::new()),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let handle = provider
+        .start_invocation("revision-test", None, br#"{"value":42}"#, None)
+        .await
+        .unwrap();
+    let id = handle.id().to_string();
+    let result = handle.wait().await.unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&result.payload).unwrap();
+    assert_eq!(response["request_id"], id);
+    assert_eq!(response["echo"]["value"], 42);
+    assert_ne!(response["pid"].as_u64().unwrap().to_string(), pid.trim());
+    provider.quiesce(Duration::from_secs(2)).await.unwrap();
+    provider.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_reap_successful_instances_before_returning_when_warm_retention_is_full() {
+    for max_warm_instances in [0, 1] {
+        let root = tempfile::tempdir().unwrap();
+        let provider = RustackLambda::with_store(
+            FunctionStore::new(root.path()),
+            LambdaConfig {
+                executor: ExecutorBackend::Native,
+                max_warm_instances,
+                ..Default::default()
+            },
+        );
+        let mut input = create("retirement");
+        input.environment = Some(Environment {
+            variables: Some(HashMap::from([("SLEEP_SECS".into(), "1".into())])),
+        });
+        provider.create_function(input).await.unwrap();
+        let first = provider
+            .start_invocation("revision-test", None, b"{}", None)
+            .await
+            .unwrap();
+        let second = provider
+            .start_invocation("revision-test", None, b"{}", None)
+            .await
+            .unwrap();
+        let (first, second) = tokio::join!(first.wait(), second.wait());
+        let mut alive = 0;
+        for result in [first.unwrap(), second.unwrap()] {
+            let response: serde_json::Value = serde_json::from_slice(&result.payload).unwrap();
+            let status = tokio::process::Command::new("kill")
+                .arg("-0")
+                .arg(response["pid"].as_u64().unwrap().to_string())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .unwrap();
+            alive += usize::from(status.success());
+        }
+        assert_eq!(
+            alive, max_warm_instances,
+            "nonretained instances must already be reaped"
+        );
+        provider.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn test_should_reject_native_event_architecture_mismatch_before_acceptance() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path()),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            ..Default::default()
+        },
+    );
+    let mut input = create("mismatched");
+    input.architectures = Some(vec![
+        if cfg!(target_arch = "aarch64") {
+            "x86_64"
+        } else {
+            "arm64"
+        }
+        .into(),
+    ]);
+    provider.create_function(input).await.unwrap();
+    assert!(
+        provider
+            .invoke("revision-test", None, b"{}", InvokeKind::Event)
+            .await
+            .is_err()
+    );
+    provider.quiesce(Duration::from_secs(1)).await.unwrap();
+    provider.shutdown().await;
+}

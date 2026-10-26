@@ -62,10 +62,11 @@ use crate::{
     config::LambdaConfig,
     error::LambdaServiceError,
     executor::{
-        AutoExecutor, Executor, ExecutorBackend, InvokeRequest, NativeExecutor, NoopExecutor,
-        SquibExecutor,
+        AutoExecutor, ExecutionRevision, Executor, ExecutorBackend, InvokeRequest, NativeExecutor,
+        NoopExecutor, SquibExecutor,
     },
     identity::FunctionResourceId,
+    invocation::InvocationHandle,
     resolver::{
         alias_arn, function_arn, function_version_arn, layer_arn, layer_version_arn,
         parse_layer_version_arn, resolve_function_ref, resolve_version,
@@ -281,10 +282,13 @@ impl RustackLambda {
     /// Stop all warm executor instances. Wired into the rustack server's
     /// graceful shutdown path.
     pub async fn shutdown(&self) {
-        if let Err(error) = self.work.quiesce(Duration::ZERO).await {
+        self.work.cancel_all();
+        if let Err(error) = self.work.quiesce(Duration::from_secs(10)).await {
             tracing::error!(%error, "Lambda shutdown cancelled unfinished work");
         }
-        self.executor.shutdown().await;
+        if self.executor.shutdown().await.is_err() {
+            tracing::error!("Lambda executor shutdown did not confirm cleanup");
+        }
     }
 
     /// Stop accepting invocation work and drain it before snapshot export.
@@ -292,16 +296,19 @@ impl RustackLambda {
     /// # Errors
     /// Returns an error after cancelling remaining tasks when the deadline expires.
     pub async fn quiesce(&self, timeout: Duration) -> Result<(), LambdaServiceError> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| invalid_parameter("Invalid Lambda quiesce budget"))?;
         let cleanup_budget = (timeout / 10).min(Duration::from_secs(1));
         let result = self
             .work
             .quiesce(timeout.saturating_sub(cleanup_budget))
             .await;
         if result.is_err()
-            && tokio::time::timeout_at(deadline, self.executor.shutdown())
-                .await
-                .is_err()
+            && !matches!(
+                tokio::time::timeout_at(deadline, self.executor.shutdown()).await,
+                Ok(Ok(()))
+            )
         {
             tracing::error!("Lambda executor cancellation deadline exceeded");
         }
@@ -934,12 +941,11 @@ impl RustackLambda {
     // Phase 0: Invoke
     // ---------------------------------------------------------------
 
-    /// Invoke a function.
+    /// Invoke a function through shared admission and supervised execution.
     ///
-    /// Resolves the target version, validates the payload size, then routes
-    /// to the configured [`Executor`]. `DryRun` short-circuits before the
-    /// executor is touched. `Event` returns immediately with a synthetic
-    /// request id only after a slot in the bounded, supervised work set is acquired.
+    /// # Errors
+    /// Rejects invalid payload/reference, missing resources, unavailable execution,
+    /// exhausted capacity and mapped backend errors. DryRun starts no runtime.
     pub async fn invoke(
         &self,
         function_ref: &str,
@@ -947,66 +953,128 @@ impl RustackLambda {
         payload: &[u8],
         invocation_type: InvokeKind,
     ) -> Result<InvokeOutcome, LambdaServiceError> {
-        // Validate synchronous payload size (Appendix C: 6 MB).
-        let payload_limit = if invocation_type == InvokeKind::Event {
-            1024 * 1024
-        } else {
-            MAX_SYNC_PAYLOAD
-        };
-        if payload.len() > payload_limit {
-            let payload_len = payload.len();
-            return Err(LambdaServiceError::RequestTooLarge {
-                message: format!(
-                    "Request payload size {payload_len} exceeds the invoke limit of \
-                     {payload_limit} bytes",
-                ),
-            });
-        }
-
-        let (name, ref_qualifier) = resolve_function_ref(function_ref)?;
-        let qualifier = qualifier.or(ref_qualifier.as_deref());
-        if let Some(q) = qualifier {
-            crate::resolver::Qualifier::parse(q)?;
-        }
-
-        // Validate function exists and qualifier resolves.
-        let record = self.get_record(&name)?;
-        let version = resolve_version(&record, qualifier)?;
-
+        validate_invoke_payload(
+            payload,
+            if invocation_type == InvokeKind::Event {
+                1024 * 1024
+            } else {
+                MAX_SYNC_PAYLOAD
+            },
+        )?;
+        let (record, qualifier) = self.resolve_invocation(function_ref, qualifier)?;
+        resolve_version(&record, qualifier.as_deref())?;
         if invocation_type == InvokeKind::DryRun {
             return Ok(InvokeOutcome::DryRun);
         }
-
-        if self.config.executor == ExecutorBackend::Docker {
-            return Err(LambdaServiceError::Internal {
-                message: "Docker execution is not implemented in this build".into(),
-            });
-        }
-        let req = self
-            .build_invoke_request(&record, version, qualifier, payload)
-            .await?;
-
-        let (response, handle) = self
-            .work
-            .submit(
-                Arc::clone(&self.executor),
-                req,
-                record.reserved_concurrent_executions,
+        let handle = self
+            .admit_invocation(
+                &record,
+                qualifier.as_deref(),
+                payload,
                 invocation_type == InvokeKind::Event,
+                None,
             )
             .await?;
         if invocation_type == InvokeKind::Event {
-            return Ok(InvokeOutcome::Async {
-                request_id: uuid::Uuid::new_v4().to_string(),
-            });
+            let request_id = handle.id().to_string();
+            handle.detach();
+            return Ok(InvokeOutcome::Async { request_id });
         }
-        let _cancel = crate::work::CancelOnDrop(handle);
-        let response = response
+        handle
+            .wait()
             .await
-            .map_err(|error| LambdaServiceError::Internal {
-                message: format!("Lambda worker cancelled: {error}"),
-            })??;
-        Ok(InvokeOutcome::Sync(response))
+            .map(InvokeOutcome::Sync)
+            .map_err(LambdaServiceError::from)
+    }
+
+    /// Admit a cancellable synchronous invocation for an internal service adapter.
+    ///
+    /// Shares version resolution, validation and quotas with ordinary HTTP Invoke.
+    /// The optional absolute deadline bounds capture, queueing and cold start.
+    ///
+    /// # Errors
+    /// Rejects invalid input, missing resources, capture timeout, unavailable backend
+    /// or exhausted admission/execution capacity. Runtime outcomes use the handle.
+    ///
+    /// ```no_run
+    /// # async fn invoke(provider: &rustack_lambda_core::provider::RustackLambda)
+    /// # -> Result<(), Box<dyn std::error::Error>> {
+    /// let handle = provider.start_invocation("worker", None, b"{}", None).await?;
+    /// let result = handle.wait().await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn start_invocation(
+        &self,
+        function_ref: &str,
+        qualifier: Option<&str>,
+        payload: &[u8],
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<InvocationHandle, LambdaServiceError> {
+        validate_invoke_payload(payload, MAX_SYNC_PAYLOAD)?;
+        let (record, qualifier) = self.resolve_invocation(function_ref, qualifier)?;
+        self.admit_invocation(&record, qualifier.as_deref(), payload, false, deadline)
+            .await
+    }
+
+    fn resolve_invocation(
+        &self,
+        reference: &str,
+        qualifier: Option<&str>,
+    ) -> Result<(FunctionRecord, Option<String>), LambdaServiceError> {
+        let (name, embedded) = resolve_function_ref(reference)?;
+        if qualifier
+            .zip(embedded.as_deref())
+            .is_some_and(|(explicit, embedded)| explicit != embedded)
+        {
+            return Err(invalid_parameter("Conflicting invocation qualifiers"));
+        }
+        let qualifier = qualifier.map(str::to_owned).or(embedded.clone());
+        if let Some(qualifier) = &qualifier {
+            crate::resolver::Qualifier::parse(qualifier)?;
+        }
+        let record = self.get_record(&name)?;
+        if reference.starts_with("arn:") {
+            let expected = embedded.as_ref().map_or_else(
+                || record.arn.clone(),
+                |qualifier| format!("{}:{qualifier}", record.arn),
+            );
+            if reference != expected {
+                return Err(invalid_parameter(
+                    "Invocation ARN does not match this Lambda scope",
+                ));
+            }
+        }
+        Ok((record, qualifier))
+    }
+
+    async fn admit_invocation(
+        &self,
+        record: &FunctionRecord,
+        qualifier: Option<&str>,
+        payload: &[u8],
+        asynchronous: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<InvocationHandle, LambdaServiceError> {
+        let version = resolve_version(record, qualifier)?;
+        let capture = self.build_invoke_request(record, version, qualifier, payload);
+        let request = if let Some(deadline) = deadline {
+            tokio::time::timeout_at(deadline, capture)
+                .await
+                .map_err(|_| {
+                    LambdaServiceError::from(crate::executor::ExecutorError::DeadlineExceeded)
+                })??
+        } else {
+            capture.await?
+        };
+        self.work
+            .submit(
+                Arc::clone(&self.executor),
+                request,
+                record.reserved_concurrent_executions,
+                asynchronous,
+                deadline,
+            )
+            .await
     }
 
     /// Build the executor request from a resolved function/version record.
@@ -1070,12 +1138,11 @@ impl RustackLambda {
             .or_insert_with(|| self.config.default_region.clone());
         env.entry("AWS_DEFAULT_REGION".to_owned())
             .or_insert_with(|| self.config.default_region.clone());
-        Ok(InvokeRequest::builder()
+        let revision = ExecutionRevision::builder()
             .resource_id(record.resource_id)
             .revision_id(version.revision_id.clone())
             .image_config(version.image_config.clone())
             .ephemeral_storage_mb(version.ephemeral_storage_size)
-            .function_arn(function_arn)
             .function_name(record.name.clone())
             .qualifier(version.version.clone())
             .runtime(version.runtime.clone())
@@ -1085,9 +1152,13 @@ impl RustackLambda {
             .environment(env)
             .timeout(Duration::from_secs(u64::from(version.timeout)))
             .memory_mb(version.memory_size)
-            .payload(Bytes::copy_from_slice(payload))
-            .capture_logs(false)
-            .build())
+            .backend(self.config.executor)
+            .build();
+        Ok(InvokeRequest::new(
+            Arc::new(revision),
+            function_arn,
+            Bytes::copy_from_slice(payload),
+        ))
     }
 
     // ---------------------------------------------------------------
@@ -3053,6 +3124,15 @@ fn validate_s3_field(name: &str, value: &str, max_bytes: usize) -> Result<(), La
 }
 
 /// Build an `InvalidParameter` service error.
+fn validate_invoke_payload(payload: &[u8], limit: usize) -> Result<(), LambdaServiceError> {
+    if payload.len() > limit {
+        return Err(LambdaServiceError::RequestTooLarge {
+            message: format!("Invocation payload exceeds {limit} bytes"),
+        });
+    }
+    Ok(())
+}
+
 fn invalid_parameter(message: &str) -> LambdaServiceError {
     LambdaServiceError::InvalidParameter {
         message: message.to_owned(),
@@ -3257,6 +3337,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_reject_cross_scope_arns_and_conflicting_invocation_qualifiers()
+    -> Result<(), LambdaServiceError> {
+        let provider = test_provider();
+        provider
+            .create_function(sample_create_input("scoped"))
+            .await?;
+        let arn = provider.get_record("scoped")?.arn;
+        for reference in [
+            arn.replace("us-east-1", "us-west-2"),
+            arn.replace("000000000000", "111111111111"),
+            arn.replace("arn:aws:", "arn:aws-cn:"),
+        ] {
+            assert!(matches!(
+                provider
+                    .invoke(&reference, None, b"{}", InvokeKind::DryRun)
+                    .await,
+                Err(LambdaServiceError::InvalidParameter { .. })
+            ));
+        }
+        assert!(matches!(
+            provider
+                .invoke(
+                    &format!("{arn}:$LATEST"),
+                    Some("1"),
+                    b"{}",
+                    InvokeKind::DryRun
+                )
+                .await,
+            Err(LambdaServiceError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            provider
+                .invoke(
+                    &format!("{arn}:$LATEST"),
+                    Some("$LATEST"),
+                    b"{}",
+                    InvokeKind::DryRun
+                )
+                .await?,
+            InvokeOutcome::DryRun
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_should_preserve_invoked_alias_separately_from_resolved_version()
     -> Result<(), LambdaServiceError> {
         let provider = test_provider();
@@ -3286,9 +3411,9 @@ mod tests {
             let expected_arn =
                 qualifier.map_or_else(|| record.arn.clone(), |q| format!("{}:{q}", record.arn));
             assert_eq!(request.function_arn, expected_arn);
-            assert_eq!(request.qualifier, resolved);
-            assert_eq!(request.resource_id, record.resource_id);
-            assert_eq!(request.revision_id, version.revision_id);
+            assert_eq!(request.revision.qualifier, resolved);
+            assert_eq!(request.revision.resource_id, record.resource_id);
+            assert_eq!(request.revision.revision_id, version.revision_id);
         }
         Ok(())
     }
@@ -3321,8 +3446,9 @@ mod tests {
             .await?;
         version.ephemeral_storage_size = 4096;
         version.image_config = None;
-        assert_eq!(request.ephemeral_storage_mb, 2048);
+        assert_eq!(request.revision.ephemeral_storage_mb, 2048);
         let image = request
+            .revision
             .image_config
             .as_ref()
             .ok_or_else(|| invalid_parameter("Image configuration was lost"))?;
@@ -3333,7 +3459,10 @@ mod tests {
         assert_eq!(image.command.as_deref(), Some([].as_slice()));
         assert_eq!(image.working_directory.as_deref(), Some("/function"));
         assert_eq!(request.payload, Bytes::from_static(b"{\"value\":1}"));
-        assert_ne!(request.ephemeral_storage_mb, version.ephemeral_storage_size);
+        assert_ne!(
+            request.revision.ephemeral_storage_mb,
+            version.ephemeral_storage_size
+        );
         assert!(version.image_config.is_none());
         Ok(())
     }

@@ -18,6 +18,7 @@ pub mod executor;
 mod function_config;
 pub mod handler;
 pub mod identity;
+pub mod invocation;
 pub mod provider;
 pub mod resolver;
 pub mod storage;

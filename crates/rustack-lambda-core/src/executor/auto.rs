@@ -13,7 +13,7 @@ use super::{
     Executor, ExecutorError, InvokeRequest, InvokeResponse, NativeExecutor, SquibExecutor,
     SquibExecutorConfig,
 };
-use crate::artifact::DeploymentArtifact;
+use crate::{artifact::DeploymentArtifact, invocation::InvocationContext};
 
 /// Executor that chooses the concrete backend for each invocation.
 #[derive(Debug)]
@@ -39,28 +39,43 @@ impl AutoExecutor {
     }
 
     fn should_use_squib(req: &InvokeRequest) -> bool {
-        cfg!(target_os = "macos") && matches!(req.artifact, DeploymentArtifact::Zip(_))
+        cfg!(target_os = "macos") && matches!(req.revision.artifact, DeploymentArtifact::Zip(_))
     }
 }
 
 #[async_trait]
 impl Executor for AutoExecutor {
-    async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
-        if Self::should_use_squib(&req) {
-            self.squib.invoke(req).await
+    fn available(&self, request: &InvokeRequest) -> Result<(), ExecutorError> {
+        if Self::should_use_squib(request) {
+            self.squib.available(request)
         } else {
-            self.native.invoke(req).await
+            self.native.available(request)
         }
     }
 
-    async fn shutdown(&self) {
-        self.squib.shutdown().await;
-        self.native.shutdown().await;
+    async fn invoke(
+        &self,
+        req: InvokeRequest,
+        context: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
+        if Self::should_use_squib(&req) {
+            self.squib.invoke(req, context).await
+        } else {
+            self.native.invoke(req, context).await
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), ExecutorError> {
+        let squib = self.squib.shutdown().await;
+        let native = self.native.shutdown().await;
+        squib.and(native)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::artifact::{Architecture, ResolvedImage};
 
@@ -75,7 +90,8 @@ mod tests {
     #[test]
     fn test_should_not_use_squib_for_image_package() {
         let mut request = InvokeRequest::fixture();
-        request.artifact = DeploymentArtifact::Image(ResolvedImage::fixture(Architecture::Arm64));
+        Arc::make_mut(&mut request.revision).artifact =
+            DeploymentArtifact::Image(ResolvedImage::fixture(Architecture::Arm64));
         assert!(!AutoExecutor::should_use_squib(&request));
     }
 }
