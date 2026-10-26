@@ -909,6 +909,17 @@ test-lambda-executor-docker: lambda-runtime-image lambda-runtime-fixture-image
 
 .PHONY: test-lambda-executor test-lambda-executor-docker
 
+# The bridge lane requires an explicit pre-provisioned operator network.
+test-lambda-probes:
+	@cargo test -p rustack-lambda-runtime --lib probe::
+	@cargo test -p rustack-lambda-core --lib docker::network::tests
+	@cargo test -p rustack-lambda-core --lib docker::probe::tests
+
+test-lambda-probes-docker: lambda-runtime-image lambda-runtime-fixture-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" RUSTACK_RUNTIME_NETWORK="$(WORKFLOWS_NETWORK)" cargo test -p rustack-lambda-core --test docker_probe -- --ignored --test-threads=1
+
+.PHONY: test-lambda-probes test-lambda-probes-docker
+
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:
 	@cargo test -p rustack-lambda-runtime --lib

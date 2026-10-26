@@ -18,7 +18,8 @@ use super::{
     DirectoryLease, DockerError, DockerKey, DockerPort,
     models::{
         ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, HealthConfig,
-        HostConfig, HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
+        HostConfig, HostConfigCgroupnsModeEnum, HostConfigLogConfig, RestartPolicy,
+        RestartPolicyNameEnum,
     },
     mutation::MutationGuard,
 };
@@ -38,9 +39,14 @@ pub(super) enum ContainerRole {
 }
 
 /// Operator network selection; a bridge still requires daemon startup validation.
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct NetworkSelection(String);
+impl NetworkSelection {
+    pub(super) fn value(&self) -> &str {
+        &self.0
+    }
+}
 impl fmt::Debug for NetworkSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("NetworkSelection(<operator>)")
@@ -61,7 +67,7 @@ impl FromStr for NetworkSelection {
 }
 
 /// Integral relay session budgets independent of handler and deployment budgets.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct RelayBudgets {
     io: Duration,
@@ -104,13 +110,13 @@ impl RelayBudgets {
 }
 
 /// Validated operator limits, independent of user function configuration.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct ContainerPolicy {
-    network: NetworkSelection,
+    pub(super) network: NetworkSelection,
     uid: u32,
     gid: u32,
-    nano_cpus: i64,
+    pub(super) nano_cpus: i64,
     relay: RelayBudgets,
 }
 impl ContainerPolicy {
@@ -589,6 +595,7 @@ fn limits(
 ) -> Result<HostConfig, DockerError> {
     let memory = i64::try_from(memory).map_err(|_| DockerError::Configuration)?;
     Ok(HostConfig {
+        cgroupns_mode: Some(HostConfigCgroupnsModeEnum::PRIVATE),
         network_mode: Some(network),
         memory: Some(memory),
         memory_swap: Some(memory),

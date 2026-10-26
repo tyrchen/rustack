@@ -139,6 +139,10 @@ fn test_should_capture_fixed_images_identities_labels_and_complete_resource_poli
         );
         assert_eq!(labels["rustack.lambda.role"], role);
         let limits = body.host_config.as_ref().unwrap();
+        assert_eq!(
+            limits.cgroupns_mode,
+            Some(HostConfigCgroupnsModeEnum::PRIVATE)
+        );
         assert_eq!(limits.memory, Some(i64::try_from(memory).unwrap()));
         assert_eq!(limits.memory_swap, limits.memory);
         assert_eq!(limits.oom_kill_disable, Some(false));

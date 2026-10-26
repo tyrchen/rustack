@@ -328,3 +328,13 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: actual code execution and provider response composition can be verified independently while ordinary CLI selection remains unavailable until all production reconciliation/probes are implemented. The readiness interface shares the existing trusted Rust custom-Executor boundary and is never supplied through AWS requests. Pool/environment quota rejection is distinct from Docker wire saturation that may occur after side effects; only the former maps to429, while both retain no-replay behavior.
 - **Pinned by**: [runtime §4.6](./rustack-workflows-20-lambda-runtime-design.md#46-docker-executor-and-provider-composition), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26. No new dependency is required; this does not close M0 startup/platform acceptance.
+
+
+## D37 — Qualify actual kernel resources through the retained environment path
+
+- **Context**: production readiness must verify the daemon's real container limits without trusting declared create fields or operator user images to attest themselves.
+- **Alternatives considered**: info/inspect-only checks do not observe process isolation; a new one-off container owner duplicates uncertain-create/cleanup semantics; shell probes require image tooling and leak text; a network name can be retargeted after inspection.
+- **Decision**: pin qualified bridge selections by full ID and execute a bounded Rust probe mode from the operator-pinned relay image as a private Lambda revision under EnvironmentManager; issue private report proof only after exact kernel validation and joined retirement.
+- **Why**: probes consume the same policy/runtime path they qualify and retain existing cleanup ownership. Resource and network proofs remain independent from historical mutation reconciliation and cannot open readiness by themselves.
+- **Pinned by**: [runtime §4.7](./rustack-workflows-20-lambda-runtime-design.md#47-startup-network-qualification-and-actual-resource-probe), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Promote the already-resolved runtime serde_json dev dependency to a normal workspace dependency for bounded typed report serialization; no new library/version is introduced.

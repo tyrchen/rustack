@@ -404,6 +404,9 @@ impl fmt::Debug for EnvironmentPort {
     }
 }
 impl EnvironmentPort {
+    pub(super) fn same_service(&self, other: &Self) -> bool {
+        self.sender.same_channel(&other.sender)
+    }
     pub(super) fn same_scope(&self, directory: &DirectoryLease) -> bool {
         self.directory.owner_id() == directory.owner_id()
             && self.directory.run_id() == directory.run_id()

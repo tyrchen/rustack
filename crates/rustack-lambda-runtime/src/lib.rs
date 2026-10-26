@@ -10,6 +10,7 @@ pub mod client;
 pub mod diagnostics;
 pub mod http;
 pub mod metadata;
+pub mod probe;
 pub mod protocol;
 pub mod relay;
 pub mod session;

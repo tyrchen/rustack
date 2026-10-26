@@ -11,10 +11,12 @@ mod image;
 mod lease;
 mod logs;
 mod mutation;
+mod network;
 mod ownership;
 mod pin;
 mod plan;
 mod pool;
+mod probe;
 mod types;
 
 use std::{
@@ -49,11 +51,16 @@ use models::{
     ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, ContainerSummary,
     ContainerWaitResponse, ImageInspect, SystemInfo, SystemVersion,
 };
+pub use network::QualifiedNetwork;
 pub use ownership::{DirectoryLease, DirectoryLeaseError};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub use pin::{ImagePin, ImagePinScope};
 pub use plan::{ContainerPolicy, EnvironmentPlan, NetworkSelection, RelayBudgets};
 pub use pool::{EnvironmentPool, PoolConfig, PoolInvocation, PoolPort, PoolSettings, PoolStatus};
+pub use probe::{
+    EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, ProbeFailure, ProbeSettings,
+    probe_environment,
+};
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};
@@ -76,6 +83,7 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 enum Operation {
     Version,
     Info,
+    Network,
     Image,
     TagPin,
     InspectPin,

@@ -89,6 +89,14 @@ The permanent lease.lock inode is never truncated, replaced or deleted during re
 
 This capability alone is not a ready backend. Startup must separately reconcile prior runs and unresolved historical effects under the same persistent owner before accepting image execution. Do not treat one empty list/404 as proof that a prior uncertain daemon mutation cannot appear later. Shutdown keeps the lease until environment/deployment/image cleanup owners are joined; unresolved cleanup prevents successful quiescence/snapshot publication.
 
+### 1.4 Network and kernel probe receipts
+
+Startup must use [runtime §4.7](./rustack-workflows-20-lambda-runtime-design.md#47-startup-network-qualification-and-actual-resource-probe) to inspect an exact operator bridge and bind the full network ID before allocation. none is deliberately disconnected. Relay/function creation explicitly requests private cgroup namespaces; the pinned Rust probe checks current controller membership before reading normalized kernel limits. Host validation and joined retirement precede issuance of a private, exact-input resource proof; a final deadline/live-input check prevents late or revoked success. A serialized report alone cannot establish readiness.
+
+`make test-lambda-probes` runs bounded parser/qualification/facade regressions. `make test-lambda-probes-docker WORKFLOWS_DOCKER_SOCKET=<socket-path> WORKFLOWS_ARCH=arm64 WORKFLOWS_NETWORK=<existing-user-bridge>` requires an explicit pre-provisioned operator bridge and the pinned fixture images; it runs both none and bridge cases without silently skipping either. Tests do not create/delete the operator bridge. Test provisioners retain their own bridge identity/ownership and remove only their known bridge after all attached probe environments settle.
+
+Current actual execution evidence is on cgroup-v2 arm64 VZ and amd64/QEMU daemons. v1 normalization/private namespace behavior has parser and allocation-body coverage; an actual v1 daemon lane is still unmeasured. Network/resource receipts are implemented components; historical uncertain effects, registry pulls, endpoint reachability and the production startup coordinator remain mandatory before CLI Docker enablement.
+
 ## 2. Deployment topology and readiness
 
 | Topology | Control path | Handler SDK path | Required test |

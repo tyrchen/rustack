@@ -39,6 +39,17 @@ fn seconds(key: &str, default: u64, maximum: u64) -> Result<Duration, RelayError
 
 /// Run the private Linux relay process.
 pub(crate) async fn run() -> Result<(), RelayError> {
+    let mut arguments = env::args_os();
+    arguments.next();
+    match arguments.next() {
+        None => {}
+        Some(command) if command == "probe" && arguments.next().is_none() => {
+            return rustack_lambda_runtime::probe::run()
+                .await
+                .map_err(|_| RelayError::Configuration);
+        }
+        Some(_) => return Err(RelayError::Configuration),
+    }
     let environment =
         env::var("RUSTACK_LAMBDA_ENVIRONMENT_ID").map_err(|_| RelayError::Configuration)?;
     if environment.len() != 36 {
