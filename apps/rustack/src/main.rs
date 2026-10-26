@@ -1751,6 +1751,15 @@ mod tests {
             let capabilities: serde_json::Value = serde_json::from_str(body)?;
             anyhow::ensure!(capabilities["ready"] == true, "workflow gateway not ready");
             anyhow::ensure!(
+                capabilities["workflows"]["stateTypes"]
+                    .as_array()
+                    .is_some_and(|states| states.len() == 8
+                        && states.contains(&serde_json::json!("Parallel"))
+                        && states.contains(&serde_json::json!("Map")))
+                    && capabilities["workflows"]["limits"]["frames"] == 4096,
+                "installed structured profile or frame limit not reported"
+            );
+            anyhow::ensure!(
                 capabilities["workflows"]["lambdaRequestResponse"] == false,
                 "pure service advertised Lambda"
             );

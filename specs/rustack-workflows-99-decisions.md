@@ -512,3 +512,11 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: scheduler cloning and actor mutexes are unnecessary; physical ownership remains independent of business results and CPU observation. Equal branch AttemptIds cannot collide, and a clean watcher join cannot discard its unread completion.
 - **Pinned by**: [ASL§3.5](./rustack-workflows-30-asl-design.md#35-asynchronous-structured-resource-owner-and-commit-fence), [AWS history DTO](https://docs.aws.amazon.com/step-functions/latest/apireference/API_HistoryEvent.html).
 - **Date**: 2026-10-26. Actual consuming-service Native/SDK acceptance and nested integrations remain required; Docker remains deferred by user priority.
+
+## D59 — Bind service compilation to the registry's installed execution profile
+
+- **Context**: the structured owner is qualified as an explicit library path; enabling API compilation without matching registry admission and configured shared frame budgets would advertise unusable definitions.
+- **Decision**: retain Sequential library defaults and add an immutable registry state profile read by API preparation. Main selects Structured and configures shared/global frame/result caps. Choose the structured runtime only when the captured root artifact requires it, preserving sequential event semantics. Reject unsupported artifacts before publication and roll back failed Start without name/record mutation.
+- **Why**: one trusted composition root governs Create/Update/Validate and execution; no client-supplied profile or unimplemented quota is accepted. Independent real SDK structured/lifecycle cases gate eight-state capability reporting.
+- **Pinned by**: [ASL§3.6](./rustack-workflows-30-asl-design.md#36-structured-service-composition-and-capability-binding), [operations budgets](./rustack-workflows-60-operations-design.md#12-tunable-budgets).
+- **Date**: 2026-10-26. Nested jobs/callbacks/persistence and final Docker image/platform gates remain required; Docker work remains deferred by user priority.

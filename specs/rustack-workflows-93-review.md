@@ -694,6 +694,19 @@ ASL§3.5/D58 add the explicit structured supervisor composition; default service
 
 Final gates: `make test-stepfunctions-core` passes558 default units/224 doctests and89 compiler/35 frame-effect/22 scheduler/10 asynchronous preserve_order cases, followed by standard and strict production Clippy. Feature-enabled workspace build/all-target tests pass3,117 cases with428 separately gated; Clippy, denied-warning rustdoc, nightly formatting and full/minimal main-service gates pass. `make test-stepfunctions-bridge-native` executes10 actual process cases without an ignored case. Actual Rust SDK/boto3/runner-cleanup acceptance executes3 cases with none ignored. Evidence: `/tmp/rustack-p3-async-{core-complete,build,workspace,clippy,docs,format,runtime,native-final,sdk}.log`. Six changed documents have251 resolvable local links; whitespace checks pass. No new dependencies, lint/advisory ignores or Docker experiments are introduced. Existing B06 audit/deny remediation remains required; no fresh advisory scan is claimed by these dependency-unchanged checks.
 
+## P3 structured service binding independent review
+
+ASL§3.6/operations§1.6/D59 align API preparation, registry publication and execution profile, install frame/result quotas and expose real eight-state capability. Independent production review found no binding/admission defect. Both qualification findings below are corrected, and final read-only review reports no remaining finding.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W164 | P2; `apps/rustack/tests/workflows_sdk/rust/structured.rs`, `tests/workflows/stepfunctions_structured.py`, independent SDK review | previous<id is insufficient: assert exact shared Parallel fork and MapIterationStarted→MapStateStarted links; reuse complete Execution/State/Task/Lambda payload/metadata omission assertions, including the optimized TaskScheduled parameters object | Both actual SDKs execute six structured catalog cases, reverse/data-disabled paginators and exact fork/iteration identity checks |
+| W165 | P2; same SDK gate deployment fixtures, independent lifecycle review | Raise gate Lambda timeout to900s; fixture gate180s and function expiry must exceed the outer120s qualification window, so natural timeout cannot masquerade as Stop cleanup | Both SDKs Stop an enclosing Parallel→Map after two consumed-event identities, then prove both handler PIDs absent and both iteration aborts precede root termination |
+
+Final gates: core560 units/226 doctests plus89 compiler/35 frame-effect/22 scheduler/10 asynchronous preserve_order cases pass via `make test-stepfunctions-core`, followed by standard/strict production checks. Main full/minimal gates pass77/57 cases and strict boundary checks; settings5 cases and strict core-library checks pass. Actual Native10 and actual Rust SDK/boto3/runner3 cases execute without ignored cases in their required gates. Each SDK runs17 M1 +6 structured catalog cases and2 consumed-event lifecycle scenarios. Feature-enabled workspace build/all-target tests pass3,123 cases with428 separately gated; final Clippy, denied-warning rustdoc and nightly format checks pass. Evidence: `/tmp/rustack-p3-service-{core,runtime-final,settings,strict-settings,build-final,workspace-final,clippy-final,docs,format-final,native,sdk-final}.log`. No fresh advisory scan is claimed for this dependency-unchanged slice.
+
+The completed service gate enables Parallel/Map API execution; nested `.sync`, callbacks, persistence, B06 and final image/platform acceptance remain required. No dependency versions, lint/advisory ignores or Docker experiments change.
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

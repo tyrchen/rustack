@@ -28,8 +28,13 @@ pub(super) async fn run(
 ) -> Result<Response, StepFunctionsError> {
     let scope = context.scope.clone();
     let tasks = context.tasks;
+    let states = context.registry.state_support();
     let prepared = cpu(&context, deadline, move || {
-        prepare::prepare(request, &AslCompiler::new(scope.clone(), tasks), &scope)
+        prepare::prepare(
+            request,
+            &AslCompiler::new(scope.clone(), tasks).with_state_support(states),
+            &scope,
+        )
     })
     .await?;
     check(deadline)?;

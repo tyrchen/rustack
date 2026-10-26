@@ -1,4 +1,4 @@
-//! One retained blocking preparation for the strict M1 profile.
+//! Retained blocking preparation under the installed STANDARD/JSONPath profile.
 
 use rustack_stepfunctions_core::{
     AslCompiler, DiagnosticSeverity, ExecutionArn, Payload, PreparedDefinition, RegistryCommand,

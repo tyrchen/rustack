@@ -12,7 +12,9 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 
-use crate::{CompiledMachine, ExecutionLimits, ExecutionSupervisor, Payload, TenantScope};
+use crate::{
+    CompiledMachine, ExecutionLimits, ExecutionSupervisor, Payload, StateSupport, TenantScope,
+};
 
 mod actor;
 mod domain;
@@ -94,8 +96,14 @@ struct Reply {
     result: Result<RegistryResult, RegistryError>,
     permit: OwnedSemaphorePermit,
 }
+#[derive(Debug, Clone, Copy, Default)]
+struct Profile {
+    execution: ExecutionLimits,
+    states: StateSupport,
+}
 struct Shared {
     scope: TenantScope,
+    states: StateSupport,
     sender: mpsc::Sender<Envelope>,
     capacity: Arc<Semaphore>,
     closing: watch::Sender<bool>,
@@ -174,6 +182,27 @@ impl Registry {
         runtime: ExecutionSupervisor,
         execution: ExecutionLimits,
     ) -> Result<(Self, RegistrySupervisor), RegistryError> {
+        Self::new_with_state_support(scope, limits, runtime, execution, StateSupport::Sequential)
+    }
+    /// Compose the registry with an immutable installed state-instruction profile.
+    ///
+    /// The API must use `state_support()` when compiling definitions.
+    ///
+    /// # Errors
+    /// Requires an active Tokio runtime; all supplied limits are validated.
+    ///
+    /// ```no_run
+    /// # fn compose(runtime:rustack_stepfunctions_core::ExecutionSupervisor)->Result<(),rustack_stepfunctions_core::RegistryError>{
+    /// let (registry,owner)=rustack_stepfunctions_core::Registry::new_with_state_support(Default::default(),Default::default(),runtime,Default::default(),rustack_stepfunctions_core::StateSupport::Structured)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn new_with_state_support(
+        scope: TenantScope,
+        limits: RegistryLimits,
+        runtime: ExecutionSupervisor,
+        execution: ExecutionLimits,
+        support: StateSupport,
+    ) -> Result<(Self, RegistrySupervisor), RegistryError> {
         Handle::try_current().map_err(|_| RegistryError::Unavailable)?;
         let (sender, receiver) = mpsc::channel(limits.commands);
         let (closing, stop) = watch::channel(false);
@@ -183,6 +212,7 @@ impl Registry {
         });
         let shared = Arc::new(Shared {
             scope: scope.clone(),
+            states: support,
             sender,
             capacity: Arc::new(Semaphore::new(limits.commands)),
             closing: closing.clone(),
@@ -193,7 +223,10 @@ impl Registry {
             scope,
             limits,
             runtime,
-            execution,
+            Profile {
+                execution,
+                states: support,
+            },
             receiver,
             closing.clone(),
             status,
@@ -260,6 +293,15 @@ impl Registry {
     pub fn scope(&self) -> &TenantScope {
         &self.shared.scope
     }
+    /// Read the immutable installed instruction profile for compilation.
+    ///
+    /// ```
+    /// # fn inspect(registry:&rustack_stepfunctions_core::Registry){let states=registry.state_support();}
+    /// ```
+    #[must_use]
+    pub fn state_support(&self) -> StateSupport {
+        self.shared.states
+    }
     /// Validate and synchronously transfer one command to retained ownership.
     ///
     /// # Errors
@@ -272,7 +314,7 @@ impl Registry {
     /// # Ok(()) }
     /// ```
     pub fn submit(&self, command: RegistryCommand) -> Result<RegistryReceipt, RegistryError> {
-        command.check(&self.shared.scope)?;
+        command.check(&self.shared.scope, self.shared.states)?;
         if *self.shared.closing.borrow() {
             return Err(RegistryError::Unavailable);
         }
@@ -325,9 +367,12 @@ impl Registry {
     }
 }
 impl RegistryCommand {
-    fn check(&self, scope: &TenantScope) -> Result<(), RegistryError> {
+    fn check(&self, scope: &TenantScope, states: StateSupport) -> Result<(), RegistryError> {
         let check_machine = |machine: &CompiledMachine| {
-            if machine.is_root_definition() && domain::same_scope(machine.scope(), scope) {
+            if machine.is_root_definition()
+                && domain::same_scope(machine.scope(), scope)
+                && (states == StateSupport::Structured || !machine.requires_structured_execution())
+            {
                 Ok(())
             } else {
                 Err(RegistryError::Validation)

@@ -477,7 +477,7 @@ fn test_should_charge_nested_scope_and_item_selector_units_to_one_exact_budget()
 }
 
 #[test]
-fn test_should_keep_default_service_and_sequential_driver_admission_closed() -> TestResult {
+fn test_should_keep_default_compiler_and_sequential_driver_admission_closed() -> TestResult {
     for value in [parallel(vec![leaf()]), map()] {
         let source = serde_json::to_vec(&value)?;
         let error = AslCompiler::default()

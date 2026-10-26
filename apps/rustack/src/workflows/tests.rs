@@ -265,3 +265,84 @@ async fn test_should_skip_grace_on_final_cleanup_and_cancel_before_provider_dest
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn test_should_compile_validate_update_and_execute_structured_profile_through_real_api()
+-> Result<()> {
+    let mut budgets = RuntimeBudgets::default();
+    budgets.workflow_frames = 16;
+    budgets.workflow_frames_per_execution = 8;
+    budgets.workflow_result_bytes = 2 * 1024 * 1024;
+    budgets.workflow_result_bytes_per_execution = 1024 * 1024;
+    let mut runtime = runtime(budgets)?;
+    let result = async {
+        let definition = json!({"StartAt":"M","States":{"M":{"Type":"Map","ItemProcessor":{"StartAt":"D","States":{"D":{"Type":"Pass","End":true}}},"End":true}}}).to_string();
+        let (status, validated) = request(runtime.api.clone(), "ValidateStateMachineDefinition", json!({"definition":definition})).await?;
+        assert_eq!(status, StatusCode::OK, "{validated}");
+        assert_eq!(validated["result"], "OK");
+        let (status, created) = request(runtime.api.clone(), "CreateStateMachine", json!({"name":"Structured","roleArn":"arn:aws:iam::000000000000:role/Test","definition":definition})).await?;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let definition = json!({"StartAt":"P","States":{"P":{"Type":"Parallel","Branches":[serde_json::from_str::<Value>(&definition)?,serde_json::from_str::<Value>(&definition)?],"End":true}}}).to_string();
+        let (status, updated) = request(runtime.api.clone(), "UpdateStateMachine", json!({"stateMachineArn":created["stateMachineArn"],"definition":definition})).await?;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        let (status, started) = request(runtime.api.clone(), "StartExecution", json!({"stateMachineArn":created["stateMachineArn"],"input":"[1,null,3]"})).await?;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let arn = started["executionArn"].as_str().context("execution ARN")?.parse()?;
+        let RegistryResult::Execution(snapshot) = runtime.status.registry.submit(RegistryCommand::Execution(arn))?.wait(Instant::now()+Duration::from_secs(5)).await? else { anyhow::bail!("missing execution"); };
+        let complete = snapshot.wait(Instant::now()+Duration::from_secs(5)).await?;
+        assert!(matches!(complete.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(value)) if value.value()==&json!([[1,null,3],[1,null,3]])));
+        let capabilities = runtime.status.capabilities();
+        assert_eq!(capabilities["stateTypes"].as_array().context("states")?.len(), 8);
+        assert_eq!(capabilities["inlineMapMaxConcurrency"], 40);
+        assert_eq!(capabilities["limits"]["frames"], 16);
+        assert_eq!(capabilities["limits"]["framesPerExecution"], 8);
+        assert_eq!(capabilities["limits"]["resultBytes"], 2*1024*1024);
+        assert_eq!(capabilities["limits"]["resultBytesPerExecution"], 1024*1024);
+        let invalid = json!({"StartAt":"M","States":{"M":{"Type":"Map","ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED"},"StartAt":"D","States":{"D":{"Type":"Succeed"}}},"End":true}}}).to_string();
+        let (_, validation) = request(runtime.api.clone(), "ValidateStateMachineDefinition", json!({"definition":invalid})).await?;
+        assert_eq!(validation["result"], "FAIL");
+        Ok(())
+    }.await;
+    runtime
+        .owner
+        .quiesce(Instant::now() + Duration::from_secs(10))
+        .await?;
+    result
+}
+
+#[tokio::test]
+async fn test_should_enforce_configured_frame_and_result_limits_in_public_execution_view()
+-> Result<()> {
+    for (frames, bytes, expected) in [
+        (1, 1024 * 1024, "Rustack.FrameLimitExceeded"),
+        (8, 4096, "Rustack.ResultLimitExceeded"),
+    ] {
+        let mut budgets = RuntimeBudgets::default();
+        budgets.workflow_frames = frames;
+        budgets.workflow_frames_per_execution = frames;
+        budgets.workflow_result_bytes = bytes;
+        budgets.workflow_result_bytes_per_execution = bytes;
+        let mut runtime = runtime(budgets)?;
+        let result = async {
+            let definition = json!({"StartAt":"P","States":{"P":{"Type":"Parallel","Branches":[{"StartAt":"D","States":{"D":{"Type":"Pass","Result":"x".repeat(3000),"End":true}}}],"End":true}}}).to_string();
+            let (status, created) = request(runtime.api.clone(), "CreateStateMachine", json!({"name":"Quota","roleArn":"arn:aws:iam::000000000000:role/Test","definition":definition})).await?;
+            assert_eq!(status, StatusCode::OK, "{created}");
+            let (status, started) = request(runtime.api.clone(), "StartExecution", json!({"stateMachineArn":created["stateMachineArn"],"name":"Run"})).await?;
+            assert_eq!(status, StatusCode::OK, "{started}");
+            let arn = started["executionArn"].as_str().context("ARN")?.parse()?;
+            let RegistryResult::Execution(snapshot) = runtime.status.registry.submit(RegistryCommand::Execution(arn))?.wait(Instant::now()+Duration::from_secs(5)).await? else { anyhow::bail!("missing execution"); };
+            snapshot.wait(Instant::now()+Duration::from_secs(5)).await?;
+            let (status, described) = request(runtime.api.clone(), "DescribeExecution", json!({"executionArn":started["executionArn"]})).await?;
+            assert_eq!(status, StatusCode::OK, "{described}");
+            assert_eq!(described["status"], "FAILED");
+            assert_eq!(described["error"], expected);
+            Ok(())
+        }.await;
+        runtime
+            .owner
+            .quiesce(Instant::now() + Duration::from_secs(5))
+            .await?;
+        result?;
+    }
+    Ok(())
+}

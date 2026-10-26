@@ -41,7 +41,7 @@ pub use task::{FunctionArn, Integration, TaskSupport, TenantScope};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StateSupport {
-    /// The six sequential state forms supported by the current service.
+    /// The six sequential instruction forms used by the default library profile.
     #[default]
     Sequential,
     /// Also compile Parallel and Inline Map for a structured frame owner.

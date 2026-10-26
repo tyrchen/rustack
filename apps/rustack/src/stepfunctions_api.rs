@@ -1,7 +1,7 @@
-//! Real registry-backed M1 API, retained preparation and charged stable cursors.
+//! Registry-backed API, retained preparation and charged stable cursors.
 //!
-//! This binary-support layer composes core and HTTP without advertising a main
-//! service. async-trait is required by the transport's object-safe handler port.
+//! Compilation follows the registry's immutable installed instruction profile.
+//! async-trait is required by the transport's object-safe handler port.
 
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 

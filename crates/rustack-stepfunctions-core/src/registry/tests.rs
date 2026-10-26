@@ -12,9 +12,9 @@ use tokio::{
 
 use super::*;
 use crate::{
-    AslCompiler, ExecutionError, ExecutionOutcome, HistoryLimits, LambdaTaskCommand,
-    LambdaTaskPort, RuntimeLimits, StateSupport, StateView, TaskCall, TaskFailure, TaskResponder,
-    TaskSupport,
+    AslCompiler, ExecutionError, ExecutionOutcome, FrameCapacity, FrameLimits, HistoryLimits,
+    LambdaTaskCommand, LambdaTaskPort, RuntimeLimits, StateSupport, StateView, TaskCall,
+    TaskFailure, TaskResponder, TaskSupport,
 };
 
 fn deadline() -> Instant {
@@ -879,5 +879,109 @@ async fn test_should_reject_nested_artifact_promotion_during_create_and_update()
     assert_eq!(current.revision().id(), first.revision().id());
     assert!(Arc::ptr_eq(current.revision(), first.revision()));
     owner.shutdown(deadline()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_bind_structured_publication_and_start_to_installed_profile()
+-> Result<(), Box<dyn Error>> {
+    let compiled = AslCompiler::default().with_state_support(StateSupport::Structured)
+        .compile(br#"{"StartAt":"P","States":{"P":{"Type":"Parallel","Branches":[{"StartAt":"D","States":{"D":{"Type":"Pass","Result":1,"End":true}}},{"StartAt":"D","States":{"D":{"Type":"Pass","Result":2,"End":true}}}],"End":true}}}"#)?;
+    let prepared = PreparedDefinition::new(compiled.machine().clone());
+    let (sequential, mut old_owner) = registry(RegistryLimits::default(), None);
+    assert_eq!(sequential.state_support(), StateSupport::Sequential);
+    assert!(matches!(
+        sequential.submit(RegistryCommand::Create(
+            "Machine".parse()?,
+            prepared.clone(),
+            role(),
+            Tags::default()
+        )),
+        Err(RegistryError::Validation)
+    ));
+    machine(&sequential, 7, false).await;
+    assert!(matches!(
+        sequential.submit(RegistryCommand::Update(arn(), Some(prepared.clone()), None)),
+        Err(RegistryError::Validation)
+    ));
+    let old = start(&sequential, "unchanged", "{}").await?;
+    let old = observe(old).await;
+    assert!(
+        matches!(old.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(value)) if value.value()==&json!(7))
+    );
+    old_owner.shutdown(deadline()).await?;
+    let runtime = ExecutionSupervisor::new(
+        RuntimeLimits::default(),
+        HistoryLimits::default(),
+        256 * 1024 * 1024,
+        None,
+    )?;
+    let (structured, mut owner) = Registry::new_with_state_support(
+        TenantScope::default(),
+        RegistryLimits::default(),
+        runtime,
+        ExecutionLimits::default(),
+        StateSupport::Structured,
+    )?;
+    assert_eq!(structured.state_support(), StateSupport::Structured);
+    result(
+        &structured,
+        RegistryCommand::Create("Machine".parse()?, prepared, role(), Tags::default()),
+    )
+    .await?;
+    let completed = observe(start(&structured, "structured", "{}").await?).await;
+    assert!(
+        matches!(completed.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(value)) if value.value()==&json!([1,2]))
+    );
+    owner.shutdown(deadline()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_rollback_record_and_name_when_shared_root_frame_admission_is_full()
+-> Result<(), Box<dyn Error>> {
+    let capacity = Arc::new(FrameCapacity::new(1, 1024 * 1024)?);
+    let runtime = ExecutionSupervisor::new_with_frames(
+        RuntimeLimits::default(),
+        HistoryLimits::default(),
+        256 * 1024 * 1024,
+        None,
+        capacity.clone(),
+        FrameLimits::new(1, 1024 * 1024)?,
+    )?;
+    let (reg, mut owner) = Registry::new_with_state_support(
+        TenantScope::default(),
+        RegistryLimits::default(),
+        runtime,
+        ExecutionLimits::default(),
+        StateSupport::Structured,
+    )?;
+    machine(&reg, 1, true).await;
+    let first = start(&reg, "first", "{}").await?;
+    assert_eq!(capacity.available_frames(), 0);
+    result(
+        &reg,
+        RegistryCommand::Update(arn(), Some(definition(7, false)), None),
+    )
+    .await?;
+    assert!(matches!(
+        start(&reg, "retry-same-name", "{}").await,
+        Err(RegistryError::Execution(ExecutionError::Capacity))
+    ));
+    let RegistryResult::Executions(records) =
+        result(&reg, RegistryCommand::Executions(arn())).await?
+    else {
+        return Err("missing records".into());
+    };
+    assert_eq!(records.len(), 1);
+    reg.stop(first.arn().clone(), None, None, deadline())
+        .await?;
+    reg.wait_idle(deadline()).await?;
+    let completed = observe(start(&reg, "retry-same-name", "{}").await?).await;
+    assert!(
+        matches!(completed.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(value)) if value.value()==&json!(7))
+    );
+    owner.shutdown(deadline()).await?;
+    assert_eq!(capacity.available_frames(), 1);
     Ok(())
 }

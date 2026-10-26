@@ -14,8 +14,9 @@ use rustack_lambda_core::{executor::ExecutorBackend, provider::RustackLambda};
 #[cfg(feature = "lambda")]
 use rustack_stepfunctions_core::LambdaTaskPort;
 use rustack_stepfunctions_core::{
-    ExecutionLimits, ExecutionSupervisor, HistoryLimits, Registry, RegistryCapacities,
-    RegistryError, RegistryLimits, RegistrySupervisor, RuntimeLimits, TaskSupport, TenantScope,
+    ExecutionLimits, ExecutionSupervisor, FrameCapacity, FrameLimits, HistoryLimits, Registry,
+    RegistryCapacities, RegistryError, RegistryLimits, RegistrySupervisor, RuntimeLimits,
+    StateSupport, TaskSupport, TenantScope,
 };
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -43,7 +44,8 @@ impl WorkflowStatus {
         let lambda = false;
         json!({
             "type": "STANDARD", "queryLanguage": "JSONPath",
-            "stateTypes": ["Pass", "Choice", "Wait", "Task", "Succeed", "Fail"],
+            "stateTypes": ["Pass", "Choice", "Wait", "Task", "Succeed", "Fail", "Parallel", "Map"],
+            "inlineMapMaxConcurrency": 40,
             "lambdaRequestResponse": lambda, "nestedSync": false, "callbacks": false,
             "snapshot": "unsupported", "dockerQualified": false,
             "limits": {
@@ -62,6 +64,10 @@ impl WorkflowStatus {
                 "dispatches": self.budgets.workflow_dispatches,
                 "maxDurationSeconds": self.budgets.workflow_max_duration_seconds,
                 "transitions": self.budgets.workflow_transitions,
+                "frames": self.budgets.workflow_frames,
+                "framesPerExecution": self.budgets.workflow_frames_per_execution,
+                "resultBytes": self.budgets.workflow_result_bytes,
+                "resultBytesPerExecution": self.budgets.workflow_result_bytes_per_execution,
                 "historyEvents": 25000, "historyBytes": self.budgets.workflow_history_bytes,
                 "totalHistoryBytes": self.budgets.workflow_total_history_bytes,
                 "lambdaAcceptedCalls": self.budgets.workflow_lambda_accepted_calls,
@@ -148,7 +154,7 @@ impl WorkflowRuntime {
         } else {
             TaskSupport::Disabled
         };
-        let runtime = ExecutionSupervisor::new(
+        let runtime = ExecutionSupervisor::new_with_frames(
             RuntimeLimits::new(
                 budgets.workflow_open_executions,
                 budgets.workflow_dispatches,
@@ -157,8 +163,16 @@ impl WorkflowRuntime {
             HistoryLimits::new(25000, budgets.workflow_history_bytes)?,
             budgets.workflow_total_history_bytes,
             task_port,
+            Arc::new(FrameCapacity::new(
+                budgets.workflow_frames,
+                budgets.workflow_result_bytes,
+            )?),
+            FrameLimits::new(
+                budgets.workflow_frames_per_execution,
+                budgets.workflow_result_bytes_per_execution,
+            )?,
         )?;
-        let (registry, owner) = Registry::new(
+        let (registry, owner) = Registry::new_with_state_support(
             scope.clone(),
             RegistryLimits::new(
                 RegistryCapacities::new(
@@ -175,6 +189,7 @@ impl WorkflowRuntime {
                 Duration::from_secs(budgets.workflow_max_duration_seconds),
                 budgets.workflow_transitions,
             )?,
+            StateSupport::Structured,
         )?;
         let (api, api_owner) = StepFunctionsApi::new(
             scope,

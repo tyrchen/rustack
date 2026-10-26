@@ -33,6 +33,9 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::process::{ACCESS, SECRET, Server};
 
+#[path = "rust/structured.rs"]
+mod structured;
+
 const ROLE: &str = "arn:aws:iam::000000000000:role/Workflows";
 const PREFIX: &str = "arn:aws:states:us-east-1:000000000000:";
 fn credentials() -> Credentials {
@@ -477,6 +480,69 @@ fn verify_output(case: &Value, result: &DescribeExecutionOutput) -> Result<()> {
     }
     Ok(())
 }
+fn assert_omitted(events: &[HistoryEvent]) -> Result<()> {
+    for event in events {
+        let inputs = [
+            event
+                .execution_started_event_details()
+                .and_then(|d| d.input()),
+            event.state_entered_event_details().and_then(|d| d.input()),
+            event
+                .lambda_function_scheduled_event_details()
+                .and_then(|d| d.input()),
+        ];
+        let outputs = [
+            event
+                .execution_succeeded_event_details()
+                .and_then(|d| d.output()),
+            event.state_exited_event_details().and_then(|d| d.output()),
+            event
+                .lambda_function_succeeded_event_details()
+                .and_then(|d| d.output()),
+            event
+                .task_succeeded_event_details()
+                .and_then(|d| d.output()),
+        ];
+        let metadata_present = [
+            event
+                .execution_started_event_details()
+                .and_then(|d| d.input_details())
+                .is_some(),
+            event
+                .state_entered_event_details()
+                .and_then(|d| d.input_details())
+                .is_some(),
+            event
+                .lambda_function_scheduled_event_details()
+                .and_then(|d| d.input_details())
+                .is_some(),
+            event
+                .execution_succeeded_event_details()
+                .and_then(|d| d.output_details())
+                .is_some(),
+            event
+                .state_exited_event_details()
+                .and_then(|d| d.output_details())
+                .is_some(),
+            event
+                .lambda_function_succeeded_event_details()
+                .and_then(|d| d.output_details())
+                .is_some(),
+            event
+                .task_succeeded_event_details()
+                .and_then(|d| d.output_details())
+                .is_some(),
+        ];
+        ensure!(
+            inputs.iter().all(Option::is_none)
+                && outputs.iter().all(Option::is_none)
+                && metadata_present.iter().all(|present| !present)
+                && event.task_scheduled_event_details().is_none(),
+            "execution data was not omitted"
+        );
+    }
+    Ok(())
+}
 async fn pagination(client: &Client, arn: &str, events: &[HistoryEvent]) -> Result<()> {
     let reverse = history(client, arn, true, false).await?;
     ensure!(
@@ -493,18 +559,7 @@ async fn pagination(client: &Client, arn: &str, events: &[HistoryEvent]) -> Resu
             .all(|(left, right)| left.previous_event_id() == right.previous_event_id()),
         "reverse traversal changed causal links"
     );
-    for event in &reverse {
-        ensure!(
-            event
-                .state_entered_event_details()
-                .is_none_or(|d| d.input().is_none())
-                && event
-                    .task_succeeded_event_details()
-                    .is_none_or(|d| d.output().is_none())
-                && event.task_scheduled_event_details().is_none(),
-            "execution data was not omitted"
-        );
-    }
+    assert_omitted(&reverse)?;
     let first = client
         .get_execution_history()
         .execution_arn(arn)
@@ -954,5 +1009,6 @@ pub(super) async fn exercise(server: &Server) -> Result<()> {
     deploy(server, &lambda(server)).await?;
     catalog(&client).await?;
     controls(&client, server).await?;
+    structured::exercise(&client, server).await?;
     Ok(())
 }

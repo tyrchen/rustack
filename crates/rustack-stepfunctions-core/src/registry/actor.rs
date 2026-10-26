@@ -16,18 +16,19 @@ use tokio::{
 
 use super::{
     DefinitionRevision, Envelope, ExecutionArn, ExecutionName, ExecutionSnapshot, MachineSnapshot,
-    MachineStatus, PreparedDefinition, RegistryCommand, RegistryError, RegistryLimits,
+    MachineStatus, PreparedDefinition, Profile, RegistryCommand, RegistryError, RegistryLimits,
     RegistryResult, RegistryStatus, Reply, RoleArn, StateMachineArn, TenantScope,
     types::{ExecutionIdentity, ExecutionRecord, MachineIdentity, RevisionData, TagAllocation},
 };
 use crate::{
     CleanupState, ClockSample, EvaluationContext, ExecutionDriver, ExecutionError, ExecutionLimits,
-    ExecutionSupervisor, Payload, SystemUuidSource, UuidSource,
+    ExecutionSupervisor, Payload, StateSupport, SystemUuidSource, UuidSource,
 };
 
 const NAME_RETENTION: Duration = Duration::from_hours(2160);
 struct Resources {
     scope: TenantScope,
+    states: StateSupport,
     limits: RegistryLimits,
     machines: BTreeMap<String, MachineSnapshot>,
     revisions: Arc<Semaphore>,
@@ -67,7 +68,7 @@ impl Owner {
         scope: TenantScope,
         limits: RegistryLimits,
         runtime: ExecutionSupervisor,
-        execution: ExecutionLimits,
+        profile: Profile,
         receiver: mpsc::Receiver<Envelope>,
         closing: watch::Sender<bool>,
         status: watch::Sender<RegistryStatus>,
@@ -76,6 +77,7 @@ impl Owner {
             state: Some(State {
                 resources: Resources {
                     scope,
+                    states: profile.states,
                     limits,
                     machines: BTreeMap::new(),
                     revisions: Arc::new(Semaphore::new(limits.capacities.revisions)),
@@ -85,7 +87,7 @@ impl Owner {
                     records: BTreeMap::new(),
                     claims: BTreeMap::new(),
                     capacity: Arc::new(Semaphore::new(limits.capacities.records)),
-                    limits: execution,
+                    limits: profile.execution,
                 },
                 runtime,
                 io: Io {
@@ -203,7 +205,11 @@ impl State {
         if let Some(envelope) = self.io.pending.take() {
             self.maintain(Instant::now());
             let result = prepared
-                .and_then(|()| envelope.command.check(&self.resources.scope))
+                .and_then(|()| {
+                    envelope
+                        .command
+                        .check(&self.resources.scope, self.resources.states)
+                })
                 .and_then(|()| self.command(&envelope.command));
             self.maintain(Instant::now());
             reply(envelope, result);
@@ -422,7 +428,13 @@ impl State {
         let context = EvaluationContext::from_value(
             &json!({"Execution":{"Id":arn.as_str(),"Name":arn.name().as_str(),"Input":input.value(),"RoleArn":machine.revision.role().as_str(),"StartTime":now.to_rfc3339_opts(SecondsFormat::Millis,true)},"StateMachine":{"Id":machine.arn().as_str(),"Name":machine.arn().name().as_str()}}),
         )?;
-        let driver = ExecutionDriver::new(
+        let structured = machine.revision.machine().requires_structured_execution();
+        let construct = if structured {
+            ExecutionDriver::for_structured_owner
+        } else {
+            ExecutionDriver::new
+        };
+        let driver = construct(
             machine.revision.machine().clone(),
             input.clone(),
             context,
@@ -430,7 +442,11 @@ impl State {
             self.executions.limits,
         )?;
         // No await between runtime registration and the atomic record/name commit.
-        let handle = self.runtime.start(driver)?;
+        let handle = if structured {
+            self.runtime.start_structured(driver)?
+        } else {
+            self.runtime.start(driver)?
+        };
         let view = handle.snapshot();
         let record = Arc::new(ExecutionRecord {
             identity: ExecutionIdentity {
@@ -576,7 +592,7 @@ mod clock_tests {
             TenantScope::default(),
             RegistryLimits::new(capacities, Duration::from_secs(60), 8).unwrap(),
             runtime,
-            ExecutionLimits::default(),
+            Profile::default(),
             receiver,
             closing,
             watch::channel(RegistryStatus {

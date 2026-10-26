@@ -128,6 +128,14 @@ pub struct RuntimeBudgets {
     pub workflow_evaluations: usize,
     /// Concurrent workflow Task dispatches.
     pub workflow_dispatches: usize,
+    /// Global retained frame slots, including root and ancestor leases.
+    pub workflow_frames: usize,
+    /// Retained frame slots per execution.
+    pub workflow_frames_per_execution: usize,
+    /// Global intermediate indexed result storage bytes.
+    pub workflow_result_bytes: usize,
+    /// Intermediate indexed result storage bytes per execution.
+    pub workflow_result_bytes_per_execution: usize,
     /// Independent workflow execution duration ceiling.
     pub workflow_max_duration_seconds: u64,
     /// Maximum transitions per workflow execution.
@@ -186,6 +194,10 @@ impl Default for RuntimeBudgets {
             workflow_open_executions: 128,
             workflow_evaluations: 8,
             workflow_dispatches: 32,
+            workflow_frames: 4096,
+            workflow_frames_per_execution: 512,
+            workflow_result_bytes: 268_435_456,
+            workflow_result_bytes_per_execution: 33_554_432,
             workflow_max_duration_seconds: 3600,
             workflow_transitions: 100_000,
             workflow_history_bytes: 33_554_432,
@@ -218,6 +230,7 @@ impl RuntimeBudgets {
     pub fn validate(&self) -> Result<(), SettingsError> {
         self.validate_workflow_api()?;
         self.validate_workflow_execution()?;
+        self.validate_workflow_frames()?;
         if self.workflow_api_workers > self.workflow_api_accepted {
             return Err(invalid(
                 "budgets.workflowApiWorkers",
@@ -349,6 +362,42 @@ impl RuntimeBudgets {
             if !(min..=max).contains(&value) {
                 return Err(invalid(key, "outside supported workflow range"));
             }
+        }
+        Ok(())
+    }
+    fn validate_workflow_frames(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            ("budgets.workflowFrames", self.workflow_frames, 1, 4096),
+            (
+                "budgets.workflowFramesPerExecution",
+                self.workflow_frames_per_execution,
+                1,
+                512,
+            ),
+            (
+                "budgets.workflowResultBytes",
+                self.workflow_result_bytes,
+                4096,
+                1024 * 1024 * 1024,
+            ),
+            (
+                "budgets.workflowResultBytesPerExecution",
+                self.workflow_result_bytes_per_execution,
+                4096,
+                128 * 1024 * 1024,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(key, "outside supported workflow frame range"));
+            }
+        }
+        if self.workflow_frames_per_execution > self.workflow_frames
+            || self.workflow_result_bytes_per_execution > self.workflow_result_bytes
+        {
+            return Err(invalid(
+                "budgets.workflowFrames",
+                "per-execution frame/result limits must not exceed global limits",
+            ));
         }
         Ok(())
     }
@@ -897,6 +946,14 @@ mod tests {
             "workflowOpenExecutions: 0",
             "workflowEvaluations: 129",
             "workflowDispatches: 1025",
+            "workflowFrames: 0",
+            "workflowFrames: 4097",
+            "workflowFramesPerExecution: 513",
+            "workflowResultBytes: 4095",
+            "workflowResultBytes: 1073741825",
+            "workflowResultBytesPerExecution: 134217729",
+            "workflowFrames: 1\n  workflowFramesPerExecution: 2",
+            "workflowResultBytes: 4096\n  workflowResultBytesPerExecution: 4097",
             "workflowMaxDurationSeconds: 0",
             "workflowTransitions: 1000001",
             "workflowHistoryBytes: 1048575",
@@ -911,6 +968,32 @@ mod tests {
                 ValidatedSettings::parse(&format!("budgets:\n  {setting}"), &BTreeMap::new())
                     .is_err(),
                 "{setting}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_enforce_exact_frame_and_result_configuration_bounds() -> Result<(), SettingsError>
+    {
+        for (frames, local_frames, results, local_results) in [
+            (1, 1, 4096, 4096),
+            (4096, 512, 1024 * 1024 * 1024, 128 * 1024 * 1024),
+        ] {
+            let config = ValidatedSettings::parse(
+                &format!(
+                    "budgets:\n  workflowFrames: {frames}\n  workflowFramesPerExecution: \
+                     {local_frames}\n  workflowResultBytes: {results}\n  \
+                     workflowResultBytesPerExecution: {local_results}\n"
+                ),
+                &BTreeMap::new(),
+            )?;
+            assert_eq!(config.budgets().workflow_frames, frames);
+            assert_eq!(config.budgets().workflow_frames_per_execution, local_frames);
+            assert_eq!(config.budgets().workflow_result_bytes, results);
+            assert_eq!(
+                config.budgets().workflow_result_bytes_per_execution,
+                local_results
             );
         }
         Ok(())

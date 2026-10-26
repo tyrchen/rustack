@@ -64,6 +64,8 @@ async fn test_should_accept_ordinary_boto3_through_actual_runtime() -> Result<()
         ensure!(
             result["catalogCases"] == 17
                 && result["m1Actions"] == 15
+                && result["structuredCases"] == 6
+                && result["structuredLifecycle"] == 2
                 && result["actualNative"] == true,
             "missing SDK acceptance evidence"
         );
