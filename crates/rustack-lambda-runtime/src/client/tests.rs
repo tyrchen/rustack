@@ -626,3 +626,87 @@ async fn test_should_preserve_transport_worker_failure_after_a_prior_scope_error
         Err(RelayError::Worker)
     ));
 }
+
+#[rstest::rstest]
+#[case::idle("idle")]
+#[case::initializing("initializing")]
+#[case::without_budget("without_budget")]
+#[case::foreign_attempt("foreign")]
+#[case::duplicate("duplicate")]
+#[case::init_after_timeout("init_after_timeout")]
+#[tokio::test]
+async fn test_should_reject_impossible_handler_timeout_events(#[case] condition: &str) {
+    let mut peer = Peer::new(4096);
+    peer.ready(condition != "initializing").await;
+    let call = invocation();
+    let attempt = call.parts().0;
+    if !matches!(condition, "idle" | "initializing") {
+        let call = if condition == "without_budget" {
+            call
+        } else {
+            call.with_handler_timeout(
+                crate::protocol::HandlerTimeout::try_from(Duration::from_secs(1)).unwrap(),
+            )
+        };
+        peer.client.invoke(call, deadline()).await.unwrap();
+        let sent = peer.read().await;
+        assert!(
+            matches!(
+                sent,
+                Message::Invoke {
+                    handler_timeout_ms: Some(_),
+                    ..
+                }
+            ) || condition == "without_budget"
+        );
+    }
+    let reported = if condition == "foreign" {
+        AttemptId::default()
+    } else {
+        attempt
+    };
+    peer.send(Message::InvocationTimedOut { attempt: reported })
+        .await;
+    if matches!(condition, "duplicate" | "init_after_timeout") {
+        assert_eq!(
+            peer.client.next(deadline()).await.unwrap(),
+            ClientEvent::InvocationTimedOut(attempt)
+        );
+        assert!(!peer.client.is_idle());
+        let message = if condition == "duplicate" {
+            Message::InvocationTimedOut { attempt }
+        } else {
+            Message::InitError {
+                payload: Payload::try_from(Bytes::new()).unwrap(),
+            }
+        };
+        peer.send(message).await;
+    }
+    assert!(matches!(
+        peer.client.next(deadline()).await,
+        Err(RelayError::UnexpectedMessage)
+    ));
+    assert!(peer.client.shutdown(deadline()).await.is_err());
+}
+#[tokio::test]
+async fn test_should_discard_only_one_matching_handler_timeout_during_cancel_before_ack() {
+    let mut peer = Peer::new(4096);
+    peer.ready(true).await;
+    let call = invocation().with_handler_timeout(
+        crate::protocol::HandlerTimeout::try_from(Duration::from_secs(1)).unwrap(),
+    );
+    let attempt = call.parts().0;
+    peer.client.invoke(call, deadline()).await.unwrap();
+    peer.read().await;
+    peer.client.cancel(attempt, deadline()).await.unwrap();
+    assert_eq!(peer.read().await, Message::Cancel { attempt });
+    peer.send(Message::InvocationTimedOut { attempt }).await;
+    peer.send(Message::Ack(Acknowledgement::Cancel(attempt)))
+        .await;
+    assert_eq!(
+        peer.client.next(deadline()).await.unwrap(),
+        ClientEvent::Cancelled(attempt)
+    );
+    assert!(!peer.client.is_idle());
+    peer.close().await;
+}

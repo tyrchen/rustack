@@ -364,6 +364,23 @@ Four explicit owner/pool real-RIC cases pass with zero ignored on each retained 
 
 Exact handler timeout from Runtime API delivery, per-invocation log attribution, historical reconciliation, pulls/network/resource probes and real Executor/provider composition remain mandatory M0 work. P2–P5 remain required by the complete objective.
 
+## P1 task1.3 delivery-based handler clock review
+
+Independent design and implementation review covers §3.8/D33: typed timeout bounds, protocol-v2 compatibility, original Offering ownership, consumed monotonic receipts, effective HTTP metadata, earlier-handler versus outer classification, strict timeout correlation and joined retirement. The final recheck has no remaining in-slice finding. Final Docker Executor/provider and ASL envelope mapping remain mandatory integration work.
+
+| ID | Priority / source | Finding and resolution | Evidence |
+|---|---|---|---|
+| W82 | P2; `crates/rustack-lambda-runtime/src/session.rs:761`, timer selection | A receipt could become ready after initial polling but before the old outer timer; biased timer selection then used stale classification. Reconcile again inside the timer branch and recheck current pending timing | Actual actor.run future manually polled before receipt, then both receipt/outer timer made ready between polls; result must be HandlerTimeout |
+| W83 | P2; `crates/rustack-lambda-core/src/executor/instance.rs:477`, initialization errors | Reusing invocation Deadline mapping mislabeled independent initialization expiry as caller DeadlineExceeded. Dedicated initialization mapping checks caller cancellation/deadline, otherwise preserves Timeout(init budget) at API/process/readiness sites | Real no-poll initialization requires2s error category and joined child reap; delivered-handler fixture requires1s category, reap and quiescence |
+| W84 | P3; runtime §3.1 protocol table | Optional timeout notation must not imply null support while structural preflight rejects null. Document omission-only and skip absent budget serialization | Typed round trips accept omitted/valid millisecond values; explicit null, invalid ranges and version1 reject |
+
+Final-source standard workspace build/test/fmt/Clippy/rustdoc all pass with2,255 tests, zero failures and406 separately resource-gated cases. Runtime has119 unit tests/51 doctests; Lambda core has553 unit tests/132 doctests. The six-library strict boundary target passes839 unit tests/199 doctests (1,038 total),12 separately gated Docker cases and all strict production checks. The timeout target passes119 runtime cases plus12 actual Native hardening fixtures. Fresh audit scans474 dependencies without vulnerabilities; deny advisories/bans/licenses/sources all pass. No dependency/version/advisory exception was introduced.
+
+Final production-relay images were rebuilt for protocol v2 on both retained Engine29.5.2 daemons. Owner/pool5, wire2 and shared runtime5 cases explicitly pass with zero ignored on each arm64 VZ and amd64/QEMU daemon (12 per daemon). Actual code execution proves captured3s cannot be extended to900s by caller metadata, allocation is released before the handler-timeout result, and replacement code starts with counter1. Existing near6MiB/warm/FunctionError/cancel/EOF/Close regressions pass under v2. Post-run scoped queries find no owner/test-labeled containers or internal image aliases. Native provider regression separately passes its six actual Native/DryRun scenarios; the seventh gated Squib test is not claimed as VM execution. QEMU is not native-x86 platform acceptance.
+
+Per-invocation log attribution, real Docker Executor/provider envelope mapping, historical reconciliation, allowed pulls/network/resource probes and final startup acceptance remain mandatory M0 work. The ASL engine and P2–P5 remain required by the full objective.
+
+
 ## Existing baseline issues affecting final gates
 
 | ID | Priority / source | Verified evidence | Required disposition |

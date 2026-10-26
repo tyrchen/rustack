@@ -5,7 +5,9 @@ use std::{future::pending, sync::Arc, time::Duration};
 use bytes::Bytes;
 use http::StatusCode;
 use rustack_lambda_runtime::{
-    client::ClientEvent, protocol::Architecture as RuntimeArchitecture, session::RuntimeResult,
+    client::ClientEvent,
+    protocol::{Architecture as RuntimeArchitecture, HandlerTimeout},
+    session::RuntimeResult,
 };
 use tokio::{
     runtime::Handle,
@@ -278,7 +280,10 @@ impl Worker {
         }
         io.client()?
             .invoke(
-                call.invocation.clone(),
+                call.invocation.clone().with_handler_timeout(
+                    HandlerTimeout::try_from(self.plan.revision().timeout)
+                        .map_err(|_| EnvironmentError::Configuration)?,
+                ),
                 deadline.min(self.config.deadline()),
             )
             .await?;
@@ -286,6 +291,9 @@ impl Worker {
             .next(io, deadline, Some(cleaner), Some(&mut call.cancellation))
             .await;
         match result {
+            Ok(ClientEvent::InvocationTimedOut(returned)) if returned == attempt => {
+                Err(EnvironmentError::Timeout(self.plan.revision().timeout))
+            }
             Ok(ClientEvent::InvocationResult {
                 attempt: returned,
                 result,

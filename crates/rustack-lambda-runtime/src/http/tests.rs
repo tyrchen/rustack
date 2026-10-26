@@ -506,3 +506,48 @@ async fn test_should_reject_all_trailers_before_initialization_or_invocation_mut
     }
     api.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_should_publish_effective_delivery_deadline_and_join_api_after_handler_timeout() {
+    use crate::{metadata::deadline_unix_ms, protocol::HandlerTimeout};
+    let mut api = start().await.unwrap();
+    let handle = api.session().clone();
+    let mut call = invocation();
+    call = Invocation::new(
+        call.parts().0,
+        Instant::now() + Duration::from_secs(30),
+        call.parts().2.clone(),
+        call.parts().3.clone(),
+        call.parts().4.clone(),
+    )
+    .unwrap()
+    .with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+    let outer = deadline_unix_ms(call.parts().1).unwrap().get();
+    let ticket = handle
+        .submit(call, Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    let reply = request(
+        api.addr(),
+        "GET",
+        "/2018-06-01/runtime/invocation/next",
+        "",
+        b"",
+    )
+    .await;
+    assert_eq!(reply.status, 200);
+    let effective = reply
+        .header("Lambda-Runtime-Deadline-Ms")
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    assert!(u128::from(effective) <= now + 1000 && u128::from(effective) > now);
+    assert!(effective + 20_000 < outer);
+    assert_eq!(ticket.wait().await, Err(SessionError::HandlerTimeout));
+    api.shutdown().await.unwrap();
+    assert!(TcpStream::connect(api.addr()).await.is_err());
+}

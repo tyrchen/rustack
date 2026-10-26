@@ -347,6 +347,7 @@ impl Environment {
         self.send(Message::Invoke {
             attempt,
             deadline_unix_ms: deadline_unix_ms(Instant::now() + Duration::from_secs(60))?,
+            handler_timeout_ms: None,
             function_arn: "arn:aws:lambda:us-east-1:000000000000:function:spike:prod".parse()?,
             trace_id: local_trace_id()?,
             payload: Payload::try_from(Bytes::from(serde_json::to_vec(&event)?))?,

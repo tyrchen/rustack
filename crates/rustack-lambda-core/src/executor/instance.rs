@@ -18,7 +18,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use rustack_lambda_runtime::{
     metadata::local_trace_id,
-    protocol::{AttemptId, Payload},
+    protocol::{AttemptId, HandlerTimeout, Payload},
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
@@ -243,6 +243,8 @@ impl InstancePool {
             .map_err(|_| ExecutorError::InvalidCode("Invalid invocation clock metadata".into()))?;
         let payload = Payload::try_from(req.payload.clone())
             .map_err(|_| ExecutorError::InvalidCode("Invocation payload too large".into()))?;
+        let handler_timeout = HandlerTimeout::try_from(req.revision.timeout)
+            .map_err(|_| ExecutorError::InvalidCode("Invalid handler timeout".into()))?;
         let key = Self::key(&req);
         let (instance, retired) = self.try_acquire(&key);
         retire_all(retired).await?;
@@ -260,18 +262,18 @@ impl InstancePool {
             Some(instance) => instance,
             None => self.spawn_new(&req, &context).await?,
         };
-        let Some(handler_deadline) = TokioInstant::now().checked_add(req.revision.timeout) else {
-            instance.retire().await?;
-            return Err(ExecutorError::InvalidCode("Invalid handler timeout".into()));
-        };
-        let deadline = handler_deadline.min(context.deadline());
-        let Ok(invocation) = Invocation::new(attempt, deadline, arn, trace, payload) else {
+        let Ok(invocation) = Invocation::new(attempt, context.deadline(), arn, trace, payload)
+        else {
             instance.retire().await?;
             context.check()?;
             return Err(ExecutorError::Timeout(req.revision.timeout));
         };
         let result = instance
-            .run(invocation, &context, req.revision.timeout)
+            .run(
+                invocation.with_handler_timeout(handler_timeout),
+                &context,
+                req.revision.timeout,
+            )
             .await;
         let result = context.check().and(result);
         let reusable = matches!(&result, Ok(RuntimeResult::Success(_)))
@@ -371,7 +373,7 @@ impl InstancePool {
             biased;
             reason = context.cancelled() => return Err(reason.error()),
             result = timeout_at(deadline, runtime_api::start_at(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), self.idle_timeout)) => {
-                result.map_err(|_| ExecutorError::Timeout(self.init_timeout))?.map_err(|_| ExecutorError::InitFailed("Runtime API startup failed".into()))?
+                result.map_err(|_| initialization_error(SessionError::Deadline, self.init_timeout, context))?.map_err(|_| ExecutorError::InitFailed("Runtime API startup failed".into()))?
             }
         };
         let addr = api.addr();
@@ -379,7 +381,7 @@ impl InstancePool {
         let backend = tokio::select! {
             biased;
             reason = context.cancelled() => Err(reason.error()),
-            result = timeout_at(deadline, self.backend.spawn(req, addr)) => result.map_err(|_| ExecutorError::Timeout(self.init_timeout)).and_then(|result| result),
+            result = timeout_at(deadline, self.backend.spawn(req, addr)) => result.map_err(|_| initialization_error(SessionError::Deadline, self.init_timeout, context)).and_then(|result| result),
         };
         let backend = match backend {
             Ok(backend) => backend,
@@ -406,14 +408,14 @@ impl InstancePool {
                             Ok(_) => Err(ExecutorError::InitFailed("Bootstrap reported initialization failure".into())),
                             Err(_) => Err(ExecutorError::RuntimeExited("Runtime initialization channel closed".into())),
                         },
-                        ready = instance.api.session().bootstrap_ready(deadline) => ready.map_err(|error| invocation_error(error, self.init_timeout)),
+                        ready = instance.api.session().bootstrap_ready(deadline) => ready.map_err(|error| initialization_error(error, self.init_timeout, context)),
                     },
                     None => instance
                         .api
                         .session()
                         .bootstrap_ready(deadline)
                         .await
-                        .map_err(|error| invocation_error(error, self.init_timeout)),
+                        .map_err(|error| initialization_error(error, self.init_timeout, context)),
                 }
             };
             tokio::select! {
@@ -472,9 +474,24 @@ impl InstancePool {
     }
 }
 
-fn invocation_error(error: SessionError, timeout: Duration) -> ExecutorError {
+fn initialization_error(
+    error: SessionError,
+    timeout: Duration,
+    context: &InvocationContext,
+) -> ExecutorError {
+    if let Err(error) = context.check() {
+        return error;
+    }
     match error {
         SessionError::Deadline => ExecutorError::Timeout(timeout),
+        _ => invocation_error(error, timeout),
+    }
+}
+
+fn invocation_error(error: SessionError, timeout: Duration) -> ExecutorError {
+    match error {
+        SessionError::HandlerTimeout => ExecutorError::Timeout(timeout),
+        SessionError::Deadline => ExecutorError::DeadlineExceeded,
         SessionError::Cancelled => ExecutorError::Cancelled,
         SessionError::SupervisorFailed => {
             ExecutorError::CleanupFailed("Runtime session supervisor failed".into())

@@ -114,6 +114,7 @@ fn invoke() -> (AttemptId, Message) {
         Message::Invoke {
             attempt,
             deadline_unix_ms: deadline_unix_ms(Instant::now() + Duration::from_secs(10)).unwrap(),
+            handler_timeout_ms: None,
             function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo:prod"
                 .parse::<FunctionArn>()
                 .unwrap(),
@@ -246,7 +247,7 @@ async fn test_should_distinguish_function_and_initialization_errors_and_allow_cl
 
 #[tokio::test]
 async fn test_should_reject_foreign_scope_wrong_direction_and_invoke_before_bootstrap() {
-    for variant in 0..3 {
+    for variant in 0..4 {
         let mut harness = Harness::new().await;
         match variant {
             0 => write_frame(
@@ -257,6 +258,13 @@ async fn test_should_reject_foreign_scope_wrong_direction_and_invoke_before_boot
             .await
             .unwrap(),
             1 => harness.send(Message::Ready).await,
+            2 => {
+                harness
+                    .send(Message::InvocationTimedOut {
+                        attempt: AttemptId::default(),
+                    })
+                    .await;
+            }
             _ => harness.send(invoke().1).await,
         }
         assert!(
@@ -428,4 +436,26 @@ fn test_should_bound_relay_config() {
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn test_should_forward_delivered_handler_timeout_and_preserve_close_ack_retirement() {
+    let mut harness = Harness::new().await;
+    let poll = harness.bootstrap().await;
+    let (attempt, mut message) = invoke();
+    if let Message::Invoke {
+        handler_timeout_ms, ..
+    } = &mut message
+    {
+        *handler_timeout_ms =
+            Some(crate::protocol::HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+    }
+    harness.send(message).await;
+    let response = poll.await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        harness.next().await,
+        Message::InvocationTimedOut { attempt }
+    );
+    harness.close().await;
 }

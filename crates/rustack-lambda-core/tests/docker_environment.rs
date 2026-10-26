@@ -18,7 +18,7 @@ use rustack_lambda_core::{
 };
 use rustack_lambda_runtime::{
     metadata::local_trace_id,
-    protocol::{AttemptId, Payload},
+    protocol::{AttemptId, HandlerTimeout, Payload},
     session::{Invocation, RuntimeResult},
 };
 use serde_json::{Value, json};
@@ -425,6 +425,54 @@ async fn test_should_join_pool_retirement_after_abandoning_an_observed_running_h
         Ok(())
     }
     .await;
+    let retired = pool.shutdown(deadline()).await;
+    let cleanup = fixture.cleanup().await;
+    result.and(retired.map_err(Into::into)).and(cleanup)
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Docker environment images/socket"]
+async fn test_should_enforce_captured_handler_timeout_and_replace_the_retired_pooled_environment()
+-> Result<()> {
+    let mut fixture = Fixture::new().await?;
+    let mut pool = EnvironmentPool::start(fixture.owner.port(), PoolConfig::default())?;
+    let result = async {
+        let mut revision = (*fixture.revision()?).clone();
+        revision.timeout = Duration::from_secs(3);
+        let revision = Arc::new(revision);
+        let port = pool.port();
+        let response = port.invoke(
+            fixture.plan_revision(revision.clone())?,
+            invocation(&json!({"value":0}))?,
+            false,
+        ).await?;
+        let RuntimeResult::Success(payload) = response.result else {
+            anyhow::bail!("timeout fixture warm setup failed");
+        };
+        let value: Value = serde_json::from_slice(payload.as_ref())?;
+        ensure!(value["counter"] == 1, "initial counter differs");
+        let result = port.invoke(
+            fixture.plan_revision(revision.clone())?,
+            invocation(&json!({"value":1,"sleep":true}))?.with_handler_timeout(HandlerTimeout::try_from(Duration::from_mins(15))?),
+            false,
+        ).await;
+        ensure!(
+            matches!(result, Err(EnvironmentError::Timeout(duration)) if duration == Duration::from_secs(3)),
+            "handler timeout was not preserved",
+        );
+        ensure!(fixture.owner.port().status().allocated == 0, "timeout returned before resource settlement");
+        let response = port.invoke(
+            fixture.plan_revision(revision)?,
+            invocation(&json!({"value":35}))?,
+            false,
+        ).await?;
+        let RuntimeResult::Success(payload) = response.result else {
+            anyhow::bail!("timeout replacement invocation failed");
+        };
+        let value: Value = serde_json::from_slice(payload.as_ref())?;
+        ensure!(value["computed"] == 42 && value["counter"] == 1, "timed out environment was reused");
+        Ok(())
+    }.await;
     let retired = pool.shutdown(deadline()).await;
     let cleanup = fixture.cleanup().await;
     result.and(retired.map_err(Into::into)).and(cleanup)

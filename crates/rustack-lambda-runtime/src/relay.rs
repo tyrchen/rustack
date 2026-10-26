@@ -332,7 +332,17 @@ impl RelayActor {
                     self.phase = Phase::Idle;
                     self.emit(Message::BootstrapReady).await?;
                 }
-                result = self.phase.result() => { self.completed(result?).await?; }
+                result = self.phase.result() => {
+                    match result {
+                        Ok(result) => self.completed(result).await?,
+                        Err(SessionError::HandlerTimeout) => {
+                            let attempt=self.last_attempt.ok_or(RelayError::UnexpectedMessage)?;
+                            self.emit(Message::InvocationTimedOut { attempt }).await?;
+                            self.retire().await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
                 () = session.closed(), if !matches!(self.phase, Phase::Retiring(_)) => return Err(RelayError::Session(SessionError::Unavailable)),
             }
         }
@@ -343,14 +353,18 @@ impl RelayActor {
             Message::Invoke {
                 attempt,
                 deadline_unix_ms,
+                handler_timeout_ms,
                 function_arn,
                 trace_id,
                 payload,
             } if matches!(self.phase, Phase::Idle) && self.last_attempt != Some(attempt) => {
                 let deadline =
                     deadline_from_unix_ms(deadline_unix_ms).map_err(|_| RelayError::Deadline)?;
-                let invocation =
+                let mut invocation =
                     Invocation::new(attempt, deadline, function_arn, trace_id, payload)?;
+                if let Some(timeout) = handler_timeout_ms {
+                    invocation = invocation.with_handler_timeout(timeout);
+                }
                 let ticket = self
                     .api
                     .session()

@@ -510,7 +510,7 @@ fn status(error: SessionError) -> StatusCode {
     match error {
         SessionError::Busy => StatusCode::CONFLICT,
         SessionError::UnknownAttempt | SessionError::InvalidMetadata => StatusCode::BAD_REQUEST,
-        SessionError::Deadline => StatusCode::REQUEST_TIMEOUT,
+        SessionError::Deadline | SessionError::HandlerTimeout => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::SERVICE_UNAVAILABLE,
     }
 }

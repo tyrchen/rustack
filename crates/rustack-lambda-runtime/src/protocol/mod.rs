@@ -19,8 +19,8 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 pub use types::{
-    Acknowledgement, Architecture, AttemptId, EnvironmentId, FunctionArn, Message, Outcome,
-    Payload, TraceId,
+    Acknowledgement, Architecture, AttemptId, EnvironmentId, FunctionArn, HandlerTimeout, Message,
+    Outcome, Payload, TraceId,
 };
 
 /// Maximum event or result payload, in bytes.
@@ -29,6 +29,8 @@ pub const MAX_PAYLOAD_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 /// Maximum frame body, excluding its four-byte prefix.
 pub const MAX_FRAME_BYTES: usize = MAX_PAYLOAD_BYTES + MAX_METADATA_BYTES;
+/// Host/relay contract version; older relays cannot enforce delivery-based timeouts.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Protocol failures contain classes and IO sources, never invalid peer values.
 #[derive(Debug, Error)]
@@ -43,7 +45,7 @@ pub enum ProtocolError {
     /// The valid CBOR does not match the typed message schema.
     #[error("invalid control message schema")]
     InvalidSchema,
-    /// A version other than one was supplied.
+    /// An incompatible host/relay version was supplied.
     #[error("unsupported control protocol version")]
     UnsupportedVersion,
     /// A validated primitive has invalid syntax or range.
@@ -85,7 +87,7 @@ impl TryFrom<RawFrame> for Frame {
     type Error = ProtocolError;
 
     fn try_from(raw: RawFrame) -> Result<Self, Self::Error> {
-        if raw.version != 1 {
+        if raw.version != PROTOCOL_VERSION {
             return Err(ProtocolError::UnsupportedVersion);
         }
         Ok(Self::new(raw.environment, raw.message))
@@ -93,7 +95,7 @@ impl TryFrom<RawFrame> for Frame {
 }
 
 impl Frame {
-    /// Wrap a typed message in protocol version one.
+    /// Wrap a typed message in the current protocol version.
     ///
     /// ```
     /// use rustack_lambda_runtime::protocol::{EnvironmentId, Frame, Message};
@@ -103,7 +105,7 @@ impl Frame {
     #[must_use]
     pub fn new(environment: EnvironmentId, message: Message) -> Self {
         Self {
-            version: 1,
+            version: PROTOCOL_VERSION,
             environment,
             message,
         }

@@ -488,6 +488,7 @@ async fn test_should_reconcile_ready_poll_receipts_before_completion_or_initiali
         let pending = Pending {
             attempt,
             deadline: invocation.deadline,
+            timeout_error: SessionError::Deadline,
             cancellation,
             response,
         };
@@ -497,7 +498,7 @@ async fn test_should_reconcile_ready_poll_receipts_before_completion_or_initiali
             pending,
             receipt: acknowledged,
         };
-        receipt.send(()).unwrap();
+        receipt.send(Instant::now()).unwrap();
         let (reply, result) = oneshot::channel();
         if initialization {
             assert!(!actor.command(Command::InitError {
@@ -583,6 +584,7 @@ async fn test_should_revalidate_cancellation_closed_owners_and_expiry_at_every_d
             let pending = Pending {
                 attempt,
                 deadline: invocation.deadline,
+                timeout_error: SessionError::Deadline,
                 cancellation,
                 response,
             };
@@ -625,7 +627,7 @@ async fn test_should_revalidate_cancellation_closed_owners_and_expiry_at_every_d
                         pending,
                         receipt,
                     };
-                    actor.received(true);
+                    actor.received(Some(Instant::now()));
                 }
                 _ => panic!("unknown test case"),
             }
@@ -634,4 +636,187 @@ async fn test_should_revalidate_cancellation_closed_owners_and_expiry_at_every_d
             assert!(actor.inbox.is_closed());
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_should_arm_handler_timeout_only_when_the_runtime_consumes_the_offered_event() {
+    let mut session = RuntimeSession::start(Duration::from_secs(60)).unwrap();
+    let handle = session.handle().clone();
+    let mut call = invocation();
+    call.deadline = Instant::now() + Duration::from_secs(30);
+    call = call.with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+    let ticket = handle.submit(call.clone(), deadline()).await.unwrap();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(!handle.is_closed());
+    let mut abandoned = Box::pin(handle.next(deadline()));
+    assert!(poll_once(&mut abandoned).is_pending());
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(!handle.is_closed());
+    drop(abandoned);
+    let started = Instant::now();
+    let delivered = handle.next(deadline()).await.unwrap();
+    assert_eq!(delivered.parts().1, started + Duration::from_secs(1));
+    assert_ne!(delivered.parts().1, call.parts().1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(ticket.wait().await, Err(SessionError::HandlerTimeout));
+    assert!(handle.is_closed());
+    session.shutdown().await.unwrap();
+}
+#[tokio::test(start_paused = true)]
+async fn test_should_keep_outer_deadline_classification_when_shorter_or_tied_with_handler_timeout()
+{
+    for remaining in [Duration::from_millis(500), Duration::from_secs(1)] {
+        let mut session = RuntimeSession::start(Duration::from_secs(60)).unwrap();
+        let handle = session.handle().clone();
+        let mut call = invocation();
+        call.deadline = Instant::now() + remaining;
+        call = call.with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+        let expected = call.parts().1;
+        let ticket = handle.submit(call, deadline()).await.unwrap();
+        assert_eq!(handle.next(deadline()).await.unwrap().parts().1, expected);
+        tokio::time::advance(remaining).await;
+        assert_eq!(ticket.wait().await, Err(SessionError::Deadline));
+        session.shutdown().await.unwrap();
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn test_should_reject_late_handler_completion_and_delayed_consumption_receipt_without_replay()
+{
+    for transition in ["receipt", "complete", "receipt_after_outer"] {
+        let mut actor = transition_actor();
+        let call = invocation()
+            .with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+        let attempt = call.attempt;
+        let (_cancel, cancellation) = watch::channel(false);
+        let (response, received) = oneshot::channel();
+        let pending = Pending {
+            attempt,
+            deadline: call.deadline,
+            timeout_error: SessionError::Deadline,
+            cancellation,
+            response,
+        };
+        let (receipt, acknowledged) = oneshot::channel();
+        actor.phase = Phase::Offering {
+            invocation: call,
+            pending,
+            receipt: acknowledged,
+        };
+        receipt.send(Instant::now()).unwrap();
+        if transition == "complete" {
+            actor.reconcile_receipt();
+        }
+        tokio::time::advance(Duration::from_secs(
+            if transition == "receipt_after_outer" {
+                6
+            } else {
+                1
+            },
+        ))
+        .await;
+        let (reply, result) = oneshot::channel();
+        assert!(!actor.command(Command::Complete {
+            attempt,
+            invocation_id: None,
+            outcome: Outcome::Success,
+            payload: payload(),
+            reply
+        }));
+        assert_eq!(
+            result.await.unwrap(),
+            Err(if transition == "complete" {
+                SessionError::HandlerTimeout
+            } else {
+                SessionError::Unavailable
+            })
+        );
+        assert_eq!(received.await.unwrap(), Err(SessionError::HandlerTimeout));
+        assert!(matches!(actor.phase, Phase::Closed));
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn test_should_preserve_on_time_completion_when_the_ticket_waiter_resumes_after_handler_expiry()
+ {
+    let mut session = RuntimeSession::start(Duration::from_secs(60)).unwrap();
+    let handle = session.handle().clone();
+    let call = invocation()
+        .with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+    let ticket = handle.submit(call, deadline()).await.unwrap();
+    handle.next(deadline()).await.unwrap();
+    handle
+        .complete(
+            ticket.attempt(),
+            None,
+            Outcome::Success,
+            payload(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(ticket.wait().await, Ok(RuntimeResult::Success(payload())));
+    assert!(!handle.is_closed());
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_should_reject_an_offered_call_consumed_after_its_outer_deadline_before_receipting_delivery()
+ {
+    let mut session = RuntimeSession::start(Duration::from_secs(60)).unwrap();
+    let handle = session.handle().clone();
+    let mut call = invocation()
+        .with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+    call.deadline = Instant::now() + Duration::from_secs(2);
+    let ticket = handle.submit(call, deadline()).await.unwrap();
+    let mut next = Box::pin(handle.next(Instant::now() + Duration::from_secs(10)));
+    assert!(poll_once(&mut next).is_pending());
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(next.await, Err(SessionError::Deadline));
+    assert_eq!(ticket.wait().await, Err(SessionError::Deadline));
+    tokio::time::timeout(Duration::from_secs(1), handle.closed())
+        .await
+        .unwrap();
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_should_reconcile_consumed_delivery_when_receipt_and_old_outer_timer_become_ready_between_actor_polls()
+ {
+    let (commands, inbox) = mpsc::channel(MAILBOX_CAPACITY);
+    let (stop, stopped) = watch::channel(false);
+    let (bootstrap, _) = watch::channel(false);
+    let mut actor = SessionActor::builder()
+        .inbox(inbox)
+        .stop(stopped)
+        .bootstrap(bootstrap)
+        .initialization_error(None)
+        .idle_lease(Duration::from_secs(60))
+        .idle_deadline(Instant::now() + Duration::from_secs(60))
+        .build();
+    let call = invocation()
+        .with_handler_timeout(HandlerTimeout::try_from(Duration::from_secs(1)).unwrap());
+    let attempt = call.attempt;
+    let (_cancel, cancellation) = watch::channel(false);
+    let (response, received) = oneshot::channel();
+    let (receipt, acknowledged) = oneshot::channel();
+    actor.phase = Phase::Offering {
+        pending: Pending {
+            attempt,
+            deadline: call.deadline,
+            timeout_error: SessionError::Deadline,
+            cancellation,
+            response,
+        },
+        invocation: call,
+        receipt: acknowledged,
+    };
+    let mut running = Box::pin(actor.run());
+    assert!(poll_once(&mut running).is_pending());
+    receipt.send(Instant::now()).unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(poll_once(&mut running).is_ready());
+    assert_eq!(received.await.unwrap(), Err(SessionError::HandlerTimeout));
+    drop((commands, stop));
 }

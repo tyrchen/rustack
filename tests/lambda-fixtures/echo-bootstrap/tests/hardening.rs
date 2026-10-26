@@ -8,6 +8,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rustack_lambda_core::{
     config::LambdaConfig,
+    error::LambdaServiceError,
     executor::ExecutorBackend,
     provider::{InvokeKind, InvokeOutcome, RustackLambda},
     storage::FunctionStore,
@@ -174,11 +175,12 @@ async fn test_should_time_out_and_reap_a_bootstrap_that_never_polls_the_runtime_
     });
     provider.create_function(input).await.unwrap();
     let started = tokio::time::Instant::now();
+    let error = provider
+        .invoke("revision-test", None, b"{}", InvokeKind::RequestResponse)
+        .await
+        .unwrap_err();
     assert!(
-        provider
-            .invoke("revision-test", None, b"{}", InvokeKind::RequestResponse)
-            .await
-            .is_err()
+        matches!(error, LambdaServiceError::Internal { message } if message=="function timed out after 2s")
     );
     assert!(started.elapsed() < Duration::from_secs(4));
     let pid = tokio::fs::read_to_string(marker).await.unwrap();
@@ -612,5 +614,50 @@ async fn test_should_reject_native_event_architecture_mismatch_before_acceptance
             .is_err()
     );
     provider.quiesce(Duration::from_secs(1)).await.unwrap();
+    provider.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_should_preserve_delivered_native_handler_timeout_and_join_process_retirement() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("started");
+    let provider = RustackLambda::with_store(
+        FunctionStore::new(root.path().join("code")),
+        LambdaConfig {
+            executor: ExecutorBackend::Native,
+            init_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+    );
+    let mut input = create("handler-timeout");
+    input.timeout = Some(1);
+    input.environment = Some(Environment {
+        variables: Some(HashMap::from([
+            ("SLEEP_SECS".into(), "60".into()),
+            ("STARTED_FILE".into(), marker.to_string_lossy().into_owned()),
+        ])),
+    });
+    provider.create_function(input).await.unwrap();
+    let error = provider
+        .invoke("revision-test", None, b"{}", InvokeKind::RequestResponse)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error,LambdaServiceError::Internal{message} if message=="function timed out after 1s")
+    );
+    let pid = tokio::fs::read_to_string(marker).await.unwrap();
+    let status = tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.trim())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert!(
+        !status.success(),
+        "handler timeout returned before child reap"
+    );
+    provider.quiesce(Duration::from_secs(5)).await.unwrap();
     provider.shutdown().await;
 }

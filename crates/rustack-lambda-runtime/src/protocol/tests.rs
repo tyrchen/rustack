@@ -27,6 +27,7 @@ fn messages() -> Vec<Message> {
         Message::Invoke {
             attempt,
             deadline_unix_ms: NonZeroU64::new(1_800_000_000_000).unwrap(),
+            handler_timeout_ms: None,
             function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo:prod"
                 .parse()
                 .unwrap(),
@@ -50,6 +51,7 @@ fn messages() -> Vec<Message> {
         Message::Close,
         Message::Ack(Acknowledgement::Close),
         Message::Ack(Acknowledgement::Cancel(attempt)),
+        Message::InvocationTimedOut { attempt },
     ]
 }
 
@@ -193,7 +195,7 @@ fn test_should_reject_unknown_duplicate_and_mismatched_variant_fields() {
         Err(ProtocolError::InvalidSchema)
     ));
     let mut version = frame;
-    *field(&mut version, "version") = Value::Integer(2.into());
+    *field(&mut version, "version") = Value::Integer(1.into());
     assert!(matches!(
         decode(&body(&version)),
         Err(ProtocolError::UnsupportedVersion)
@@ -420,4 +422,85 @@ async fn test_should_enforce_absolute_deadlines_for_partial_reads_and_stalled_wr
         encoded.as_ref(),
         "expired reads must not consume a ready frame"
     );
+}
+
+#[rstest]
+#[case(0)]
+#[case(999)]
+#[case(1001)]
+#[case(900_001)]
+#[case(u32::MAX)]
+fn test_should_reject_out_of_profile_handler_timeouts_before_session_admission(
+    #[case] milliseconds: u32,
+) {
+    assert!(HandlerTimeout::try_from(milliseconds).is_err());
+    let mut invoke = messages().into_iter().nth(4).unwrap();
+    if let Message::Invoke {
+        handler_timeout_ms, ..
+    } = &mut invoke
+    {
+        *handler_timeout_ms = Some(HandlerTimeout::try_from(1000).unwrap());
+    }
+    let mut packet = value(invoke);
+    *field(
+        field(field(&mut packet, "message"), "data"),
+        "handlerTimeoutMs",
+    ) = Value::Integer(milliseconds.into());
+    assert!(matches!(
+        decode(&body(&packet)),
+        Err(ProtocolError::InvalidSchema)
+    ));
+}
+#[test]
+fn test_should_round_trip_handler_budget_timeout_event_and_reject_older_relays() {
+    for seconds in [1, 900] {
+        let timeout = HandlerTimeout::try_from(Duration::from_secs(seconds)).unwrap();
+        assert_eq!(timeout.duration(), Duration::from_secs(seconds));
+        let mut invoke = messages().into_iter().nth(4).unwrap();
+        if let Message::Invoke {
+            handler_timeout_ms, ..
+        } = &mut invoke
+        {
+            *handler_timeout_ms = Some(timeout);
+        }
+        let packet = value(invoke.clone());
+        assert_eq!(decode(&body(&packet)).unwrap().into_message(), invoke);
+    }
+    for timeout in [
+        Duration::ZERO,
+        Duration::from_millis(1001),
+        Duration::from_secs(901),
+        Duration::MAX,
+    ] {
+        assert!(HandlerTimeout::try_from(timeout).is_err());
+    }
+    let message = Message::InvocationTimedOut {
+        attempt: AttemptId::default(),
+    };
+    let packet = value(message.clone());
+    assert_eq!(decode(&body(&packet)).unwrap().into_message(), message);
+    for version in [0, 1, 3, u32::MAX] {
+        let mut packet = value(Message::Ready);
+        *field(&mut packet, "version") = Value::Integer(version.into());
+        assert!(matches!(
+            decode(&body(&packet)),
+            Err(ProtocolError::UnsupportedVersion)
+        ));
+    }
+    let mut invoke = messages().into_iter().nth(4).unwrap();
+    if let Message::Invoke {
+        handler_timeout_ms, ..
+    } = &mut invoke
+    {
+        *handler_timeout_ms = Some(HandlerTimeout::try_from(1000).unwrap());
+    }
+    let mut packet = value(invoke);
+    *field(
+        field(field(&mut packet, "message"), "data"),
+        "handlerTimeoutMs",
+    ) = Value::Null;
+    assert!(matches!(
+        decode(&body(&packet)),
+        Err(ProtocolError::InvalidStructure)
+    ));
 }

@@ -290,3 +290,12 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Why**: queue, execution, warm retention and cleanup have explicit bounded owners; underlying EnvironmentManager reservations remain authoritative through quarantine.
 - **Pinned by**: [runtime §4.4](./rustack-workflows-20-lambda-runtime-design.md#44-warm-checkout-and-retained-pool-dispatch), [verification](./rustack-workflows-70-verification-plan.md).
 - **Date**: 2026-10-26.
+
+## D33 — Arm handler timeout at consumed Runtime API delivery
+
+- **Context**: A warm RIC may not poll immediately; queue/startup time must not consume the function handler timeout or extend the caller's absolute deadline.
+- **Alternatives considered**: starting at host dispatch charges queue/transport time prematurely; starting on offer charges abandoned polls; retaining protocol v1 permits an older relay to silently omit timeout enforcement.
+- **Decision**: version2 carries a validated relative timeout; the session's consumed poll receipt arms the effective monotonic deadline and a distinct correlated timeout result forces environment retirement.
+- **Why**: HTTP metadata and actor enforcement share one delivery instant, abandoned offers remain recoverable, and handler versus outer timeout preserves error semantics without replay.
+- **Pinned by**: [runtime §3.8](./rustack-workflows-20-lambda-runtime-design.md#38-delivery-based-handler-clock-and-protocol-v2), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26.

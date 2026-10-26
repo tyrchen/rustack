@@ -1,6 +1,6 @@
 //! Validated metadata and closed control-message variants.
 
-use std::{fmt, num::NonZeroU64, str::FromStr};
+use std::{fmt, num::NonZeroU64, str::FromStr, time::Duration};
 
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -56,6 +56,51 @@ identity!(
     EnvironmentId,
     "Canonical nonnil environment UUID; parse with `FromStr`, generate with `Default`."
 );
+
+/// Validated whole-second handler timeout, encoded as milliseconds on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct HandlerTimeout(u32);
+
+impl TryFrom<u32> for HandlerTimeout {
+    type Error = ProtocolError;
+    fn try_from(milliseconds: u32) -> Result<Self, Self::Error> {
+        if !(1000..=900_000).contains(&milliseconds) || !milliseconds.is_multiple_of(1000) {
+            return Err(ProtocolError::InvalidMetadata);
+        }
+        Ok(Self(milliseconds))
+    }
+}
+impl TryFrom<Duration> for HandlerTimeout {
+    type Error = ProtocolError;
+    fn try_from(timeout: Duration) -> Result<Self, Self::Error> {
+        if timeout.subsec_nanos() != 0 {
+            return Err(ProtocolError::InvalidMetadata);
+        }
+        Self::try_from(
+            u32::try_from(timeout.as_millis()).map_err(|_| ProtocolError::InvalidMetadata)?,
+        )
+    }
+}
+impl From<HandlerTimeout> for u32 {
+    fn from(timeout: HandlerTimeout) -> Self {
+        timeout.0
+    }
+}
+impl HandlerTimeout {
+    /// Return the validated relative budget without starting a clock.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// let timeout = rustack_lambda_runtime::protocol::HandlerTimeout::try_from(Duration::from_secs(3))?;
+    /// assert_eq!(timeout.duration(), Duration::from_secs(3));
+    /// # Ok::<(), rustack_lambda_runtime::protocol::ProtocolError>(())
+    /// ```
+    #[must_use]
+    pub fn duration(self) -> Duration {
+        Duration::from_millis(u64::from(self.0))
+    }
+}
 identity!(
     AttemptId,
     "Canonical nonnil invocation attempt UUID; parse with `FromStr`, generate with `Default`."
@@ -315,6 +360,9 @@ pub enum Message {
         attempt: AttemptId,
         /// Absolute wall deadline, checked and converted by the receiver.
         deadline_unix_ms: NonZeroU64,
+        /// Optional captured handler budget, armed only at consumed delivery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handler_timeout_ms: Option<HandlerTimeout>,
         /// Requested ARN, preserving an invoked alias.
         function_arn: FunctionArn,
         /// Runtime trace header.
@@ -330,6 +378,11 @@ pub enum Message {
         outcome: Outcome,
         /// Raw result or error bytes.
         payload: Payload,
+    },
+    /// The delivered handler clock expired before the caller's absolute deadline.
+    InvocationTimedOut {
+        /// Timed-out active attempt; this environment cannot be reused.
+        attempt: AttemptId,
     },
     /// Fatal initialization failure before event delivery.
     InitError {

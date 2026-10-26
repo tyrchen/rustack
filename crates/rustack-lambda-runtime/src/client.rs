@@ -13,7 +13,8 @@ use tokio::{
 use crate::{
     metadata::deadline_unix_ms,
     protocol::{
-        Acknowledgement, Architecture, AttemptId, EnvironmentId, Frame, Message, Outcome, Payload,
+        Acknowledgement, Architecture, AttemptId, EnvironmentId, Frame, HandlerTimeout, Message,
+        Outcome, Payload,
     },
     relay::RelayError,
     session::{Invocation, RuntimeResult},
@@ -72,6 +73,8 @@ pub enum ClientEvent {
         /// Raw success or function error, without an implicit retry.
         result: RuntimeResult,
     },
+    /// A matching delivered handler clock expired; this session is retiring.
+    InvocationTimedOut(AttemptId),
     /// Initialization failed; this environment cannot be reused.
     InitError(Payload),
     /// The relay invalidated the attempt; external code may still be running.
@@ -102,6 +105,7 @@ struct State {
     closing: bool,
     writing: bool,
     delivered: bool,
+    handler_timeout: Option<HandlerTimeout>,
 }
 
 /// One host control session with retained IO and fail-closed send semantics.
@@ -153,6 +157,7 @@ impl ControlClient {
                 closing: false,
                 writing: false,
                 delivered: false,
+                handler_timeout: None,
             },
             last_attempt: None,
             settlement: None,
@@ -245,11 +250,13 @@ impl ControlClient {
             _ => return Err(self.fail(RelayError::Deadline)),
         };
         self.last_attempt = Some(attempt);
+        self.state.handler_timeout = invocation.handler_timeout();
         self.state.phase = Phase::Busy(attempt);
         self.send(
             Message::Invoke {
                 attempt,
                 deadline_unix_ms,
+                handler_timeout_ms: invocation.handler_timeout(),
                 function_arn: function_arn.clone(),
                 trace_id: trace_id.clone(),
                 payload: payload.clone(),
@@ -433,6 +440,24 @@ impl ControlClient {
                 }
                 _ => Err(RelayError::UnexpectedMessage),
             },
+            Message::InvocationTimedOut { attempt } if self.state.handler_timeout.is_some() => {
+                match &mut self.state.phase {
+                    Phase::Busy(active) if *active == attempt => {
+                        self.state.delivered = true;
+                        self.state.phase = Phase::Retiring;
+                        Ok(Some(ClientEvent::InvocationTimedOut(attempt)))
+                    }
+                    Phase::Cancelling {
+                        attempt: active,
+                        outcome_seen,
+                    } if *active == attempt && !*outcome_seen => {
+                        self.state.delivered = true;
+                        *outcome_seen = true;
+                        Ok(None)
+                    }
+                    _ => Err(RelayError::UnexpectedMessage),
+                }
+            }
             Message::InitError { payload } if !self.state.delivered => {
                 match &mut self.state.phase {
                     Phase::Initializing | Phase::Idle | Phase::Busy(_) => {

@@ -105,6 +105,9 @@ pub enum EnvironmentError {
     /// Startup, call or waiting deadline expired.
     #[error("environment deadline exceeded")]
     Deadline,
+    /// The captured function timeout expired after Runtime API delivery.
+    #[error("function timed out after {0:?}")]
+    Timeout(Duration),
     /// This owner no longer accepts work.
     #[error("environment is stopped")]
     Stopped,

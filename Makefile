@@ -898,3 +898,13 @@ test-lambda-pool:
 test-lambda-pool-docker: test-lambda-environments-docker
 
 .PHONY: test-lambda-pool test-lambda-pool-docker
+
+# Delivery clocks, protocol-v2 correlation and actual Native process retirement.
+test-lambda-timeouts:
+	@cargo test -p rustack-lambda-runtime --lib
+	@cargo test -p rustack-lambda-echo-bootstrap --test hardening
+
+# Captured handler-timeout/retirement/replacement through the real image pool.
+test-lambda-timeouts-docker: test-lambda-environments-docker
+
+.PHONY: test-lambda-timeouts test-lambda-timeouts-docker

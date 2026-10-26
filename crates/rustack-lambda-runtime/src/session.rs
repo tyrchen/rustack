@@ -19,7 +19,7 @@ use tokio::{
 };
 use typed_builder::TypedBuilder;
 
-use crate::protocol::{AttemptId, FunctionArn, Outcome, Payload, TraceId};
+use crate::protocol::{AttemptId, FunctionArn, HandlerTimeout, Outcome, Payload, TraceId};
 
 const MAILBOX_CAPACITY: usize = 8;
 const MAX_IDLE_LEASE: Duration = Duration::from_hours(24);
@@ -40,6 +40,9 @@ pub enum SessionError {
     /// Command, idle lease or attempt deadline expired.
     #[error("runtime session deadline exceeded")]
     Deadline,
+    /// The delivered handler's separate function timeout expired first.
+    #[error("function handler timeout exceeded")]
+    HandlerTimeout,
     /// Caller or environment owner cancelled the session.
     #[error("runtime session cancelled")]
     Cancelled,
@@ -57,6 +60,7 @@ pub enum SessionError {
 pub struct Invocation {
     attempt: AttemptId,
     deadline: Instant,
+    handler_timeout: Option<HandlerTimeout>,
     function_arn: FunctionArn,
     trace_id: TraceId,
     payload: Payload,
@@ -90,10 +94,46 @@ impl Invocation {
         Ok(Self {
             attempt,
             deadline,
+            handler_timeout: None,
             function_arn,
             trace_id,
             payload,
         })
+    }
+
+    /// Attach a validated handler budget; it starts only at consumed delivery.
+    ///
+    /// ```no_run
+    /// # fn timed(call: rustack_lambda_runtime::session::Invocation, timeout: rustack_lambda_runtime::protocol::HandlerTimeout) {
+    /// let timed = call.with_handler_timeout(timeout);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_handler_timeout(mut self, timeout: HandlerTimeout) -> Self {
+        self.handler_timeout = Some(timeout);
+        self
+    }
+
+    /// Read the relative handler budget without arming it.
+    ///
+    /// ```no_run
+    /// # fn inspect(call: &rustack_lambda_runtime::session::Invocation) { let timeout = call.handler_timeout(); }
+    /// ```
+    #[must_use]
+    pub fn handler_timeout(&self) -> Option<HandlerTimeout> {
+        self.handler_timeout
+    }
+
+    fn timing(&self, started: Instant) -> Result<(Instant, SessionError), SessionError> {
+        if let Some(timeout) = self.handler_timeout {
+            let handler = started
+                .checked_add(timeout.duration())
+                .ok_or(SessionError::InvalidMetadata)?;
+            if handler < self.deadline {
+                return Ok((handler, SessionError::HandlerTimeout));
+            }
+        }
+        Ok((self.deadline, SessionError::Deadline))
     }
 
     /// Borrow all event metadata and payload without copying bytes.
@@ -432,11 +472,15 @@ impl SessionHandle {
         check_deadline(deadline)?;
         let (reply, response) = oneshot::channel();
         self.send(Command::Next { reply }, deadline)?;
-        let delivery = receive(response, deadline).await??;
+        let mut delivery = receive(response, deadline).await??;
+        let started = Instant::now();
+        let (effective, _) = delivery.invocation.timing(started)?;
+        check_deadline(effective)?;
+        delivery.invocation.deadline = effective;
         delivery
             .receipt
-            .send(())
-            .map_err(|()| SessionError::Unavailable)?;
+            .send(started)
+            .map_err(|_| SessionError::Unavailable)?;
         Ok(delivery.invocation)
     }
 
@@ -603,13 +647,16 @@ enum Command {
 struct Pending {
     attempt: AttemptId,
     deadline: Instant,
+    timeout_error: SessionError,
     cancellation: watch::Receiver<bool>,
     response: oneshot::Sender<Result<RuntimeResult, SessionError>>,
 }
 
 impl Pending {
     fn check(&self) -> Result<(), SessionError> {
-        check_deadline(self.deadline)?;
+        if Instant::now() >= self.deadline {
+            return Err(self.timeout_error);
+        }
         if *self.cancellation.borrow() || self.cancellation.has_changed().is_err() {
             Err(SessionError::Cancelled)
         } else {
@@ -621,13 +668,13 @@ impl Pending {
 #[derive(Debug)]
 struct PollDelivery {
     invocation: Invocation,
-    receipt: oneshot::Sender<()>,
+    receipt: oneshot::Sender<Instant>,
 }
 
 #[derive(Debug)]
 enum PhaseEvent {
     Cancelled,
-    Receipt(bool),
+    Receipt(Option<Instant>),
 }
 
 #[derive(Debug, Default)]
@@ -641,7 +688,7 @@ enum Phase {
     Offering {
         invocation: Invocation,
         pending: Pending,
-        receipt: oneshot::Receiver<()>,
+        receipt: oneshot::Receiver<Instant>,
     },
     Delivered(Pending),
     Closed,
@@ -665,7 +712,7 @@ impl Phase {
                 tokio::select! {
                     biased;
                     () = async { let _ = pending.cancellation.wait_for(|cancelled| *cancelled).await; } => PhaseEvent::Cancelled,
-                    result = receipt => PhaseEvent::Receipt(result.is_ok()),
+                    result = receipt => PhaseEvent::Receipt(result.ok()),
                 }
             }
             Self::Queued { pending, .. } | Self::Delivered(pending) => {
@@ -696,6 +743,14 @@ struct SessionActor {
 impl SessionActor {
     async fn run(mut self) {
         loop {
+            if *self.stop.borrow() {
+                self.close(SessionError::Cancelled);
+                break;
+            }
+            self.reconcile_receipt();
+            if matches!(self.phase, Phase::Closed) {
+                break;
+            }
             let deadline = self
                 .phase
                 .pending()
@@ -703,7 +758,15 @@ impl SessionActor {
             tokio::select! {
                 biased;
                 () = async { let _ = self.stop.wait_for(|stopped| *stopped).await; } => { self.close(SessionError::Cancelled); break; }
-                () = sleep_until(deadline) => { self.close(SessionError::Deadline); break; }
+                () = sleep_until(deadline) => {
+                    self.reconcile_receipt();
+                    if matches!(self.phase, Phase::Closed) { break; }
+                    let error = self.phase.pending().map_or_else(
+                        || (Instant::now() >= self.idle_deadline).then_some(SessionError::Deadline),
+                        |pending| pending.check().err(),
+                    );
+                    if let Some(error) = error { self.close(error); break; }
+                }
                 event = self.phase.event() => {
                     match event {
                         PhaseEvent::Cancelled => { self.close(SessionError::Cancelled); break; }
@@ -763,6 +826,7 @@ impl SessionActor {
                 let pending = Pending {
                     attempt: invocation.attempt,
                     deadline: invocation.deadline,
+                    timeout_error: SessionError::Deadline,
                     cancellation,
                     response,
                 };
@@ -828,8 +892,8 @@ impl SessionActor {
     fn reconcile_receipt(&mut self) {
         let received = match &mut self.phase {
             Phase::Offering { receipt, .. } => match receipt.try_recv() {
-                Ok(()) => Some(true),
-                Err(TryRecvError::Closed) => Some(false),
+                Ok(started) => Some(Some(started)),
+                Err(TryRecvError::Closed) => Some(None),
                 Err(TryRecvError::Empty) => None,
             },
             _ => None,
@@ -919,29 +983,42 @@ impl SessionActor {
         }
     }
 
-    fn received(&mut self, received: bool) {
+    fn received(&mut self, received: Option<Instant>) {
         let Phase::Offering {
             invocation,
-            pending,
+            mut pending,
             ..
         } = replace(&mut self.phase, Phase::Idle)
         else {
             return;
         };
+        if let Some(started) = received {
+            match invocation.timing(started) {
+                Ok((deadline, error)) => {
+                    pending.deadline = deadline;
+                    pending.timeout_error = error;
+                }
+                Err(error) => {
+                    let _ = pending.response.send(Err(error));
+                    self.close(error);
+                    return;
+                }
+            }
+            self.ever_delivered = true;
+        }
         if let Err(error) = pending.check() {
             let _ = pending.response.send(Err(error));
             self.close(error);
             return;
         }
-        if received {
-            self.ever_delivered = true;
-            self.phase = Phase::Delivered(pending);
+        self.phase = if received.is_some() {
+            Phase::Delivered(pending)
         } else {
-            self.phase = Phase::Queued {
+            Phase::Queued {
                 invocation,
                 pending,
-            };
-        }
+            }
+        };
     }
 
     fn take_pending(&mut self) -> Option<Pending> {
