@@ -556,3 +556,7 @@ Extend the atomic parent gate to the exact ExecutionSnapshot, bind callback admi
 ## D67 — Route public callback commands through the installed registry binding
 
 Retain the immutable CallbackRegistry in Registry shared admission and expose typed submit_callback under its captured scope. Derive API callback compiler support from that same binding; never accept an unrelated callback actor argument or a capability boolean. Reuse retained CPU/API admission and CallbackAck semantics, preserve typed static error mappings and emit the documented empty callback success body. See [API§1.4](./rustack-workflows-10-api-design.md#14-registry-bound-public-callback-adapter). Main activation and handler-originated SDK acceptance remain consuming work; Docker stays deferred.
+
+## D68 — Install the real callback root with main-service lifecycle ownership
+
+When the actual selected Lambda port exists, compose one scoped bounded callback registry before Registry/API, retain its unique controller between registry and bridge shutdown, and derive capability/health from that installed root. Enforce four validated YAML quotas and shared result-byte limits. Qualify real signed Rust SDK/boto3 callbacks from actual Native handlers, with explicit post-response gates and independent consumed-PID/history evidence; do not infer Docker/network or AWS background-execution guarantees. See [operations§1.7](./rustack-workflows-60-operations-design.md#17-executable-callback-service-composition) and [verification](./rustack-workflows-70-verification-plan.md).

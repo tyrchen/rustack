@@ -33,6 +33,8 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::process::{ACCESS, SECRET, Server};
 
+#[path = "rust/callback.rs"]
+mod callback;
 #[path = "rust/nested.rs"]
 mod nested;
 #[path = "rust/structured.rs"]
@@ -1025,4 +1027,12 @@ pub(super) async fn exercise(server: &Server) -> Result<()> {
 
 pub(super) async fn nested_only(server: &Server) -> Result<()> {
     nested::exercise(&sfn(server, SECRET), server).await
+}
+
+pub(super) async fn callbacks_only(server: &Server) -> Result<()> {
+    callback::exercise(server).await
+}
+
+pub(super) async fn native_probe_only(server: &Server) -> Result<()> {
+    deploy(server, &lambda(server)).await
 }

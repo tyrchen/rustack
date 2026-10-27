@@ -14,9 +14,10 @@ use rustack_lambda_core::{executor::ExecutorBackend, provider::RustackLambda};
 #[cfg(feature = "lambda")]
 use rustack_stepfunctions_core::LambdaTaskPort;
 use rustack_stepfunctions_core::{
-    ExecutionLimits, ExecutionSupervisor, FrameCapacity, FrameLimits, HistoryLimits, Registry,
-    RegistryCapacities, RegistryError, RegistryLimits, RegistrySupervisor, RuntimeLimits,
-    StateSupport, TaskSupport, TenantScope,
+    CallbackError, CallbackLimits, CallbackRegistry, CallbackSupervisor, ExecutionLimits,
+    ExecutionSupervisor, FrameCapacity, FrameLimits, HistoryLimits, Registry, RegistryCapacities,
+    RegistryError, RegistryLimits, RegistrySupervisor, RuntimeLimits, StateSupport, TaskSupport,
+    TenantScope,
 };
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -27,12 +28,18 @@ pub(crate) struct WorkflowStatus {
     api: Arc<StepFunctionsApi>,
     registry: Registry,
     budgets: RuntimeBudgets,
+    callbacks: Option<CallbackRegistry>,
     #[cfg(feature = "lambda")]
     port: Option<Arc<StepFunctionsLambdaBridge>>,
 }
 impl WorkflowStatus {
     pub(crate) fn is_ready(&self) -> bool {
-        let ready = self.api.is_ready() && self.registry.status().ready;
+        let ready = self.api.is_ready()
+            && self.registry.status().ready
+            && self
+                .callbacks
+                .as_ref()
+                .is_none_or(|callbacks| callbacks.status().ready);
         #[cfg(feature = "lambda")]
         let ready = ready && self.port.as_ref().is_none_or(|port| port.is_ready());
         ready
@@ -46,7 +53,7 @@ impl WorkflowStatus {
             "type": "STANDARD", "queryLanguage": "JSONPath",
             "stateTypes": ["Pass", "Choice", "Wait", "Task", "Succeed", "Fail", "Parallel", "Map"],
             "inlineMapMaxConcurrency": 40,
-            "lambdaRequestResponse": lambda, "nestedSync": true, "callbacks": false,
+            "lambdaRequestResponse": lambda, "nestedSync": true, "callbacks": self.registry.callback_support(),
             "snapshot": "unsupported", "dockerQualified": false,
             "limits": {
                 "apiAccepted": self.budgets.workflow_api_accepted,
@@ -72,7 +79,12 @@ impl WorkflowStatus {
                 "totalHistoryBytes": self.budgets.workflow_total_history_bytes,
                 "lambdaAcceptedCalls": self.budgets.workflow_lambda_accepted_calls,
                 "lambdaCleanupSeconds": self.budgets.workflow_lambda_cleanup_seconds,
-                "drainSeconds": self.budgets.workflow_drain_seconds
+                "drainSeconds": self.budgets.workflow_drain_seconds,
+                "callbackTokens": self.budgets.workflow_callback_tokens,
+                "callbackTombstones": self.budgets.workflow_callback_tombstones,
+                "callbackCommands": self.budgets.workflow_callback_commands,
+                "callbackWorkers": self.budgets.workflow_callback_workers,
+                "callbackRetentionSeconds": self.budgets.workflow_retention_seconds
             }
         })
     }
@@ -84,6 +96,7 @@ enum Phase {
     ClosingApi,
     Grace(Instant),
     Registry,
+    Callbacks,
     Bridge,
     Done,
 }
@@ -93,6 +106,7 @@ pub(crate) struct WorkflowSupervisor {
     api: ApiSupervisor,
     registry: RegistrySupervisor,
     status: WorkflowStatus,
+    callbacks: Option<CallbackSupervisor>,
     #[cfg(feature = "lambda")]
     bridge: Option<LambdaBridgeSupervisor>,
     phase: Phase,
@@ -154,7 +168,7 @@ impl WorkflowRuntime {
         } else {
             TaskSupport::Disabled
         };
-        let runtime = ExecutionSupervisor::new_with_frames(
+        let mut runtime = ExecutionSupervisor::new_with_frames(
             RuntimeLimits::new(
                 budgets.workflow_open_executions,
                 budgets.workflow_dispatches,
@@ -172,6 +186,8 @@ impl WorkflowRuntime {
                 budgets.workflow_result_bytes_per_execution,
             )?,
         )?;
+        let (callbacks, callback_owner) =
+            callback_runtime(&scope, &budgets, &mut runtime, tasks)?.unzip();
         let (registry, owner) = Registry::new_with_state_support(
             scope.clone(),
             RegistryLimits::new(
@@ -206,6 +222,7 @@ impl WorkflowRuntime {
             api: api.clone(),
             registry,
             budgets,
+            callbacks,
             #[cfg(feature = "lambda")]
             port,
         };
@@ -216,6 +233,7 @@ impl WorkflowRuntime {
                 api: api_owner,
                 registry: owner,
                 status,
+                callbacks: callback_owner,
                 #[cfg(feature = "lambda")]
                 bridge,
                 phase: Phase::Accepting,
@@ -224,6 +242,29 @@ impl WorkflowRuntime {
         })
     }
 }
+fn callback_runtime(
+    scope: &TenantScope,
+    budgets: &RuntimeBudgets,
+    runtime: &mut ExecutionSupervisor,
+    tasks: TaskSupport,
+) -> Result<Option<(CallbackRegistry, CallbackSupervisor)>> {
+    if tasks != TaskSupport::Lambda {
+        return Ok(None);
+    }
+    let (callbacks, owner) = CallbackRegistry::new(
+        scope.clone(),
+        CallbackLimits::new(
+            budgets.workflow_callback_tokens,
+            budgets.workflow_callback_tombstones,
+            budgets.workflow_callback_commands,
+            budgets.workflow_callback_workers,
+            Duration::from_secs(budgets.workflow_retention_seconds),
+        )?,
+    )?;
+    runtime.install_callbacks(callbacks.clone())?;
+    Ok(Some((callbacks, owner)))
+}
+
 impl WorkflowSupervisor {
     /// Resume the same controllers; a dropped/expired observer never restarts grace.
     pub(crate) async fn quiesce(&mut self, deadline: Instant) -> Result<()> {
@@ -269,6 +310,18 @@ impl WorkflowSupervisor {
                         }
                         Err(error) => self.fail(error.into()),
                     }
+                    self.phase = Phase::Callbacks;
+                }
+                Phase::Callbacks => {
+                    if let Some(callbacks) = &mut self.callbacks {
+                        match callbacks.shutdown(deadline).await {
+                            Ok(()) => {}
+                            Err(CallbackError::Deadline) => {
+                                anyhow::bail!("workflow callback shutdown observation expired")
+                            }
+                            Err(error) => self.fail(error.into()),
+                        }
+                    }
                     self.phase = Phase::Bridge;
                 }
                 Phase::Bridge => {
@@ -305,6 +358,9 @@ impl WorkflowSupervisor {
             // No successful consistency cut is claimed; cancel retained owners
             // before main attempts provider destruction under the same deadline.
             self.registry.close();
+            if let Some(callbacks) = &self.callbacks {
+                callbacks.close();
+            }
             #[cfg(feature = "lambda")]
             if let Some(bridge) = &self.bridge {
                 bridge.close();

@@ -31,6 +31,7 @@ struct Resources {
     child: Child,
     directory: Option<TempDir>,
     markers: PathBuf,
+    cleanup_proven: bool,
 }
 #[derive(Debug)]
 struct Owner {
@@ -39,6 +40,7 @@ struct Owner {
 }
 #[derive(Debug)]
 pub(super) struct Server {
+    pub pid: u32,
     pub endpoint: String,
     pub markers: PathBuf,
     pub bootstrap: PathBuf,
@@ -47,6 +49,22 @@ pub(super) struct Server {
     joined: Option<Result<usize, Arc<anyhow::Error>>>,
 }
 impl Server {
+    pub async fn capabilities(&self) -> Result<serde_json::Value> {
+        let address = self
+            .endpoint
+            .strip_prefix("http://")
+            .context("owned server endpoint")?;
+        timeout(Duration::from_secs(2),async {
+            let mut stream=TcpStream::connect(address).await?;
+            stream.write_all(b"GET /_rustack/capabilities HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await?;
+            let mut response=Vec::new();stream.take(16_385).read_to_end(&mut response).await?;
+            ensure!(response.len()<=16_384,"oversized capability response");
+            let text=std::str::from_utf8(&response)?;
+            ensure!(text.starts_with("HTTP/1.1 200"),"capability response failed");
+            let (_,body)=text.split_once("\r\n\r\n").context("capability envelope")?;
+            Ok(serde_json::from_str(body)?)
+        }).await.context("capability observer expired")?
+    }
     pub async fn start() -> Result<Self> {
         Self::start_with_dispatch(32).await
     }
@@ -67,13 +85,17 @@ impl Server {
         let markers = directory.path().join("processes");
         fs::create_dir(&markers).await?;
         fs::create_dir(directory.path().join("gates")).await?;
+        fs::create_dir(directory.path().join("callbacks")).await?;
+        fs::create_dir(directory.path().join("callback-gates")).await?;
         let config = directory.path().join("rustack.yaml");
         fs::write(
             &config,
             format!(
                 "budgets:\n  workflowTransitions: 80\n  workflowHistoryBytes: 1048576\n  \
                  workflowTotalHistoryBytes: 8388608\n  workflowDrainSeconds: 0\n  \
-                 workflowDispatches: {dispatch}\n"
+                 workflowDispatches: {dispatch}\n  workflowCallbackTokens: 2\n  \
+                 workflowCallbackTombstones: 64\n  workflowCallbackCommands: 8\n  \
+                 workflowCallbackWorkers: 1\n"
             ),
         )
         .await?;
@@ -98,16 +120,19 @@ impl Server {
             .kill_on_drop(true)
             .spawn()
             .context("spawn actual Rustack binary")?;
+        let pid = child.id().context("owned server PID")?;
         let (stop, receiver) = watch::channel(false);
         let owner = Owner {
             state: Some(Resources {
                 child,
                 directory: Some(directory),
                 markers: markers.clone(),
+                cleanup_proven: false,
             }),
             stop: receiver,
         };
         let mut server = Self {
+            pid,
             endpoint: format!("http://{address}"),
             markers,
             bootstrap,
@@ -174,6 +199,7 @@ impl Drop for Server {
 impl Owner {
     async fn run(mut self) -> Result<usize> {
         let state = self.state.as_mut().context("missing owned server state")?;
+        let mut gate_failure = None;
         let status = tokio::select! {
             result = state.child.wait() => {
                 let status = result?;
@@ -181,6 +207,7 @@ impl Owner {
                 status
             },
             _ = self.stop.changed() => {
+                if let Err(error)=release_fixture_gates(&state.markers).await {gate_failure=Some(error);}
                 let pid = state.child.id().context("missing owned server PID")?;
                 let signal=Runner::spawn(Path::new("/bin/kill"), &[OsString::from("-TERM"), OsString::from(pid.to_string())])?
                     .wait(Instant::now()+Duration::from_secs(5)).await?;
@@ -196,19 +223,34 @@ impl Owner {
         let observed = timeout(Duration::from_secs(10), verify_absent(&state.markers))
             .await
             .context("PID evidence deadline")??;
+        state.cleanup_proven = true;
+        if let Some(error) = gate_failure {
+            return Err(error.context("fixture gates failed after coordinated process cleanup"));
+        }
         self.state = None;
         Ok(observed)
     }
+}
+async fn release_fixture_gates(markers: &Path) -> Result<()> {
+    let root = markers.parent().context("owned fixture directory")?;
+    timeout(
+        Duration::from_secs(2),
+        fs::write(root.join("callback-gates/all.release"), b"cleanup"),
+    )
+    .await??;
+    Ok(())
 }
 impl Drop for Owner {
     fn drop(&mut self) {
         if let Some(state) = &mut self.state {
             if let Some(directory) = state.directory.take() {
                 let path = directory.keep();
-                eprintln!(
-                    "SDK cleanup was not proven; retained evidence at {}",
-                    path.display()
-                );
+                let reason = if state.cleanup_proven {
+                    "SDK qualification failed after proven process cleanup"
+                } else {
+                    "SDK cleanup was not proven"
+                };
+                eprintln!("{reason}; retained evidence at {}", path.display());
             }
         }
     }

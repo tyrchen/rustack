@@ -37,7 +37,14 @@ async fn request(
     let response = service.handle(request).await;
     let status = response.status();
     let body = response.into_body().collect().await?.to_bytes();
-    Ok((status, serde_json::from_slice(&body)?))
+    Ok((
+        status,
+        if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body)?
+        },
+    ))
 }
 async fn start(
     runtime: &WorkflowRuntime,
@@ -187,6 +194,8 @@ async fn test_should_report_pure_profile_and_reject_lambda_without_actual_port()
     assert_eq!(capabilities["dockerQualified"], false);
     assert_eq!(capabilities["limits"]["apiWorkers"], 8);
     assert_eq!(capabilities["nestedSync"], true);
+    assert_eq!(capabilities["callbacks"], false);
+    assert!(runtime.status.callbacks.is_none());
     let child = json!({"StartAt":"D","States":{"D":{"Type":"Pass","End":true}}});
     let (status, created) = request(runtime.api.clone(), "CreateStateMachine", json!({"name":"PureChild","definition":child.to_string(),"roleArn":"arn:aws:iam::000000000000:role/Test"})).await?;
     assert_eq!(status, StatusCode::OK, "{created}");
@@ -242,13 +251,55 @@ async fn test_should_install_only_registered_selected_actual_lambda_provider() -
         Some(provider.clone()),
     )?;
     assert_eq!(runtime.status.capabilities()["lambdaRequestResponse"], true);
+    assert_eq!(runtime.status.capabilities()["callbacks"], true);
+    assert_eq!(
+        runtime.status.capabilities()["limits"]["callbackTokens"],
+        4096
+    );
+    assert_eq!(
+        runtime.status.capabilities()["limits"]["callbackTombstones"],
+        100_000
+    );
+    assert_eq!(
+        runtime.status.capabilities()["limits"]["callbackCommands"],
+        1024
+    );
+    assert_eq!(
+        runtime.status.capabilities()["limits"]["callbackWorkers"],
+        8
+    );
+    assert_eq!(
+        runtime.status.capabilities()["limits"]["callbackRetentionSeconds"],
+        86_400
+    );
     assert!(runtime.status.is_ready());
+    let callback = json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke.waitForTaskToken","Parameters":{"FunctionName":"Missing","Payload":{"token.$":"$$.Task.Token"}},"End":true}}});
+    assert_eq!(request(runtime.api.clone(),"CreateStateMachine",json!({"name":"Callback","roleArn":"arn:aws:iam::000000000000:role/Test","definition":callback.to_string()})).await?.0,StatusCode::OK);
+    assert_eq!(
+        request(
+            runtime.api.clone(),
+            "SendTaskHeartbeat",
+            json!({"taskToken":"a".repeat(64)})
+        )
+        .await?
+        .1["__type"],
+        "InvalidToken"
+    );
     runtime
         .owner
         .quiesce(Instant::now() + Duration::from_secs(5))
         .await?;
     provider.quiesce(Duration::from_secs(5)).await?;
     provider.shutdown().await;
+    assert!(
+        !runtime
+            .status
+            .callbacks
+            .as_ref()
+            .context("callback root")?
+            .status()
+            .ready
+    );
     Ok(())
 }
 
@@ -276,6 +327,102 @@ fn test_should_retain_typed_cleanup_source_and_redact_debug() {
     let failure = WorkflowFailure(Arc::new(anyhow::anyhow!("sensitive-marker")));
     assert!(!format!("{failure:?}").contains("sensitive-marker"));
     assert!(failure.source().is_some());
+}
+
+#[cfg(feature = "lambda")]
+#[tokio::test]
+async fn test_should_observe_callback_failure_without_business_admission_and_resume_same_callback_join()
+-> Result<()> {
+    use rustack_lambda_core::config::LambdaConfig;
+
+    let config =
+        LambdaConfig::from_lookup(|key| (key == "LAMBDA_EXECUTOR").then(|| "native".to_owned()))?;
+    let provider = Arc::new(RustackLambda::new(config));
+    let mut budgets = RuntimeBudgets::default();
+    budgets.workflow_registry_commands = 1;
+    budgets.workflow_callback_tokens = 2;
+    budgets.workflow_callback_tombstones = 3;
+    budgets.workflow_callback_commands = 4;
+    budgets.workflow_callback_workers = 1;
+    let mut runtime =
+        WorkflowRuntime::new(TenantScope::default(), budgets, Some(provider.clone()))?;
+    let callbacks = runtime
+        .status
+        .callbacks
+        .clone()
+        .context("callback handle")?;
+    let receipt = runtime.status.registry.submit(RegistryCommand::Machines)?;
+    assert!(runtime.status.is_ready());
+    runtime
+        .owner
+        .callbacks
+        .as_ref()
+        .context("callback controller")?
+        .close();
+    assert!(!callbacks.status().ready);
+    assert!(!runtime.status.is_ready());
+    assert_eq!(runtime.status.capabilities()["limits"]["callbackTokens"], 2);
+    assert_eq!(
+        runtime.status.capabilities()["limits"]["callbackTombstones"],
+        3
+    );
+    assert_eq!(
+        request(
+            runtime.api.clone(),
+            "SendTaskHeartbeat",
+            json!({"taskToken":"a".repeat(64)})
+        )
+        .await?
+        .1["__type"],
+        "ServiceUnavailable"
+    );
+    drop(receipt);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    runtime.owner.api.shutdown(deadline).await?;
+    runtime.owner.registry.shutdown(deadline).await?;
+    runtime.owner.phase = Phase::Callbacks;
+    assert!(runtime.owner.quiesce(Instant::now()).await.is_err());
+    assert!(matches!(runtime.owner.phase, Phase::Callbacks));
+    runtime.owner.quiesce(deadline).await?;
+    assert!(matches!(runtime.owner.phase, Phase::Done));
+    provider.quiesce(Duration::from_secs(5)).await?;
+    provider.shutdown().await;
+    Ok(())
+}
+
+#[cfg(feature = "lambda")]
+#[tokio::test]
+async fn test_should_signal_callback_root_when_final_shutdown_observation_expires() -> Result<()> {
+    use rustack_lambda_core::config::LambdaConfig;
+
+    let config =
+        LambdaConfig::from_lookup(|key| (key == "LAMBDA_EXECUTOR").then(|| "native".to_owned()))?;
+    let provider = Arc::new(RustackLambda::new(config));
+    let mut runtime = WorkflowRuntime::new(
+        TenantScope::default(),
+        RuntimeBudgets::default(),
+        Some(provider.clone()),
+    )?;
+    let callbacks = runtime
+        .status
+        .callbacks
+        .clone()
+        .context("callback handle")?;
+    assert!(runtime.owner.shutdown(Instant::now()).await.is_err());
+    assert!(!callbacks.status().ready);
+    assert!(!runtime.status.is_ready());
+    assert!(!matches!(
+        runtime.owner.phase,
+        Phase::Accepting | Phase::Done
+    ));
+    runtime
+        .owner
+        .shutdown(Instant::now() + Duration::from_secs(5))
+        .await?;
+    assert!(matches!(runtime.owner.phase, Phase::Done));
+    provider.quiesce(Duration::from_secs(5)).await?;
+    provider.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test]

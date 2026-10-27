@@ -150,6 +150,14 @@ pub struct RuntimeBudgets {
     pub workflow_lambda_cleanup_seconds: u64,
     /// Grace interval before cancelling remaining workflows.
     pub workflow_drain_seconds: u64,
+    /// Live callback token attempts, including provisional completion.
+    pub workflow_callback_tokens: usize,
+    /// Retained active and closed callback classification entries.
+    pub workflow_callback_tombstones: usize,
+    /// Accepted callback commands, including ready acknowledgments.
+    pub workflow_callback_commands: usize,
+    /// Retained callback mint entropy workers.
+    pub workflow_callback_workers: usize,
     /// Maximum live HTTP connections.
     pub connections: usize,
     /// Maximum concurrently active business requests, including response bodies.
@@ -205,6 +213,10 @@ impl Default for RuntimeBudgets {
             workflow_lambda_accepted_calls: 128,
             workflow_lambda_cleanup_seconds: 10,
             workflow_drain_seconds: 5,
+            workflow_callback_tokens: 4096,
+            workflow_callback_tombstones: 100_000,
+            workflow_callback_commands: 1024,
+            workflow_callback_workers: 8,
             connections: 256,
             requests: 128,
             header_seconds: 5,
@@ -231,6 +243,7 @@ impl RuntimeBudgets {
         self.validate_workflow_api()?;
         self.validate_workflow_execution()?;
         self.validate_workflow_frames()?;
+        self.validate_workflow_callbacks()?;
         if self.workflow_api_workers > self.workflow_api_accepted {
             return Err(invalid(
                 "budgets.workflowApiWorkers",
@@ -397,6 +410,41 @@ impl RuntimeBudgets {
             return Err(invalid(
                 "budgets.workflowFrames",
                 "per-execution frame/result limits must not exceed global limits",
+            ));
+        }
+        Ok(())
+    }
+    fn validate_workflow_callbacks(&self) -> Result<(), SettingsError> {
+        for (key, value, maximum) in [
+            (
+                "budgets.workflowCallbackTokens",
+                self.workflow_callback_tokens,
+                65_536,
+            ),
+            (
+                "budgets.workflowCallbackTombstones",
+                self.workflow_callback_tombstones,
+                1_000_000,
+            ),
+            (
+                "budgets.workflowCallbackCommands",
+                self.workflow_callback_commands,
+                100_000,
+            ),
+            (
+                "budgets.workflowCallbackWorkers",
+                self.workflow_callback_workers,
+                128,
+            ),
+        ] {
+            if !(1..=maximum).contains(&value) {
+                return Err(invalid(key, "outside supported callback range"));
+            }
+        }
+        if self.workflow_callback_tombstones < self.workflow_callback_tokens {
+            return Err(invalid(
+                "budgets.workflowCallbackTombstones",
+                "must include live token reservations",
             ));
         }
         Ok(())
@@ -961,6 +1009,14 @@ mod tests {
             "workflowLambdaAcceptedCalls: 0",
             "workflowLambdaCleanupSeconds: 61",
             "workflowDrainSeconds: 61",
+            "workflowCallbackTokens: 0",
+            "workflowCallbackTokens: 65537",
+            "workflowCallbackTombstones: 1000001",
+            "workflowCallbackTombstones: 1\n  workflowCallbackTokens: 2",
+            "workflowCallbackCommands: 0",
+            "workflowCallbackCommands: 100001",
+            "workflowCallbackWorkers: 0",
+            "workflowCallbackWorkers: 129",
             "workflowApiAccepted: 1\n  workflowApiWorkers: 2",
             "workflowHistoryBytes: 33554432\n  workflowTotalHistoryBytes: 8388608",
         ] {
@@ -994,6 +1050,46 @@ mod tests {
             assert_eq!(
                 config.budgets().workflow_result_bytes_per_execution,
                 local_results
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_enforce_exact_callback_configuration_bounds_and_defaults()
+    -> Result<(), SettingsError> {
+        let defaults = RuntimeBudgets::default();
+        assert_eq!(
+            (
+                defaults.workflow_callback_tokens,
+                defaults.workflow_callback_tombstones,
+                defaults.workflow_callback_commands,
+                defaults.workflow_callback_workers
+            ),
+            (4096, 100_000, 1024, 8)
+        );
+        for (tokens, retained, commands, workers, seconds) in [
+            (1, 1, 1, 1, 60),
+            (65_536, 1_000_000, 100_000, 128, 7_776_000),
+        ] {
+            let config = ValidatedSettings::parse(
+                &format!(
+                    "budgets:\n  workflowCallbackTokens: {tokens}\n  workflowCallbackTombstones: \
+                     {retained}\n  workflowCallbackCommands: {commands}\n  \
+                     workflowCallbackWorkers: {workers}\n  workflowRetentionSeconds: {seconds}\n"
+                ),
+                &BTreeMap::new(),
+            )?;
+            let budgets = config.budgets();
+            assert_eq!(
+                (
+                    budgets.workflow_callback_tokens,
+                    budgets.workflow_callback_tombstones,
+                    budgets.workflow_callback_commands,
+                    budgets.workflow_callback_workers,
+                    budgets.workflow_retention_seconds
+                ),
+                (tokens, retained, commands, workers, seconds)
             );
         }
         Ok(())

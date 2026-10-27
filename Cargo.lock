@@ -3775,13 +3775,21 @@ dependencies = [
 name = "rustack-lambda-echo-bootstrap"
 version = "0.9.0"
 dependencies = [
+ "anyhow",
+ "aws-credential-types",
+ "aws-sdk-sfn",
  "base64 0.22.1",
  "rustack-lambda-core",
  "rustack-lambda-model",
+ "secrecy",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "typed-builder",
  "ureq",
+ "url",
+ "uuid",
  "zip",
 ]
 
