@@ -220,6 +220,17 @@ test-stepfunctions-sdk: workflows-sdk-python test-stepfunctions-handler-fixture
 audit-codegen:
 	@cargo audit --file codegen/Cargo.lock
 
+# D69: source-preserving loader overlay and the complete patched codec graph.
+verify-workflows-compression:
+	@python3 -I -c 'import hashlib,json,pathlib; p=pathlib.Path("patches/squib-loader"); v=json.loads((p/"provenance.json").read_text()); names={"src/lib.rs","Cargo.toml.registry","Cargo.toml.orig",".cargo_vcs_info.json","LICENSE.md"}; assert v["schemaVersion"]==1 and v["package"]=="squib-loader" and v["version"]=="0.2.0"; assert set(v["sha256"])==names; assert all(hashlib.sha256((p/n).read_bytes()).hexdigest()==h for n,h in v["sha256"].items()); original=(p/"Cargo.toml.registry").read_text(); before="[dependencies.zstd]\nversion = \"0.13\""; after="[dependencies.zstd]\nversion = \"0.14.3\""; assert original.count(before)==1 and (p/"Cargo.toml").read_text()==original.replace(before,after); f=pathlib.Path("apps/rustack/src/snapshot/fixtures"); a=json.loads((f/"legacy-v2-meta-provenance.json").read_text()); assert hashlib.sha256((f/a["fixture"]).read_bytes()).hexdigest()==a["sha256"]'
+	@cargo metadata --locked --format-version 1 | python3 -I -c 'import json,pathlib,sys; data=json.load(sys.stdin); minimum={"zstd":(0,14,3),"zstd-safe":(8,2,0),"zstd-sys":(2,1,2)}; codecs=[p for p in data["packages"] if p["name"] in minimum]; assert len(codecs)==3 and {p["name"] for p in codecs}==set(minimum); assert all(tuple(map(int,p["version"].split("+")[0].split(".")))>=minimum[p["name"]] for p in codecs); loader=[p for p in data["packages"] if p["name"]=="squib-loader"]; assert len(loader)==1 and loader[0]["source"] is None and pathlib.Path(loader[0]["manifest_path"]).resolve()==pathlib.Path("patches/squib-loader/Cargo.toml").resolve()'
+
+test-workflows-compression: verify-workflows-compression
+	@cargo test --locked -p squib-loader --lib
+	@cargo test --locked -p rustack-cli --bin rustack --features stepfunctions snapshot::
+
+.PHONY: verify-workflows-compression test-workflows-compression
+
 deny-codegen:
 	@cargo deny --manifest-path codegen/Cargo.toml check
 

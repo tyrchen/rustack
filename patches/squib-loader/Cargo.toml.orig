@@ -1,0 +1,23 @@
+[package]
+name = "squib-loader"
+description = "aarch64 kernel image loader (PE / Image / Image.gz / Image.zst) for squib"
+categories = ["virtualization"]
+keywords = ["kernel", "loader", "aarch64", "linux"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+flate2 = { workspace = true }
+squib-arch = { workspace = true }
+squib-core = { workspace = true }
+thiserror = { workspace = true }
+zstd = { workspace = true }

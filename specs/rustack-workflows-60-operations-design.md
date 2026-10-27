@@ -261,6 +261,27 @@ Follow AGENTS.md Error/Async/Type/Safety/Serialization/Testing/Logging/Performan
 
 Explicit exception to AGENTS.md § Injection Prevention, URL/SSRF: an operator-configured local gateway may use HTTP and private/loopback addressing because local AWS emulation requires it. It is not an ASL-controlled outbound URL, and request Host headers cannot configure it. Function networking and Docker daemon registry networking remain separate operator trust boundaries. Local cancellation actively terminates a function container; this is resource hygiene, not a promise that AWS Lambda would stop code when a Step Functions Task times out. Already completed side effects survive both paths.
 
+### 4.1 Patched compression cohort before workflow persistence
+
+Close existing B06 before installing the workflow archive decoder. Use the current patched zstd0.14.3 / zstd-safe8.2.0 / zstd-sys2.1.2 cohort (or later compatible patched releases) across both the direct snapshot dependency and the transitive Squib loader graph. Keep the existing snapshot envelope/version/compression level, bounded streaming decode and independent archive CRC validation. Do not downgrade to a nominally unaffected old binding or waive advisory checks. The current [zstd release](https://docs.rs/zstd/0.14.3/zstd/) and local fresh RustSec database define the patched baseline.
+
+The published squib-loader0.2.0 and upstream HEAD4f1fd673c20ab28328b47592138409ad68f12f76 still require zstd0.13. Apply one explicit crates.io path override under patches/squib-loader, excluded from Rustack workspace membership as an independently maintained third-party package. Preserve the published0.2.0 src/lib.rs byte for byte, normalized package metadata/dependency versions and API/type identity; change only its zstd requirement to the patched0.14 line. The rest of Squib stays on its pinned registry cohort. Include original manifest, VCS/package checksum, source fingerprints and upstream license notice so the exact overlay is inspectable. Preserve upstream's declared Apache-2.0 metadata and its separately supplied LICENSE.md notice verbatim; do not silently rewrite either. Do not copy its stale lockfile, edit Cargo's cache, add first-party unsafe/lint exceptions, or mutate/publish another repository. Retire the override when an upstream compatible release supplies the patched dependency. Source/binary build distributions must include the overlay directory and root manifest. Independently published Rust crates consumed under another workspace require that root to repeat the override or adopt the upstream fixed loader, because [Cargo applies patches only from the workspace root](https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html#the-patch-section). This dependency closure is verified for the current Rustack workspace.
+
+Make qualification must verify the overlay source/manifest provenance, select the intended patched loader package, execute its existing synthetic kernel decompression/size/magic/overflow regressions and the runtime snapshot suite, and fail on any remaining vulnerable zstd cohort. Add a harmless pre-upgrade snapshot frame generated with the original resolved0.13.3 graph as compatibility evidence; the updated decoder must preserve its typed envelope/section bytes and reject truncated/corrupt input. Reusable raw encoder/decoder contexts also need a regression across an abandoned stream and subsequent frame, including bounded decoding, matching the repaired leak class. These are library/codec regressions, not new VM/Docker/platform qualification.
+
+```text
+snapshot archives ──► direct zstd ~0.14.3 ───────────────┐
+                                                       ▼
+squib0.2.0 → vmm → patched loader0.2.0 → zstd0.14 → safe8.2 → sys2.1.2
+                         │
+                         └─ original source/API + one dependency override
+
+acceptance = source provenance + old-frame/kernel regressions
+             + normal/strict workspace gates + fresh audit/deny
+```
+
+Fresh cargo audit must have no vulnerabilities or unsound compression warnings, and all cargo deny checks must pass without new ignores. Historical B01/B06 evidence remains chronological; mark B06 closed only after inspecting the current resolved graph and gates. Workflow archive export/import, frozen-registry lifetime, cross-service consistency and final image/platform acceptance remain separate work.
+
 ## 5. Cross-references
 
 - ← [runtime hardening](./rustack-runtime-hardening-design.md), [binary archives](./ruststack-snapshot-binary-archive-design.md)

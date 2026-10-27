@@ -516,7 +516,11 @@ async fn decompress(bytes: Vec<u8>) -> Result<Vec<u8>> {
 }
 
 fn decode_zstd_bounded(bytes: Vec<u8>) -> Result<Vec<u8>> {
-    let read_limit = MAX_ARCHIVE_BYTES
+    decode_zstd_with_limit(bytes, MAX_ARCHIVE_BYTES)
+}
+
+fn decode_zstd_with_limit(bytes: Vec<u8>, limit: u64) -> Result<Vec<u8>> {
+    let read_limit = limit
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("snapshot archive size overflow"))?;
     let decoder = zstd::stream::read::Decoder::new(Cursor::new(bytes))
@@ -526,7 +530,7 @@ fn decode_zstd_bounded(bytes: Vec<u8>) -> Result<Vec<u8>> {
     limited
         .read_to_end(&mut output)
         .context("failed to decompress snapshot archive")?;
-    if usize_to_u64(output.len())? > MAX_ARCHIVE_BYTES {
+    if usize_to_u64(output.len())? > limit {
         bail!("decompressed snapshot archive exceeds maximum size");
     }
     Ok(output)
@@ -678,9 +682,114 @@ fn u64_to_usize(value: u64) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
     use tempfile::tempdir;
+    use zstd::{
+        stream::{read::Decoder as ZstdReader, write::Encoder as ZstdWriter},
+        zstd_safe::{CCtx, DCtx},
+    };
 
     use super::*;
+
+    const LEGACY_V2: &[u8] = include_bytes!("fixtures/legacy-v2-meta.ss.zst");
+
+    #[test]
+    fn test_should_preserve_original_zstd_0133_snapshot_envelope() -> Result<()> {
+        let plain = decode_zstd_bounded(LEGACY_V2.to_vec())?;
+        assert_eq!(plain.len(), 88);
+        let sections = parse_archive(&plain, ArchiveKind::ServiceMeta)?;
+        let section = sections.first().context("legacy section")?;
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            (section.kind, section.flags, section.row_count),
+            (SECTION_STATE_CBOR, 0, 7)
+        );
+        assert_eq!(section.bytes, b"legacy-state");
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_every_truncated_legacy_frame_and_reencoded_corrupt_envelope() -> Result<()>
+    {
+        for end in 0..LEGACY_V2.len() {
+            let prefix = LEGACY_V2.get(..end).context("bounded prefix")?;
+            assert!(
+                decode_zstd_bounded(prefix.to_vec())
+                    .and_then(|plain| parse_archive(&plain, ArchiveKind::ServiceMeta))
+                    .is_err(),
+                "truncated prefix {end}"
+            );
+        }
+        let mut plain = decode_zstd_bounded(LEGACY_V2.to_vec())?;
+        let index = plain.len().checked_sub(FOOTER_LEN).context("CRC offset")?;
+        let crc = plain.get_mut(index).context("CRC byte")?;
+        *crc = crc.wrapping_add(1);
+        let frame = zstd::stream::encode_all(Cursor::new(plain), ZSTD_LEVEL)?;
+        let plain = decode_zstd_bounded(frame)?;
+        assert!(parse_archive(&plain, ArchiveKind::ServiceMeta).is_err());
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(4096)]
+    #[test]
+    fn test_should_enforce_exact_decompressed_byte_boundary(#[case] limit: usize) -> Result<()> {
+        let exact = zstd::stream::encode_all(Cursor::new(vec![b'x'; limit]), ZSTD_LEVEL)?;
+        assert_eq!(
+            decode_zstd_with_limit(exact, u64::try_from(limit)?)?.len(),
+            limit
+        );
+        let excess = zstd::stream::encode_all(Cursor::new(vec![b'x'; limit + 1]), ZSTD_LEVEL)?;
+        assert!(decode_zstd_with_limit(excess, u64::try_from(limit)?).is_err());
+        assert!(decode_zstd_with_limit(Vec::new(), u64::MAX).is_err());
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(4096)]
+    #[case(131_071)]
+    #[test]
+    fn test_should_discard_abandoned_encoder_input_before_reusing_context(
+        #[case] size: usize,
+    ) -> Result<()> {
+        let mut context = CCtx::create();
+        {
+            let mut abandoned = ZstdWriter::with_context(Vec::new(), &mut context);
+            abandoned.write_all(&vec![b'X'; size])?;
+        }
+        let mut current = ZstdWriter::with_context(Vec::new(), &mut context);
+        current.write_all(b"current-stream")?;
+        let frame = current.finish()?;
+        assert_eq!(decode_zstd_with_limit(frame, 64)?, b"current-stream");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(4096)]
+    #[case(131_072)]
+    #[test]
+    fn test_should_discard_abandoned_decoder_output_before_reusing_context(
+        #[case] size: usize,
+    ) -> Result<()> {
+        let mut context = DCtx::create();
+        let previous = zstd::stream::encode_all(Cursor::new(vec![b'X'; size]), ZSTD_LEVEL)?;
+        {
+            let mut abandoned = ZstdReader::with_context(Cursor::new(previous), &mut context);
+            let mut byte = [0_u8; 1];
+            abandoned.read_exact(&mut byte)?;
+            assert_eq!(byte, [b'X']);
+        }
+        let frame = zstd::stream::encode_all(Cursor::new(b"current-stream"), ZSTD_LEVEL)?;
+        let mut current = ZstdReader::with_context(Cursor::new(frame), &mut context).take(64);
+        let mut output = Vec::new();
+        current.read_to_end(&mut output)?;
+        assert_eq!(output, b"current-stream");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_should_round_trip_archive_sections() -> Result<()> {
