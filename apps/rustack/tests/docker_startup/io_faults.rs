@@ -29,6 +29,11 @@ pub(super) enum Case {
     DeleteTimeout,
     Pull,
     Negative,
+    RuntimeBounds,
+    GlobalLimit,
+    DefaultLimit,
+    MemoryLimit,
+    EnvironmentLimit,
 }
 impl Case {
     fn phase(self) -> &'static str {
@@ -41,6 +46,11 @@ impl Case {
             Self::DeleteTimeout => "delete_timeout",
             Self::Pull => "pull",
             Self::Negative => "negative",
+            Self::RuntimeBounds => "runtime_bounds",
+            Self::GlobalLimit => "global_limit",
+            Self::DefaultLimit => "default_limit",
+            Self::MemoryLimit => "memory_limit",
+            Self::EnvironmentLimit => "environment_limit",
         }
     }
     fn expected(self) -> Value {
@@ -80,6 +90,24 @@ impl Case {
                 "failed-update-preserves-active-A",
                 "backend-pull-positively-drained",
                 "recovered-B-computation"
+            ]),
+            Self::RuntimeBounds => json!([
+                "runtime-http-405-431-413-413-400",
+                "same-attempt-computed-result",
+                "warm-counter-two",
+                "retired-healthy"
+            ]),
+            Self::GlobalLimit | Self::DefaultLimit => json!([
+                format!("{}-positive-capacity-proof", self.phase()),
+                "held-delete-retains-charge",
+                "physical-retirement-before-recovery",
+                "computed-recovery"
+            ]),
+            Self::MemoryLimit | Self::EnvironmentLimit => json!([
+                format!("{}-independent-ceiling", self.phase()),
+                "admitted-B-waits-without-allocation",
+                "retained-until-old-pair-retired",
+                "B-cold-computed-recovery"
             ]),
             Self::Negative => json!([
                 "real-wrong-os-rejected",
@@ -206,6 +234,8 @@ async fn handoff(
         Case::CreateTimeout | Case::DeleteTimeout => Profile::Deadline,
         Case::Pull => Profile::Pull,
         Case::Negative => Profile::Negative,
+        Case::MemoryLimit => Profile::MemoryPressure,
+        Case::DefaultLimit | Case::EnvironmentLimit => Profile::EnvironmentPressure,
         _ => Profile::Controlled,
     };
     let mut ordinary = Server::spawn_with_socket(profile, Some(&root.join("engine.sock"))).await?;

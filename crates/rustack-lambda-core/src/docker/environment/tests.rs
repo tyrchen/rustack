@@ -150,6 +150,13 @@ async fn test_should_retain_quota_after_500_and_initial_absence_until_late_creat
     quarantined(&handle).await;
     assert_eq!(manager.port().status().allocated, 1);
     assert_eq!(manager.port().status().memory_bytes, 256 * 1024 * 1024);
+    let capacity = manager.port().status();
+    assert_eq!(
+        serde_json::to_value(capacity).unwrap(),
+        serde_json::json!({"allocated":1,
+        "memoryBytes":256 * 1024 * 1024,"quarantined":capacity.quarantined,
+        "accepting":capacity.accepting,"workerFailed":capacity.worker_failed})
+    );
     assert!(matches!(
         handle
             .shutdown(Instant::now() + Duration::from_millis(20))

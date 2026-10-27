@@ -37,6 +37,8 @@ pub(super) enum Profile {
     Deadline,
     Pull,
     Negative,
+    MemoryPressure,
+    EnvironmentPressure,
     MissingRelay,
     Legacy,
     WrongEndpoint,
@@ -69,6 +71,8 @@ impl Profile {
                 | Self::Deadline
                 | Self::Pull
                 | Self::Negative
+                | Self::MemoryPressure
+                | Self::EnvironmentPressure
                 | Self::WrongEndpoint
         )
     }
@@ -128,9 +132,19 @@ impl Server {
         }
         if matches!(
             profile,
-            Profile::Controlled | Profile::Deadline | Profile::Pull | Profile::Negative
+            Profile::Controlled
+                | Profile::Deadline
+                | Profile::Pull
+                | Profile::Negative
+                | Profile::EnvironmentPressure
         ) {
             text.push_str("  lambdaDockerMemoryBytes: 402653184\n");
+        }
+        if profile == Profile::MemoryPressure {
+            text.push_str("  lambdaDockerMemoryBytes: 268435456\n");
+        }
+        if profile == Profile::EnvironmentPressure {
+            text = text.replace("lambdaDockerEnvironments: 2", "lambdaDockerEnvironments: 1");
         }
         fs::write(&config, text).await?;
         if profile == Profile::Pull {
@@ -489,7 +503,11 @@ async fn launch(
             "LAMBDA_INIT_TIMEOUT_SECS",
             if matches!(
                 profile,
-                Profile::Controlled | Profile::Deadline | Profile::Pull
+                Profile::Controlled
+                    | Profile::Deadline
+                    | Profile::Pull
+                    | Profile::MemoryPressure
+                    | Profile::EnvironmentPressure
             ) {
                 "20"
             } else {

@@ -156,8 +156,9 @@ pub(super) async fn check_logs(server: &Server) -> Result<()> {
     file.take(32769).read_to_end(&mut bytes).await?;
     ensure!(bytes.len() <= 32768, "fault log evidence exceeds cap");
     ensure!(
-        !String::from_utf8_lossy(&bytes).contains("fixture-init-payload-sentinel"),
-        "initialization payload leaked into diagnostics"
+        !String::from_utf8_lossy(&bytes).contains("fixture-init-payload-sentinel")
+            && !String::from_utf8_lossy(&bytes).contains("runtime-boundary-secret"),
+        "fixture payload/header leaked into diagnostics"
     );
     Ok(())
 }

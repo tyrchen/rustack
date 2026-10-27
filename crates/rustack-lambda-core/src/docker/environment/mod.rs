@@ -18,6 +18,7 @@ use rustack_lambda_runtime::{
     relay::RelayError,
     session::{Invocation, RuntimeResult},
 };
+use serde::Serialize;
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot, watch},
@@ -180,7 +181,8 @@ pub struct EnvironmentStatus {
     pub error: Option<EnvironmentError>,
 }
 /// Allocation accounting includes every queued, live and quarantined reservation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct EnvironmentCapacity {
     /// Number of retained allocation slots.

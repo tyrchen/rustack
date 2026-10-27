@@ -63,6 +63,7 @@ use crate::{
     code::{S3CodeFetchError, S3CodeFetcher, UnavailableS3CodeFetcher},
     config::LambdaConfig,
     deployment::{DeploymentState, check_revision},
+    diagnostics::InvocationWorkStatus,
     error::LambdaServiceError,
     executor::{
         AutoExecutor, ExecutionRevision, Executor, ExecutorBackend, ExecutorError, InvokeRequest,
@@ -237,6 +238,23 @@ fn check_external_cancellation(
 }
 
 impl RustackLambda {
+    /// Sample real invocation ownership without admission or supervisor startup.
+    ///
+    /// The counters are independently sampled and include retained cleanup and
+    /// backend pool waiting. They do not count physical running containers.
+    ///
+    /// ```
+    /// use rustack_lambda_core::{config::LambdaConfig, provider::RustackLambda};
+    /// let provider = RustackLambda::new(LambdaConfig::default());
+    /// let status = provider.work_status();
+    /// assert_eq!(status.active_executions, 0);
+    /// assert_eq!(status.limits.active_executions, 32);
+    /// ```
+    #[must_use]
+    pub fn work_status(&self) -> InvocationWorkStatus {
+        self.work.status()
+    }
+
     /// Create a new Lambda provider with the given store and config.
     ///
     /// The executor is selected from `config.executor`.

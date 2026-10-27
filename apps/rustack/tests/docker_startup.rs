@@ -336,6 +336,11 @@ async fn test_should_settle_real_image_faults_and_public_cancellation_admission(
 #[case::delete_ack_timeout(io_faults::Case::DeleteTimeout)]
 #[case::interrupted_pull(io_faults::Case::Pull)]
 #[case::negative_images(io_faults::Case::Negative)]
+#[case::runtime_http_bounds(io_faults::Case::RuntimeBounds)]
+#[case::global_execution_limit(io_faults::Case::GlobalLimit)]
+#[case::default_function_limit(io_faults::Case::DefaultLimit)]
+#[case::independent_memory_limit(io_faults::Case::MemoryLimit)]
+#[case::independent_environment_limit(io_faults::Case::EnvironmentLimit)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires explicit real-daemon IO proxy fixtures; run make test-lambda-io-faults-docker"]
 async fn test_should_retain_actual_management_io_through_cancellation_and_deployment_faults(

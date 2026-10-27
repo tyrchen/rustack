@@ -20,7 +20,8 @@ from lambda_fault_support import UnixHTTP
 
 
 @contextlib.contextmanager
-def daemon(handler):
+def daemon(handler, connections=1):
+    assert connections in (1, 2)
     with tempfile.TemporaryDirectory(prefix="rio-", dir="/tmp") as root:
         path = str(Path(root) / "daemon.sock")
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -30,7 +31,8 @@ def daemon(handler):
         stop, streams, errors = threading.Event(), [], []
         def serve():
             try:
-                while not stop.is_set():
+                served = 0
+                while not stop.is_set() and served < connections:
                     try:
                         stream, _ = listener.accept()
                     except socket.timeout:
@@ -40,7 +42,7 @@ def daemon(handler):
                         handler(stream)
                     finally:
                         stream.close()
-                    return
+                    served += 1
             except (OSError, EOFError):
                 pass
             except BaseException as error:
@@ -69,6 +71,49 @@ def request(stream):
 
 
 class ProxyControls(unittest.TestCase):
+    def test_should_release_function_delete_without_releasing_the_paired_relay(self):
+        owner, function, relay = str(uuid.uuid4()), "e"*64, "f"*64
+        effects = []
+        def backend(stream):
+            first, _ = request(stream)
+            effects.append(first.split(b" ")[1].decode().rsplit("/", 1)[1])
+            stream.sendall(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+        with daemon(backend, connections=2) as proxy:
+            proxy.records[function] = {"owner":owner,"role":"function"}
+            proxy.records[relay] = {"owner":owner,"role":"relay"}
+            proxy.arm("pair_delete", owner, 2)
+            with self.assertRaises(AssertionError):
+                proxy.release_function()
+            self.assertEqual(proxy.released_records, set())
+            def client(key):
+                connection = UnixHTTP(proxy.path)
+                try:
+                    connection.request("DELETE", "/v1.53/containers/" + key)
+                    response = connection.getresponse()
+                    response.read()
+                    return response.status
+                finally:
+                    connection.close()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                try:
+                    first = pool.submit(client, function)
+                    self.assertEqual(proxy.wait(1, time.monotonic() + 2)[0]["id"], function)
+                    self.assertEqual(effects, [])
+                    proxy.release_function()
+                    self.assertEqual(first.result(2), 204)
+                    second = pool.submit(client, relay)
+                    self.assertEqual(proxy.wait(2, time.monotonic() + 2)[1]["id"], relay)
+                    self.assertEqual(effects, [function])
+                    self.assertFalse(second.done())
+                    self.assertFalse(proxy.released)
+                    with self.assertRaises(AssertionError):
+                        proxy.release_function()
+                    proxy.release()
+                    self.assertEqual(second.result(2), 204)
+                    self.assertEqual(effects, [function, relay])
+                finally:
+                    proxy.restore()
+
     def test_should_reject_late_ready_io_instead_of_publishing_completion(self):
         writer, reader = socket.socketpair()
         try:

@@ -1,10 +1,12 @@
 # Rustack Workflows: Step Functions and Real Lambda Execution
 
-Status: implementation in progress; full M0–M4 incomplete · Date: 2026-10-25 · Delivery: M0–M4
+Status: implementation in progress; full M0–M4 incomplete · Date: 2026-10-27 · Delivery: M0–M4
+
+P1/M0 is functionally qualified on the retained P0 native-arm64 VZ/emulated-amd64 QEMU lanes; see the [M0 exit audit](./rustack-workflows-93-review.md#m0-source-and-acceptance-audit-after-d86). Later image consumers and complete reference/platform/release acceptance remain open.
 
 ## 1. Problem and vision
 
-Other projects need to test real serverless workflows locally and in CI: deploy the same Lambda container images used on AWS, create state machines through ordinary AWS SDKs, exercise branching, retries, timeouts and child workflows, and inspect actual outputs and execution histories. Rustack has a Lambda control plane and Runtime API, but explicitly rejects Docker execution and has no Step Functions engine. Returning plausible API responses or echoing inputs cannot validate function code or workflow behavior.
+Other projects need to test real serverless workflows locally and in CI: deploy the same Lambda container images used on AWS, create state machines through ordinary AWS SDKs, exercise branching, retries, timeouts and child workflows, and inspect actual outputs and execution histories. At feature inception, Rustack had a Lambda control plane and Runtime API, explicitly rejected Docker execution and had no Step Functions engine. Returning plausible API responses or echoing inputs cannot validate function code or workflow behavior.
 
 Rustack will own an ASL interpreter and Docker Lambda execution environments, reusing its gateway, Lambda provider, immutable revisions and snapshots. Clients change their AWS endpoint rather than rewrite production workflows. The complete release profile is **STANDARD workflows, an explicit JSONPath subset, all eight state types, real image Lambdas, Retry/Catch/timeouts, Parallel/Inline Map, nested `.sync`, and Lambda callbacks**. No Step Functions Local, LocalStack, Temporal or other replacement workflow engine is required.
 

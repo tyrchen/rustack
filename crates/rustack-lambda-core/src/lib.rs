@@ -15,6 +15,7 @@ pub mod code;
 pub mod config;
 pub mod deployment;
 mod deployment_input;
+pub mod diagnostics;
 #[cfg(unix)]
 pub mod docker;
 pub mod error;

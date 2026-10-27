@@ -1246,6 +1246,7 @@ test-lambda-custom-ric-docker: test-lambda-startup-docker
 .PHONY: test-lambda-custom-ric-docker
 
 test-lambda-custom-ric-fixture: workflows-sdk-python
+	@cargo test --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap
 	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_custom_ric_collector.py -v
 	@cargo clippy --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 
@@ -1276,6 +1277,7 @@ test-lambda-io-faults: workflows-sdk-python
 .PHONY: test-lambda-io-faults test-lambda-io-faults-docker
 
 test-lambda-deadline-fixture: test-lambda-io-faults
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_lambda_admission.py -v
 	@cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions test_should_validate_pull_completion_before_granting_cache_cleanup
 	@cargo clippy --locked -p rustack-lambda-echo-bootstrap --bin no-runtime-bootstrap -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 

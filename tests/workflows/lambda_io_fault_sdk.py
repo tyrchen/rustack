@@ -17,6 +17,7 @@ from custom_ric_sdk import collecting
 from docker_io_proxy import Proxy
 from lambda_fault_sdk import Faults
 from lambda_fault_support import Hold, Metadata
+from lambda_admission_sdk import execution_pressure, resource_pressure, runtime_bounds
 from required_suites import read_regular
 
 
@@ -326,6 +327,12 @@ def main():
             cases = matrix.negative_images(config["fixtures"])
         elif phase == "pull":
             cases = matrix.interrupted_update(config["fixtures"])
+        elif phase == "runtime_bounds":
+            cases = runtime_bounds(matrix)
+        elif phase in ("memory_limit", "environment_limit"):
+            cases = resource_pressure(matrix, host, phase)
+        elif phase in ("global_limit", "default_limit"):
+            cases = execution_pressure(matrix, host, phase == "global_limit")
         else:
             assert phase == "saturation"
             cases = matrix.saturation()

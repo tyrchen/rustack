@@ -224,7 +224,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 48-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 53-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -255,6 +255,13 @@ two genuinely incompatible platform artifacts and a separate Linux process that
 never speaks Runtime API. They qualify preparation rejection and bootstrap timeout,
 respectively. `make test-lambda-deadline-fixture` runs the bounded protocol, archive
 and cleanup-receipt controls without executing Docker resources.
+
+The additional Runtime HTTP resource sends unsupported methods, oversized header
+values and declared bodies, a GET body and chunked trailers from a real consumed
+custom RIC attempt, then requires the correct result and warm reuse. Separate
+execution-capacity resources require actual8/32 permit ownership before429.
+Physical-resource cases independently bind memory256MiB versus one environment,
+and hold function then relay deletion to prove charges remain until full retirement.
 
 ## Enable trusted-host Lambda tasks
 
@@ -354,6 +361,14 @@ including `snapshot: "resources-and-history"`, `snapshotResume: false`,
 selected Lambda port, `lambdaRequestResponse` and `callbacks` are false. Health
 reads worker status independently of business admission; business quota rejection
 does not by itself make a healthy service unready.
+
+With Lambda installed, `workers.lambdaAdmission` shows actual
+`acceptedInvocations` and `activeExecutions`, plus their limits128/32 and the
+default per-function limit8. Active work includes backend pool waiting and
+retained cleanup; it is not a count of running containers. The two counters are
+independently sampled. Qualified Docker also reports `workers.docker.capacity`
+with actual retained environment/memory/quarantine charges. These bounded views
+contain no function names or request data and remain readable at work saturation.
 
 ```bash
 make test-workflows-manifest  # Exact compiled ignored-test inventory preflight.

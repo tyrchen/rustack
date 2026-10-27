@@ -17,13 +17,14 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use crate::{
+    diagnostics::{
+        ACCEPTED_LIMIT, DEFAULT_FUNCTION_LIMIT, EXECUTION_LIMIT, InvocationWorkLimits,
+        InvocationWorkStatus,
+    },
     error::LambdaServiceError,
     executor::{Executor, ExecutorError, InvokeRequest, InvokeResponse},
     invocation::{InvocationContext, InvocationHandle, InvocationSubmission, Settlement},
 };
-
-const ACCEPTED_LIMIT: u32 = 128;
-const EXECUTION_LIMIT: usize = 32;
 
 #[derive(Debug)]
 pub(crate) struct WorkManager {
@@ -140,16 +141,29 @@ impl WorkManager {
     pub(crate) fn new() -> Self {
         Self {
             accepting: Arc::new(AtomicBool::new(true)),
-            capacity: Arc::new(Semaphore::new(ACCEPTED_LIMIT as usize)),
+            capacity: Arc::new(Semaphore::new(ACCEPTED_LIMIT)),
             global: Arc::new(Semaphore::new(EXECUTION_LIMIT)),
             drain: Arc::new(Notify::new()),
             supervisor: OnceLock::new(),
         }
     }
 
+    pub(crate) fn status(&self) -> InvocationWorkStatus {
+        InvocationWorkStatus {
+            accepted_invocations: ACCEPTED_LIMIT.saturating_sub(self.capacity.available_permits()),
+            active_executions: EXECUTION_LIMIT.saturating_sub(self.global.available_permits()),
+            accepting: self.accepting.load(Ordering::Acquire),
+            limits: InvocationWorkLimits {
+                accepted_invocations: ACCEPTED_LIMIT,
+                active_executions: EXECUTION_LIMIT,
+                default_function_executions: DEFAULT_FUNCTION_LIMIT,
+            },
+        }
+    }
+
     fn supervisor(&self) -> &SupervisorHandle {
         self.supervisor.get_or_init(|| {
-            let (inbox, receiver) = mpsc::channel(ACCEPTED_LIMIT as usize);
+            let (inbox, receiver) = mpsc::channel(ACCEPTED_LIMIT);
             let (stop, cancellation) = watch::channel(false);
             let (state, snapshot) = watch::channel(SupervisorState::Running);
             let supervisor = Supervisor::builder()
@@ -204,8 +218,11 @@ impl WorkManager {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(unavailable("Lambda is quiescing"));
         }
-        let reserved = usize::try_from(reserved.unwrap_or(8))
-            .map_err(|_| unavailable("Invalid reserved concurrency"))?;
+        let reserved = match reserved {
+            Some(reserved) => usize::try_from(reserved)
+                .map_err(|_| unavailable("Invalid reserved concurrency"))?,
+            None => DEFAULT_FUNCTION_LIMIT,
+        };
         if reserved == 0 {
             return Err(LambdaServiceError::TooManyRequests);
         }
@@ -536,6 +553,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_observe_actual_accepted_active_and_retained_cleanup_without_admission() {
+        let work = WorkManager::new();
+        let idle = work.status();
+        assert!(work.supervisor.get().is_none());
+        assert_eq!(
+            (
+                idle.accepted_invocations,
+                idle.active_executions,
+                idle.accepting
+            ),
+            (0, 0, true)
+        );
+        let serialized = serde_json::to_value(idle).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({"acceptedInvocations":0,"activeExecutions":0,"accepting":true,
+            "limits":{"acceptedInvocations":128,"activeExecutions":32,"defaultFunctionExecutions":8}})
+        );
+        let executor = Arc::new(ProbeExecutor::new(true));
+        for _ in 0..3 {
+            work.submit(executor.clone(), request("one"), Some(1), true, None)
+                .await
+                .unwrap()
+                .detach();
+        }
+        executor.started(1).await;
+        let active = work.status();
+        assert_eq!(
+            (active.accepted_invocations, active.active_executions),
+            (3, 1)
+        );
+        work.cancel_all();
+        executor.cancelling().await;
+        timeout(Duration::from_secs(2), async {
+            while work.status().accepted_invocations != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let retained = work.status();
+        assert_eq!(
+            (
+                retained.accepted_invocations,
+                retained.active_executions,
+                retained.accepting
+            ),
+            (1, 1, false)
+        );
+        executor.cleanup.add_permits(1);
+        work.quiesce(Duration::from_secs(2)).await.unwrap();
+        let settled = work.status();
+        assert_eq!(
+            (
+                settled.accepted_invocations,
+                settled.active_executions,
+                settled.accepting
+            ),
+            (0, 0, false)
+        );
+    }
+
+    #[tokio::test]
     async fn test_should_bound_event_admission_and_cancel_queued_work_without_starting_it() {
         let work = WorkManager::new();
         let executor = Arc::new(ProbeExecutor::new(false));
@@ -546,6 +626,13 @@ mod tests {
                 .detach();
         }
         executor.started(8).await;
+        assert_eq!(
+            (
+                work.status().accepted_invocations,
+                work.status().active_executions
+            ),
+            (128, 8)
+        );
         assert_eq!(executor.calls.load(Ordering::Acquire), 8);
         assert!(matches!(
             work.submit(executor.clone(), request("bounded"), None, true, None)

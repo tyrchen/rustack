@@ -35,6 +35,7 @@ class Hold(Collector):
     def __init__(self, stage):
         self.stage, self.expected, self.observed = stage, set(), {}
         self.released = False
+        self.released_targets = set()
         super().__init__()
 
     def targets(self, names):
@@ -54,6 +55,13 @@ class Hold(Collector):
             assert not self.aborted and time.monotonic() < min(deadline, self.deadline)
             return dict(self.observed)
 
+    def release_target(self, name):
+        with self.condition:
+            assert not self.aborted and time.monotonic() < self.deadline
+            assert name in self.expected and name in self.observed and name not in self.released_targets
+            self.released_targets.add(name)
+            self.condition.notify_all()
+
     def exchange(self, path, event):
         with self.condition:
             assert path == "/hold" and not self.aborted and time.monotonic() < self.deadline
@@ -67,7 +75,7 @@ class Hold(Collector):
                 assert self.stage == "initializing" and event["requestId"] is None
             self.observed[name] = event
             self.condition.notify_all()
-            while not self.released and not self.aborted:
+            while not self.released and name not in self.released_targets and not self.aborted:
                 remaining = self.deadline - time.monotonic()
                 assert remaining > 0, "fixture hold lease expired"
                 self.condition.wait(remaining)

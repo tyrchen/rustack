@@ -24,9 +24,9 @@ use typed_builder::TypedBuilder;
 use super::{
     DirectoryLease, DirectoryLeaseError, DockerError, DockerExecutor, DockerExecutorError,
     DockerPort, DockerReadiness, DockerRuntimeSettings, DockerWire, EndpointProbe,
-    EndpointProbeConfig, EnvironmentError, EnvironmentManager, EnvironmentProbe,
-    EnvironmentProbeConfig, EnvironmentProbeError, GatewayInstanceId, ImageLeaseManager,
-    ImageLeasePort, RegistryAuthError,
+    EndpointProbeConfig, EnvironmentCapacity, EnvironmentError, EnvironmentManager,
+    EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, GatewayInstanceId,
+    ImageLeaseManager, ImageLeasePort, RegistryAuthError,
     ownership::{DataDirectory, DirectoryAcquisition},
 };
 use crate::{
@@ -217,6 +217,9 @@ pub struct DockerRuntimeStatus(Arc<Qualification>);
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct DockerCapabilities {
+    /// Actual retained allocation/memory charges, absent before qualification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<EnvironmentCapacity>,
     /// Actual installed owner health and receipt validity.
     pub ready: bool,
     /// Qualified Linux platform, absent before successful qualification.
@@ -235,6 +238,7 @@ impl DockerRuntimeStatus {
     pub fn capabilities(&self) -> DockerCapabilities {
         let evidence = self.0.evidence.get();
         DockerCapabilities {
+            capacity: evidence.map(|evidence| evidence.base.environments.status()),
             ready: self.0.check().is_ok(),
             platform: evidence.map(|e| match e.architecture {
                 Architecture::Arm64 => "linux/arm64",

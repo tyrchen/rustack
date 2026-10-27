@@ -106,6 +106,13 @@ async fn test_should_retain_failed_attempt_without_replay_and_release_after_owne
     let mut owner = begin(config(directory.path().into())).await;
     let status = owner.status();
     assert!(!status.capabilities().ready && !status.capabilities().sdk_gateway);
+    assert!(status.capabilities().capacity.is_none());
+    assert!(
+        serde_json::to_value(status.capabilities())
+            .unwrap()
+            .get("capacity")
+            .is_none()
+    );
     assert!(owner.installation().is_err());
     assert!(
         owner

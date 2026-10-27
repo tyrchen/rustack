@@ -1,6 +1,9 @@
 //! Independent bounded custom Rust Runtime Interface Client for real Image tests.
 #![forbid(unsafe_code)]
 
+#[path = "image_framing.rs"]
+mod framing;
+
 use std::{
     env, hint::black_box, io::Read, net::SocketAddr, path::Path, process, thread, time::Duration,
 };
@@ -201,6 +204,29 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
             "compute" | "error" => Vec::new(),
             "hold" => {
                 hold("busy", Some(&id))?;
+                Vec::new()
+            }
+            "hold-exit" => {
+                hold("busy", Some(&id))?;
+                process::exit(42)
+            }
+            "framing" => framing::check(root, &id)?,
+            "counted" => {
+                let ticket = event
+                    .get("ticket")
+                    .and_then(Value::as_u64)
+                    .filter(|ticket| *ticket < 30)
+                    .ok_or("invalid fixture completion ticket")?;
+                let name = variable("AWS_LAMBDA_FUNCTION_NAME")?;
+                let accepted = barrier(
+                    agent,
+                    "completed",
+                    &json!({"ticket":ticket,"functionName":name,
+                    "requestId":id,"computed":computed,"counter":counter}),
+                )?;
+                if accepted.get("recorded") != Some(&Value::Bool(true)) {
+                    return Err("fixture computation was not recorded");
+                }
                 Vec::new()
             }
             "exit" => process::exit(42),

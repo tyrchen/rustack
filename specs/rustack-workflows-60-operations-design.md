@@ -199,6 +199,32 @@ The host example requires a suitable gateway listener; the default host loopback
 
 Expose capability fields for workflow type/query profile/state types/integrations, local quotas, snapshot coverage, Docker platform, backend probe result, relay protocol version and limitations. Distinguish available adapter from successfully executed test fixture. Health endpoints remain free of ordinary business admission starvation. Metrics contain bounded error classes/counts/durations, not function names, input, image credentials or task tokens as unbounded labels.
 
+### 2.1 Bounded Lambda admission diagnostics (D86)
+
+The existing `/_rustack/capabilities` worker projection gains optional `workers.lambdaAdmission` whenever the actual Lambda provider is installed, on every backend. It is omitted without Lambda. No new route, authentication policy, business request option, persistence field or quota-setting surface is added.
+
+```json
+{"acceptedInvocations":0,"activeExecutions":0,"accepting":true,
+ "limits":{"acceptedInvocations":128,"activeExecutions":32,"defaultFunctionExecutions":8}}
+```
+
+`acceptedInvocations` counts the real accepted-work semaphore charges, including queued asynchronous work and retained cleanup. `activeExecutions` counts the real global execution permits, including Native/Docker execution, Docker pool waiting and failure/cancellation cleanup; it is not a running-container count. The provider exposes a typed non-exhaustive `InvocationWorkStatus` with typed `InvocationWorkLimits`, both redacted-data-free Debug/serde camelCase values. Read the same WorkManager used by real provider submissions; never substitute a fixture counter or cumulative invocation metric. Values are bounded by their reported limits; the two atomic counters are independently sampled, not a transactional cross-counter snapshot. Stable held-work tests can require exact values while no completion is possible.
+
+The qualified Docker worker also projects optional `workers.docker.capacity`, using the exact existing EnvironmentPort status: allocated, memoryBytes, quarantined, accepting and workerFailed. Omit it before qualification. These are retained reservation counters (including incomplete/quarantined cleanup), not a count of presently running processes; independently sample them without IO/mailbox admission. A stopped/deleted function can still retain its full function+relay memory charge until the paired relay/IO/journal ownership settles. This reuses the existing bounded EnvironmentCapacity type and contains no peer/resource identity.
+
+Reading diagnostics never starts a supervisor, submits business work, takes execution/admission permits, waits on actor mailboxes or changes readiness. Counts contain no function names, ARN, payload, image URI, request IDs, credentials or tokens. Existing diagnostic access/readiness rules remain authoritative. Limits come from the same constants used to construct/acquire the semaphores and default function capacity. Serialization is deterministic and bounded; service feature gating preserves minimal builds.
+
+```text
+WorkManager owned semaphores / accepting flag
+                    │ constant-time read, no admission
+                    ▼
+RustackLambda::work_status → RuntimeWorkers::diagnostics
+                                        │
+                          existing capabilities JSON
+```
+
+Qualification must show idle0 without lazy supervisor initialization, actual accepted versus active divergence, exact saturation/cleanup retention and return to0, cached admission closure, typed JSON fields/limits and absence for non-Lambda services. Existing actual Docker32/default8 resources consume this boundary, alongside Native regression. Independently mutate/lower permit ownership in controls so a claimed capacity cannot be manufactured merely from configured limits or an Event acknowledgment.
+
 ## 3. Shutdown, cancellation and snapshots
 
 ```text

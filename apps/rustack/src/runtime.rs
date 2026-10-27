@@ -23,6 +23,8 @@ use std::{collections::BTreeMap, fmt};
 ))]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::diagnostics::InvocationWorkStatus;
 use serde::Serialize;
 
 /// Handles retained until quiescence, snapshot publication, and final shutdown.
@@ -64,6 +66,9 @@ pub(crate) struct DeliverySummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkerDiagnostics {
+    #[cfg(feature = "lambda")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lambda_admission: Option<InvocationWorkStatus>,
     #[cfg(all(feature = "lambda", unix))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) docker: Option<rustack_lambda_core::docker::DockerCapabilities>,
@@ -130,6 +135,8 @@ impl RuntimeWorkers {
             }),
         ];
         WorkerDiagnostics {
+            #[cfg(feature = "lambda")]
+            lambda_admission: self.lambda.as_ref().map(|provider| provider.work_status()),
             #[cfg(all(feature = "lambda", unix))]
             docker: self
                 .docker
@@ -251,4 +258,36 @@ fn check_deadline(deadline: tokio::time::Instant) -> Result<()> {
         "runtime quiescence deadline exceeded"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[cfg(feature = "lambda")]
+    use rustack_lambda_core::{config::LambdaConfig, provider::RustackLambda};
+
+    use super::*;
+
+    #[test]
+    fn test_should_omit_admission_counts_without_an_installed_lambda_provider() {
+        let value = serde_json::to_value(RuntimeWorkers::default().diagnostics()).unwrap();
+        assert!(value.get("lambdaAdmission").is_none());
+    }
+
+    #[cfg(feature = "lambda")]
+    #[tokio::test]
+    async fn test_should_project_the_actual_installed_lambda_admission_without_starting_work() {
+        let provider = Arc::new(RustackLambda::new(LambdaConfig::default()));
+        let workers = RuntimeWorkers {
+            lambda: Some(provider.clone()),
+            ..RuntimeWorkers::default()
+        };
+        let value = serde_json::to_value(workers.diagnostics()).unwrap();
+        assert_eq!(
+            value.get("lambdaAdmission"),
+            Some(&serde_json::json!({"acceptedInvocations":0,
+            "activeExecutions":0,"accepting":true,"limits":{"acceptedInvocations":128,
+            "activeExecutions":32,"defaultFunctionExecutions":8}}))
+        );
+        assert_eq!(provider.work_status().active_executions, 0);
+    }
 }

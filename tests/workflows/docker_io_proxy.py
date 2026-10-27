@@ -231,6 +231,7 @@ class Proxy:
         self.deadline = time.monotonic() + 480
         self.sockets, self.workers, self.records, self.starts, self.errors = set(), [], {}, set(), []
         self.rule, self.observed, self.released, self.unavailable = None, [], False, False
+        self.released_records = set()
         self.failed_image = None
         self.pull_reference, self.pull_cut, self.pull_done, self.pull_count = None, False, False, 0
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -241,7 +242,8 @@ class Proxy:
         self.worker.start()
 
     def arm(self, kind, owner, count=1):
-        assert kind in ("create", "delete", "delete_ack", "tag") and count in (1, 2)
+        assert kind in ("create", "delete", "delete_ack", "pair_delete", "tag") and count in (1, 2)
+        assert kind != "pair_delete" or count == 2
         identity(owner)
         with self.condition:
             assert self.rule is None and not self.unavailable
@@ -256,12 +258,13 @@ class Proxy:
             if kind == "tag":
                 if record["owner"] != rule[1]:
                     return
-            elif record["owner"] != rule[1] or record["role"] != "function":
+            elif record["owner"] != rule[1] or record["role"] not in (
+                    ("function", "relay") if kind == "pair_delete" else ("function",)):
                 return
             assert time.monotonic() < rule[3]
             self.observed.append(dict(record))
             self.condition.notify_all()
-            while not self.released and not self.stopped.is_set():
+            while not self.released and record.get("id") not in self.released_records and not self.stopped.is_set():
                 remaining = rule[3] - time.monotonic()
                 assert remaining > 0, "proxy gate lease expired"
                 self.condition.wait(remaining)
@@ -280,6 +283,16 @@ class Proxy:
         with self.condition:
             assert self.rule is not None
             self.released = True
+            self.condition.notify_all()
+
+    def release_function(self):
+        with self.condition:
+            assert self.rule is not None and self.rule[0] == "pair_delete"
+            assert not self.released and not self.stopped.is_set() and time.monotonic() < self.rule[3]
+            assert len(self.observed) == 1 and self.observed[0]["role"] == "function"
+            key = self.observed[0]["id"]
+            assert not self.released_records
+            self.released_records.add(key)
             self.condition.notify_all()
 
     def restore(self):
@@ -406,6 +419,7 @@ class Proxy:
                     if known is not None:
                         deletion = dict(known, id=key)
                         self.gate("delete", dict(known, id=key))
+                        self.gate("pair_delete", dict(known, id=key))
                 if method == b"POST" and path.startswith("/containers/") and path.endswith("/start"):
                     with self.condition:
                         assert len(self.starts) < 128
