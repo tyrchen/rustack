@@ -8,8 +8,9 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{
-    DirectoryLease, DockerError, DockerPort, Operation, decode, escaped,
+    DirectoryLease, DockerError, DockerPort, Operation, RawRequest, decode, escaped,
     models::{ImageDeleteResponseItem, ImageInspect},
+    mutation::MutationGuard,
     unit,
 };
 use crate::artifact::{ImageReference, Sha256Digest};
@@ -45,19 +46,7 @@ impl ImagePinScope {
     /// # Errors
     /// Returns validation failure if the generated reference cannot validate.
     pub(super) fn allocate(&self) -> Result<ImagePin, DockerError> {
-        let id = Uuid::new_v4();
-        let reference = format!(
-            "rustack-internal/lambda-{}/{}:{}",
-            self.lease.owner_id().simple(),
-            self.lease.run_id().simple(),
-            id.simple()
-        )
-        .parse()?;
-        Ok(ImagePin {
-            id,
-            reference,
-            _scope: self.clone(),
-        })
+        ImagePin::historical(self.lease.clone(), self.lease.run_id(), Uuid::new_v4())
     }
 }
 
@@ -66,8 +55,36 @@ impl ImagePinScope {
 #[non_exhaustive]
 pub struct ImagePin {
     pub(super) id: Uuid,
+    pub(super) run: Uuid,
     reference: ImageReference,
-    _scope: ImagePinScope,
+    scope: ImagePinScope,
+}
+impl ImagePin {
+    pub(super) fn historical(
+        lease: DirectoryLease,
+        run: Uuid,
+        id: Uuid,
+    ) -> Result<Self, DockerError> {
+        if run.is_nil() || id.is_nil() {
+            return Err(DockerError::Configuration);
+        }
+        let reference = format!(
+            "rustack-internal/lambda-{}/{}:{}",
+            lease.owner_id().simple(),
+            run.simple(),
+            id.simple()
+        )
+        .parse()?;
+        Ok(Self {
+            id,
+            run,
+            reference,
+            scope: ImagePinScope::new(lease),
+        })
+    }
+    pub(super) fn directory(&self) -> &DirectoryLease {
+        &self.scope.lease
+    }
 }
 impl fmt::Debug for ImagePin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -108,17 +125,44 @@ impl DockerPort {
         pin: &ImagePin,
         deadline: Instant,
     ) -> Result<(), DockerError> {
+        self.tag_image_pin_inner(id, pin, deadline, None).await
+    }
+    pub(super) async fn tag_image_pin_tracked(
+        &self,
+        id: &Sha256Digest,
+        pin: &ImagePin,
+        deadline: Instant,
+        mutation: MutationGuard,
+    ) -> Result<(), DockerError> {
+        self.tag_image_pin_inner(id, pin, deadline, Some(mutation))
+            .await
+    }
+    async fn tag_image_pin_inner(
+        &self,
+        id: &Sha256Digest,
+        pin: &ImagePin,
+        deadline: Instant,
+        mutation: Option<MutationGuard>,
+    ) -> Result<(), DockerError> {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("repo", pin.reference.repository())
             .append_pair("tag", &pin.id.simple().to_string())
             .finish();
         let reply = self
-            .call(
-                Operation::TagPin,
-                Method::POST,
-                format!("/images/{}/tag?{query}", escaped(id.as_str())),
-                Bytes::new(),
-                StatusCode::CREATED,
+            .raw
+            .request(
+                RawRequest {
+                    mutation,
+                    operation: Operation::TagPin,
+                    method: Method::POST,
+                    target: format!(
+                        "/v{}/images/{}/tag?{query}",
+                        self.version,
+                        escaped(id.as_str())
+                    ),
+                    body: Bytes::new(),
+                    expected: StatusCode::CREATED,
+                },
                 deadline,
             )
             .await?;

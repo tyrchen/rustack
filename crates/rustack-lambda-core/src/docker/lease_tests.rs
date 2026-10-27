@@ -710,9 +710,18 @@ async fn test_should_recover_owned_aliases_after_worker_or_off_runtime_root_fail
         )
         .await
         .unwrap();
+    let intent = ImageRecord::new(&pin, &resolved.metadata().image_id).unwrap();
+    pin.directory()
+        .prepare_image(intent.clone(), deadline())
+        .await
+        .unwrap();
     fake.wire
         .port()
         .tag_image_pin(&resolved.metadata().image_id, &pin, deadline())
+        .await
+        .unwrap();
+    pin.directory()
+        .commit_image(intent, deadline())
         .await
         .unwrap();
     let budget = Arc::new(PinBudget::new(1));
@@ -874,3 +883,6 @@ async fn test_should_retain_cleanup_capacity_and_shutdown_join_until_delete_reco
     assert!(fake.stats.deletes.load(Ordering::Acquire) >= 2);
     fake.close().await;
 }
+
+#[path = "lease_tests/durable.rs"]
+mod durable;

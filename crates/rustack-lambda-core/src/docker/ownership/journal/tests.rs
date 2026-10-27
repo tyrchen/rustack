@@ -1,6 +1,7 @@
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::PathBuf,
+    time::Duration,
 };
 
 use super::*;

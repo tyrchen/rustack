@@ -349,6 +349,15 @@ Supersede decisions with a new ID rather than rewriting their rationale after im
 - **Date**: 2026-10-26. Reuse existing nix/sha2/hex dependencies and the bounded ownership worker pool.
 
 
+## D39 — Persist private image-tag intent and commitment separately
+
+- **Context**: a nested daemon tag request can commit after a failed HTTP result; in-memory image-owner phases do not survive restart.
+- **Alternatives considered**: owner-tag scans miss pending mutations; one negative lookup cannot settle an unknown tag; reissuing tag can replay effects; duplicating directory IO creates divergent durability/cancellation rules.
+- **Decision**: share the bounded snapshot transaction implementation with container records, keep a distinct bounded versioned pin encoding, and persist intent before issuance and commitment before lease publication/deletion. Retire historical containers before aliases.
+- **Why**: durable commitment permits absent-alias settlement after interrupted cleanup, while unknown absence remains conservative. Reconstructed aliases remain confined to the exact reserved namespace and never become operator-source cleanup keys.
+- **Pinned by**: [runtime §2.13](./rustack-workflows-20-lambda-runtime-design.md#213-durable-image-pin-intents-and-historical-alias-retirement), [implementation plan](./rustack-workflows-90-impl-plan.md).
+- **Date**: 2026-10-26. No new dependency or version is needed. Startup coordinator/pulls/platform acceptance remain required.
+
 ## D40 — Generate exact JSON epoch timestamps before the Step Functions API
 
 - **Context**: Step Functions uses AWS JSON1.0 numeric timestamps; default chrono serde emits strings, and the existing optional KMS float helper mishandles negative fractions.

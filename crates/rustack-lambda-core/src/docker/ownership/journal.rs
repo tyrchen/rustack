@@ -1,18 +1,12 @@
 //! Bounded, atomically replaced container identities; no deployment secrets.
 
-use std::{
-    fmt,
-    fs::File,
-    io::{self, Read, Write},
-    time::Duration,
-};
+use std::fmt;
 
-use nix::fcntl::{OFlag, renameat};
 use sha2::{Digest, Sha256};
-use tokio::time::{Instant, timeout_at};
+use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::{Control, DirectoryLease, DirectoryLeaseError, LeaseGuard, WORKERS, managed_file, run};
+use super::{DirectoryLease, DirectoryLeaseError, snapshot::Codec};
 use crate::docker::{
     DockerError, DockerKey, EnvironmentPlan, models::ContainerInspectResponse, plan::ContainerRole,
 };
@@ -129,42 +123,12 @@ impl ContainerRecord {
     }
 }
 impl DirectoryLease {
-    fn namespace(&self) -> &File {
-        match &self.0.guard {
-            LeaseGuard::Held { directory, .. } => directory,
-            #[cfg(test)]
-            LeaseGuard::Testing { directory, .. } => directory,
-        }
-    }
     async fn journal<T: Send + 'static>(
         &self,
         deadline: Instant,
         work: impl FnOnce(&mut Vec<ContainerRecord>) -> Result<T, DirectoryLeaseError> + Send + 'static,
     ) -> Result<T, DirectoryLeaseError> {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or(DirectoryLeaseError::Deadline)?;
-        if remaining > Duration::from_secs(60) {
-            return Err(DirectoryLeaseError::Configuration);
-        }
-        let permit = timeout_at(deadline, self.0.transaction.clone().acquire_owned())
-            .await
-            .map_err(|_| DirectoryLeaseError::Deadline)?
-            .map_err(|_| DirectoryLeaseError::Worker)?;
-        let lease = self.clone();
-        run(&WORKERS, deadline, move |control| {
-            let _transaction = permit;
-            let mut records = read(lease.namespace(), lease.owner_id())?;
-            control.check()?;
-            let original = records.clone();
-            let result = work(&mut records)?;
-            if records != original {
-                write(lease.namespace(), lease.owner_id(), &records, control)?;
-            }
-            Ok(result)
-        })
-        .await
+        self.snapshot::<ContainerCodec, T>(deadline, work).await
     }
     pub(in crate::docker) async fn container_records(
         &self,
@@ -246,29 +210,6 @@ impl DirectoryLease {
     }
 }
 
-fn read(directory: &File, owner: Uuid) -> Result<Vec<ContainerRecord>, DirectoryLeaseError> {
-    // A torn staging snapshot is never authoritative, but its inode must be safe.
-    optional(directory, STAGING)?;
-    let Some(mut file) = optional(directory, PUBLISHED)? else {
-        directory.sync_all()?;
-        return Ok(Vec::new());
-    };
-    let mut bytes = Vec::with_capacity(MAX_BYTES);
-    Read::by_ref(&mut file)
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    let records = decode(&bytes, owner)?;
-    file.sync_all()?;
-    directory.sync_all()?;
-    Ok(records)
-}
-fn optional(directory: &File, name: &str) -> Result<Option<File>, DirectoryLeaseError> {
-    match managed_file(directory, name, OFlag::O_RDONLY, MAX_BYTES as u64) {
-        Ok(file) => Ok(Some(file)),
-        Err(DirectoryLeaseError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
 fn encode(owner: Uuid, records: &[ContainerRecord]) -> Result<Vec<u8>, DirectoryLeaseError> {
     if records.len() > MAX_RECORDS || owner.is_nil() {
         return Err(DirectoryLeaseError::InvalidState);
@@ -358,27 +299,18 @@ fn decode(bytes: &[u8], owner: Uuid) -> Result<Vec<ContainerRecord>, DirectoryLe
     }
     Ok(records)
 }
-fn write(
-    directory: &File,
-    owner: Uuid,
-    records: &[ContainerRecord],
-    control: &Control,
-) -> Result<(), DirectoryLeaseError> {
-    let bytes = encode(owner, records)?;
-    let mut file = managed_file(
-        directory,
-        STAGING,
-        OFlag::O_RDWR | OFlag::O_CREAT,
-        MAX_BYTES as u64,
-    )?;
-    control.check()?;
-    file.set_len(0)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    control.check()?;
-    renameat(directory, STAGING, directory, PUBLISHED)?;
-    directory.sync_all()?;
-    Ok(())
+struct ContainerCodec;
+impl Codec for ContainerCodec {
+    type Record = ContainerRecord;
+    const PUBLISHED: &'static str = PUBLISHED;
+    const STAGING: &'static str = STAGING;
+    const MAX_BYTES: usize = MAX_BYTES;
+    fn encode(owner: Uuid, records: &[ContainerRecord]) -> Result<Vec<u8>, DirectoryLeaseError> {
+        encode(owner, records)
+    }
+    fn decode(bytes: &[u8], owner: Uuid) -> Result<Vec<ContainerRecord>, DirectoryLeaseError> {
+        decode(bytes, owner)
+    }
 }
 
 #[cfg(test)]

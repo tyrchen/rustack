@@ -1109,6 +1109,17 @@ test-lambda-recovery-docker: lambda-runtime-image
 
 .PHONY: test-lambda-recovery test-lambda-recovery-docker
 
+# Durable private tag intents and container-ordered historical alias recovery.
+test-lambda-image-recovery:
+	@cargo test -p rustack-lambda-core --lib docker::ownership::images::tests
+	@cargo test -p rustack-lambda-core --lib docker::recovery::images::tests
+	@cargo test -p rustack-lambda-core --lib docker::lease::tests
+
+test-lambda-image-recovery-docker: lambda-runtime-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --lib docker::recovery::images::tests::test_should_recover_real_private_alias_across_directory_reacquisition -- --ignored --test-threads=1
+
+.PHONY: test-lambda-image-recovery test-lambda-image-recovery-docker
+
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:
 	@cargo test -p rustack-lambda-runtime --lib

@@ -6,7 +6,7 @@ use http::StatusCode;
 use rustack_core::json::JsonError;
 use tokio::time::{Instant, timeout_at};
 
-use super::check_deadline;
+use super::{DirectoryLeaseError, check_deadline};
 use crate::artifact::ArtifactError;
 
 /// Docker boundary failure classes; no peer response body is displayed.
@@ -46,6 +46,9 @@ pub enum DockerError {
     /// An owned task panicked or failed to join.
     #[error("Docker supervision failed")]
     Worker,
+    /// Persistent mutation ownership could not be read or durably settled.
+    #[error("persistent Docker ownership failed")]
+    Ownership(#[source] Arc<DirectoryLeaseError>),
     /// A bounded output allocation could not be reserved.
     #[error("Docker allocation failed")]
     Allocation,
@@ -77,6 +80,11 @@ impl fmt::Debug for DockerError {
 impl From<io::Error> for DockerError {
     fn from(error: io::Error) -> Self {
         Self::Io(Arc::new(error))
+    }
+}
+impl From<DirectoryLeaseError> for DockerError {
+    fn from(error: DirectoryLeaseError) -> Self {
+        Self::Ownership(Arc::new(error))
     }
 }
 impl From<hyper::Error> for DockerError {

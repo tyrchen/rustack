@@ -4,7 +4,6 @@
 //! on bounded blocking workers; lease clones perform no IO and retain the lock.
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
-mod journal;
 use std::{
     ffi::OsString,
     fmt,
@@ -19,7 +18,6 @@ use std::{
     time::Duration,
 };
 
-pub(super) use journal::ContainerRecord;
 use nix::{
     errno::Errno,
     fcntl::{OFlag, open, openat, renameat},
@@ -34,6 +32,12 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use uuid::Uuid;
+
+pub(super) use self::{images::ImageRecord, journal::ContainerRecord};
+
+mod images;
+mod journal;
+mod snapshot;
 
 const NAMESPACE: &str = ".rustack-lambda-docker";
 const LOCK: &str = "lease.lock";

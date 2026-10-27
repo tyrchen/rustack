@@ -24,6 +24,8 @@ use uuid::Uuid;
 use super::{
     DockerError, DockerPort, ImagePin, ImagePinScope, ImageResolver, check_deadline,
     connection::stopped,
+    mutation::{MutationGuard, MutationReceipt},
+    ownership::ImageRecord,
 };
 use crate::{
     artifact::{
@@ -447,8 +449,11 @@ impl Drop for ImageLeaseManager {
 #[derive(Debug, Clone)]
 enum Phase {
     Unissued,
-    Uncertain(Sha256Digest),
+    Preparing(Sha256Digest),
+    Uncertain(Sha256Digest, MutationReceipt),
+    Committing(Sha256Digest),
     Known(Sha256Digest),
+    NoEffect(Sha256Digest),
     Clean,
 }
 #[derive(Debug)]
@@ -841,22 +846,34 @@ impl Worker {
         let expected = image.metadata().image_id.clone();
         self.progress
             .phase
-            .send_replace(Phase::Uncertain(expected.clone()));
+            .send_replace(Phase::Preparing(expected.clone()));
+        self.pin
+            .directory()
+            .prepare_image(
+                ImageRecord::new(&self.pin, &expected)?,
+                self.config.deadline(),
+            )
+            .await?;
+        self.check(deadline, cancel)?;
+        let mutation = MutationGuard::new();
+        self.progress
+            .phase
+            .send_replace(Phase::Uncertain(expected.clone(), mutation.receipt()));
         let tagged = self
             .docker
-            .tag_image_pin(&expected, &self.pin, self.config.deadline())
+            .tag_image_pin_tracked(&expected, &self.pin, self.config.deadline(), mutation)
             .await;
         if matches!(
             &tagged,
             Err(DockerError::Busy
                 | DockerError::Status(StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND))
         ) {
-            self.progress.phase.send_replace(Phase::Clean);
+            self.progress
+                .phase
+                .send_replace(Phase::NoEffect(expected.clone()));
         }
         tagged?;
-        self.progress
-            .phase
-            .send_replace(Phase::Known(expected.clone()));
+        self.persist_commit(&expected).await?;
         self.check(deadline, cancel)?;
         let actual = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(self.pin.reference(),deadline.min(self.config.deadline()))=>result?,};
         if actual.id.as_deref() != Some(expected.as_str()) {
@@ -868,8 +885,11 @@ impl Worker {
     }
     async fn retire(self) {
         self.progress.active.store(false, Ordering::Release);
-        let mut dirty = matches!(*self.progress.phase.borrow(), Phase::Uncertain(_))
-            .then(|| Dirty::new(self.health.clone()));
+        let mut dirty = matches!(
+            *self.progress.phase.borrow(),
+            Phase::Uncertain(..) | Phase::Committing(_)
+        )
+        .then(|| Dirty::new(self.health.clone()));
         let mut delay = Duration::from_secs(1);
         loop {
             if self.cleanup_step().await {
@@ -887,8 +907,20 @@ impl Worker {
         let phase = self.progress.phase.borrow().clone();
         let (expected, known) = match phase {
             Phase::Unissued | Phase::Clean => return true,
+            Phase::Preparing(id) | Phase::NoEffect(id) => return self.erase(&id).await,
+            Phase::Committing(id) => {
+                if self.persist_commit(&id).await.is_err() {
+                    return false;
+                }
+                (id, true)
+            }
             Phase::Known(id) => (id, true),
-            Phase::Uncertain(id) => (id, false),
+            Phase::Uncertain(id, receipt) => {
+                if receipt.definitely_unissued() {
+                    return self.erase(&id).await;
+                }
+                (id, false)
+            }
         };
         let Ok(_cleanup) = self.cleanup.acquire().await else {
             return false;
@@ -898,9 +930,16 @@ impl Worker {
             .inspect_image_pin(&self.pin, self.config.deadline())
             .await;
         match inspected {
-            Err(DockerError::Status(StatusCode::NOT_FOUND)) => known,
+            Err(DockerError::Status(StatusCode::NOT_FOUND)) => known && self.erase(&expected).await,
             Ok(image) if image.id.as_deref() == Some(expected.as_str()) => {
-                self.progress.phase.send_replace(Phase::Known(expected));
+                if self.persist_commit(&expected).await.is_err() {
+                    return false;
+                }
+                if !matches!(self.docker.inspect_image_pin(&self.pin, self.config.deadline()).await,
+                    Ok(image) if image.id.as_deref() == Some(expected.as_str()))
+                {
+                    return false;
+                }
                 let _ = self
                     .docker
                     .remove_image_pin(&self.pin, self.config.deadline())
@@ -910,10 +949,36 @@ impl Worker {
                         .inspect_image_pin(&self.pin, self.config.deadline())
                         .await,
                     Err(DockerError::Status(StatusCode::NOT_FOUND))
-                )
+                ) && self.erase(&expected).await
             }
             _ => false,
         }
+    }
+    async fn persist_commit(&self, expected: &Sha256Digest) -> Result<(), DockerError> {
+        self.progress
+            .phase
+            .send_replace(Phase::Committing(expected.clone()));
+        self.pin
+            .directory()
+            .commit_image(
+                ImageRecord::new(&self.pin, expected)?,
+                self.config.deadline(),
+            )
+            .await?;
+        self.progress
+            .phase
+            .send_replace(Phase::Known(expected.clone()));
+        Ok(())
+    }
+    async fn erase(&self, expected: &Sha256Digest) -> bool {
+        let Ok(record) = ImageRecord::new(&self.pin, expected) else {
+            return false;
+        };
+        self.pin
+            .directory()
+            .settle_image(record, self.config.deadline())
+            .await
+            .is_ok()
     }
 }
 

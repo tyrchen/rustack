@@ -62,7 +62,9 @@ pub use probe::{
     EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, ProbeFailure, ProbeSettings,
     probe_environment,
 };
-pub use recovery::{ContainerRecovery, reconcile_containers};
+pub use recovery::{
+    ContainerRecovery, ImagePinRecovery, reconcile_containers, reconcile_image_pins,
+};
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};
