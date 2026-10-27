@@ -148,7 +148,7 @@ test-stepfunctions-http:
 	@cargo test -p rustack-stepfunctions-http
 	@cargo clippy -p rustack-stepfunctions-http --lib --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 
-test-stepfunctions-http-sdk:
+test-stepfunctions-http-sdk: test-workflows-manifest
 	@cargo test -p rustack-stepfunctions-http --test network test_should_exchange_signed_boto3_requests_with_typed_transport -- --ignored --test-threads=1
 
 .PHONY: test-stepfunctions-http test-stepfunctions-http-sdk
@@ -179,7 +179,7 @@ test-stepfunctions-bridge:
 	@cargo clippy -p rustack-cli --all-targets --features stepfunctions -- -D warnings
 	@cargo clippy -p rustack-cli --lib --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 
-test-stepfunctions-bridge-native:
+test-stepfunctions-bridge-native: test-workflows-manifest
 	@cargo build -p rustack-lambda-echo-bootstrap
 	@RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test -p rustack-cli --lib --features stepfunctions native_e2e -- --ignored --test-threads=1
 
@@ -211,7 +211,7 @@ test-stepfunctions-handler-fixture:
 	@python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("tests/lambda-fixtures/callback_bootstrap.py").read_text())'
 
 # Both ordinary SDKs directly own their real client and server processes.
-test-stepfunctions-sdk: workflows-sdk-python test-stepfunctions-handler-fixture
+test-stepfunctions-sdk: test-workflows-manifest workflows-sdk-python test-stepfunctions-handler-fixture
 	@cargo build -p rustack-lambda-echo-bootstrap
 	@RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" RUSTACK_CALLBACK_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/callback-bootstrap" RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test -p rustack-cli --test workflows_sdk --features stepfunctions -- --ignored --test-threads=1 --nocapture
 
@@ -275,6 +275,28 @@ test-workflows-performance:
 	@cargo clippy --locked -p rustack-cli --test workflows_sdk --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic
 
 .PHONY: test-workflows-performance
+
+# D75: exact same-feature resource inventories, before any resource execution.
+test-workflows-manifest:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_required_suites.py -v
+	@set -eu; \
+		workflow_manifest_dir=$$(mktemp -d); \
+		trap 'rm -rf "$$workflow_manifest_dir"' EXIT; \
+		cargo test --locked -p rustack-cli --lib --features stepfunctions -- --ignored --list --color never >"$$workflow_manifest_dir/native-bridge.txt"; \
+		cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions -- --ignored --list --color never >"$$workflow_manifest_dir/registered-sdk.txt"; \
+		cargo test --locked -p rustack-stepfunctions-http --test network -- --ignored --list --color never >"$$workflow_manifest_dir/typed-http-sdk.txt"; \
+		python3 -I -B tests/workflows/required_suites.py "$$workflow_manifest_dir"
+
+# This owned pure-service smoke needs no Native bootstrap, uv, boto3 or Docker.
+smoke-workflows: test-workflows-manifest
+	@cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions test_should_execute_documented_pure_workflow_in_owned_strict_service -- --ignored --exact --nocapture
+
+# Explicit current-host workflow scope; the full image/platform release gate remains open.
+verify-workflows-native: test-workflows-manifest
+	@$(MAKE) --no-print-directory -j1 test-stepfunctions-model test-stepfunctions-http test-stepfunctions-http-sdk test-stepfunctions-core test-stepfunctions-runtime test-stepfunctions-bridge-native test-stepfunctions-sdk test-workflows-persistence test-workflows-performance test-workflows-archive test-workflows-compression
+	@echo 'Verified native-workflow-only suites; image/ZIP/IaC/reference-platform release acceptance remains required.'
+
+.PHONY: test-workflows-manifest smoke-workflows verify-workflows-native
 
 deny-codegen:
 	@cargo deny --manifest-path codegen/Cargo.toml check

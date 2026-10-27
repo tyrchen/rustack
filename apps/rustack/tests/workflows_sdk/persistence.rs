@@ -127,7 +127,7 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(40)
 }
 async fn deploy(server: &Server, root: &Path, collector: &Collector) -> Result<()> {
-    let bytes = fs::read(&server.bootstrap).await?;
+    let bytes = fs::read(server.bootstrap()?).await?;
     let zip = tokio::task::spawn_blocking(move || archive(&bytes)).await??;
     fs::create_dir_all(root.join("invocations")).await?;
     let client: Lambda = lambda(server);

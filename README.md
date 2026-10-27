@@ -2,6 +2,8 @@
 
 A local AWS service emulator written in Rust, with **18 service adapters**. Routed operation counts describe API surface—not full AWS semantics, authorization enforcement, execution support, or persistence. See the [capability and safety guide](docs/runtime-hardening.md) before choosing a test workload.
 
+An opt-in source build also provides [Step Functions workflows](docs/workflows-guide.md), including real Native Lambda integration and named workflow snapshots. Production Docker image startup and final platform qualification remain in progress.
+
 ## Install
 
 ```bash

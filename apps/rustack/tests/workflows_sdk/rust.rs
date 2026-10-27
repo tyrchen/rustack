@@ -92,7 +92,7 @@ pub(super) fn archive(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(writer.finish()?.into_inner())
 }
 async fn deploy(server: &Server, client: &Lambda) -> Result<()> {
-    let bytes = fs::read(&server.bootstrap).await?;
+    let bytes = fs::read(server.bootstrap()?).await?;
     let archive = tokio::task::spawn_blocking(move || archive(&bytes)).await??;
     for (name, variables, seconds) in [
         ("SdkCompute", vec![("WORKFLOW_MODE", "1")], 5),

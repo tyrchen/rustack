@@ -2,6 +2,8 @@
 #![cfg(all(feature = "stepfunctions", feature = "lambda", unix))]
 #![forbid(unsafe_code)]
 
+#[path = "workflows_sdk/documented.rs"]
+mod documented;
 #[path = "workflows_sdk/performance.rs"]
 mod performance;
 #[path = "workflows_sdk/persistence.rs"]
@@ -54,7 +56,7 @@ async fn test_should_accept_ordinary_boto3_through_actual_runtime() -> Result<()
             root.join("tests/workflows/stepfunctions_sdk.py")
                 .into_os_string(),
             OsString::from(&server.endpoint),
-            server.bootstrap.as_os_str().to_owned(),
+            server.bootstrap()?.as_os_str().to_owned(),
             server.markers.as_os_str().to_owned(),
         ];
         let report = Runner::spawn(&python, &arguments)?
@@ -208,5 +210,18 @@ async fn test_should_join_actual_server_and_native_children_after_fixture_gate_r
     );
     fs::remove_dir_all(&private).await?;
     ensure!(!native.is_empty(), "no actual Native child observed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "actual owned pure-service smoke; run make smoke-workflows"]
+async fn test_should_execute_documented_pure_workflow_in_owned_strict_service() -> Result<()> {
+    let mut server = Server::start_pure().await?;
+    let result = timeout(Duration::from_secs(60), documented::exercise(&server)).await;
+    let cleanup = server
+        .shutdown(Instant::now() + Duration::from_secs(45))
+        .await;
+    ensure!(cleanup? == 0, "pure smoke created Native Lambda processes");
+    result??;
     Ok(())
 }

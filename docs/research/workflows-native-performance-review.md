@@ -19,6 +19,8 @@ The actual server is a local macOS/aarch64 debug-assertion build with18 availabl
 
 Every latency execution preserves exact input/output and102 sequential typed history events. The loop reaches its configured history byte/event bound with States.HistoryLimitExceeded, then100 immediate one-slot starts each observe live work and finish ABORTED with the requested stop error. Configured accounting limits do not claim process RSS bounds. No Docker, VM, image latency, image log-flood, container cleanup, IaC or platform acceptance is inferred.
 
+The captured harness is retained in commit `43054d3`; recorded source hashes refer to that historical capture, before later fixture evolution.
+
 ## Capture provenance
 
 ```json

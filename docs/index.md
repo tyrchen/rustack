@@ -1,5 +1,7 @@
 # Documentation
 
+- [Step Functions and Lambda workflows](./workflows-guide.md) - Source feature selection, strict-auth pure example, explicit Native execution, supported ASL/integrations, snapshots and exact native qualification.
+
 - [Local smoke tests](./smoke-tests.md) - Functional SDK/HTTP checks, recent-change regressions, and Pulumi smoke coverage.
 - [Pulumi](./pulumi.md) - Use Rustack as a Pulumi AWS provider deployment target.
 - [运行时硬化操作与能力指南](./runtime-hardening.md) - 配置/信任边界/执行与持久化范围/健康与能力端点。

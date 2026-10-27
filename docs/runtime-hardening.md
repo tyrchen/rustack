@@ -79,16 +79,18 @@ advertisedEndpoint: "http://localhost:4566"
 
 默认 `disabled`；Docker **不支持并显式报错**。`native`/`auto`（squib 需要可用虚拟化）是**可信主机执行**，不是沙箱。执行准入：全局 32、每函数默认 8，保留并发为 0 时拒绝；异步事件预算 128（采用当前 AWS 异步载荷上限 1 MiB，同步 6 MiB）。ZIP 上传不可变、按内部 UUID 落地，`latest` 与已发布版本不再共享同一可覆盖路径；坏 ZIP/CRC/路径/大小/IO 在发布前被拒绝且保留先前版本与 warm 指纹。
 
+启用源代码 `stepfunctions` feature 后可运行纯 ASL 和显式 Native Lambda 工作流，支持 Parallel/Inline Map、嵌套 .sync、回调与终态快照。构建/配置/范围和已验证示例见 [English workflow guide](./workflows-guide.md)。纯服务不分配 Lambda/回调执行口，Docker 生产启动仍未开放。
+
 ### 3.2 快照（`--snapshot <name>`）
 
 - 目录 `RUSTACK_SNAPSHOT_DIR`（默认 `.rustack/snapshots`）下按名字排他锁（`.{name}.lock`），同一快照名同时只能一个运行时拥有；
 - 保存：staged 目录写入与 fsync → 校验 manifest → 发布为目录级原子替换，替换前保留 `.{name}.previous`，崩溃或发布间隙通过恢复逻辑回到上一个完整代际；发布失败/恢复失败会**报错退出**，不会静默以空状态继续；
-- 加载：先恢复再读取；目标缺失且无可恢复代际才视为空起始（首次运行建快照的合法场景）；
-- **覆盖范围不等于全量持久化**：S3/DynamoDB 持久资源+数据，DynamoDB Streams 记录，Lambda 元数据+代码（不可变 artifact），其余服务为资源或缓存；SQS **消息**、Events/SNS 投递历史、无快照声明的服务不随快照保留。日志明确打印本次 coverage。
+- 加载：先恢复再读取；目标缺失且无可恢复代际才视为空起始（首次运行建快照的合法场景）；物理发布中断可恢复上一完整代际，profile/hash/quota 等导入失败不自动回退，并保留现有/previous 两代；
+- **覆盖范围不等于全量持久化**：S3/DynamoDB 持久资源+数据，DynamoDB Streams 记录，Lambda 元数据+代码（不可变 artifact），其余服务为资源或缓存；Step Functions 在启用时保存定义、保留的执行结果与完整历史；重启不恢复活跃任务、计时器、回调或进程，不重放 Lambda 副作用，旧分页/回调句柄失效。SQS **消息**、Events/SNS 投递历史、无快照声明的服务不随快照保留。日志明确打印本次 coverage。
 
 ### 3.3 停机（SIGINT/SIGTERM）
 
-收到信号后：停止接受连接（保留诊断连接）→ 在共享总 deadline（`budgets.shutdownSeconds`，默认 30 s）内排空 HTTP → 按顺序 quiesce：Events/SNS 停新投递并等待已接受投递 → DynamoDB 排空已准入 blocking 工作 → Lambda 停新执行并收割子进程 → SQS 停新移交并排空 DLQ 移交 → 快照保存（有快照名且前序成功）→ 并行停止各 provider。quiesce/保存超时不发布一致性快照；总截止前留出清理余量，被卡住的 blocking IO 不会让进程无限挂起。
+收到信号后：停止接受连接（保留诊断连接）→ 在共享总 deadline（`budgets.shutdownSeconds`，默认 30 s）内排空 HTTP → 按顺序 quiesce：Events/SNS 停新投递并等待已接受投递 → DynamoDB 排空已准入 blocking 工作 → Step Functions 关闭 API、保留原 grace 截点、取消并等待执行/回调/桥接清理 → Lambda 停新执行并收割子进程 → SQS 停新移交并排空 DLQ 移交 → 快照保存（有快照名且前序成功）→ 并行停止各 provider。quiesce/保存超时不发布一致性快照；总截止前留出清理余量，被卡住的 blocking IO 不会让进程无限挂起。
 
 ## 4. 健康与能力端点
 

@@ -1,0 +1,25 @@
+{
+  "Comment": "Pure local workflow: double a number, choose, wait, and finish.",
+  "StartAt": "Compute",
+  "States": {
+    "Compute": {
+      "Type": "Pass",
+      "Parameters": { "doubled.$": "States.MathAdd($.n, $.n)" },
+      "Next": "Positive"
+    },
+    "Positive": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.doubled", "NumericGreaterThan": 0, "Next": "Pause" }
+      ],
+      "Default": "Reject"
+    },
+    "Pause": { "Type": "Wait", "Seconds": 0, "Next": "Done" },
+    "Done": { "Type": "Succeed" },
+    "Reject": {
+      "Type": "Fail",
+      "Error": "Example.NotPositive",
+      "Cause": "The doubled value must be positive."
+    }
+  }
+}

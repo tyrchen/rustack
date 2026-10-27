@@ -132,7 +132,7 @@ pub(super) async fn deploy_named(server: &Server, client: &Lambda, name: &str) -
     let directory = server.markers.parent().context("root")?.join(name);
     fs::create_dir(&directory).await?;
     fs::create_dir(directory.join("consumed")).await?;
-    let bytes = fs::read(&server.bootstrap).await?;
+    let bytes = fs::read(server.bootstrap()?).await?;
     let archive = tokio::task::spawn_blocking(move || archive(&bytes)).await??;
     client
         .create_function()

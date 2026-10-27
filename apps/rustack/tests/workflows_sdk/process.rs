@@ -57,10 +57,14 @@ struct Owner {
 enum Profile {
     Semantic,
     Performance,
+    Pure,
 }
 impl Profile {
     fn settings(self, dispatch: usize) -> String {
         let limits = match self {
+            Self::Pure => {
+                return include_str!("../../../../examples/workflows/rustack.yaml").to_owned();
+            }
             Self::Semantic => {
                 "workflowTransitions: 80\n  workflowHistoryBytes: 1048576\n  \
                  workflowTotalHistoryBytes: 8388608"
@@ -79,11 +83,31 @@ impl Profile {
 }
 
 #[derive(Debug)]
+enum ExecutionFixture {
+    Pure,
+    Native(PathBuf),
+}
+impl ExecutionFixture {
+    fn services(&self) -> &'static str {
+        match self {
+            Self::Pure => "stepfunctions",
+            Self::Native(_) => "lambda,stepfunctions",
+        }
+    }
+    fn executor(&self) -> &'static str {
+        match self {
+            Self::Pure => "disabled",
+            Self::Native(_) => "native",
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct Server {
     pub pid: u32,
     pub endpoint: String,
     pub markers: PathBuf,
-    pub bootstrap: PathBuf,
+    execution: ExecutionFixture,
     stop: watch::Sender<Stop>,
     root: Option<JoinHandle<Result<usize>>>,
     joined: Option<Result<usize, Arc<anyhow::Error>>>,
@@ -110,6 +134,15 @@ impl Server {
     }
     pub async fn start_with_dispatch(dispatch: usize) -> Result<Self> {
         Self::start_options(dispatch, None, false, Profile::Semantic).await
+    }
+    pub fn bootstrap(&self) -> Result<&Path> {
+        match &self.execution {
+            ExecutionFixture::Native(path) => Ok(path),
+            ExecutionFixture::Pure => bail!("pure fixture has no Lambda bootstrap"),
+        }
+    }
+    pub async fn start_pure() -> Result<Self> {
+        Self::start_options(1, None, false, Profile::Pure).await
     }
     pub async fn start_performance() -> Result<Self> {
         Self::start_options(1, None, false, Profile::Performance).await
@@ -157,14 +190,19 @@ impl Server {
             (1..=32).contains(&dispatch),
             "invalid fixture dispatch capacity"
         );
-        let bootstrap = PathBuf::from(
-            env::var_os("RUSTACK_WORKFLOWS_BOOTSTRAP")
-                .context("run make test-stepfunctions-sdk")?,
-        );
-        ensure!(
-            (1..=32 * 1024 * 1024).contains(&fs::metadata(&bootstrap).await?.len()),
-            "invalid bootstrap size"
-        );
+        let execution = if matches!(profile, Profile::Pure) {
+            ExecutionFixture::Pure
+        } else {
+            let bootstrap = PathBuf::from(
+                env::var_os("RUSTACK_WORKFLOWS_BOOTSTRAP")
+                    .context("run make test-stepfunctions-sdk")?,
+            );
+            ensure!(
+                (1..=32 * 1024 * 1024).contains(&fs::metadata(&bootstrap).await?.len()),
+                "invalid bootstrap size"
+            );
+            ExecutionFixture::Native(bootstrap)
+        };
         let directory = tempfile::tempdir()?;
         let fixture_root = named.unwrap_or_else(|| directory.path());
         let markers = fixture_root.join("processes");
@@ -191,8 +229,8 @@ impl Server {
             .env("TMPDIR", directory.path())
             .env("RUSTACK_CONFIG", &config)
             .env("GATEWAY_LISTEN", address.to_string())
-            .env("SERVICES", "lambda,stepfunctions")
-            .env("LAMBDA_EXECUTOR", "native")
+            .env("SERVICES", execution.services())
+            .env("LAMBDA_EXECUTOR", execution.executor())
             .env("LAMBDA_SKIP_SIGNATURE_VALIDATION", "false")
             .env("STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION", "false")
             .env("ACCESS_KEY", ACCESS)
@@ -224,7 +262,7 @@ impl Server {
             pid,
             endpoint: format!("http://{address}"),
             markers,
-            bootstrap,
+            execution,
             stop,
             root: Some(tokio::spawn(owner.run())),
             joined: None,
