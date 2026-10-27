@@ -3,13 +3,18 @@
 use http::StatusCode;
 use tokio::time::Instant;
 
-pub use self::images::{ImagePinRecovery, reconcile_image_pins};
+pub use self::{
+    images::{ImagePinRecovery, reconcile_image_pins},
+    namespace::{NamespaceRecovery, reconcile_namespace},
+};
 use super::{
     DirectoryLease, DockerError, DockerPort, EnvironmentError, check_deadline,
     ownership::ContainerRecord,
 };
 
 mod images;
+mod inventory;
+mod namespace;
 
 /// Container-only recovery accounting, not a complete backend readiness proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1131,6 +1131,16 @@ test-lambda-daemon-binding-docker:
 
 .PHONY: test-lambda-daemon-binding test-lambda-daemon-binding-docker
 
+# Recorded retirement plus complete bounded startup namespace inventories.
+test-lambda-namespace:
+	@cargo test -p rustack-lambda-core --lib docker::recovery::namespace::tests
+	@cargo test -p rustack-lambda-core --lib docker::recovery::inventory::tests
+
+test-lambda-namespace-docker: lambda-runtime-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --lib docker::recovery::namespace::tests::real::test_should_reconcile_real_namespace_and_preserve_unrecorded_observations -- --ignored --test-threads=1
+
+.PHONY: test-lambda-namespace test-lambda-namespace-docker
+
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:
 	@cargo test -p rustack-lambda-runtime --lib

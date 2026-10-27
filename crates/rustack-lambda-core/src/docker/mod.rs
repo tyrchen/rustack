@@ -65,7 +65,8 @@ pub use probe::{
     probe_environment,
 };
 pub use recovery::{
-    ContainerRecovery, ImagePinRecovery, reconcile_containers, reconcile_image_pins,
+    ContainerRecovery, ImagePinRecovery, NamespaceRecovery, reconcile_containers,
+    reconcile_image_pins, reconcile_namespace,
 };
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
@@ -102,6 +103,7 @@ enum Operation {
     Wait,
     Remove,
     List,
+    ListImages,
     Attach,
 }
 impl Operation {
@@ -112,6 +114,7 @@ impl Operation {
                 | Self::Kill
                 | Self::Remove
                 | Self::List
+                | Self::ListImages
                 | Self::InspectPin
                 | Self::RemovePin
         )
@@ -282,6 +285,9 @@ impl OwnerFilter {
         })
     }
     fn encoded(self) -> Result<String, DockerError> {
+        self.query(Some(64))
+    }
+    fn query(self, limit: Option<usize>) -> Result<String, DockerError> {
         let mut labels = vec![format!("rustack.lambda.ownerId={}", self.owner)];
         if let Some(run) = self.run {
             labels.push(format!("rustack.lambda.runId={run}"));
@@ -291,11 +297,12 @@ impl OwnerFilter {
         }
         let filters = BTreeMap::from([("label", labels)]);
         let filters = serde_json::to_string(&filters).map_err(|_| DockerError::Schema)?;
-        Ok(form_urlencoded::Serializer::new(String::new())
-            .append_pair("all", "true")
-            .append_pair("limit", "64")
-            .append_pair("filters", &filters)
-            .finish())
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query.append_pair("all", "true");
+        if let Some(limit) = limit {
+            query.append_pair("limit", &limit.to_string());
+        }
+        Ok(query.append_pair("filters", &filters).finish())
     }
 }
 
