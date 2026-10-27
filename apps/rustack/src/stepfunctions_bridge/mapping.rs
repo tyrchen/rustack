@@ -8,7 +8,8 @@ use rustack_lambda_core::{
     executor::{ExecutorError, InvokeResponse},
 };
 use rustack_stepfunctions_core::{
-    AslError, Integration, LambdaTaskCommand, MAX_PAYLOAD_BYTES, Payload, StateView, TaskFailure,
+    AslError, CallbackError, CallbackInvocationMetadata, Integration, LambdaTaskCommand,
+    MAX_PAYLOAD_BYTES, Payload, StateView, TaskFailure,
 };
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -19,8 +20,14 @@ pub(super) struct CallPlan {
     pub(super) function: String,
     pub(super) qualifier: Option<String>,
     pub(super) payload: Payload,
-    pub(super) optimized: bool,
+    pub(super) mode: ResponseMode,
     pub(super) deadline: Instant,
+}
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ResponseMode {
+    Direct,
+    Optimized,
+    ObservedCallback,
 }
 impl fmt::Debug for CallPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -91,7 +98,16 @@ impl CallPlan {
             function,
             qualifier,
             payload,
-            optimized,
+            mode: if command.is_observed_callback() {
+                if !optimized {
+                    return Err(BridgeError::Parameters);
+                }
+                ResponseMode::ObservedCallback
+            } else if optimized {
+                ResponseMode::Optimized
+            } else {
+                ResponseMode::Direct
+            },
             deadline: Instant::from_std(call.deadline()),
         })
     }
@@ -231,6 +247,35 @@ pub(super) fn response(
             Ok(mapped)
         }
     }
+}
+pub(super) fn observed_response(
+    invocation: &InvokeResponse,
+    metadata: Result<CallbackInvocationMetadata, CallbackError>,
+) -> Result<(Mapped, Option<CallbackInvocationMetadata>), BridgeError> {
+    // FunctionError keeps the ordinary bounded failure path. Successful callback
+    // invocations never parse or retain the synchronous function business body.
+    if invocation.status != 200 || invocation.function_error.is_some() {
+        return response(invocation, false, "").map(|mapped| (mapped, None));
+    }
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let mut mapped = failure(
+                "Lambda.ServiceException",
+                "Invalid Lambda invocation metadata",
+            )?;
+            mapped.diagnostic = Some(BridgeError::Callback(Arc::new(error)));
+            return Ok((mapped, None));
+        }
+    };
+    let output = metadata.payload()?;
+    Ok((
+        Mapped {
+            result: Ok(output),
+            diagnostic: None,
+        },
+        Some(metadata),
+    ))
 }
 fn bounded_cause(cause: &str) -> Result<String, BridgeError> {
     const MARKER: &str = " [truncated]";

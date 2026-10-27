@@ -300,7 +300,7 @@ fn test_should_redact_call_plan_names_and_reject_invalid_limits() {
         function: "function-debug-marker".into(),
         qualifier: Some("qualifier-debug-marker".into()),
         payload: Payload::parse(b"{}").unwrap(),
-        optimized: true,
+        mode: mapping::ResponseMode::Optimized,
         deadline: deadline(),
     };
     let debug = format!("{plan:?}");
@@ -601,4 +601,53 @@ async fn test_should_keep_bridge_ready_after_settled_missing_function_diagnostic
     assert!(diagnostic.is_some());
     assert!(ready, "historical diagnostic is not owner failure");
     assert_eq!(exec.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_should_ignore_callback_success_body_but_preserve_function_failures_and_actual_metadata() {
+    use rustack_stepfunctions_core::CallbackInvocationMetadata;
+    use uuid::Uuid;
+
+    let id = Uuid::new_v4();
+    for body in [
+        Bytes::from_static(b"not-json"),
+        Bytes::from_static(&[0xff]),
+        Bytes::from(vec![b'x'; 262_145]),
+    ] {
+        let response = InvokeResponse::success(body, "42".into());
+        assert!(
+            mapping::response(&response, true, &id.to_string())
+                .unwrap()
+                .result
+                .is_err()
+        );
+        let (mapped, metadata) =
+            mapping::observed_response(&response, CallbackInvocationMetadata::new(id, "42"))
+                .unwrap();
+        let output = mapped.result.unwrap();
+        assert!(output.value().get("Payload").is_none());
+        assert_eq!(output.value()["ExecutedVersion"], "42");
+        assert_eq!(
+            output.value()["SdkResponseMetadata"]["RequestId"],
+            id.to_string()
+        );
+        assert_eq!(metadata.unwrap().request_id(), id);
+    }
+    let mut response = InvokeResponse::success(
+        Bytes::from_static(br#"{"errorType":"RealFailure"}"#),
+        "$LATEST".into(),
+    );
+    response.function_error = Some("Unhandled".into());
+    let (mapped, metadata) =
+        mapping::observed_response(&response, CallbackInvocationMetadata::new(id, "$LATEST"))
+            .unwrap();
+    assert!(matches!(mapped.result,Err(f) if f.details().error()==Some("RealFailure")));
+    assert!(metadata.is_none());
+    response.function_error = None;
+    let (mapped, metadata) =
+        mapping::observed_response(&response, CallbackInvocationMetadata::new(id, "alias"))
+            .unwrap();
+    assert!(matches!(mapped.result,Err(f) if f.details().error()==Some("Lambda.ServiceException")));
+    assert!(mapped.diagnostic.is_some());
+    assert!(metadata.is_none());
 }

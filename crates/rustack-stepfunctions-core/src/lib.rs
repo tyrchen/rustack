@@ -44,7 +44,8 @@ pub use expression::{Expression, SystemUuidSource, UuidSource};
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};
 pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
 pub use registry::{
-    CallbackAck, CallbackAttempt, CallbackCommand, CallbackError, CallbackLimits, CallbackMint,
+    CallbackAck, CallbackAttempt, CallbackCommand, CallbackError, CallbackInvocation,
+    CallbackInvocationMetadata, CallbackInvocationReporter, CallbackLimits, CallbackMint,
     CallbackOutcome, CallbackRegistry, CallbackStatus, CallbackSupervisor, CallbackTask,
     CallbackTimeout, CallbackToken, ChildError, ChildExecution, ChildExecutionPort, ChildParent,
     ChildPattern, ChildStartParameters, ChildSubmission, DefinitionRevision, ExecutionArn,

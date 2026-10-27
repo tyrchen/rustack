@@ -9,7 +9,10 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
-use crate::{CompiledMachine, Payload, TaskDispatch, TaskFailure};
+use crate::{
+    CallbackError, CallbackInvocationReporter, CompiledMachine, FrameCallId, Integration, Payload,
+    StateView, TaskDispatch, TaskFailure,
+};
 
 /// Immutable captured instruction and evaluated parameters for one attempt.
 #[derive(Debug)]
@@ -17,10 +20,85 @@ use crate::{CompiledMachine, Payload, TaskDispatch, TaskFailure};
 pub struct LambdaTaskCommand {
     machine: Arc<CompiledMachine>,
     dispatch: TaskDispatch,
+    mode: LambdaTaskMode,
+}
+#[derive(Debug)]
+enum LambdaTaskMode {
+    Response,
+    Observed(Option<CallbackInvocationReporter>),
 }
 impl LambdaTaskCommand {
     pub(crate) fn new(machine: Arc<CompiledMachine>, dispatch: TaskDispatch) -> Self {
-        Self { machine, dispatch }
+        Self {
+            machine,
+            dispatch,
+            mode: LambdaTaskMode::Response,
+        }
+    }
+    /// Bind one real optimized invocation to its unique callback attempt.
+    ///
+    /// # Errors
+    /// Rejects another scope/frame/generation, a nonoptimized Task or expired control.
+    ///
+    /// ```
+    /// # fn bind(m:std::sync::Arc<rustack_stepfunctions_core::CompiledMachine>,d:rustack_stepfunctions_core::TaskDispatch,c:rustack_stepfunctions_core::FrameCallId,r:rustack_stepfunctions_core::CallbackInvocationReporter){let command=rustack_stepfunctions_core::LambdaTaskCommand::observed_callback(m,d,c,r);}
+    /// ```
+    pub fn observed_callback(
+        machine: Arc<CompiledMachine>,
+        mut dispatch: TaskDispatch,
+        call: FrameCallId,
+        reporter: CallbackInvocationReporter,
+    ) -> Result<Self, CallbackError> {
+        let deadline = reporter.bind(machine.scope(), call)?;
+        if dispatch.attempt() != call.attempt()
+            || !matches!(
+                machine.state(dispatch.state()),
+                Ok(StateView::Task {
+                    resource: Integration::LambdaInvoke,
+                    ..
+                })
+            )
+        {
+            return Err(CallbackError::Validation);
+        }
+        dispatch.deadline = dispatch.deadline.min(deadline.into_std());
+        Ok(Self {
+            machine,
+            dispatch,
+            mode: LambdaTaskMode::Observed(Some(reporter)),
+        })
+    }
+    /// Identify explicit callback observation even after its reporter transfers.
+    ///
+    /// ```
+    /// # fn inspect(c:&rustack_stepfunctions_core::LambdaTaskCommand){let callback=c.is_observed_callback();}
+    /// ```
+    #[must_use]
+    pub fn is_observed_callback(&self) -> bool {
+        matches!(self.mode, LambdaTaskMode::Observed(_))
+    }
+    /// Transfer the real invocation report capability once, after validating a plan.
+    ///
+    /// # Errors
+    /// Rejects consumed, expired or revoked callback control. Ordinary commands
+    /// return `None` and keep their response mapping.
+    ///
+    /// ```
+    /// # fn take(c:&mut rustack_stepfunctions_core::LambdaTaskCommand){let reporter=c.take_callback_reporter();}
+    /// ```
+    pub fn take_callback_reporter(
+        &mut self,
+    ) -> Result<Option<CallbackInvocationReporter>, CallbackError> {
+        match &mut self.mode {
+            LambdaTaskMode::Response => Ok(None),
+            LambdaTaskMode::Observed(reporter) => {
+                reporter
+                    .as_ref()
+                    .ok_or(CallbackError::Progress)?
+                    .check_live()?;
+                Ok(Some(reporter.take().ok_or(CallbackError::Progress)?))
+            }
+        }
     }
     /// Read the captured artifact; the dispatch's state ID belongs to this machine.
     ///

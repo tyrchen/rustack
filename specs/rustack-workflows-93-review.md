@@ -782,6 +782,20 @@ Final gates pass691 core units/273 doctests and preserve_order56 preparation/10 
 
 The public combined Parameters type deliberately lacks Serialize, protected by a compile-fail doctest. Typed CallbackHistory has no unchecked public constructor. Temporary token context is never serialized for size measurement or stored in the driver. These proofs do not claim ASL callback admission, actual callback Lambda execution, persistent history or SendTask API acceptance. Docker remains deferred, and existing B06 is not waived.
 
+
+## P4 observed Lambda callback invocation independent review
+
+Integrations§5.3/D64 compose the unique reporter with the actual Lambda invocation port. Independent read-only review found one P2 issue, fixed and rechecked; the final review reports no remaining in-slice finding. Callback ASL/public API activation remains gated.
+
+| ID | Priority / source | Resolution / required evidence |
+|---|---|---|
+| W180 | P2; `registry/callback/actor.rs`, independent delayed-report review | Store the provisional callback's actor-receipt timestamp. On successful report, compare it with captured observed+heartbeat before commit; an arrival at/after the deadline expires even if stored while Invoking. Paused 0/9/10/11s cases pin within-window and exact-boundary behavior. Existing preactivation heartbeat remains an acknowledged no-op, explicitly tested during delayed reporting. |
+| W181 | P2 evidence clarification; Lambda `work.rs` and integrations§5.3 | Current provider publishes InvokeResponse after backend cleanup/settlement. Qualify provider-return capture before bridge mapping/settlement observation; do not claim earlier handler Runtime API timing or independently held successful Native backend cleanup. A controlled Pending→Quarantined→Clean bridge receipt test proves report independence without inventing physical evidence. |
+
+New qualification covers one-shot delegation, wrong scope/frame/dispatch generation, expired/revoked ownership, past/future timestamp rejection, captured heartbeat timing, late-ready report success/failure/owner-loss fences, last-observer report release, canonical executed versions and real v4/RFC4122 request identities. Mapping tests ignore non-JSON/non-UTF8/ASL-oversized successful synchronous bodies only in callback mode, preserve FunctionError semantics and reject invalid metadata. A retained CPU-join test relays both caller and manager cancellation while the mapping job remains held. Actual Native composition covers early/late callbacks, failure after early callback, actual request/version metadata and consumed-process cancellation with PID absence before global cleanup. Handler-originated SDK callback, ASL history/dispatch, public SendTask and persistence acceptance remain required.
+
+Final gates pass721 core unit cases and289 doctests (288 merged plus one compile-fail). Preserve-order suites pass56 preparation/10 payload/91 compiler/35 effects/22 scheduler/10 asynchronous-owner/61 callback/17 nested/19 atomic-child/2 controlled-clock cases, with strict production Clippy. Binary-support qualification passes34 units/13 docs, all13 actual Native cases, full/minimal main77/57 and4 existing real SDK/runner regressions. Feature-enabled workspace build/all-target test/Clippy/denied-warning rustdoc/nightly formatting pass3,288 tests with432 separately gated. Fresh audit scans482 dependencies/1,378 advisories and preserves existing B06 (4 vulnerabilities/10 warnings); deny advisories fail, while bans/licenses/sources pass. No new dependency, advisory ignore, lint suppression or Docker mutation is introduced.
+
 ## Cross-references
 
 - ← [implementation plan](./rustack-workflows-90-impl-plan.md)

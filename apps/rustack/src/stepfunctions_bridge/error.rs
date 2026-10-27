@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use rustack_lambda_core::{error::LambdaServiceError, executor::ExecutorError};
-use rustack_stepfunctions_core::AslError;
+use rustack_stepfunctions_core::{AslError, CallbackError};
 use thiserror::Error;
 use tokio::task::JoinError;
 
@@ -39,6 +39,9 @@ pub enum BridgeError {
         #[source]
         AslError,
     ),
+    /// Invalid or closed real callback invocation reporting control.
+    #[error("Lambda callback invocation report failed")]
+    Callback(#[source] Arc<CallbackError>),
     /// A supervised worker panicked or was unexpectedly cancelled.
     #[error("Lambda task bridge worker failed")]
     Worker(#[source] JoinError),

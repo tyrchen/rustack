@@ -26,7 +26,7 @@ use crate::{
     ExecutionLimits, ExecutionSnapshot, ExecutionSupervisor, FrameCallId, FrameCapacity,
     FrameLimits, FrameScheduler, FrameUpdate, HistoryLimits, Payload, PreparedDefinition, Registry,
     RegistryCommand, RegistryLimits, RegistryResult, RegistrySupervisor, RuntimeLimits,
-    SystemUuidSource, Tags, TaskSupport,
+    SystemUuidSource, Tags, TaskFailure, TaskSupport,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -817,17 +817,29 @@ async fn test_should_release_terminal_payload_ownership_while_retaining_closed_t
 }
 
 fn manual_task(control: Arc<Control>) -> CallbackTask {
-    let (invocation, _invoked) = watch::channel(None);
+    let (sender, invocation) = watch::channel(None);
     let (_view, reader) = watch::channel(Arc::new(CallbackOutcome::Invoking));
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let reporter = CallbackInvocationReporter::new(
+        InvocationIdentity {
+            scope: TenantScope::default(),
+            call: calls().unwrap()[0],
+            deadline,
+            issued: Instant::now(),
+        },
+        control.clone(),
+        sender,
+    );
     CallbackTask {
         token: "a".repeat(64).parse().unwrap(),
         control,
+        reporter: Some(reporter),
         invocation,
         view: reader,
-        deadline: Instant::now() + Duration::from_secs(300),
-        reported: false,
+        deadline,
     }
 }
+
 fn control() -> Arc<Control> {
     Arc::new(Control {
         revoked: AtomicBool::new(false),
@@ -1111,3 +1123,5 @@ async fn test_should_prepare_real_registered_token_once_with_separate_safe_histo
     ));
     f.close().await
 }
+
+mod observed;

@@ -16,15 +16,18 @@ use tokio::{
 };
 
 use super::domain;
-use crate::{TaskFailure, TenantScope};
+use crate::TenantScope;
 
 mod actor;
+mod invocation;
 mod receipts;
 #[cfg(test)]
 mod tests;
 mod token;
 mod types;
 
+use invocation::InvocationIdentity;
+pub use invocation::{CallbackInvocation, CallbackInvocationMetadata, CallbackInvocationReporter};
 pub use receipts::{CallbackAck, CallbackMint, CallbackTask};
 pub use token::CallbackToken;
 use token::TokenHash;
@@ -49,11 +52,6 @@ impl Control {
         self.revoked.load(Ordering::Acquire)
     }
 }
-#[derive(Debug, Clone)]
-struct Invocation {
-    outcome: Result<(), TaskFailure>,
-    observed: Instant,
-}
 #[derive(Debug)]
 struct Reservations {
     live: OwnedSemaphorePermit,
@@ -64,8 +62,8 @@ struct Reservations {
 struct MintRequest {
     attempt: CallbackAttempt,
     control: Arc<Control>,
-    invocation: watch::Sender<Option<Invocation>>,
-    invoked: watch::Receiver<Option<Invocation>>,
+    invocation: watch::Sender<Option<Arc<CallbackInvocation>>>,
+    invoked: watch::Receiver<Option<Arc<CallbackInvocation>>>,
     reply: oneshot::Sender<MintReply>,
     reservations: Reservations,
 }

@@ -8,7 +8,8 @@ use tokio::{
 };
 
 use super::{
-    AckReply, CallbackError, CallbackOutcome, CallbackToken, Control, Invocation, MintReply,
+    AckReply, CallbackError, CallbackInvocation, CallbackInvocationReporter, CallbackOutcome,
+    CallbackToken, Control, MintReply,
 };
 use crate::TaskFailure;
 
@@ -166,10 +167,10 @@ impl CallbackAck {
 pub struct CallbackTask {
     pub(super) token: CallbackToken,
     pub(super) control: Arc<Control>,
-    pub(super) invocation: watch::Sender<Option<Invocation>>,
+    pub(super) reporter: Option<CallbackInvocationReporter>,
+    pub(super) invocation: watch::Receiver<Option<Arc<CallbackInvocation>>>,
     pub(super) view: watch::Receiver<Arc<CallbackOutcome>>,
     pub(super) deadline: Instant,
-    pub(super) reported: bool,
 }
 impl CallbackTask {
     /// Borrow the secret only for intentional context/outbound credential access.
@@ -202,25 +203,88 @@ impl CallbackTask {
         &mut self,
         result: Result<(), TaskFailure>,
     ) -> Result<(), CallbackError> {
-        if self.reported {
+        self.reporter_live()?;
+        self.reporter
+            .as_mut()
+            .ok_or(CallbackError::Progress)?
+            .complete_unit(result)
+    }
+    fn reporter_live(&self) -> Result<(), CallbackError> {
+        if self
+            .reporter
+            .as_ref()
+            .is_none_or(|reporter| reporter.reported)
+        {
             return Err(CallbackError::Progress);
         }
         if matches!(self.snapshot().as_ref(), CallbackOutcome::Unavailable) {
             return Err(CallbackError::Unavailable);
         }
-        if Instant::now() >= self.deadline
+        if self.snapshot().is_terminal()
+            || Instant::now() >= self.deadline
             || self.control.revoked()
-            || self.snapshot().is_terminal()
         {
             return Err(CallbackError::TaskTimedOut);
         }
-        self.reported = true;
-        self.invocation.send_replace(Some(Invocation {
-            outcome: result,
-            observed: Instant::now(),
-        }));
-        self.control.wake.notify_one();
         Ok(())
+    }
+    /// Transfer the unique invocation report capability to its real provider owner.
+    ///
+    /// # Errors
+    /// Rejects duplicate/delegated progress, expired/revoked tasks or root loss.
+    ///
+    /// ```
+    /// # fn delegate(t:&mut rustack_stepfunctions_core::CallbackTask){let reporter=t.take_invocation_reporter();}
+    /// ```
+    pub fn take_invocation_reporter(
+        &mut self,
+    ) -> Result<CallbackInvocationReporter, CallbackError> {
+        self.reporter_live()?;
+        self.reporter.take().ok_or(CallbackError::Progress)
+    }
+    /// Capture the actual return report independently of callback/cleanup state.
+    ///
+    /// ```
+    /// # fn inspect(t:&rustack_stepfunctions_core::CallbackTask){let report=t.invocation();}
+    /// ```
+    #[must_use]
+    pub fn invocation(&self) -> Option<Arc<CallbackInvocation>> {
+        self.invocation.borrow().clone()
+    }
+    /// Observe the same invocation return without resending or consuming cleanup.
+    ///
+    /// # Errors
+    /// Returns observer Deadline, known task closure, root Unavailable or `OwnerLost`.
+    ///
+    /// ```no_run
+    /// # async fn observe(t:&mut rustack_stepfunctions_core::CallbackTask,d:tokio::time::Instant){let report=t.wait_invocation(d).await;}
+    /// ```
+    pub async fn wait_invocation(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Arc<CallbackInvocation>, CallbackError> {
+        if Instant::now() >= deadline {
+            return Err(CallbackError::Deadline);
+        }
+        let result = timeout_at(deadline, async {
+            loop {
+                if let Some(report) = self.invocation() { return Ok(report); }
+                match self.snapshot().as_ref() {
+                    CallbackOutcome::Unavailable => return Err(CallbackError::Unavailable),
+                    CallbackOutcome::TimedOut(_) | CallbackOutcome::Revoked => return Err(CallbackError::TaskTimedOut),
+                    _ => {},
+                }
+                tokio::select! {
+                    biased;
+                    result = self.invocation.changed() => result.map_err(|_| CallbackError::OwnerLost)?,
+                    result = self.view.changed() => result.map_err(|_| CallbackError::OwnerLost)?,
+                }
+            }
+        }).await.map_err(|_| CallbackError::Deadline)?;
+        if Instant::now() >= deadline {
+            return Err(CallbackError::Deadline);
+        }
+        result
     }
     /// Revoke immediately through independent monotonic control and Notify.
     ///

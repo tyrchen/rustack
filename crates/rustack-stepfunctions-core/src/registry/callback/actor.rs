@@ -13,9 +13,10 @@ use tokio::{
 };
 
 use super::{
-    AckReply, Action, CallbackAttempt, CallbackError, CallbackLimits, CallbackOutcome,
-    CallbackStatus, CallbackTask, CallbackTimeout, CallbackToken, Control, Invocation, MintReply,
-    MintRequest, Request, Shared, TokenHash,
+    AckReply, Action, CallbackAttempt, CallbackError, CallbackInvocation,
+    CallbackInvocationReporter, CallbackLimits, CallbackOutcome, CallbackStatus, CallbackTask,
+    CallbackTimeout, CallbackToken, Control, InvocationIdentity, MintReply, MintRequest, Request,
+    Shared, TokenHash,
 };
 use crate::{FrameCallId, Payload, TaskFailure};
 
@@ -35,16 +36,21 @@ impl AttemptKey {
 }
 #[derive(Debug)]
 enum Progress {
-    Invoking(Option<Completion>),
+    Invoking(Option<Provisional>),
     Waiting(Option<Instant>),
     Closed,
+}
+#[derive(Debug)]
+struct Provisional {
+    result: Completion,
+    received: Instant,
 }
 #[derive(Debug)]
 struct Entry {
     digest: TokenHash,
     attempt: CallbackAttempt,
     control: Arc<Control>,
-    invoked: Option<watch::Receiver<Option<Invocation>>>,
+    invoked: Option<watch::Receiver<Option<Arc<CallbackInvocation>>>>,
     view: Option<watch::Sender<Arc<CallbackOutcome>>>,
     progress: Progress,
     live: Option<OwnedSemaphorePermit>,
@@ -56,6 +62,7 @@ impl Entry {
     fn close(&mut self, outcome: CallbackOutcome) {
         if !matches!(self.progress, Progress::Closed) {
             self.progress = Progress::Closed;
+            self.control.revoke();
             self.live = None;
             self.invoked = None;
             if let Some(view) = self.view.take() {
@@ -79,42 +86,45 @@ impl Entry {
             let invoked = self.invoked.as_mut().ok_or(CallbackError::Progress)?;
             let report = invoked.borrow_and_update().clone();
             let owner_lost = invoked.has_changed().is_err();
-            match report {
-                Some(Invocation {
+            match report.as_deref() {
+                Some(CallbackInvocation {
                     outcome: Err(failure),
                     ..
-                }) => self.close(CallbackOutcome::InvocationFailed(failure)),
-                Some(Invocation {
-                    outcome: Ok(()),
+                }) => self.close(CallbackOutcome::InvocationFailed(failure.clone())),
+                Some(CallbackInvocation {
+                    outcome: Ok(_),
                     observed,
                 }) => {
                     let Progress::Invoking(provisional) = &mut self.progress else {
                         return Err(CallbackError::Progress);
                     };
-                    if let Some(result) = provisional.take() {
-                        self.complete(result);
-                    } else {
-                        let heartbeat = self
-                            .attempt
-                            .heartbeat
-                            .map(|period| {
-                                observed
-                                    .checked_add(period)
-                                    .ok_or(CallbackError::Validation)
-                            })
-                            .transpose()?
-                            .map(|until| until.min(self.attempt.deadline));
-                        if heartbeat.is_some_and(|until| now >= until) {
+                    let provisional = provisional.take();
+                    let heartbeat = self
+                        .attempt
+                        .heartbeat
+                        .map(|period| {
+                            observed
+                                .checked_add(period)
+                                .ok_or(CallbackError::Validation)
+                        })
+                        .transpose()?
+                        .map(|until| until.min(self.attempt.deadline));
+                    if let Some(Provisional { result, received }) = provisional {
+                        if heartbeat.is_some_and(|until| received >= until) {
                             self.close(CallbackOutcome::TimedOut(CallbackTimeout::Heartbeat));
                         } else {
-                            self.progress = Progress::Waiting(heartbeat);
-                            self.view
-                                .as_ref()
-                                .ok_or(CallbackError::Progress)?
-                                .send_replace(Arc::new(CallbackOutcome::Waiting {
-                                    heartbeat_deadline: heartbeat,
-                                }));
+                            self.complete(result);
                         }
+                    } else if heartbeat.is_some_and(|until| now >= until) {
+                        self.close(CallbackOutcome::TimedOut(CallbackTimeout::Heartbeat));
+                    } else {
+                        self.progress = Progress::Waiting(heartbeat);
+                        self.view
+                            .as_ref()
+                            .ok_or(CallbackError::Progress)?
+                            .send_replace(Arc::new(CallbackOutcome::Waiting {
+                                heartbeat_deadline: heartbeat,
+                            }));
                     }
                 }
                 None if owner_lost => self.close(CallbackOutcome::Revoked),
@@ -134,7 +144,10 @@ impl Entry {
         match (&mut self.progress, action) {
             (Progress::Closed | Progress::Invoking(Some(_)), _) => Err(CallbackError::TaskTimedOut),
             (Progress::Invoking(provisional), Action::Complete(result)) => {
-                *provisional = Some(result);
+                *provisional = Some(Provisional {
+                    result,
+                    received: now,
+                });
                 Ok(())
             }
             (Progress::Waiting(_), Action::Complete(result)) => {
@@ -426,10 +439,19 @@ impl State {
         let task = CallbackTask {
             token,
             control: request.control.clone(),
-            invocation: request.invocation,
+            reporter: Some(CallbackInvocationReporter::new(
+                InvocationIdentity {
+                    scope: request.attempt.parent.revision().machine().scope().clone(),
+                    call: request.attempt.call,
+                    deadline: request.attempt.deadline,
+                    issued: Instant::now(),
+                },
+                request.control.clone(),
+                request.invocation,
+            )),
+            invocation: request.invoked.clone(),
             view: reader,
             deadline: request.attempt.deadline,
-            reported: false,
         };
         self.hashes.insert(digest, id);
         self.active.insert(id);

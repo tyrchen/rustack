@@ -26,7 +26,8 @@ mod tests;
 mod types;
 
 pub use callback::{
-    CallbackAck, CallbackAttempt, CallbackCommand, CallbackError, CallbackLimits, CallbackMint,
+    CallbackAck, CallbackAttempt, CallbackCommand, CallbackError, CallbackInvocation,
+    CallbackInvocationMetadata, CallbackInvocationReporter, CallbackLimits, CallbackMint,
     CallbackOutcome, CallbackRegistry, CallbackStatus, CallbackSupervisor, CallbackTask,
     CallbackTimeout, CallbackToken,
 };
