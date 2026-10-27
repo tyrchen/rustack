@@ -129,6 +129,24 @@ impl FunctionArn {
     }
 }
 
+impl TryFrom<(&str, &TenantScope)> for FunctionArn {
+    type Error = CompileError;
+    /// Validate a static function ARN against the compiler's scope and grammar.
+    ///
+    /// # Errors
+    /// Rejects malformed, oversized or foreign function ARNs and qualifiers.
+    ///
+    /// ```
+    /// use rustack_stepfunctions_core::{FunctionArn, TenantScope};
+    /// let scope = TenantScope::default();
+    /// let arn = FunctionArn::try_from(("arn:aws:lambda:us-east-1:000000000000:function:worker", &scope))?;
+    /// # Ok::<(), rustack_stepfunctions_core::CompileError>(())
+    /// ```
+    fn try_from((value, scope): (&str, &TenantScope)) -> Result<Self, Self::Error> {
+        Self::parse(value, scope, &Location::root())
+    }
+}
+
 /// Optimized nested integration behavior selected by the trusted caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

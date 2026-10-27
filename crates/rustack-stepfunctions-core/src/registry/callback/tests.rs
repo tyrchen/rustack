@@ -953,7 +953,7 @@ async fn test_should_validate_captured_parent_scope_heartbeat_and_task_deadline_
     let attempt = f.attempt(0, 1_000_000, None)?;
     assert_eq!(
         attempt.deadline,
-        Instant::from_std(f.parent.record.deadline)
+        Instant::from_std(f.parent.record.deadline.ok_or("missing live deadline")?)
     );
     let (foreign, mut owner) = CallbackRegistry::new(
         TenantScope::new("aws", "us-west-2", "000000000000")?,

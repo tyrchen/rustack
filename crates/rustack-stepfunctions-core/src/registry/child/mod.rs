@@ -269,7 +269,9 @@ impl ChildExecutionPort {
             return Err(ChildError::Unavailable);
         }
         parameters.machine.check(&shared.scope)?;
-        let deadline = deadline.min(Instant::from_std(parent.record.deadline));
+        let deadline = deadline.min(Instant::from_std(
+            parent.record.deadline.ok_or(ChildError::Invalid)?,
+        ));
         if Instant::now() >= deadline {
             return Err(ChildError::Deadline);
         }

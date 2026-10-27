@@ -19,12 +19,13 @@ use tokio::{
 
 use super::{
     DefinitionRevision, Envelope, ExecutionArn, ExecutionName, ExecutionSnapshot, MachineSnapshot,
-    MachineStatus, PreparedDefinition, Profile, RegistryCommand, RegistryError, RegistryLimits,
-    RegistryResult, RegistryStatus, Reply, RoleArn, StateMachineArn, TenantScope,
+    MachineStatus, Operation, PreparedDefinition, Profile, RegistryCommand, RegistryError,
+    RegistryLimits, RegistryResult, RegistryStatus, Reply, RoleArn, StateMachineArn, TenantScope,
     child::{
         ChildError, Lineage, Request,
         owner::{Inbox as ChildInbox, Owner as ChildOwner},
     },
+    retention::Retention,
     snapshot::{CapturedExecution, SealedRegistry},
     types::{ExecutionIdentity, ExecutionRecord, MachineIdentity, RevisionData, TagAllocation},
 };
@@ -44,13 +45,13 @@ struct Resources {
     revisions: Arc<Semaphore>,
     tag_versions: Arc<Semaphore>,
 }
-struct Entry {
-    record: Arc<ExecutionRecord>,
-    closed: Option<Instant>,
+pub(super) struct Entry {
+    pub(super) record: Arc<ExecutionRecord>,
+    pub(super) retention: Retention,
 }
 struct Executions {
     records: BTreeMap<String, Entry>,
-    claims: BTreeMap<String, Option<Instant>>,
+    claims: BTreeMap<String, Retention>,
     capacity: Arc<Semaphore>,
     limits: ExecutionLimits,
 }
@@ -98,19 +99,19 @@ impl Owner {
         Self {
             capture: None,
             state: Some(State {
-                children: ChildOwner::new(registry),
+                children: ChildOwner::new(registry.clone()),
                 resources: Resources {
                     scope,
                     states: profile.states,
                     limits,
                     machines: BTreeMap::new(),
-                    revisions: Arc::new(Semaphore::new(limits.capacities.revisions)),
-                    tag_versions: Arc::new(Semaphore::new(limits.capacities.revisions)),
+                    revisions: registry.restore.pools.revisions.clone(),
+                    tag_versions: registry.restore.pools.tags.clone(),
                 },
                 executions: Executions {
                     records: BTreeMap::new(),
                     claims: BTreeMap::new(),
-                    capacity: Arc::new(Semaphore::new(limits.capacities.records)),
+                    capacity: registry.restore.pools.records.clone(),
                     limits: profile.execution,
                 },
                 runtime,
@@ -255,7 +256,12 @@ impl State {
         if self.io.sealed.borrow().is_some() || self.runtime.owned_executions() != 0 {
             return Err(RegistryError::Unavailable);
         }
-        if self.executions.claims.values().any(Option::is_none) {
+        if self
+            .executions
+            .claims
+            .values()
+            .any(|retention| retention.running())
+        {
             return Err(RegistryError::Unavailable);
         }
         let mut executions = Vec::new();
@@ -264,18 +270,26 @@ impl State {
             .map_err(|_| RegistryError::Capacity)?;
         for (arn, entry) in &self.executions.records {
             let view = entry.record.handle.snapshot();
-            let closed = entry.closed.ok_or(RegistryError::Unavailable)?;
+            let retention = entry.retention;
+            let name = self
+                .executions
+                .claims
+                .get(arn)
+                .ok_or(RegistryError::Unavailable)?;
+            let cut = Instant::from_std(clock.monotonic);
             if view.outcome().is_none()
                 || view.stop_date().is_none()
                 || view.cleanup() != CleanupState::Clean
-                || self.executions.claims.get(arn) != Some(&Some(closed))
+                || retention.running()
+                || name.running()
+                || retention.remaining(cut)? > name.remaining(cut)?
             {
                 return Err(RegistryError::Unavailable);
             }
             executions.push(CapturedExecution {
                 record: entry.record.clone(),
                 view,
-                closed,
+                retention,
             });
         }
         Ok(SealedRegistry {
@@ -284,7 +298,6 @@ impl State {
             lambda: self.runtime.lambda_support(),
             callbacks: self.runtime.callback_scope().is_some(),
             clock,
-            retention: self.resources.limits.retention,
             machines: take(&mut self.resources.machines),
             executions,
             names: take(&mut self.executions.claims),
@@ -294,9 +307,11 @@ impl State {
     async fn dispatch(&mut self, envelope: Envelope) {
         let needs_entropy = matches!(
             envelope.command,
-            RegistryCommand::Create(..)
-                | RegistryCommand::Update(..)
-                | RegistryCommand::Start(_, None, _, _)
+            Operation::Business(
+                RegistryCommand::Create(..)
+                    | RegistryCommand::Update(..)
+                    | RegistryCommand::Start(_, None, _, _)
+            )
         );
         self.io.pending = Some(envelope);
         self.io.ready.clear();
@@ -317,17 +332,37 @@ impl State {
         };
         if let Some(envelope) = self.io.pending.take() {
             self.maintain(Instant::now());
-            let result = prepared
-                .and_then(|()| {
-                    envelope.command.check(
+            let Envelope {
+                command,
+                reply: observer,
+                permit,
+            } = envelope;
+            let result = prepared.and_then(|()| match command {
+                Operation::Business(command) => {
+                    command.check(
                         &self.resources.scope,
                         self.resources.states,
                         self.runtime.callback_scope().is_some(),
-                    )
-                })
-                .and_then(|()| self.command(&envelope.command));
+                    )?;
+                    self.command(&command)
+                }
+                Operation::Restore(prepared) => {
+                    if !self.resources.machines.is_empty()
+                        || !self.executions.records.is_empty()
+                        || !self.executions.claims.is_empty()
+                        || self.runtime.owned_executions() != 0
+                    {
+                        return Err(RegistryError::Unavailable);
+                    }
+                    let graph = prepared.install(&self.children.registry)?;
+                    self.resources.machines = graph.machines;
+                    self.executions.records = graph.records;
+                    self.executions.claims = graph.names;
+                    Ok(RegistryResult::Restored)
+                }
+            });
             self.maintain(Instant::now());
-            reply(envelope, result);
+            let _sent = observer.send(Reply { result, permit });
         }
     }
     fn close_child_intake(&mut self) {
@@ -605,7 +640,7 @@ impl State {
         let view = handle.snapshot();
         let record = Arc::new(ExecutionRecord {
             lineage,
-            deadline: absolute_deadline,
+            deadline: Some(absolute_deadline),
             identity: ExecutionIdentity {
                 arn: arn.clone(),
                 machine: machine.identity,
@@ -617,12 +652,14 @@ impl State {
             handle,
             _permit: permit,
         });
-        self.executions.claims.insert(arn.as_str().into(), None);
+        self.executions
+            .claims
+            .insert(arn.as_str().into(), Retention::Running);
         self.executions.records.insert(
             arn.as_str().into(),
             Entry {
                 record: record.clone(),
-                closed: None,
+                retention: Retention::Running,
             },
         );
         let snapshot = ExecutionSnapshot { record, view };
@@ -639,21 +676,26 @@ impl State {
             owned_executions: self.runtime.owned_executions(),
         });
         for (arn, entry) in &mut self.executions.records {
-            if entry.closed.is_none() && entry.record.handle.snapshot().outcome().is_some() {
-                entry.closed = Some(now);
-                if let Some(closed) = self.executions.claims.get_mut(arn) {
-                    *closed = Some(now);
+            if entry.retention.running() && entry.record.handle.snapshot().outcome().is_some() {
+                entry.retention = Retention::ClosedAt {
+                    at: now,
+                    ttl: self.resources.limits.retention,
+                };
+                if let Some(retention) = self.executions.claims.get_mut(arn) {
+                    *retention = Retention::ClosedAt {
+                        at: now,
+                        ttl: NAME_RETENTION,
+                    };
                 }
             }
         }
         self.executions.records.retain(|_, entry| {
-            entry.closed.is_none_or(|closed| {
-                now.saturating_duration_since(closed) < self.resources.limits.retention
-            }) || entry.record.handle.snapshot().cleanup() != CleanupState::Clean
+            !entry.retention.expired(now)
+                || entry.record.handle.snapshot().cleanup() != CleanupState::Clean
         });
         let records = &self.executions.records;
-        self.executions.claims.retain(|arn, closed| {
-            closed.is_none_or(|closed| now.saturating_duration_since(closed) < NAME_RETENTION)
+        self.executions.claims.retain(|arn, retention| {
+            !retention.expired(now)
                 || records.get(arn).is_some_and(|entry| {
                     entry.record.handle.snapshot().cleanup() != CleanupState::Clean
                 })
@@ -754,6 +796,7 @@ mod clock_tests {
             StateSupport::Sequential,
             runtime.open_limit(),
             None,
+            runtime.snapshot_restorer(),
         );
         Owner::new(
             TenantScope::default(),
@@ -945,12 +988,12 @@ mod clock_tests {
         let capacity = Arc::new(Semaphore::new(1));
         let (reply, mut observed) = tokio::sync::oneshot::channel();
         let envelope = Envelope {
-            command: RegistryCommand::Create(
+            command: Operation::Business(RegistryCommand::Create(
                 "Machine".parse().unwrap(),
                 definition(),
                 "arn:aws:iam::000000000000:role/Worker".parse().unwrap(),
                 Tags::default(),
-            ),
+            )),
             reply,
             permit: capacity.clone().try_acquire_owned().unwrap(),
         };

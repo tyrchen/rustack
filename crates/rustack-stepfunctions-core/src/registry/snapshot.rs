@@ -1,6 +1,6 @@
 //! Data-only export of one immutable post-cleanup registry cut.
 
-use std::{collections::BTreeMap, fmt, str, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt, str, sync::Arc};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,15 +9,21 @@ use tokio::time::Instant;
 use super::{
     DefinitionRevision, MachineSnapshot, MachineStatus, RegistryError, StateSupport,
     domain::redacted,
+    retention::Retention,
     types::{ExecutionRecord, MachineIdentity},
 };
 use crate::{
     ClockSample, ExecutionFailure, ExecutionHistory, ExecutionOutcome, ExecutionView, TenantScope,
 };
 
+mod decode;
+mod restore;
+
+pub(super) use restore::Admission as RestoreAdmission;
+pub use restore::PreparedSnapshot;
+
 const METADATA_BYTES: usize = 4096;
 const NAME_BYTES: usize = 512;
-const NAME_RETENTION: Duration = Duration::from_hours(2160);
 
 /// Validated conservative source-copy budget for one registry snapshot export.
 ///
@@ -51,12 +57,12 @@ impl Default for SnapshotLimits {
     }
 }
 
-/// Versioned durable rows exported only from a successfully sealed registry.
+/// Versioned durable document for sealed export and bounded startup decoding.
 ///
-/// This type deliberately exposes serialization, not live handles or an import
-/// capability. Its data carries intentional definition/input/output/history
-/// payloads; Debug is redacted. Restore must validate the entire schema/profile
-/// and stage charged domain ownership before publishing any imported state.
+/// Deserialization does not grant domain validity: use `Registry::prepare_snapshot`
+/// before committing it. Decode with a bounded redacting adapter. Intentional
+/// definition/input/output/history payloads are available only through serialization;
+/// Debug is redacted and no live handles or credentials are stored.
 ///
 /// ```no_run
 /// # fn export(registry:&rustack_stepfunctions_core::Registry)->Result<(),Box<dyn std::error::Error>> {
@@ -64,8 +70,8 @@ impl Default for SnapshotLimits {
 /// let bytes=serde_json::to_vec(&snapshot)?;
 /// # Ok(()) }
 /// ```
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RegistrySnapshot {
     schema_version: u32,
@@ -74,17 +80,23 @@ pub struct RegistrySnapshot {
     state_support: ProfileStates,
     lambda_support: bool,
     callback_support: bool,
+    #[serde(deserialize_with = "decode::time")]
     captured_at: DateTime<Utc>,
+    #[serde(deserialize_with = "decode::rows::<_, _, 4096>")]
     resources: Vec<ResourceRow>,
+    #[serde(deserialize_with = "decode::rows::<_, _, 4096>")]
     revisions: Vec<RevisionRow>,
+    #[serde(deserialize_with = "decode::rows::<_, _, 4096>")]
     machines: Vec<MachineRow>,
+    #[serde(deserialize_with = "decode::rows::<_, _, 100000>")]
     executions: Vec<ExecutionRow>,
+    #[serde(deserialize_with = "decode::rows::<_, _, 1000000>")]
     names: Vec<NameRow>,
 }
 redacted!(RegistrySnapshot);
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 enum ProfileStates {
     Sequential,
     Structured,
@@ -97,8 +109,8 @@ impl From<StateSupport> for ProfileStates {
         }
     }
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 enum Availability {
     Active,
     Deleting,
@@ -114,101 +126,148 @@ impl From<MachineStatus> for Availability {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HistoryRow {
+    #[serde(deserialize_with = "decode::time")]
     timestamp: DateTime<Utc>,
+    #[serde(deserialize_with = "decode::text::<_, 2097152>")]
     event_json: String,
 }
 redacted!(HistoryRow);
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ScopeRow {
+    #[serde(deserialize_with = "decode::text::<_, 16>")]
     partition: String,
+    #[serde(deserialize_with = "decode::text::<_, 64>")]
     region: String,
+    #[serde(deserialize_with = "decode::text::<_, 12>")]
     account: String,
 }
 redacted!(ScopeRow);
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ResourceRow {
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     resource_id: String,
+    #[serde(deserialize_with = "decode::text::<_, 256>")]
     arn: String,
+    #[serde(deserialize_with = "decode::time")]
     created_at: DateTime<Utc>,
 }
 redacted!(ResourceRow);
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RevisionRow {
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     revision_id: String,
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     resource_id: String,
+    #[serde(deserialize_with = "decode::text::<_, 1048576>")]
     definition: String,
     source_hash: [u8; 32],
+    #[serde(deserialize_with = "decode::text::<_, 2048>")]
     role_arn: String,
+    #[serde(deserialize_with = "decode::time")]
     published_at: DateTime<Utc>,
 }
 redacted!(RevisionRow);
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MachineRow {
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     resource_id: String,
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     revision_id: String,
     status: Availability,
+    #[serde(deserialize_with = "decode::time")]
     updated_at: DateTime<Utc>,
+    #[serde(deserialize_with = "decode::tags")]
     tags: BTreeMap<String, String>,
 }
 redacted!(MachineRow);
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ExecutionRow {
+    #[serde(deserialize_with = "decode::text::<_, 256>")]
     arn: String,
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     resource_id: String,
+    #[serde(deserialize_with = "decode::text::<_, 36>")]
     revision_id: String,
+    #[serde(deserialize_with = "decode::text::<_, 262144>")]
     input: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "decode::optional_text::<_, 256>")]
     trace_header: Option<String>,
+    #[serde(deserialize_with = "decode::time")]
     started_at: DateTime<Utc>,
-    stopped_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
+    #[serde(
+        default,
+        deserialize_with = "decode::optional_time",
+        skip_serializing_if = "Option::is_none"
+    )]
+    stopped_at: Option<DateTime<Utc>>,
+    #[serde(
+        default,
+        deserialize_with = "decode::optional_time",
+        skip_serializing_if = "Option::is_none"
+    )]
+    expires_at: Option<DateTime<Utc>>,
     outcome: Outcome,
+    #[serde(deserialize_with = "decode::rows::<_, _, 25000>")]
     history: Vec<HistoryRow>,
 }
 redacted!(ExecutionRow);
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(
+    deny_unknown_fields,
     tag = "status",
     rename_all = "SCREAMING_SNAKE_CASE",
     rename_all_fields = "camelCase"
 )]
 enum Outcome {
+    Running {},
     Succeeded {
+        #[serde(deserialize_with = "decode::text::<_, 262144>")]
         output: String,
     },
     Failed {
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, deserialize_with = "decode::optional_text::<_, 256>")]
         error: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, deserialize_with = "decode::optional_text::<_, 32768>")]
         cause: Option<String>,
     },
-    TimedOut,
+    TimedOut {},
     Aborted {
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, deserialize_with = "decode::optional_text::<_, 256>")]
         error: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, deserialize_with = "decode::optional_text::<_, 32768>")]
         cause: Option<String>,
     },
 }
 redacted!(Outcome);
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NameRow {
+    #[serde(deserialize_with = "decode::text::<_, 256>")]
     arn: String,
-    expires_at: DateTime<Utc>,
+    #[serde(
+        default,
+        deserialize_with = "decode::optional_time",
+        skip_serializing_if = "Option::is_none"
+    )]
+    expires_at: Option<DateTime<Utc>>,
 }
 redacted!(NameRow);
 
 pub(super) struct CapturedExecution {
     pub(super) record: Arc<ExecutionRecord>,
     pub(super) view: Arc<ExecutionView>,
-    pub(super) closed: Instant,
+    pub(super) retention: Retention,
 }
 redacted!(CapturedExecution);
 /// In-memory ownership only; serialized DTOs never contain these handles.
@@ -218,10 +277,9 @@ pub(super) struct SealedRegistry {
     pub(super) lambda: bool,
     pub(super) callbacks: bool,
     pub(super) clock: ClockSample,
-    pub(super) retention: Duration,
     pub(super) machines: BTreeMap<String, MachineSnapshot>,
     pub(super) executions: Vec<CapturedExecution>,
-    pub(super) names: BTreeMap<String, Option<Instant>>,
+    pub(super) names: BTreeMap<String, Retention>,
 }
 redacted!(SealedRegistry);
 
@@ -354,7 +412,7 @@ fn outcome(view: &ExecutionView) -> Result<Outcome, RegistryError> {
                 error: failure.error().map(str::to_owned),
                 cause: failure.cause().map(str::to_owned),
             },
-            ExecutionOutcome::TimedOut => Outcome::TimedOut,
+            ExecutionOutcome::TimedOut => Outcome::TimedOut {},
             ExecutionOutcome::Aborted(failure) => Outcome::Aborted {
                 error: failure.details().error().map(str::to_owned),
                 cause: failure.details().cause().map(str::to_owned),
@@ -377,14 +435,10 @@ fn history(source: &ExecutionHistory) -> Result<Vec<HistoryRow>, RegistryError> 
     Ok(history)
 }
 impl SealedRegistry {
-    fn expiry(&self, closed: Instant, ttl: Duration) -> Result<DateTime<Utc>, RegistryError> {
-        let elapsed = self
-            .clock
-            .monotonic
-            .checked_duration_since(closed.into_std())
-            .ok_or(RegistryError::Validation)?;
-        let remaining = TimeDelta::from_std(ttl.saturating_sub(elapsed))
-            .map_err(|_| RegistryError::Validation)?;
+    fn expiry(&self, retention: Retention) -> Result<DateTime<Utc>, RegistryError> {
+        let remaining =
+            TimeDelta::from_std(retention.remaining(Instant::from_std(self.clock.monotonic))?)
+                .map_err(|_| RegistryError::Validation)?;
         self.clock
             .wall
             .checked_add_signed(remaining)
@@ -438,11 +492,13 @@ impl SealedRegistry {
                     input: text(record.input.original_bytes())?,
                     trace_header: record.identity.trace.clone(),
                     started_at: record.identity.started,
-                    stopped_at: execution
-                        .view
-                        .stop_date()
-                        .ok_or(RegistryError::Unavailable)?,
-                    expires_at: self.expiry(execution.closed, self.retention)?,
+                    stopped_at: Some(
+                        execution
+                            .view
+                            .stop_date()
+                            .ok_or(RegistryError::Unavailable)?,
+                    ),
+                    expires_at: Some(self.expiry(execution.retention)?),
                     outcome: outcome(&execution.view)?,
                     history: history(execution.view.history())?,
                 })
@@ -454,8 +510,7 @@ impl SealedRegistry {
             .map(|(arn, closed)| {
                 Ok(NameRow {
                     arn: arn.clone(),
-                    expires_at: self
-                        .expiry(closed.ok_or(RegistryError::Unavailable)?, NAME_RETENTION)?,
+                    expires_at: Some(self.expiry(*closed)?),
                 })
             })
             .collect::<Result<_, RegistryError>>()?;

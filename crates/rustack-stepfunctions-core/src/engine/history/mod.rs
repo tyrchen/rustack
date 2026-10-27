@@ -25,6 +25,27 @@ const EVENT_BYTES: usize = 2 * 1024 * 1024;
 const PAGE_BYTES: usize = 4 * 1024 * 1024;
 const PAGE_EVENTS: usize = 64;
 
+pub(crate) fn snapshot_charge(
+    events: impl Iterator<Item = usize>,
+    terminal: bool,
+) -> Result<usize, ExecutionError> {
+    let mut events = events.peekable();
+    let mut bytes = TERMINAL_RESERVE;
+    while let Some(encoded) = events.next() {
+        let charge = encoded
+            .checked_add(size_of::<StoredEvent>())
+            .and_then(|value| value.checked_add(FIXED_OVERHEAD))
+            .ok_or(ExecutionError::Capacity)?;
+        let charge = if terminal && events.peek().is_none() {
+            charge.saturating_sub(TERMINAL_RESERVE)
+        } else {
+            charge
+        };
+        bytes = bytes.checked_add(charge).ok_or(ExecutionError::Capacity)?;
+    }
+    Ok(bytes)
+}
+
 /// Local per-execution history limits with one reserved termination event.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]

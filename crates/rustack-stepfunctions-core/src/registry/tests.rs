@@ -24,20 +24,20 @@ mod nested;
 #[path = "tests/snapshot.rs"]
 mod snapshot;
 
-fn deadline() -> Instant {
+pub(super) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
-fn role() -> RoleArn {
+pub(super) fn role() -> RoleArn {
     "arn:aws:iam::000000000000:role/service-role/Worker"
         .parse()
         .unwrap()
 }
-fn arn() -> StateMachineArn {
+pub(super) fn arn() -> StateMachineArn {
     "arn:aws:states:us-east-1:000000000000:stateMachine:Machine"
         .parse()
         .unwrap()
 }
-fn definition(value: i64, wait: bool) -> PreparedDefinition {
+pub(super) fn definition(value: i64, wait: bool) -> PreparedDefinition {
     let states = if wait {
         json!({"StartAt":"Wait","States":{"Wait":{"Type":"Wait","Seconds":60,"Next":"Done"},"Done":{"Type":"Pass","Result":value,"End":true}}})
     } else {
@@ -70,7 +70,10 @@ pub(super) fn registry(
     )
     .unwrap()
 }
-async fn result(reg: &Registry, command: RegistryCommand) -> Result<RegistryResult, RegistryError> {
+pub(super) async fn result(
+    reg: &Registry,
+    command: RegistryCommand,
+) -> Result<RegistryResult, RegistryError> {
     reg.submit(command)?.wait(deadline()).await
 }
 pub(super) async fn machine(reg: &Registry, value: i64, wait: bool) -> MachineSnapshot {
@@ -90,7 +93,7 @@ pub(super) async fn machine(reg: &Registry, value: i64, wait: bool) -> MachineSn
         _ => panic!("expected machine"),
     }
 }
-async fn start(
+pub(super) async fn start(
     reg: &Registry,
     name: &str,
     input: &str,
@@ -110,7 +113,7 @@ async fn start(
         _ => Err(RegistryError::Unavailable),
     }
 }
-async fn observe(mut snapshot: ExecutionSnapshot) -> ExecutionSnapshot {
+pub(super) async fn observe(mut snapshot: ExecutionSnapshot) -> ExecutionSnapshot {
     snapshot.view = snapshot.handle().wait(deadline()).await.unwrap();
     snapshot
 }

@@ -16,8 +16,8 @@ use rustack_lambda_model::input::{
 };
 use rustack_stepfunctions_core::{
     ChildPattern, ChildStartParameters, ExecutionSnapshot, PreparedDefinition, Registry,
-    RegistryCommand, RegistryError, RegistryLimits, RegistryResult, SnapshotLimits,
-    StateMachineArn, StateSupport, Tags,
+    RegistryCommand, RegistryError, RegistryLimits, RegistryResult, RegistrySupervisor,
+    SnapshotLimits, StateMachineArn, StateSupport, Tags,
 };
 use rustack_stepfunctions_http::{RequestScope, StepFunctionsHttpConfig, StepFunctionsHttpService};
 use tokio::{
@@ -1148,3 +1148,139 @@ async fn native_e2e_should_kill_and_reap_timed_out_owned_probe_before_returning_
 mod callback;
 
 mod registered_callback;
+
+async fn run_restored_native_case(
+    source: &Registry,
+    source_owner: &mut RegistrySupervisor,
+    target: &Registry,
+    marker: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let prepared = PreparedDefinition::new(
+        AslCompiler::new(TenantScope::default(), TaskSupport::Lambda)
+            .compile(&serde_json::to_vec(&workflow(true))?)?
+            .machine()
+            .clone(),
+    );
+    let mut create = source.submit(RegistryCommand::Create(
+        "NativeWorkflow".parse()?,
+        prepared,
+        "arn:aws:iam::000000000000:role/Workflow".parse()?,
+        Tags::default(),
+    ))?;
+    let RegistryResult::Machine(machine) = create.wait(deadline()).await? else {
+        return Err("missing source machine".into());
+    };
+    let mut receipt = source.submit(RegistryCommand::Start(
+        machine.arn().clone(),
+        Some("before".parse()?),
+        Payload::parse(br#"{"n":21}"#)?,
+        None,
+    ))?;
+    let RegistryResult::Execution(original) = receipt.wait(deadline()).await? else {
+        return Err("missing original execution".into());
+    };
+    let original_view = original.handle().wait(deadline()).await?;
+    source_owner.shutdown(deadline()).await?;
+    let before = fs::read(marker).await?;
+    let document = source.export_snapshot(SnapshotLimits::default())?;
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&document, &mut bytes)?;
+    let decoded = ciborium::from_reader(bytes.as_slice())?;
+    let prepared = target.prepare_snapshot(decoded, SnapshotLimits::default())?;
+    let mut receipt = target.restore_snapshot(prepared)?;
+    if !matches!(receipt.wait(deadline()).await?, RegistryResult::Restored) {
+        return Err("missing restore acknowledgement".into());
+    }
+    let mut read = target.submit(RegistryCommand::Execution(original.arn().clone()))?;
+    let RegistryResult::Execution(saved) = read.wait(deadline()).await? else {
+        return Err("missing restored execution".into());
+    };
+    let unchanged = fs::read(marker).await?;
+    if before != unchanged
+        || output(saved.view().outcome().ok_or("missing old outcome")?).pointer("/Payload/computed")
+            != Some(&json!(42))
+        || serde_json::to_value(original_view.history().page(1, 1000, true)?.events())?
+            != serde_json::to_value(saved.view().history().page(1, 1000, true)?.events())?
+    {
+        return Err("restore replayed work or changed output/history".into());
+    }
+    let mut receipt = target.submit(RegistryCommand::Start(
+        machine.arn().clone(),
+        Some("after".parse()?),
+        Payload::parse(br#"{"n":22}"#)?,
+        None,
+    ))?;
+    let RegistryResult::Execution(next) = receipt.wait(deadline()).await? else {
+        return Err("missing new execution".into());
+    };
+    let completed = next.handle().wait(deadline()).await?;
+    if output(completed.outcome().ok_or("missing new outcome")?).pointer("/Payload/computed")
+        != Some(&json!(44))
+        || before == fs::read(marker).await?
+    {
+        return Err("restored machine did not execute a new real Lambda call".into());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the actual host bootstrap; run make test-stepfunctions-bridge-native"]
+async fn native_e2e_should_restore_without_replay_and_execute_new_lambda_requests() {
+    let mut fixture = NativeFixture::new(&[("WORKFLOW_MODE", "1")], false).await;
+    let (first_port, mut first_bridge) = StepFunctionsLambdaBridge::new(
+        fixture.provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let (second_port, mut second_bridge) = StepFunctionsLambdaBridge::new(
+        fixture.provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let (source, mut source_owner) = Registry::new(
+        TenantScope::default(),
+        RegistryLimits::default(),
+        executions(first_port),
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let (target, mut target_owner) = Registry::new(
+        TenantScope::default(),
+        RegistryLimits::default(),
+        executions(second_port),
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let marker = fixture
+        .directory
+        .as_ref()
+        .unwrap()
+        .path()
+        .join("invocation.json");
+    let result = run_restored_native_case(&source, &mut source_owner, &target, &marker).await;
+    // Join both independent registry/bridge owners even when any assertion path fails.
+    let absolute = Instant::now() + Duration::from_secs(15);
+    let first = source_owner.shutdown(absolute).await;
+    let second = target_owner.shutdown(absolute).await;
+    let first_calls = first_bridge.shutdown(absolute).await;
+    let second_calls = second_bridge.shutdown(absolute).await;
+    if first.is_err() || second.is_err() || first_calls.is_err() || second_calls.is_err() {
+        if let Some(directory) = fixture.directory.take() {
+            let _retained = directory.keep();
+        }
+    }
+    fixture.cleanup().await;
+    assert!(first.is_ok(), "source cleanup: {first:?}");
+    assert!(second.is_ok(), "target cleanup: {second:?}");
+    assert!(
+        first_calls.is_ok(),
+        "source bridge cleanup: {first_calls:?}"
+    );
+    assert!(
+        second_calls.is_ok(),
+        "target bridge cleanup: {second_calls:?}"
+    );
+    assert!(result.is_ok(), "restore case: {result:?}");
+}

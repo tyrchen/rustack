@@ -162,7 +162,9 @@ impl CallbackAttempt {
         let result = Self {
             parent: parent.clone(),
             call,
-            deadline: deadline.min(Instant::from_std(parent.record.deadline)),
+            deadline: deadline.min(Instant::from_std(
+                parent.record.deadline.ok_or(CallbackError::TaskTimedOut)?,
+            )),
             heartbeat,
         };
         result.live(Instant::now())?;

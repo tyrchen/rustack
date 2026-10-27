@@ -14,6 +14,7 @@ use tokio::{
 
 use crate::{
     CompiledMachine, ExecutionLimits, ExecutionSupervisor, Payload, StateSupport, TenantScope,
+    engine::HistoryRestorer,
 };
 
 mod actor;
@@ -21,6 +22,7 @@ mod callback;
 mod child;
 mod domain;
 mod error;
+mod retention;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -39,7 +41,7 @@ pub use child::{
 };
 pub use domain::{ExecutionArn, ExecutionName, RoleArn, StateMachineArn, StateMachineName, Tags};
 pub use error::RegistryError;
-pub use snapshot::{RegistrySnapshot, SnapshotLimits};
+pub use snapshot::{PreparedSnapshot, RegistrySnapshot, SnapshotLimits};
 pub use types::{
     DefinitionRevision, ExecutionSnapshot, MachineSnapshot, MachineStatus, PreparedDefinition,
     RegistryCapacities, RegistryLimits, StopReason,
@@ -84,6 +86,8 @@ impl fmt::Debug for RegistryCommand {
 /// One immutable command result, captured by the registry owner.
 #[non_exhaustive]
 pub enum RegistryResult {
+    /// A fully prepared startup replacement committed atomically.
+    Restored,
     /// Current resource capture.
     Machine(MachineSnapshot),
     /// Current execution capture.
@@ -102,8 +106,17 @@ impl fmt::Debug for RegistryResult {
         f.write_str("RegistryResult(<redacted>)")
     }
 }
+enum Operation {
+    Business(RegistryCommand),
+    Restore(PreparedSnapshot),
+}
+impl fmt::Debug for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RegistryOperation(<redacted>)")
+    }
+}
 struct Envelope {
-    command: RegistryCommand,
+    command: Operation,
     reply: oneshot::Sender<Reply>,
     permit: OwnedSemaphorePermit,
 }
@@ -117,6 +130,7 @@ struct Profile {
     states: StateSupport,
 }
 struct Shared {
+    restore: snapshot::RestoreAdmission,
     sealed: watch::Sender<Option<Arc<snapshot::SealedRegistry>>>,
     child_sender: mpsc::Sender<child::Request>,
     child_capacity: Arc<Semaphore>,
@@ -145,6 +159,7 @@ fn admission(
     support: StateSupport,
     child_limit: usize,
     callbacks: Option<CallbackRegistry>,
+    history: HistoryRestorer,
 ) -> Admission {
     let (sender, receiver) = mpsc::channel(limits.commands);
     let (child_sender, children) = mpsc::channel(child_limit);
@@ -155,6 +170,7 @@ fn admission(
     });
     let (sealed, _) = watch::channel(None);
     let shared = Arc::new(Shared {
+        restore: snapshot::RestoreAdmission::new(limits, history),
         sealed,
         child_sender,
         child_capacity: Arc::new(Semaphore::new(child_limit)),
@@ -281,6 +297,7 @@ impl Registry {
             support,
             runtime.open_limit(),
             callbacks,
+            runtime.snapshot_restorer(),
         );
         let closing = shared.closing.clone();
         let stop = closing.subscribe();
@@ -340,7 +357,7 @@ impl Registry {
     #[must_use]
     pub fn status(&self) -> RegistryStatus {
         let mut status = *self.shared.status.borrow();
-        status.ready &= !*self.shared.closing.borrow();
+        status.ready &= !*self.shared.closing.borrow() && !self.shared.restore.preparing();
         status
     }
     /// Wait for retained execution owners to settle through a grace cutoff.
@@ -442,6 +459,10 @@ impl Registry {
             self.shared.states,
             self.callback_support(),
         )?;
+        self.shared.restore.business()?;
+        self.submit_operation(Operation::Business(command))
+    }
+    fn submit_operation(&self, command: Operation) -> Result<RegistryReceipt, RegistryError> {
         if *self.shared.closing.borrow() {
             return Err(RegistryError::Unavailable);
         }

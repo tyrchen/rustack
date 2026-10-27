@@ -192,7 +192,7 @@ pub(super) struct ExecutionIdentity {
 redacted!(ExecutionIdentity);
 pub(super) struct ExecutionRecord {
     pub(super) lineage: Lineage,
-    pub(super) deadline: StdInstant,
+    pub(super) deadline: Option<StdInstant>,
     pub(super) identity: ExecutionIdentity,
     pub(super) input: Payload,
     pub(super) revision: Arc<DefinitionRevision>,

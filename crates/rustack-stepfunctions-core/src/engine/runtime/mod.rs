@@ -20,6 +20,7 @@ use crate::{
 mod actor;
 mod error;
 mod evaluate;
+mod restore;
 mod structured;
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ mod types;
 
 use actor::{Actor, OwnedCall, RunExit};
 pub use error::ExecutionError;
+pub(crate) use restore::HistoryRestorer;
 pub use types::{CleanupState, ExecutionHandle, ExecutionView, RuntimeLimits};
 
 use super::scheduler::TaskBytes;
@@ -105,6 +107,14 @@ pub struct ExecutionSupervisor {
     state: OwnerState,
 }
 impl ExecutionSupervisor {
+    pub(crate) fn snapshot_restorer(&self) -> HistoryRestorer {
+        HistoryRestorer {
+            lambda: self.shared.port.is_some(),
+            fresh: !self.state.started && self.state.accepting,
+            limits: self.shared.history.limits,
+            capacity: self.shared.history.capacity.clone(),
+        }
+    }
     pub(crate) fn lambda_support(&self) -> bool {
         self.shared.port.is_some()
     }

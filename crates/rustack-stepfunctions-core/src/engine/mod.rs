@@ -31,6 +31,7 @@ mod types;
 
 pub use callback::CallbackDispatch;
 pub use fanout::{FanoutBranch, FanoutFailure, FanoutPlan, PropagatedFailure};
+pub(crate) use runtime::HistoryRestorer;
 pub use scheduler::{
     FrameCallId, FrameCapacity, FrameError, FrameId, FrameLease, FrameLimits, FrameParent,
     FrameScheduler, FrameTransition, FrameUpdate,
