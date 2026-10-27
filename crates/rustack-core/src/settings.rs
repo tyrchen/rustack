@@ -57,6 +57,19 @@ const KEYS: &[&str] = &[
     "S3_DOMAIN",
     "S3_MAX_MEMORY_OBJECT_SIZE",
     "LAMBDA_DOCKER_ENABLED",
+    "LAMBDA_DOCKER_SOCKET",
+    "LAMBDA_DOCKER_RELAY_IMAGE",
+    "LAMBDA_DOCKER_NETWORK",
+    "LAMBDA_DOCKER_PULL_POLICY",
+    "LAMBDA_DOCKER_REGISTRIES",
+    "LAMBDA_DOCKER_REGISTRY_AUTH_FILE",
+    "LAMBDA_DOCKER_GATEWAY_ENDPOINT",
+    "LAMBDA_DOCKER_UID",
+    "LAMBDA_DOCKER_GID",
+    "LAMBDA_DOCKER_CPU",
+    "LAMBDA_DOCKER_LOG_RING_BYTES",
+    "LAMBDA_DOCKER_CROSS_ARCHITECTURE",
+    "LAMBDA_DOCKER_ZIP_IMAGE",
     "LAMBDA_EXECUTOR",
     "LAMBDA_MAX_WARM_INSTANCES",
     "LAMBDA_IDLE_TIMEOUT_SECS",
@@ -102,6 +115,25 @@ static SETTINGS: OnceLock<ValidatedSettings> = OnceLock::new();
 #[non_exhaustive]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeBudgets {
+    /// Maximum busy, idle and quarantined Docker environments.
+    pub lambda_docker_environments: usize,
+    /// Aggregate Docker environment and relay memory capacity.
+    pub lambda_docker_memory_bytes: u64,
+    /// Absolute Docker pull queue and progress deadline.
+    pub lambda_docker_pull_seconds: u64,
+    /// Accepted queued and running Docker deployments.
+    pub lambda_docker_deployment_jobs: usize,
+    /// Absolute Docker deployment preparation deadline.
+    pub lambda_docker_deployment_seconds: u64,
+    /// Retained preparing, live and quarantined private image pins.
+    pub lambda_docker_image_pins: usize,
+    /// Independent Docker management and control IO deadline.
+    pub lambda_docker_io_seconds: u64,
+    /// Docker startup and probe observation deadline.
+    pub lambda_docker_start_seconds: u64,
+    /// Independent Docker cleanup observation deadline.
+    pub lambda_docker_cleanup_seconds: u64,
+
     /// Accepted workflow API requests, including ready replies.
     pub workflow_api_accepted: usize,
     /// Retained workflow API preparation/response CPU workers.
@@ -191,6 +223,16 @@ pub struct RuntimeBudgets {
 impl Default for RuntimeBudgets {
     fn default() -> Self {
         Self {
+            lambda_docker_environments: 32,
+            lambda_docker_memory_bytes: 8_589_934_592,
+            lambda_docker_pull_seconds: 300,
+            lambda_docker_deployment_jobs: 8,
+            lambda_docker_deployment_seconds: 300,
+            lambda_docker_image_pins: 1024,
+            lambda_docker_io_seconds: 5,
+            lambda_docker_start_seconds: 15,
+            lambda_docker_cleanup_seconds: 10,
+
             workflow_api_accepted: 32,
             workflow_api_workers: 8,
             workflow_pagination_bytes: 67_108_864,
@@ -243,6 +285,7 @@ impl RuntimeBudgets {
     /// # Errors
     /// Rejects zero, excessive, or inconsistent resource deadlines and sizes.
     pub fn validate(&self) -> Result<(), SettingsError> {
+        self.validate_docker()?;
         self.validate_workflow_api()?;
         self.validate_workflow_execution()?;
         self.validate_workflow_frames()?;
@@ -308,6 +351,78 @@ impl RuntimeBudgets {
             return Err(invalid(
                 "budgets.bodyIdleSeconds",
                 "idle deadline must not exceed total deadline",
+            ));
+        }
+        Ok(())
+    }
+    fn validate_docker(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            (
+                "lambdaDockerEnvironments",
+                self.lambda_docker_environments as u64,
+                1,
+                32,
+            ),
+            (
+                "lambdaDockerMemoryBytes",
+                self.lambda_docker_memory_bytes,
+                268_435_456,
+                1_099_511_627_776,
+            ),
+            (
+                "lambdaDockerPullSeconds",
+                self.lambda_docker_pull_seconds,
+                1,
+                600,
+            ),
+            (
+                "lambdaDockerDeploymentJobs",
+                self.lambda_docker_deployment_jobs as u64,
+                1,
+                32,
+            ),
+            (
+                "lambdaDockerDeploymentSeconds",
+                self.lambda_docker_deployment_seconds,
+                1,
+                3600,
+            ),
+            (
+                "lambdaDockerImagePins",
+                self.lambda_docker_image_pins as u64,
+                1,
+                8192,
+            ),
+            (
+                "lambdaDockerIoSeconds",
+                self.lambda_docker_io_seconds,
+                1,
+                60,
+            ),
+            (
+                "lambdaDockerStartSeconds",
+                self.lambda_docker_start_seconds,
+                1,
+                60,
+            ),
+            (
+                "lambdaDockerCleanupSeconds",
+                self.lambda_docker_cleanup_seconds,
+                1,
+                60,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(
+                    &format!("budgets.{key}"),
+                    "outside supported range",
+                ));
+            }
+        }
+        if self.lambda_docker_deployment_jobs > self.lambda_docker_image_pins {
+            return Err(invalid(
+                "budgets.lambdaDockerDeploymentJobs",
+                "must not exceed image pins",
             ));
         }
         Ok(())
@@ -755,7 +870,12 @@ fn validate_value(key: &str, value: &mut String) -> Result<(), SettingsError> {
     if value.is_empty() && key != "SERVICES" {
         return Err(invalid(key, "must not be empty"));
     }
-    if value.len() > 4096 || value.chars().any(char::is_control) {
+    let maximum = if key == "LAMBDA_DOCKER_REGISTRIES" {
+        8127
+    } else {
+        4096
+    };
+    if value.len() > maximum || value.chars().any(char::is_control) {
         return Err(invalid(
             key,
             "exceeds byte limit or contains control characters",
@@ -767,6 +887,7 @@ fn validate_value(key: &str, value: &mut String) -> Result<(), SettingsError> {
             "PERSISTENCE"
                 | "S3_VIRTUAL_HOSTING"
                 | "LAMBDA_DOCKER_ENABLED"
+                | "LAMBDA_DOCKER_CROSS_ARCHITECTURE"
                 | "CLOUDFRONT_DETERMINISTIC_IDS"
                 | "CLOUDFRONT_FAIL_ON_FUNCTION"
                 | "CLOUDFRONT_FORWARD_USER_METADATA"
@@ -1148,5 +1269,76 @@ mod tests {
         )?;
         assert!(missing.validate_credentials(&["sqs".to_owned()]).is_err());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod docker_tests {
+    use std::collections::BTreeMap;
+
+    use super::{RuntimeBudgets, ValidatedSettings};
+    #[test]
+    fn test_should_accept_docker_yaml_keys_budgets_and_process_precedence() {
+        let yaml = "environment:\n  LAMBDA_DOCKER_RELAY_IMAGE: local:v1\n  LAMBDA_DOCKER_NETWORK: \
+                    none\n  LAMBDA_DOCKER_PULL_POLICY: never\n  LAMBDA_DOCKER_CROSS_ARCHITECTURE: \
+                    yes\nbudgets:\n  lambdaDockerPullSeconds: 1\n  lambdaDockerImagePins: 32\n  \
+                    lambdaDockerDeploymentJobs: 32\n";
+        let settings = ValidatedSettings::parse(
+            yaml,
+            &BTreeMap::from([("LAMBDA_DOCKER_RELAY_IMAGE".into(), "override:v2".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.get("LAMBDA_DOCKER_RELAY_IMAGE"),
+            Some("override:v2")
+        );
+        assert_eq!(
+            settings.get("LAMBDA_DOCKER_CROSS_ARCHITECTURE"),
+            Some("true")
+        );
+        assert_eq!(settings.budgets().lambda_docker_pull_seconds, 1);
+        assert_eq!(RuntimeBudgets::default().lambda_docker_pull_seconds, 300);
+    }
+    #[test]
+    fn test_should_reject_every_docker_budget_outside_its_supported_range() {
+        for (key, min, max) in [
+            ("lambdaDockerEnvironments", 1_u64, 32_u64),
+            ("lambdaDockerMemoryBytes", 268_435_456, 1_099_511_627_776),
+            ("lambdaDockerPullSeconds", 1, 600),
+            ("lambdaDockerDeploymentJobs", 1, 32),
+            ("lambdaDockerDeploymentSeconds", 1, 3600),
+            ("lambdaDockerImagePins", 1, 8192),
+            ("lambdaDockerIoSeconds", 1, 60),
+            ("lambdaDockerStartSeconds", 1, 60),
+            ("lambdaDockerCleanupSeconds", 1, 60),
+        ] {
+            for value in [min - 1, max + 1] {
+                let raw = format!("budgets:\n  {key}: {value}\n");
+                assert!(
+                    ValidatedSettings::parse(&raw, &BTreeMap::new()).is_err(),
+                    "{key}"
+                );
+            }
+            for value in [min, max] {
+                let raw = format!("budgets:\n  lambdaDockerDeploymentJobs: 1\n  {key}: {value}\n");
+                // Avoid duplicate keys when the row itself is deployment jobs.
+                let raw = if key == "lambdaDockerDeploymentJobs" {
+                    format!("budgets:\n  {key}: {value}\n")
+                } else {
+                    raw
+                };
+                assert!(
+                    ValidatedSettings::parse(&raw, &BTreeMap::new()).is_ok(),
+                    "{key}"
+                );
+            }
+        }
+        assert!(
+            ValidatedSettings::parse(
+                "budgets:\n  lambdaDockerImagePins: 1\n  lambdaDockerDeploymentJobs: 2",
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
     }
 }

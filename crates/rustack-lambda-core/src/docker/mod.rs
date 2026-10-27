@@ -4,6 +4,7 @@
 //! retain preallocated identities and reservations through reconciliation.
 
 mod binding;
+mod config;
 mod connection;
 mod environment;
 mod executor;
@@ -35,6 +36,9 @@ use std::{
 /// Generated Docker model contracts, without the upstream network client.
 pub use bollard_stubs::models;
 use bytes::Bytes;
+pub use config::{
+    DockerGatewayEndpoint, DockerRuntimeSettings, RegistryAuthError, RegistryAuthFile,
+};
 use connection::exchange;
 pub use environment::{
     EnvironmentCapacity, EnvironmentConfig, EnvironmentError, EnvironmentHandle,

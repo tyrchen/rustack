@@ -3752,6 +3752,7 @@ dependencies = [
  "nix",
  "parking_lot",
  "percent-encoding",
+ "proptest",
  "rstest",
  "rustack-auth",
  "rustack-core",
@@ -3769,8 +3770,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "typed-builder",
+ "url",
  "uuid",
  "winnow",
+ "yaml-rust2",
  "zip",
 ]
 

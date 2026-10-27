@@ -1141,6 +1141,13 @@ test-lambda-namespace-docker: lambda-runtime-image
 
 .PHONY: test-lambda-namespace test-lambda-namespace-docker
 
+# Pure operator settings, private YAML files and retained read-worker limits.
+test-lambda-docker-settings:
+	@cargo test --locked -p rustack-core --lib settings::docker_tests
+	@cargo test --locked -p rustack-lambda-core --lib docker::config
+
+.PHONY: test-lambda-docker-settings
+
 # Exact registry policy, retained pull streams and image-preparation integration.
 WORKFLOWS_PULL_IMAGE ?= public.ecr.aws/lambda/nodejs@sha256:92b7cccd985332238af80ac8da42d6965d418552e88955e315da4e3c0c76ca79
 

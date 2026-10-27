@@ -87,7 +87,7 @@ All budgets are validated once; limits below are local defaults and safe configu
 | lambdaDockerDeploymentSeconds |300|1..3,600; absolute queue plus preparation deadline |
 | lambdaDockerImagePins |1024|1..8,192; preparations, live revisions/captures and quarantined aliases |
 | lambdaDockerIoSeconds |5|1..60; independent bounded management/mutation and partial-control IO budget |
-| lambdaDockerPullSeconds / lambdaDockerStartSeconds |120 /15|1..600 /1..60 |
+| lambdaDockerStartSeconds |15|1..60 |
 | lambdaDockerCleanupSeconds |10|1..60; bounded by global shutdown remaining time |
 | workflowDrainSeconds |5|0..60; bounded by global shutdown remaining time |
 
@@ -470,3 +470,42 @@ Qualification must exercise real manifest/service/data-directory round trips, th
 ### Controlled pull library dependency
 
 [Runtime§2.14](./rustack-workflows-20-lambda-runtime-design.md#214-controlled-if-missing-pulls-and-retained-progress-transport) supplies validated registry/credential policy and retained ifMissing preparation. Main must load the bounded private YAML credential file, construct these types and select start_with_pull explicitly; default start never pulls. Only initial missing-image lookup triggers network work. The daemon performs registry networking; exact allowlist matching is not a guarantee about its mirrors/DNS/redirects. Close/join preparation and wire work during shutdown, and never delete source cache references as runtime cleanup. YAML loading, endpoint/readiness and final startup acceptance remain required consuming work.
+
+
+### 1.8 Validated Docker settings and private registry credential files
+
+D79 implements the operator configuration dependency of task1.4 without granting ordinary Docker readiness. Extend the existing settings key allowlist with the Docker keys in§1.1 and its typed RuntimeBudgets with the Docker fields in§1.2. Validate budgets before any file/daemon work: environments1..32, aggregate memory256MiB..1TiB, pull1..600s(default300), deployment jobs1..32(default8) and seconds1..3600(default300), image pins1..8192(default1024), IO1..60s(default5), start1..60s(default15), cleanup1..60s(default10). Deployment jobs must not exceed pin capacity. CPU remains an environment scalar, not a floating point budget. Delete the older contradictory120s pull default; D78's300s value is authoritative. Existing process-over-YAML precedence and disabled/Native/Squib semantics remain unchanged. Parsing these keys does not enable Docker selection.
+
+`DockerRuntimeSettings::from_lookup(lookup, budgets, idle_timeout)` is a side-effect-free validated library constructor for the future startup owner. Require explicit relay image and network selection; default only the local Unix socket, UID/GID1000, CPU1 and cross-architecture false. Validate relay/optional ZIP references with ImageReference and socket/network/policy/IO/idle/cleanup with the existing domain constructors. ZIP remains optional until Docker ZIP execution is implemented. CPU accepts decimal ASCII units with at most9 fractional digits and no signs/exponent/whitespace, computes checked exact integer nanocpus and enforces0.1..16. No float rounding or unlimited zero. Require cross-architecture exactly true/false (shared settings normalizes documented boolean aliases). A missing network never falls back to host/default bridge. Runtime settings expose validated immutable accessors and Debug redacts paths/references/endpoints/registries; these values are never snapshot state.
+
+`DockerGatewayEndpoint` validates≤2048bytes, absolute HTTP(S), explicit host, nonzero port, literal empty-or-root path, no userinfo/query/fragment/controls/whitespace or backslash normalization. It is an operator trust boundary; private/loopback hosts are legitimate local gateway choices. Parsing is not a reachability receipt or permission to derive the endpoint from request Host. Endpoint IO/SDK qualification remains the startup consumer. `RegistryAuthFile` validates an absolute UTF-8 path≤4096bytes with no parent components, NUL or controls; never expand tilde, interpolate environment or search ambient Docker/AWS files. Missing policy means never. Reject registry/auth-file settings with never, empty/over32/duplicate registries, unapproved credential hosts and ambiguous registry matching. ifMissing requires an exact approved-host list; credentials are optional for public sources.
+
+`DockerRuntimeSettings::load_pull_policy(deadline)` reads only its explicit auth file, then returns the existing validated ImagePullPolicy with the configured total pull budget. Never mode performs no filesystem read. Credential file loading uses a dedicated static four-worker semaphore. Queue+open/read/parse share one positive absolute deadline≤60s. The blocking worker retains its permit/file/input across observer timeout/drop, checks cancellation/deadline between local syscalls and parser events and cannot return late success. Regular local files are required; nonblocking/no-follow descriptor opens prevent FIFO/device hangs and symlink traversal. Do not perform synchronous IO on the async runtime. IO/worker/schema/unsafe-file/timeout errors are fixed classes, never paths/hosts/secret values or parser snippets. A read-only worker may finish after its observer disappears; it retains its bounded permit and drops all owned secret buffers before exiting, with no runtime readiness/publication effect.
+
+Open from the root descriptor and traverse each component with no-follow directory-relative opens; reject symlinks in ancestors or leaf, non-directory ancestors and replacement by untrusted users. Ancestors must belong to effective UID or root and not be group/world writable, except root-owned sticky temporary directories. Require leaf ownership by effective UID, exactly one hard link, regular file, no group/other/special/execute bits, and size1..65536bytes. Read at most65537bytes, require observed byte count to match initial size and recheck device/inode/uid/mode/link/size/mtime/ctime after reading. POSIX mode checks do not evaluate extended ACLs. As an explicit operator filesystem precondition, ACLs must grant no untrusted credential-file read/write or ancestor replacement; use a controlled local private directory. The loader does not claim to prove ACL confidentiality from mode0600. Same-UID/root modification and hostile network filesystems remain outside the local operator contract. No file creation, chmod, deletion or mutation. Unsafe/missing/corrupt files never fall back to anonymous auth.
+
+The credential document is one YAML mapping directly from approved registry host to a credential mapping:
+
+```yaml
+registry.example:5000:
+  username: "local-test-user"
+  password: "local-test-password"
+public.example:
+  identityToken: "local-test-token"
+```
+
+Allow an empty map for anonymous sources. Require secret scalar values to be quoted YAML strings; plain host/field keys and normal block/flow mappings are allowed. Keys are exactly username/password/identityToken; require both basic fields or one token, with no null/empty/default/coercion/mixed form. Reject unknown or repeated fields, duplicate canonical hosts, more than32 records, excess decoded total64KiB, anchors, aliases, tags, merge keys, sequences, complex keys, multiple documents or trailing malformed input. The fixed two-map schema and512-event limit reject deeper structures before tree materialization. Each scalar is checked against its domain bound; constructors enforce no controls. The owned input buffer and credential strings use zeroizing/secret wrappers. Parser-internal scratch allocation has no memory-forensics guarantee; no Debug/error/tracing ever projects raw events. Reuse yaml-rust2~0.11.1, already resolved through config0.15.25; current0.13.0's post0.11.1 changes are dependency/MSRV/marker-documentation updates. Use its low-level pull events to reject unsupported structure before constructing credentials, not the general configuration Value tree. No helper execution/include/expansion/deserialization callbacks.
+
+```text
+existing YAML/environment settings → validated Docker budgets/settings
+ │ pure parse only; no daemon/config helper IO
+ ▼ explicit load_pull_policy(deadline)
+ dedicated workers4 → root-relative no-follow descriptors → private regular file
+ │ byte cap + stable metadata → zeroizing input → bounded YAML events
+ │ exact approved hosts + mutually exclusive secret fields
+ ▼ ImagePullPolicy::if_missing → existing owned preparation (D78)
+ timeout/drop → worker keeps permit/buffers until local terminal cleanup
+ production coordinator still owns reconciliation/probes/endpoint/readiness
+```
+
+Required tests cover shared YAML keys/precedence/defaults/range/relationships; every typed scalar/CPU/endpoint/registry/policy bound; stable redacted Debug/errors; valid empty/basic/token/flow/quoted escape files; duplicate/unknown/mixed/typed/alias/tag/deep/multiple/trailing inputs; exact host/credential bounds and aggregate quotas; real safe file ownership/mode/link/symlink/ancestor/FIFO/directory/size/replacement checks; timeout, abandoned observers and worker cap retention with controlled read-only gates. Consume a file-loaded policy through the existing real bound wire/preparation path in a scripted integration, proving selected auth reaches only the approved registry and post-pull validation remains mandatory. Main startup, endpoint/resource proofs and ordinary SDK Docker activation remain task1.4 consumers and cannot be inferred from these constructors.

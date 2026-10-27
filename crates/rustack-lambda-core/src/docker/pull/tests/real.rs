@@ -1,15 +1,21 @@
-use std::{env, fmt, path::Path, time::Duration};
+use std::{collections::BTreeMap, env, fmt, path::Path, time::Duration};
 
 use anyhow::{Context, Error, Result, ensure};
 use http::StatusCode;
+use rustack_core::settings::ValidatedSettings;
 use tempfile::{TempDir, tempdir};
-use tokio::{sync::watch, time::Instant};
+use tokio::{
+    fs,
+    io::AsyncWriteExt,
+    sync::watch,
+    time::{Instant, timeout_at},
+};
 
 use crate::{
     artifact::{Architecture, ImageReference},
     docker::{
-        DirectoryLease, DockerError, DockerWire, ImageLeaseConfig, ImageLeaseManager,
-        ImagePinScope, ImagePullPolicy, RegistryCredentials, reconcile_namespace,
+        DirectoryLease, DockerError, DockerRuntimeSettings, DockerWire, ImageLeaseConfig,
+        ImageLeaseManager, ImagePinScope, ImagePullPolicy, reconcile_namespace,
     },
 };
 
@@ -69,11 +75,7 @@ async fn test_should_pull_approved_immutable_image_prepare_live_pin_and_join_cle
             Err(DockerError::Status(StatusCode::NOT_FOUND)) => true,
             Err(error) => return Err(error.into()),
         };
-        let policy = ImagePullPolicy::if_missing(
-            vec!["public.ecr.aws".parse()?],
-            RegistryCredentials::default(),
-            Duration::from_secs(600),
-        )?;
+        let policy = configured_policy(evidence.path()?, &reference).await?;
         images = Some(ImageLeaseManager::start_with_pull(
             docker.clone(),
             ImagePinScope::new(directory.clone()),
@@ -148,4 +150,43 @@ async fn audit_scope(wire: &DockerWire, root: &Path) -> Result<()> {
         "owned resources remain"
     );
     Ok(())
+}
+
+async fn configured_policy(root: &Path, reference: &ImageReference) -> Result<ImagePullPolicy> {
+    timeout_at(io_deadline(), async {
+        let path = fs::canonicalize(root)
+            .await?
+            .join("registry-credentials.yaml");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .await?;
+        file.write_all(b"{}\n").await?;
+        drop(file);
+        let shared = ValidatedSettings::parse(
+            "budgets:\n  lambdaDockerPullSeconds: 600",
+            &BTreeMap::from([
+                (
+                    "LAMBDA_DOCKER_RELAY_IMAGE".into(),
+                    reference.as_str().to_owned(),
+                ),
+                ("LAMBDA_DOCKER_NETWORK".into(), "none".into()),
+                ("LAMBDA_DOCKER_PULL_POLICY".into(), "ifMissing".into()),
+                ("LAMBDA_DOCKER_REGISTRIES".into(), "public.ecr.aws".into()),
+                (
+                    "LAMBDA_DOCKER_REGISTRY_AUTH_FILE".into(),
+                    path.to_str().context("UTF-8 fixture path")?.to_owned(),
+                ),
+            ]),
+        )?;
+        let settings = DockerRuntimeSettings::from_lookup(
+            |key| shared.get(key).map(str::to_owned),
+            shared.budgets(),
+            Duration::from_secs(600),
+        )?;
+        Ok::<_, Error>(settings.load_pull_policy(io_deadline()).await?)
+    })
+    .await?
 }
