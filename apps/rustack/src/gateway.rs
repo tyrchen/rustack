@@ -134,9 +134,13 @@ impl GatewayService {
                 .iter()
                 .map(|service| capability(service.name()))
                 .collect();
+            #[cfg(feature = "stepfunctions")]
+            let workflows = self.state.workers.workflow_capabilities();
+            #[cfg(not(feature = "stepfunctions"))]
+            let workflows = None::<serde_json::Value>;
             json_response(
                 status,
-                &serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "ready": ready, "services": capabilities, "workers": workers, "workflows": self.state.workers.workflow_capabilities(), "localEndpoints": {"apiGateway": "/_aws/execute-api/{apiId}/{stage}", "lambda": "/lambda-url/{functionName}/", "cloudFront": "/_aws/cloudfront/{distributionId}/"}, "limitations": ["No multi-tenant isolation or production IAM enforcement", "Snapshot resources-only services do not retain messages", "routed does not imply complete operation semantics"]}),
+                &serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "ready": ready, "services": capabilities, "workers": workers, "workflows": workflows, "localEndpoints": {"apiGateway": "/_aws/execute-api/{apiId}/{stage}", "lambda": "/lambda-url/{functionName}/", "cloudFront": "/_aws/cloudfront/{distributionId}/"}, "limitations": ["No multi-tenant isolation or production IAM enforcement", "Snapshot resources-only services do not retain messages", "routed does not imply complete operation semantics"]}),
             )
         } else {
             let services: std::collections::BTreeMap<_, _> = self

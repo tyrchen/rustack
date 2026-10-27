@@ -366,6 +366,7 @@ impl Actor {
         let lease = Arc::new(DispatchLease {
             _permit: Some(permit),
             _frame: None,
+            _data: None,
         });
         self.resources.leases.push(lease.clone());
         self.sync_ledger();

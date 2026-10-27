@@ -243,6 +243,9 @@ impl TaskCall {
     pub async fn next(&mut self) -> Result<TaskEvent, TaskChannelError> {
         self.events.recv().await.ok_or(TaskChannelError::OwnerLost)
     }
+    pub(crate) fn settlement_receiver(&self) -> watch::Receiver<TaskSettlement> {
+        self.settlement.clone()
+    }
     pub(crate) fn cancellation_sender(&self) -> watch::Sender<bool> {
         self.cancellation.clone()
     }

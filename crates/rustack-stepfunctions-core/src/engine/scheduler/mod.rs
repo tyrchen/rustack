@@ -24,6 +24,7 @@ mod types;
 
 use budget::{Blocked, Slot};
 pub use budget::{FrameCapacity, FrameLease, FrameLimits};
+pub(crate) use budget::{TaskBytes, TaskDataBudget};
 pub use types::{FrameCallId, FrameError, FrameId, FrameParent, FrameTransition, FrameUpdate};
 
 const ROOT: FrameId = FrameId(0);
@@ -100,6 +101,14 @@ pub struct FrameScheduler {
     outcome: Option<Arc<ExecutionOutcome>>,
 }
 impl FrameScheduler {
+    pub(crate) fn retains_result_notification(&self, frame: FrameId) -> bool {
+        self.pending.iter().any(|notice| notice.child == frame)
+            || self.frames.get(&frame).is_some_and(|frame| {
+                frame.parent.is_some()
+                    && frame.driver.outcome().is_some()
+                    && frame.notification != Notification::Emitted
+            })
+    }
     /// Admit an unstarted root driver without spawning or issuing a call.
     ///
     /// # Errors

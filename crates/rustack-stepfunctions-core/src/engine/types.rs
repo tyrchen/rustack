@@ -7,6 +7,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use rustack_core::json::JsonError;
 
 use crate::{
     AslError, CallbackDispatch, FanoutPlan, Payload, StateId, SystemUuidSource, UuidSource,
@@ -114,6 +115,24 @@ impl ExecutionFailure {
     pub fn cause(&self) -> Option<&str> {
         self.cause.as_deref()
     }
+    pub(crate) fn evaluation(error: Arc<AslError>) -> Self {
+        let name = match error.as_ref() {
+            AslError::DataLimit
+            | AslError::Json(JsonError::Bytes | JsonError::String | JsonError::Key) => {
+                "States.DataLimitExceeded"
+            }
+            AslError::Entropy(_)
+            | AslError::Encoding(_)
+            | AslError::Allocation(_)
+            | AslError::InvalidStateId
+            | AslError::InvalidFanoutResult
+            | AslError::InvalidExecution => "Rustack.InternalError",
+            _ => "States.Runtime",
+        };
+        let mut failure = Self::named(name, "State evaluation failed");
+        failure.origin = FailureOrigin::Evaluation(error);
+        failure
+    }
     pub(crate) fn fields(error: Option<String>, cause: Option<String>) -> Self {
         Self {
             error,
@@ -147,6 +166,13 @@ impl fmt::Debug for TaskFailure {
     }
 }
 impl TaskFailure {
+    pub(crate) fn evaluation(error: AslError) -> Self {
+        Self(ExecutionFailure::evaluation(Arc::new(error)))
+    }
+    pub(crate) fn safety(name: &str, cause: &str) -> Self {
+        Self(ExecutionFailure::safety(name, cause))
+    }
+
     /// Read bounded failure fields without exposing mutable construction.
     ///
     /// ```

@@ -11,7 +11,6 @@ use std::{
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rustack_core::json::JsonError;
 use serde_json::{Value, json};
 use types::FailureOrigin;
 
@@ -292,7 +291,11 @@ impl ExecutionDriver {
         }
         self.phase = Phase::Ready { entry: false };
         update(match result {
-            Err(failure) => self.recover(failure.0, now, source),
+            Err(failure) => match &failure.0.origin {
+                FailureOrigin::Business => self.recover(failure.0, now, source),
+                FailureOrigin::Evaluation(_) => self.propagate_failure(failure.0, now, source),
+                FailureOrigin::Safety => self.settle(ExecutionOutcome::Failed(failure.0)),
+            },
             Ok(result) => match self.finish_result(Ok(result), source) {
                 Ok(step) => step,
                 Err(error) => self.evaluation_failure(error, now, source, true),
@@ -596,23 +599,10 @@ impl ExecutionDriver {
         source: &mut S,
         recover: bool,
     ) -> DriverStep {
-        let name = match error.as_ref() {
-            AslError::DataLimit
-            | AslError::Json(JsonError::Bytes | JsonError::String | JsonError::Key) => {
-                "States.DataLimitExceeded"
-            }
-            AslError::Entropy(_)
-            | AslError::Encoding(_)
-            | AslError::Allocation(_)
-            | AslError::InvalidStateId
-            | AslError::InvalidFanoutResult
-            | AslError::InvalidExecution => "Rustack.InternalError",
-            _ => "States.Runtime",
-        };
-        let mut failure = ExecutionFailure::named(name, "State evaluation failed");
-        failure.origin = FailureOrigin::Evaluation(error.clone());
+        let failure = ExecutionFailure::evaluation(error.clone());
+        let limit = failure.error() == Some("States.DataLimitExceeded");
         self.diagnostic = Some(error);
-        if recover && name == "States.DataLimitExceeded" {
+        if recover && limit {
             self.recover(failure, now, source)
         } else {
             self.settle(ExecutionOutcome::Failed(failure))

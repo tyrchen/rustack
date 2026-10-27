@@ -113,6 +113,9 @@ pub struct CallbackRegistry {
     shared: Arc<Shared>,
 }
 impl CallbackRegistry {
+    pub(crate) fn scope(&self) -> &TenantScope {
+        &self.shared.scope
+    }
     /// Start the unique callback actor with bounded entropy workers and commands.
     ///
     /// # Errors

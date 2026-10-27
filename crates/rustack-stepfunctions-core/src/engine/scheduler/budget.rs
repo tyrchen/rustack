@@ -7,7 +7,7 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 
-use super::types::FrameError;
+use super::{FrameScheduler, types::FrameError};
 
 /// Validated local frame and aggregate-result slot ceilings.
 #[derive(Debug, Clone, Copy)]
@@ -183,5 +183,50 @@ impl FrameLease {
         Slot::acquire(capacity, &local)
             .map(|slot| Self::child(slot, None))
             .map_err(|_| FrameError::Capacity)
+    }
+}
+
+/// Cloned admission view of the same global/local intermediate byte pools.
+#[derive(Debug, Clone)]
+pub(crate) struct TaskDataBudget {
+    global: Arc<Semaphore>,
+    local: Arc<Semaphore>,
+}
+/// Unique encoded-byte charge retained above accepted callback/CPU work.
+#[derive(Debug)]
+pub(crate) struct TaskBytes {
+    global: OwnedSemaphorePermit,
+    local: OwnedSemaphorePermit,
+}
+impl TaskDataBudget {
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<TaskBytes, FrameError> {
+        let weight = u32::try_from(bytes).map_err(|_| FrameError::Capacity)?;
+        let global = self
+            .global
+            .clone()
+            .try_acquire_many_owned(weight)
+            .map_err(|_| FrameError::Capacity)?;
+        let local = self
+            .local
+            .clone()
+            .try_acquire_many_owned(weight)
+            .map_err(|_| FrameError::Capacity)?;
+        Ok(TaskBytes { global, local })
+    }
+}
+impl TaskBytes {
+    pub(crate) fn shrink(mut self, bytes: usize) -> Result<Self, FrameError> {
+        let weight = bytes;
+        let global = self.global.split(weight).ok_or(FrameError::Invalid)?;
+        let local = self.local.split(weight).ok_or(FrameError::Invalid)?;
+        Ok(Self { global, local })
+    }
+}
+impl FrameScheduler {
+    pub(crate) fn task_data_budget(&self) -> TaskDataBudget {
+        TaskDataBudget {
+            global: self.capacity.results.clone(),
+            local: self.local_results.clone(),
+        }
     }
 }

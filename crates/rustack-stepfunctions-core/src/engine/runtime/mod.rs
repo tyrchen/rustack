@@ -12,8 +12,9 @@ use tokio::{
 
 use super::history::{HistoryCapacity, HistoryLimits, Journal, TerminalReserve, events};
 use crate::{
-    ChildExecutionPort, ChildParent, ExecutionDriver, ExecutionFailure, FrameCapacity, FrameLease,
-    FrameLimits, FrameScheduler, LambdaTaskPort, TaskFailure,
+    CallbackRegistry, ChildExecutionPort, ExecutionDriver, ExecutionFailure, ExecutionSnapshot,
+    FrameCapacity, FrameLease, FrameLimits, FrameScheduler, LambdaTaskPort, TaskFailure,
+    TenantScope,
 };
 
 mod actor;
@@ -28,6 +29,8 @@ use actor::{Actor, OwnedCall, RunExit};
 pub use error::ExecutionError;
 pub use types::{CleanupState, ExecutionHandle, ExecutionView, RuntimeLimits};
 
+use super::scheduler::TaskBytes;
+
 #[derive(Debug)]
 struct Pools {
     open_limit: usize,
@@ -41,10 +44,13 @@ struct Shared {
     worker_hook: Option<Arc<tests::WorkerHook>>,
     #[cfg(test)]
     child_cpu_panic: bool,
+    #[cfg(test)]
+    callback_hook: Option<Arc<tests::WorkerHook>>,
     pools: Pools,
     port: Option<Arc<dyn LambdaTaskPort>>,
     history: HistorySettings,
     frames: FrameSettings,
+    callbacks: Option<CallbackRegistry>,
 }
 #[derive(Debug)]
 struct FrameSettings {
@@ -67,6 +73,7 @@ struct Slot {
 }
 #[derive(Debug)]
 struct DispatchLease {
+    _data: Option<TaskBytes>,
     _permit: Option<OwnedSemaphorePermit>,
     _frame: Option<Arc<FrameLease>>,
 }
@@ -78,6 +85,7 @@ struct Retained {
 #[derive(Debug, Default)]
 struct OwnerState {
     accepting: bool,
+    started: bool,
     jobs: JoinSet<RunExit>,
     slots: HashMap<Id, Slot>,
     quarantine: Vec<Retained>,
@@ -86,7 +94,7 @@ struct OwnerState {
 #[derive(Debug)]
 pub(crate) struct Registered {
     pub(crate) handle: ExecutionHandle,
-    pub(crate) parent: Option<oneshot::Sender<ChildParent>>,
+    pub(crate) parent: Option<oneshot::Sender<ExecutionSnapshot>>,
 }
 
 /// Actor-owned supervisor; the registry must reap jobs and drain before shutdown.
@@ -99,6 +107,36 @@ pub struct ExecutionSupervisor {
 impl ExecutionSupervisor {
     pub(crate) fn open_limit(&self) -> usize {
         self.shared.pools.open_limit
+    }
+    /// Install the real token registry before this owner accepts any execution.
+    ///
+    /// # Errors
+    /// Requires a live callback root and installed Lambda port; rejects duplicate,
+    /// reconfigured or shared ownership, including after completed work.
+    /// Registry composition additionally validates the installed trusted scope.
+    ///
+    /// ```no_run
+    /// # fn install(owner:&mut rustack_stepfunctions_core::ExecutionSupervisor,registry:rustack_stepfunctions_core::CallbackRegistry){let result=owner.install_callbacks(registry);}
+    /// ```
+    pub fn install_callbacks(&mut self, callbacks: CallbackRegistry) -> Result<(), ExecutionError> {
+        if !callbacks.status().ready {
+            return Err(ExecutionError::Unavailable);
+        }
+        if self.state.started || !self.state.accepting {
+            return Err(ExecutionError::Invalid);
+        }
+        let shared = Arc::get_mut(&mut self.shared).ok_or(ExecutionError::Unavailable)?;
+        if shared.port.is_none() {
+            return Err(ExecutionError::Unavailable);
+        }
+        if shared.callbacks.is_some() {
+            return Err(ExecutionError::Invalid);
+        }
+        shared.callbacks = Some(callbacks);
+        Ok(())
+    }
+    pub(crate) fn callback_scope(&self) -> Option<&TenantScope> {
+        self.shared.callbacks.as_ref().map(CallbackRegistry::scope)
     }
     /// Construct bounded pools/history accounting without spawning or enabling APIs.
     ///
@@ -150,6 +188,8 @@ impl ExecutionSupervisor {
                 worker_hook: None,
                 #[cfg(test)]
                 child_cpu_panic: false,
+                #[cfg(test)]
+                callback_hook: None,
                 pools: Pools {
                     open_limit: limits.open,
                     open: Arc::new(Semaphore::new(limits.open)),
@@ -157,6 +197,7 @@ impl ExecutionSupervisor {
                     cpu: Arc::new(Semaphore::new(limits.cpu)),
                 },
                 port,
+                callbacks: None,
                 frames: FrameSettings {
                     capacity: frame_capacity,
                     limits: frame_limits,
@@ -223,7 +264,8 @@ impl ExecutionSupervisor {
         }
         self.reap_ready();
         if driver.started
-            || driver.machine().uses_callbacks()
+            || (driver.machine().uses_callbacks()
+                && (!structured || child_port.is_none() || self.shared.callbacks.is_none()))
             || (!structured && driver.machine().requires_structured_execution())
             || (driver.machine().uses_children() && (!structured || child_port.is_none()))
             || (self.shared.port.is_none() && driver.machine().uses_lambda())
@@ -264,12 +306,13 @@ impl ExecutionSupervisor {
         }));
         let (stop, cancelled) = watch::channel(None);
         let (leases, ledger) = watch::channel(Arc::new(Vec::new()));
-        let (parent, registration) = if driver.machine().uses_children() {
-            let (sender, receiver) = oneshot::channel();
-            (Some(sender), child_port.map(|port| (port, receiver)))
-        } else {
-            (None, None)
-        };
+        let (parent, registration) =
+            if driver.machine().uses_children() || driver.machine().uses_callbacks() {
+                let (sender, receiver) = oneshot::channel();
+                (Some(sender), child_port.map(|port| (port, receiver)))
+            } else {
+                (None, None)
+            };
         let task = if let Some(graph) = graph.take() {
             self.state.jobs.spawn(
                 structured::Actor::new(
@@ -297,6 +340,7 @@ impl ExecutionSupervisor {
                 .run(),
             )
         };
+        self.state.started = true;
         self.state.slots.insert(
             task.id(),
             Slot {
@@ -399,7 +443,13 @@ impl ExecutionSupervisor {
     /// ```
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.state.accepting && self.state.quarantine.is_empty()
+        self.state.accepting
+            && self.state.quarantine.is_empty()
+            && self
+                .shared
+                .callbacks
+                .as_ref()
+                .is_none_or(|registry| registry.status().ready)
     }
     /// Read all unsettled jobs/quarantine slots; terminal observers do not release them.
     ///

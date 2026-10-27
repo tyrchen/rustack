@@ -45,31 +45,41 @@ impl CallbackMint {
         if Instant::now() >= deadline {
             return Err(CallbackError::Deadline);
         }
-        if self.reply.is_none() && self.loss.is_none() {
-            let result = timeout_at(
-                deadline,
-                self.receiver.as_mut().ok_or(CallbackError::OwnerLost)?,
-            )
+        let result = timeout_at(deadline, self.resolve())
             .await
             .map_err(|_| CallbackError::Deadline)?;
+        if Instant::now() >= deadline {
+            return Err(CallbackError::Deadline);
+        }
+        result?;
+        match self.reply.as_ref().map(|reply| &reply.result) {
+            Some(Ok(task)) => Ok(task),
+            _ => Err(CallbackError::OwnerLost),
+        }
+    }
+    pub(crate) async fn resolve(&mut self) -> Result<(), CallbackError> {
+        if self.reply.is_none() && self.loss.is_none() {
+            let result = self
+                .receiver
+                .as_mut()
+                .ok_or(CallbackError::OwnerLost)?
+                .await;
             self.receiver = None;
             match result {
                 Ok(reply) => self.reply = Some(reply),
                 Err(_) => self.loss = Some(Arc::new(CallbackError::OwnerLost)),
             }
         }
-        if Instant::now() >= deadline {
-            return Err(CallbackError::Deadline);
-        }
         if let Some(loss) = &self.loss {
             return Err(CallbackError::Cached(loss.clone()));
         }
         match self.reply.as_ref().map(|reply| &reply.result) {
-            Some(Ok(task)) => Ok(task),
+            Some(Ok(_)) => Ok(()),
             Some(Err(error)) => Err(CallbackError::Cached(error.clone())),
             None => Err(CallbackError::OwnerLost),
         }
     }
+
     /// Transfer the cached unique Task owner, without revoking on mint Drop.
     ///
     /// # Errors
@@ -306,24 +316,25 @@ impl CallbackTask {
         if Instant::now() >= deadline {
             return Err(CallbackError::Deadline);
         }
-        let result = timeout_at(deadline, async {
-            loop {
-                let view = self.snapshot();
-                if view.is_terminal() {
-                    return Ok::<_, CallbackError>(view);
-                }
-                self.view
-                    .changed()
-                    .await
-                    .map_err(|_| CallbackError::OwnerLost)?;
-            }
-        })
-        .await
-        .map_err(|_| CallbackError::Deadline)?;
+        let result = timeout_at(deadline, self.resolved())
+            .await
+            .map_err(|_| CallbackError::Deadline)?;
         if Instant::now() >= deadline {
             return Err(CallbackError::Deadline);
         }
         result
+    }
+    pub(crate) async fn resolved(&mut self) -> Result<Arc<CallbackOutcome>, CallbackError> {
+        loop {
+            let view = self.snapshot();
+            if view.is_terminal() {
+                return Ok(view);
+            }
+            self.view
+                .changed()
+                .await
+                .map_err(|_| CallbackError::OwnerLost)?;
+        }
     }
 }
 impl Drop for CallbackTask {

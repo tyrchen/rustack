@@ -2,7 +2,7 @@
 
 use tokio::sync::{mpsc, watch};
 
-use super::{Message, WatchExit};
+use super::{Completion, Message, Output, WatchExit};
 use crate::{
     FrameCallId, TaskEvent, TaskFailure, TaskSettlement, engine::runtime::actor::OwnedCall,
 };
@@ -22,11 +22,35 @@ pub(super) async fn run(
             tokio::select! {biased;_ = cancelled.changed()=>break,event=owned.call.next()=>event};
         let (message, done) = match event {
             Ok(TaskEvent::Started) => (Message::Started(id), false),
-            Ok(TaskEvent::Submitted(output)) => (Message::Submitted(id, output), false),
-            Ok(TaskEvent::Completed(result)) => (Message::Completed(id, result), true),
+            Ok(TaskEvent::Submitted(output)) => (
+                Message::Submitted(
+                    id,
+                    Output {
+                        payload: output,
+                        _lease: owned.lease.clone(),
+                    },
+                ),
+                false,
+            ),
+            Ok(TaskEvent::Completed(result)) => (
+                Message::Completed(
+                    id,
+                    Completion {
+                        result,
+                        _lease: Some(owned.lease.clone()),
+                    },
+                ),
+                true,
+            ),
             Err(_) if child => (Message::Fatal(super::ExecutionError::Unavailable), true),
             Err(_) => (
-                Message::Completed(id, Err(TaskFailure::service_exception())),
+                Message::Completed(
+                    id,
+                    Completion {
+                        result: Err(TaskFailure::service_exception()),
+                        _lease: Some(owned.lease.clone()),
+                    },
+                ),
                 true,
             ),
         };

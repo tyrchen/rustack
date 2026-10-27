@@ -11,19 +11,19 @@ use tokio::{
 use super::{Actor, DispatchLease, ExecutionError, Message, Shared};
 use crate::{
     ChildError, ChildExecution, ChildExecutionPort, ChildParent, ChildPattern,
-    ChildStartParameters, ChildSubmission, FrameCallId, LambdaTaskCommand, Payload, TaskCall,
-    TaskFailure, TaskResponder,
+    ChildStartParameters, ChildSubmission, ExecutionSnapshot, FrameCallId, LambdaTaskCommand,
+    Payload, TaskCall, TaskFailure, TaskResponder,
 };
 
 #[derive(Debug)]
 pub(super) enum Binding {
-    Pending(ChildExecutionPort, oneshot::Receiver<ChildParent>),
+    Pending(ChildExecutionPort, oneshot::Receiver<ExecutionSnapshot>),
     Ready(ChildExecutionPort, ChildParent),
 }
 impl Actor {
     pub(in crate::engine::runtime) fn with_child_registration(
         mut self,
-        registration: Option<(ChildExecutionPort, oneshot::Receiver<ChildParent>)>,
+        registration: Option<(ChildExecutionPort, oneshot::Receiver<ExecutionSnapshot>)>,
     ) -> Self {
         self.children = registration.map(|(port, receiver)| Binding::Pending(port, receiver));
         self
@@ -69,7 +69,10 @@ impl Actor {
             result = &mut receiver => result,
         };
         match result {
-            Ok(parent) => self.children = Some(Binding::Ready(port, parent)),
+            Ok(parent) => {
+                self.children = Some(Binding::Ready(port, parent.child_parent()));
+                self.parent = Some(parent);
+            }
             Err(_) => self.fail(super::ExecutionError::Unavailable),
         }
     }

@@ -259,9 +259,11 @@ impl State {
             self.maintain(Instant::now());
             let result = prepared
                 .and_then(|()| {
-                    envelope
-                        .command
-                        .check(&self.resources.scope, self.resources.states)
+                    envelope.command.check(
+                        &self.resources.scope,
+                        self.resources.states,
+                        self.runtime.callback_scope().is_some(),
+                    )
                 })
                 .and_then(|()| self.command(&envelope.command));
             self.maintain(Instant::now());
@@ -518,7 +520,8 @@ impl State {
             &json!({"Execution":{"Id":arn.as_str(),"Name":arn.name().as_str(),"Input":input.value(),"RoleArn":machine.revision.role().as_str(),"StartTime":now.to_rfc3339_opts(SecondsFormat::Millis,true)},"StateMachine":{"Id":machine.arn().as_str(),"Name":machine.arn().name().as_str()}}),
         )?;
         let structured = machine.revision.machine().requires_structured_execution()
-            || machine.revision.machine().uses_children();
+            || machine.revision.machine().uses_children()
+            || machine.revision.machine().uses_callbacks();
         let construct = if structured {
             ExecutionDriver::for_structured_owner
         } else {
@@ -564,7 +567,7 @@ impl State {
         );
         let snapshot = ExecutionSnapshot { record, view };
         if let Some(parent) = registered.parent {
-            let _ = parent.send(snapshot.child_parent());
+            let _ = parent.send(snapshot.clone());
         }
         Ok(RegistryResult::Execution(snapshot))
     }
@@ -689,6 +692,7 @@ mod clock_tests {
             limits,
             StateSupport::Sequential,
             runtime.open_limit(),
+            false,
         );
         Owner::new(
             TenantScope::default(),

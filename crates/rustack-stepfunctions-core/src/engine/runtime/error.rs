@@ -5,12 +5,15 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 use tokio::task::JoinError;
 
-use crate::{AslError, FrameError};
+use crate::{AslError, CallbackError, FrameError};
 
 /// Runtime admission/control/history errors without payloads or panic text.
 #[derive(Error)]
 #[non_exhaustive]
 pub enum ExecutionError {
+    /// A retained callback protocol or ownership source failed.
+    #[error("workflow callback owner failed")]
+    Callback(#[source] Arc<CallbackError>),
     /// A structured frame protocol or ownership invariant failed.
     #[error("structured workflow frame failed")]
     Frame(#[source] FrameError),

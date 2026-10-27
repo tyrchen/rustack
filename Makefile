@@ -162,6 +162,8 @@ test-stepfunctions-core:
 	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order engine::fanout::tests
 	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order engine::scheduler::tests
 	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order engine::runtime::tests::structured
+	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order engine::runtime::tests::callback
+	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order engine::runtime::structured::callback::tests
 	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order registry::callback
 	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order registry::tests::nested
 	@cargo test -p rustack-stepfunctions-core --features serde_json/preserve_order registry::tests::children

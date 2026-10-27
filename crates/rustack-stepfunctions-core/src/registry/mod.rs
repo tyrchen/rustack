@@ -120,6 +120,7 @@ struct Shared {
     child_wake: Arc<Notify>,
     scope: TenantScope,
     states: StateSupport,
+    callbacks: bool,
     sender: mpsc::Sender<Envelope>,
     capacity: Arc<Semaphore>,
     closing: watch::Sender<bool>,
@@ -140,6 +141,7 @@ fn admission(
     limits: RegistryLimits,
     support: StateSupport,
     child_limit: usize,
+    callbacks: bool,
 ) -> Admission {
     let (sender, receiver) = mpsc::channel(limits.commands);
     let (child_sender, children) = mpsc::channel(child_limit);
@@ -154,6 +156,7 @@ fn admission(
         child_wake: Arc::new(Notify::new()),
         scope,
         states: support,
+        callbacks,
         sender,
         capacity: Arc::new(Semaphore::new(limits.commands)),
         closing,
@@ -260,8 +263,20 @@ impl Registry {
         support: StateSupport,
     ) -> Result<(Self, RegistrySupervisor), RegistryError> {
         Handle::try_current().map_err(|_| RegistryError::Unavailable)?;
-        let Admission { shared, channels } =
-            admission(scope.clone(), limits, support, runtime.open_limit());
+        if runtime
+            .callback_scope()
+            .is_some_and(|installed| !domain::same_scope(installed, &scope))
+        {
+            return Err(RegistryError::Validation);
+        }
+        let callbacks = runtime.callback_scope().is_some();
+        let Admission { shared, channels } = admission(
+            scope.clone(),
+            limits,
+            support,
+            runtime.open_limit(),
+            callbacks,
+        );
         let closing = shared.closing.clone();
         let stop = closing.subscribe();
         let status = shared.status.clone();
@@ -349,6 +364,15 @@ impl Registry {
     pub fn state_support(&self) -> StateSupport {
         self.shared.states
     }
+    /// Read callback compilation support from the installed execution owner.
+    ///
+    /// ```
+    /// # fn inspect(registry:&rustack_stepfunctions_core::Registry){let enabled=registry.callback_support();}
+    /// ```
+    #[must_use]
+    pub fn callback_support(&self) -> bool {
+        self.shared.callbacks
+    }
     /// Validate and synchronously transfer one command to retained ownership.
     ///
     /// # Errors
@@ -361,7 +385,11 @@ impl Registry {
     /// # Ok(()) }
     /// ```
     pub fn submit(&self, command: RegistryCommand) -> Result<RegistryReceipt, RegistryError> {
-        command.check(&self.shared.scope, self.shared.states)?;
+        command.check(
+            &self.shared.scope,
+            self.shared.states,
+            self.shared.callbacks,
+        )?;
         if *self.shared.closing.borrow() {
             return Err(RegistryError::Unavailable);
         }
@@ -414,10 +442,15 @@ impl Registry {
     }
 }
 impl RegistryCommand {
-    fn check(&self, scope: &TenantScope, states: StateSupport) -> Result<(), RegistryError> {
+    fn check(
+        &self,
+        scope: &TenantScope,
+        states: StateSupport,
+        callbacks: bool,
+    ) -> Result<(), RegistryError> {
         let check_machine = |machine: &CompiledMachine| {
             if machine.is_root_definition()
-                && !machine.uses_callbacks()
+                && (callbacks || !machine.uses_callbacks())
                 && domain::same_scope(machine.scope(), scope)
                 && (states == StateSupport::Structured || !machine.requires_structured_execution())
             {

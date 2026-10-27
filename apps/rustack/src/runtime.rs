@@ -131,14 +131,11 @@ impl RuntimeWorkers {
         }
     }
 
+    #[cfg(feature = "stepfunctions")]
     pub(crate) fn workflow_capabilities(&self) -> Option<serde_json::Value> {
-        #[cfg(feature = "stepfunctions")]
-        return self
-            .workflows
+        self.workflows
             .as_ref()
-            .map(crate::workflows::WorkflowStatus::capabilities);
-        #[cfg(not(feature = "stepfunctions"))]
-        None
+            .map(crate::workflows::WorkflowStatus::capabilities)
     }
 
     /// Quiesce producers before the unique workflow supervisor drains.

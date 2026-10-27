@@ -3,12 +3,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
+    time::Instant as MonotonicInstant,
 };
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::{
-    sync::{OwnedSemaphorePermit, mpsc, watch},
+    sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
     task::{Id, JoinError, JoinSet, yield_now},
     time::{Instant, sleep_until},
 };
@@ -19,10 +20,10 @@ use super::{
     shutdown_reason,
 };
 use crate::{
-    ChildPattern, ClockSample, CompiledMachine, DriverStep, ExecutionFailure, ExecutionOutcome,
-    FrameCallId, FrameError, FrameLease, FrameScheduler, FrameTransition, FrameUpdate, Integration,
-    LambdaTaskCommand, Payload, StateView, SystemUuidSource, TaskCall, TaskDispatch, TaskFailure,
-    TaskTimeout,
+    CallbackDispatch, CallbackHistory, ChildPattern, ClockSample, CompiledMachine, DriverStep,
+    ExecutionFailure, ExecutionOutcome, ExecutionSnapshot, FrameCallId, FrameError, FrameLease,
+    FrameScheduler, FrameTransition, FrameUpdate, Integration, LambdaTaskCommand, Payload, StateId,
+    StateView, SystemUuidSource, TaskCall, TaskDispatch, TaskFailure, TaskTimeout,
     engine::{
         Phase,
         history::{
@@ -33,6 +34,7 @@ use crate::{
     },
 };
 
+mod callback;
 mod child;
 mod history;
 mod resource;
@@ -40,11 +42,22 @@ use history::CausalHistory;
 
 #[derive(Debug)]
 enum Message {
+    CallbackScheduled(FrameCallId, CallbackHistory, oneshot::Sender<bool>),
     Started(FrameCallId),
-    Submitted(FrameCallId, Payload),
-    Completed(FrameCallId, Result<Payload, TaskFailure>),
+    Submitted(FrameCallId, Output),
+    Completed(FrameCallId, Completion),
     Quarantined(FrameCallId),
     Fatal(ExecutionError),
+}
+#[derive(Debug)]
+struct Completion {
+    result: Result<Payload, TaskFailure>,
+    _lease: Option<Arc<DispatchLease>>,
+}
+#[derive(Debug)]
+struct Output {
+    payload: Payload,
+    _lease: Arc<DispatchLease>,
 }
 #[derive(Debug)]
 struct WatchExit {
@@ -54,16 +67,39 @@ struct WatchExit {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Progress {
+    Preparing,
     Pending,
     Started,
     Submitted,
+}
+#[derive(Debug)]
+enum Instruction {
+    Task(TaskDispatch),
+    Callback(CallbackDispatch),
+}
+impl Instruction {
+    fn state(&self) -> StateId {
+        match self {
+            Self::Task(t) => t.state(),
+            Self::Callback(t) => t.state(),
+        }
+    }
+    fn deadline(&self) -> MonotonicInstant {
+        match self {
+            Self::Task(t) => t.deadline(),
+            Self::Callback(t) => t.deadline(),
+        }
+    }
+    fn callback(&self) -> bool {
+        matches!(self, Self::Callback(_))
+    }
 }
 #[derive(Debug)]
 struct Call {
     cancel: watch::Sender<bool>,
     lease: Arc<DispatchLease>,
     machine: Arc<CompiledMachine>,
-    dispatch: TaskDispatch,
+    dispatch: Instruction,
     progress: Progress,
     result_seen: bool,
     cancelled: bool,
@@ -78,7 +114,7 @@ struct Pending {
 #[derive(Debug)]
 enum Operation {
     Advance,
-    Complete(FrameCallId, Result<Payload, TaskFailure>, ClockSample),
+    Complete(FrameCallId, Completion, ClockSample),
 }
 #[derive(Debug)]
 struct Evaluated {
@@ -104,7 +140,9 @@ pub(super) struct Actor {
     workers: JoinSet<Evaluated>,
     watchers: JoinSet<WatchExit>,
     child_jobs: JoinSet<()>,
+    callback_jobs: JoinSet<()>,
     children: Option<child::Binding>,
+    parent: Option<ExecutionSnapshot>,
     sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
     forced: Option<Arc<ExecutionOutcome>>,
@@ -142,7 +180,9 @@ impl Actor {
             workers: JoinSet::new(),
             watchers: JoinSet::new(),
             child_jobs: JoinSet::new(),
+            callback_jobs: JoinSet::new(),
             children: None,
+            parent: None,
             sender,
             receiver,
             forced: None,
@@ -210,7 +250,9 @@ impl Actor {
     }
     fn fail(&mut self, error: ExecutionError) {
         let mut view = self.view.borrow().as_ref().clone();
-        view.diagnostic = Some(Arc::new(error));
+        if view.diagnostic.is_none() {
+            view.diagnostic = Some(Arc::new(error));
+        }
         self.view.send_replace(Arc::new(view));
         let name = if matches!(
             self.view.borrow().diagnostic.as_deref(),
@@ -280,7 +322,18 @@ impl Actor {
         let mut released = Vec::new();
         for id in ids {
             match graph.retired(id) {
-                Ok(_) => {
+                Ok(changed) => {
+                    if changed {
+                        self.park = None;
+                    }
+                    if self
+                        .calls
+                        .get(&id)
+                        .is_some_and(|call| call.dispatch.callback())
+                        && graph.retains_result_notification(id.frame())
+                    {
+                        continue;
+                    }
                     self.acks.remove(&id);
                     if let Some(call) = self.calls.remove(&id) {
                         released.push(call.lease);
@@ -359,8 +412,8 @@ impl Actor {
             let mut source = SystemUuidSource::default();
             let update = match operation {
                 Operation::Advance => Ok(Some(graph.advance(sample, &mut source))),
-                Operation::Complete(call, result, observed) => graph
-                    .complete(call, result, observed, &mut source)
+                Operation::Complete(call, completion, observed) => graph
+                    .complete(call, completion.result, observed, &mut source)
                     .map(|result| result.map(|t| FrameUpdate::Transition(Box::new(t)))),
             };
             #[cfg(test)]
@@ -384,7 +437,6 @@ impl Actor {
                     result.update = Ok(None);
                 }
                 self.graph = Some(result.graph);
-                self.reconcile();
                 match result.update {
                     Ok(Some(update)) => {
                         if let Err(error) = self.update(update, result.sample.wall) {
@@ -394,6 +446,7 @@ impl Actor {
                     Ok(None) => {}
                     Err(error) => self.fail(ExecutionError::Frame(error)),
                 }
+                self.reconcile();
                 if self.forced.is_none() && self.committed.is_none() {
                     self.committed = self
                         .graph
@@ -411,8 +464,8 @@ impl Actor {
         }
     }
     fn schedule(&mut self, t: &FrameTransition, wall: DateTime<Utc>) -> Result<(), ExecutionError> {
-        if matches!(t.step(), DriverStep::Callback(_)) {
-            return Err(ExecutionError::Unavailable);
+        if let DriverStep::Callback(effect) = t.step() {
+            return self.start_callback(t.call().ok_or(ExecutionError::Invalid)?, effect.clone());
         }
         if let DriverStep::Dispatch(dispatch) = t.step() {
             let id = t.call().ok_or(ExecutionError::Invalid)?;
@@ -564,6 +617,9 @@ impl Actor {
     async fn message(&mut self, message: Message) {
         self.control();
         match message {
+            Message::CallbackScheduled(id, history, ack) => {
+                self.callback_scheduled(id, &history, ack);
+            }
             Message::Fatal(error) => self.fail(error),
             Message::Quarantined(id) => {
                 if self.calls.contains_key(&id) {
@@ -573,6 +629,10 @@ impl Actor {
             Message::Started(id) => {
                 let current = self.current(id);
                 if let Some(call) = self.calls.get_mut(&id) {
+                    if call.progress != Progress::Pending {
+                        self.fail(ExecutionError::Unavailable);
+                        return;
+                    }
                     call.progress = Progress::Started;
                     if !self.published
                         && current
@@ -591,58 +651,68 @@ impl Actor {
                     }
                 }
             }
-            Message::Submitted(id, output) => self.submitted(id, &output),
-            Message::Completed(id, result) => {
-                let observed = Self::sample();
-                let current = self.current(id);
-                let Some(call) = self.calls.get_mut(&id) else {
-                    return;
-                };
-                if call.result_seen {
-                    return;
-                }
-                call.result_seen = true;
-                if call.settled == Some(true) {
-                    self.acks.insert(id);
-                }
-                if self.published || !current {
-                    self.reconcile();
-                    return;
-                }
-                if result.is_ok() && call.progress == Progress::Pending {
-                    self.fail(ExecutionError::Unavailable);
-                    return;
-                }
-                if observed.monotonic < call.dispatch.deadline() {
-                    let event = match &result {
-                        Ok(output) => events::task_success(
-                            &call.machine,
-                            call.dispatch.state(),
-                            output,
-                            observed.wall,
-                        ),
-                        Err(failure) => events::task_failure(
-                            &call.machine,
-                            call.dispatch.state(),
-                            failure,
-                            if call.progress == Progress::Pending {
-                                TaskFailureKind::Admission
-                            } else {
-                                TaskFailureKind::Failed
-                            },
-                            observed.wall,
-                        ),
-                    };
-                    if let Err(error) = self.history.event(id.frame(), event) {
-                        self.fail(error);
-                        return;
-                    }
-                    self.publish_running();
-                }
-                self.park = None;
-                self.worker(Operation::Complete(id, result, observed)).await;
-            }
+            Message::Submitted(id, output) => self.submitted(id, &output.payload),
+            Message::Completed(id, completion) => self.completed(id, completion).await,
         }
+    }
+    async fn completed(&mut self, id: FrameCallId, completion: Completion) {
+        let result = &completion.result;
+        let observed = Self::sample();
+        let current = self.current(id);
+        let Some(call) = self.calls.get_mut(&id) else {
+            return;
+        };
+        if call.result_seen {
+            return;
+        }
+        call.result_seen = true;
+        if call.settled == Some(true) {
+            self.acks.insert(id);
+        }
+        if self.published || !current {
+            self.reconcile();
+            return;
+        }
+        if result.is_ok() && matches!(call.progress, Progress::Preparing | Progress::Pending) {
+            self.fail(ExecutionError::Unavailable);
+            return;
+        }
+        if observed.monotonic < call.dispatch.deadline() {
+            let event = match result {
+                Ok(output) => events::task_success(
+                    &call.machine,
+                    call.dispatch.state(),
+                    output,
+                    observed.wall,
+                ),
+                Err(failure) => events::task_failure(
+                    &call.machine,
+                    call.dispatch.state(),
+                    failure,
+                    if matches!(call.progress, Progress::Preparing | Progress::Pending) {
+                        TaskFailureKind::Admission
+                    } else if call.dispatch.callback()
+                        && matches!(
+                            failure.details().error(),
+                            Some("States.HeartbeatTimeout" | "States.Timeout")
+                        )
+                    {
+                        TaskFailureKind::TimedOut
+                    } else {
+                        TaskFailureKind::Failed
+                    },
+                    observed.wall,
+                ),
+            };
+            if let Err(error) = self.history.event(id.frame(), event) {
+                self.fail(error);
+                return;
+            }
+            self.publish_running();
+        }
+        self.park = None;
+        self.worker(Operation::Complete(id, completion, observed))
+            .await;
     }
     async fn dispatch(&mut self) {
         self.control();
@@ -694,6 +764,7 @@ impl Actor {
         let lease = Arc::new(DispatchLease {
             _permit: permit,
             _frame: Some(pending.frame),
+            _data: None,
         });
         self.leases.push(lease.clone());
         self.sync_ledger();
@@ -713,35 +784,51 @@ impl Actor {
             }
             Err(failure) => {
                 self.release(&lease);
-                let observed = Self::sample();
-                self.control();
-                if self.published {
-                    return;
-                }
-                if observed.monotonic >= dispatch.deadline() {
-                    self.acks.insert(id);
-                    self.park = None;
-                    return;
-                }
-                if let Err(error) = self.history.event(
-                    id.frame(),
-                    events::task_failure(
-                        &machine,
-                        dispatch.state(),
-                        &failure,
-                        TaskFailureKind::Admission,
-                        observed.wall,
-                    ),
-                ) {
-                    self.fail(error);
-                    return;
-                }
-                self.publish_running();
-                self.acks.insert(id);
-                self.worker(Operation::Complete(id, Err(failure), observed))
-                    .await;
+                self.rejected(id, machine, dispatch, failure).await;
             }
         }
+    }
+    async fn rejected(
+        &mut self,
+        id: FrameCallId,
+        machine: Arc<CompiledMachine>,
+        dispatch: TaskDispatch,
+        failure: TaskFailure,
+    ) {
+        let observed = Self::sample();
+        self.control();
+        if self.published {
+            return;
+        }
+        if observed.monotonic >= dispatch.deadline() {
+            self.acks.insert(id);
+            self.park = None;
+            return;
+        }
+        if let Err(error) = self.history.event(
+            id.frame(),
+            events::task_failure(
+                &machine,
+                dispatch.state(),
+                &failure,
+                TaskFailureKind::Admission,
+                observed.wall,
+            ),
+        ) {
+            self.fail(error);
+            return;
+        }
+        self.publish_running();
+        self.acks.insert(id);
+        self.worker(Operation::Complete(
+            id,
+            Completion {
+                result: Err(failure),
+                _lease: None,
+            },
+            observed,
+        ))
+        .await;
     }
     fn accepted(
         &mut self,
@@ -751,12 +838,22 @@ impl Actor {
         call: TaskCall,
         lease: Arc<DispatchLease>,
     ) {
+        self.accepted_instruction(id, machine, Instruction::Task(dispatch), call, lease);
+    }
+    fn accepted_instruction(
+        &mut self,
+        id: FrameCallId,
+        machine: Arc<CompiledMachine>,
+        dispatch: Instruction,
+        call: TaskCall,
+        lease: Arc<DispatchLease>,
+    ) {
         let cancel = call.cancellation_sender();
         let cancelled = cancel.subscribe();
         let child = matches!(
             machine.state(dispatch.state()),
             Ok(StateView::Task {
-                resource: Integration::StartExecution(_),
+                resource: Integration::StartExecution(_) | Integration::LambdaCallback(_),
                 ..
             })
         );
@@ -766,8 +863,12 @@ impl Actor {
                 cancel,
                 lease: lease.clone(),
                 machine,
+                progress: if dispatch.callback() {
+                    Progress::Preparing
+                } else {
+                    Progress::Pending
+                },
                 dispatch,
-                progress: Progress::Pending,
                 result_seen: false,
                 cancelled: false,
                 settled: None,
@@ -816,6 +917,7 @@ impl Actor {
             && self.workers.is_empty()
             && self.watchers.is_empty()
             && self.child_jobs.is_empty()
+            && self.callback_jobs.is_empty()
             && self.pending.is_empty()
             && self.calls.values().all(|call| call.settled == Some(false))
             && self.park.is_some()
@@ -832,6 +934,12 @@ impl Actor {
             self.control();
             self.expired();
             self.reconcile();
+            while let Some(result) = self.callback_jobs.try_join_next() {
+                if let Err(error) = result {
+                    self.uncertain = true;
+                    self.fail(ExecutionError::Worker(error));
+                }
+            }
             while let Some(result) = self.child_jobs.try_join_next() {
                 if let Err(error) = result {
                     self.uncertain = true;
@@ -881,6 +989,7 @@ impl Actor {
                 _=self.stop.changed(),if !self.published=>self.control(),
                 ()=sleep_until(until),if !self.published=>{self.control();self.expired();self.park=None;},
                 result=self.workers.join_next(),if !self.workers.is_empty()=>if let Some(result)=result{self.evaluated(result);},
+                result=self.callback_jobs.join_next(),if !self.callback_jobs.is_empty()=>if let Some(Err(error))=result{self.uncertain=true;self.fail(ExecutionError::Worker(error));},
                 result=self.child_jobs.join_next(),if !self.child_jobs.is_empty()=>if let Some(Err(error))=result{self.uncertain=true;self.fail(ExecutionError::Worker(error));},
                 result=self.watchers.join_next_with_id(),if !self.watchers.is_empty()=>if let Some(result)=result{self.joined(result);},
                 message=self.receiver.recv(),if self.workers.is_empty()=>if let Some(message)=message{self.message(message).await;},
