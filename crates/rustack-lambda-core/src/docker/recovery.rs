@@ -13,7 +13,7 @@ use super::{
     ownership::ContainerRecord,
 };
 
-mod code;
+pub(super) mod code;
 mod images;
 pub(super) mod inventory;
 mod namespace;

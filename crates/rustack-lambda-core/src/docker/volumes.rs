@@ -10,6 +10,7 @@ use super::{
     DockerCodeArchive, DockerError, DockerKey, DockerPort, Operation, OwnerFilter, RawRequest,
     decode, encode, escaped,
     models::{Volume, VolumeCreateRequest, VolumeListResponse, VolumeScopeEnum},
+    mutation::MutationGuard,
     unit,
 };
 
@@ -82,6 +83,16 @@ impl DockerPort {
         labels: &BTreeMap<String, String>,
         deadline: Instant,
     ) -> Result<Volume, DockerError> {
+        self.create_volume_tracked(name, labels, deadline, None)
+            .await
+    }
+    pub(super) async fn create_volume_tracked(
+        &self,
+        name: &DockerKey,
+        labels: &BTreeMap<String, String>,
+        deadline: Instant,
+        mutation: Option<MutationGuard>,
+    ) -> Result<Volume, DockerError> {
         validate_labels(
             labels
                 .iter()
@@ -99,15 +110,22 @@ impl DockerPort {
             ..VolumeCreateRequest::default()
         };
         let volume: Volume = decode(
-            self.call(
-                Operation::CreateVolume,
-                Method::POST,
-                "/volumes/create".into(),
-                encode(&body)?,
-                StatusCode::CREATED,
-                deadline,
-            )
-            .await?,
+            self.raw
+                .request(
+                    RawRequest {
+                        archive: None,
+                        pull: None,
+                        binding: None,
+                        mutation,
+                        operation: Operation::CreateVolume,
+                        method: Method::POST,
+                        target: format!("/v{}/volumes/create", self.version),
+                        body: encode(&body)?,
+                        expected: StatusCode::CREATED,
+                    },
+                    deadline,
+                )
+                .await?,
             deadline,
         )?;
         validate_volume(&volume)?;

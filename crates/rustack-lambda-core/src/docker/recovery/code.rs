@@ -72,11 +72,24 @@ async fn recover(
     mut record: CodeRecord,
     deadline: Instant,
 ) -> Result<bool, DockerError> {
+    if retire_effects(directory, docker, &mut record, deadline).await? {
+        directory.settle_code(record, deadline).await?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+pub(in crate::docker) async fn retire_effects(
+    directory: &DirectoryLease,
+    docker: &DockerPort,
+    record: &mut CodeRecord,
+    deadline: Instant,
+) -> Result<bool, DockerError> {
     if record.volume == VolumeState::Planned {
         let mut next = record.clone();
         next.volume = VolumeState::Retired;
         next.loader = LoaderState::Retired;
-        save(directory, &mut record, next, deadline).await?;
+        save(directory, record, next, deadline).await?;
     }
     if record.volume == VolumeState::Uncertain {
         let inspected = match docker.inspect_volume(&record.volume_key()?, deadline).await {
@@ -86,18 +99,17 @@ async fn recover(
         record.owned_volume(directory.owner_id(), &inspected)?;
         let mut next = record.clone();
         next.volume = VolumeState::Known;
-        save(directory, &mut record, next, deadline).await?;
+        save(directory, record, next, deadline).await?;
     }
-    if !Box::pin(retire_loader(directory, docker, &mut record, deadline)).await? {
+    if !Box::pin(retire_loader(directory, docker, record, deadline)).await? {
         return Ok(false);
     }
-    if !retire_volume(directory, docker, &mut record, deadline).await? {
+    if !retire_volume(directory, docker, record, deadline).await? {
         return Ok(false);
     }
-    directory.settle_code(record, deadline).await?;
     Ok(true)
 }
-async fn retire_loader(
+pub(in crate::docker) async fn retire_loader(
     directory: &DirectoryLease,
     docker: &DockerPort,
     record: &mut CodeRecord,

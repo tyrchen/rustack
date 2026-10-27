@@ -19,8 +19,10 @@ pub use execution::{ImageExecutionDefaults, ImageExecutionMetadata, ImageExecuti
 pub use image::{
     Architecture, ArtifactError, ImageMetadata, ImageReference, ResolvedImage, Sha256Digest,
 };
+pub(crate) use pinned::{
+    ImageLeaseContext, ImageLiveness, PreparationAdmission, PreparationReceipt,
+};
 pub use pinned::{PinnedImage, UnpackedImageSize};
-pub(crate) use pinned::{PreparationAdmission, PreparationReceipt};
 use tempfile::TempDir;
 
 use crate::storage::compute_sha256;

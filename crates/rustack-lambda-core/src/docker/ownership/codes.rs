@@ -1,4 +1,4 @@
-//! Code journal reader and monotonic recovery transactions; no runtime producer.
+//! Bounded code journal, checked producer transitions and monotonic retirement.
 
 use std::{collections::BTreeSet, fs::File, io};
 
@@ -12,6 +12,7 @@ use super::{
     DirectoryLease, DirectoryLeaseError, Provenance, managed_file,
     snapshot::{Codec, read},
 };
+use crate::docker::mutation::MutationReceipt;
 
 mod identity;
 
@@ -34,6 +35,12 @@ pub(in crate::docker) enum LoaderState {
     Known([u8; 32]),
     Retired,
 }
+#[derive(Debug, Clone, Copy)]
+pub(in crate::docker) enum CodeEffect {
+    Volume,
+    Loader,
+}
+
 #[derive(Clone, PartialEq, Eq, TypedBuilder)]
 pub(in crate::docker) struct CodeRecord {
     pub(in crate::docker) run: Uuid,
@@ -64,21 +71,35 @@ impl CodeRecord {
                 VolumeState::Retired => self.loader == LoaderState::Retired,
             }
     }
-    fn advances(&self, next: &Self) -> bool {
+    pub(in crate::docker) fn same_identity(&self, next: &Self) -> bool {
         let mut identity = self.clone();
         identity.volume = next.volume;
         identity.loader = next.loader;
         identity == *next
+    }
+    fn advances(&self, next: &Self) -> bool {
+        self.same_identity(next)
             && next.valid()
-            && ((self.volume == next.volume && matches!((self.loader, next.loader),
-                (LoaderState::Planned | LoaderState::Known(_), LoaderState::Retired)
-                | (LoaderState::Uncertain, LoaderState::Known(_))))
-            || (self.loader == next.loader && matches!((self.volume, next.volume),
-                (VolumeState::Uncertain, VolumeState::Known)
-                | (VolumeState::Known, VolumeState::Retired)))
-            // No effect can have issued while either intent was still Planned.
-            || (self.volume == VolumeState::Planned && self.loader == LoaderState::Planned
-                && next.volume == VolumeState::Retired && next.loader == LoaderState::Retired))
+            && ((self.volume == next.volume
+                && matches!(
+                    (self.loader, next.loader),
+                    (
+                        LoaderState::Planned | LoaderState::Known(_),
+                        LoaderState::Retired
+                    ) | (LoaderState::Planned, LoaderState::Uncertain)
+                        | (LoaderState::Uncertain, LoaderState::Known(_))
+                ))
+                || (self.loader == next.loader
+                    && matches!(
+                        (self.volume, next.volume),
+                        (VolumeState::Planned, VolumeState::Uncertain)
+                            | (VolumeState::Uncertain, VolumeState::Known)
+                            | (VolumeState::Known, VolumeState::Retired)
+                    ))
+                || (self.volume == VolumeState::Planned
+                    && self.loader == LoaderState::Planned
+                    && next.volume == VolumeState::Retired
+                    && next.loader == LoaderState::Retired))
     }
 }
 
@@ -115,15 +136,84 @@ impl DirectoryLease {
         })
         .await
     }
+    pub(in crate::docker) async fn prepare_code(
+        &self,
+        record: CodeRecord,
+        deadline: Instant,
+    ) -> Result<(), DirectoryLeaseError> {
+        if !self.code_journaled()
+            || record.run != self.run_id()
+            || record.volume != VolumeState::Planned
+            || record.loader != LoaderState::Planned
+            || !record.valid()
+        {
+            return Err(DirectoryLeaseError::InvalidState);
+        }
+        let run = self.run_id();
+        self.snapshot::<CodeCodec, _>(deadline, move |records| {
+            if records.iter().any(|old| old.run != run) {
+                return Err(DirectoryLeaseError::InvalidState);
+            }
+            if let Some(old) = records
+                .iter()
+                .find(|old| old.environment == record.environment)
+            {
+                return if *old == record {
+                    Ok(())
+                } else {
+                    Err(DirectoryLeaseError::InvalidState)
+                };
+            }
+            if records.len() >= MAX_RECORDS {
+                return Err(DirectoryLeaseError::InvalidState);
+            }
+            records.push(record);
+            Ok(())
+        })
+        .await
+    }
+    pub(in crate::docker) async fn abandon_code(
+        &self,
+        record: CodeRecord,
+        effect: CodeEffect,
+        receipt: &MutationReceipt,
+        deadline: Instant,
+    ) -> Result<(), DirectoryLeaseError> {
+        if !self.code_journaled() || record.run != self.run_id() || !receipt.definitely_unissued() {
+            return Err(DirectoryLeaseError::InvalidState);
+        }
+        let mut next = record.clone();
+        match (effect, record.volume, record.loader) {
+            (CodeEffect::Volume, VolumeState::Uncertain, LoaderState::Planned) => {
+                next.volume = VolumeState::Retired;
+                next.loader = LoaderState::Retired;
+            }
+            (CodeEffect::Loader, VolumeState::Known, LoaderState::Uncertain) => {
+                next.loader = LoaderState::Retired;
+            }
+            _ => return Err(DirectoryLeaseError::InvalidState),
+        }
+        self.replace_code(record, next, deadline).await
+    }
     pub(in crate::docker) async fn advance_code(
         &self,
         old: CodeRecord,
         next: CodeRecord,
         deadline: Instant,
     ) -> Result<(), DirectoryLeaseError> {
-        if !self.code_journaled() || !old.advances(&next) {
+        let arming = (old.volume == VolumeState::Planned && next.volume == VolumeState::Uncertain)
+            || (old.loader == LoaderState::Planned && next.loader == LoaderState::Uncertain);
+        if !self.code_journaled() || !old.advances(&next) || (arming && old.run != self.run_id()) {
             return Err(DirectoryLeaseError::InvalidState);
         }
+        self.replace_code(old, next, deadline).await
+    }
+    async fn replace_code(
+        &self,
+        old: CodeRecord,
+        next: CodeRecord,
+        deadline: Instant,
+    ) -> Result<(), DirectoryLeaseError> {
         self.snapshot::<CodeCodec, _>(deadline, move |records| {
             let saved = records
                 .iter_mut()

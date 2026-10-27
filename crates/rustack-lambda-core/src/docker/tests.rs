@@ -460,6 +460,7 @@ async fn test_should_keep_cleanup_capacity_while_business_calls_and_mailbox_are_
         port.raw
             .business
             .try_send(Envelope {
+                upload_completion: None,
                 request: RawRequest {
                     archive: None,
                     pull: None,

@@ -5,6 +5,7 @@
 
 mod binding;
 mod code;
+mod code_volume;
 mod config;
 mod connection;
 mod environment;
@@ -40,6 +41,10 @@ use std::{
 pub use bollard_stubs::models;
 use bytes::Bytes;
 pub use code::DockerCodeArchive;
+pub use code_volume::{
+    CodePreparation, CodeRetirement, CodeVolumeConfig, CodeVolumeIdentity, CodeVolumeManager,
+    CodeVolumePort, CodeVolumeStatus, PinnedCode,
+};
 pub use config::{
     DockerGatewayEndpoint, DockerRuntimeSettings, RegistryAuthError, RegistryAuthFile,
 };
@@ -189,15 +194,34 @@ impl fmt::Debug for RawReply {
         }
     }
 }
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct CompletionGate {
+    entered: watch::Sender<bool>,
+    release: watch::Receiver<bool>,
+}
+
 #[derive(Debug)]
 struct Envelope {
+    #[cfg(test)]
+    upload_completion: Option<CompletionGate>,
     request: RawRequest,
     deadline: Instant,
     reply: oneshot::Sender<Result<RawReply, DockerError>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseOwner {
+    Observer,
+    Owner,
+}
+
+#[derive(Debug, Clone, TypedBuilder)]
 struct RawPort {
+    #[cfg(test)]
+    #[builder(default)]
+    upload_completion: Option<CompletionGate>,
+    response_owner: ResponseOwner,
     binding: Option<Arc<DaemonBinding>>,
     business: mpsc::Sender<Envelope>,
     cleanup: mpsc::Sender<Envelope>,
@@ -211,6 +235,9 @@ impl RawPort {
         request: RawRequest,
         deadline: Instant,
     ) -> Result<RawReply, DockerError> {
+        if self.response_owner == ResponseOwner::Owner {
+            return self.request_owned(request, deadline).await;
+        }
         let response = self.enqueue(request, deadline)?;
         let result = timeout_at(deadline, response)
             .await
@@ -268,8 +295,16 @@ impl RawPort {
             &self.business
         };
         let (reply, response) = oneshot::channel();
+        #[cfg(test)]
+        let upload_completion = if matches!(request.operation, Operation::UploadCode) {
+            self.upload_completion.clone()
+        } else {
+            None
+        };
         sender
             .try_send(Envelope {
+                #[cfg(test)]
+                upload_completion,
                 request,
                 deadline,
                 reply,
@@ -403,6 +438,12 @@ macro_rules! container_method {
 }
 
 impl DockerPort {
+    /// Only retained internal owners may await accepted IO past observation expiry.
+    fn owned(mut self) -> Self {
+        self.raw.response_owner = ResponseOwner::Owner;
+        self
+    }
+
     /// Negotiated API version, immutable after successful connection startup.
     ///
     /// ```no_run
@@ -852,14 +893,15 @@ impl Owner {
                 primary: None,
                 settlement: None,
             },
-            RawPort {
-                binding: None,
-                business,
-                cleanup,
-                waits,
-                pulls,
-                stop,
-            },
+            RawPort::builder()
+                .response_owner(ResponseOwner::Observer)
+                .binding(None)
+                .business(business)
+                .cleanup(cleanup)
+                .waits(waits)
+                .pulls(pulls)
+                .stop(stop)
+                .build(),
         )
     }
     async fn shutdown(&mut self) -> Result<(), DockerError> {
@@ -995,6 +1037,11 @@ impl Actor {
         self.jobs.spawn(
             async move {
                 let result = exchange(&socket, envelope.request, envelope.deadline, stopped).await;
+                #[cfg(test)]
+                if let Some(mut gate) = envelope.upload_completion {
+                    gate.entered.send_replace(true);
+                    let _ = gate.release.wait_for(|released| *released).await;
+                }
                 let failed = matches!(&result, Err(DockerError::Worker));
                 let _ = envelope.reply.send(result);
                 (lane, failed)

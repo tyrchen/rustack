@@ -30,8 +30,8 @@ use super::{
 };
 use crate::{
     artifact::{
-        Architecture, ArtifactError, ImageReference, PinnedImage, PreparationAdmission,
-        PreparationReceipt, ResolvedImage, Sha256Digest, UnpackedImageSize,
+        Architecture, ArtifactError, ImageLeaseContext, ImageReference, PinnedImage,
+        PreparationAdmission, PreparationReceipt, ResolvedImage, Sha256Digest, UnpackedImageSize,
     },
     executor::ExecutorError,
     function_config::validate_image_config,
@@ -964,13 +964,16 @@ impl Worker {
         match staged {
             Ok((resolved, size)) => {
                 self.progress.active.store(true, Ordering::Release);
-                let image = PinnedImage::with_receipt(
+                let image = PinnedImage::with_context(
                     resolved,
                     size,
                     release,
                     self.progress.active.clone(),
                     self.control.subscribe(),
-                    Some(admission),
+                    ImageLeaseContext::Owned {
+                        directory: self.pin.directory().clone(),
+                        preparation: Some(admission),
+                    },
                 );
                 let delivered = match self.check(deadline, &cancelled) {
                     Ok(()) => reply.send(Ok(image)).is_ok(),

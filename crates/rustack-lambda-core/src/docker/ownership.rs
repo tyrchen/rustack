@@ -30,10 +30,11 @@ use nix::{
 use sha2::{Digest, Sha256};
 use tokio::{
     runtime::Handle,
-    sync::{AcquireError, Semaphore, SemaphorePermit},
+    sync::{AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit},
     task::{JoinHandle, spawn_blocking},
     time::{Instant, timeout_at},
 };
+use typed_builder::TypedBuilder;
 use uuid::Uuid;
 
 pub(super) use self::{images::ImageRecord, journal::ContainerRecord};
@@ -83,6 +84,39 @@ pub enum DirectoryLeaseError {
     #[error("Docker ownership IO failed")]
     Io(#[source] io::Error),
 }
+#[derive(Debug)]
+struct CodeProducerState {
+    gate: Arc<Semaphore>,
+    poisoned: AtomicBool,
+}
+impl CodeProducerState {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new(Semaphore::new(1)),
+            poisoned: AtomicBool::new(false),
+        }
+    }
+}
+/// Exclusive producing lifetime; cancellation without an empty joined ledger poisons acquisition.
+#[derive(Debug)]
+pub(in crate::docker) struct CodeProducerGuard {
+    state: Arc<CodeProducerState>,
+    _permit: OwnedSemaphorePermit,
+    clean: AtomicBool,
+}
+impl CodeProducerGuard {
+    pub(in crate::docker) fn settle(&self) {
+        self.clean.store(true, Ordering::Release);
+    }
+}
+impl Drop for CodeProducerGuard {
+    fn drop(&mut self) {
+        if !self.clean.load(Ordering::Acquire) {
+            self.state.poisoned.store(true, Ordering::Release);
+        }
+    }
+}
+
 impl fmt::Debug for DirectoryLeaseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
@@ -113,10 +147,12 @@ enum Provenance {
     CodeJournaled,
 }
 
+#[derive(TypedBuilder)]
 struct Lease {
     owner: Uuid,
     run: Uuid,
     transaction: Arc<Semaphore>,
+    code_producer: Arc<CodeProducerState>,
     provenance: Provenance,
     guard: LeaseGuard,
 }
@@ -142,6 +178,27 @@ impl DirectoryLease {
             Provenance::Journaled | Provenance::CodeJournaled => Ok(()),
             Provenance::Legacy => Err(DirectoryLeaseError::Legacy),
         }
+    }
+
+    pub(super) fn code_producer(&self) -> Result<CodeProducerGuard, DirectoryLeaseError> {
+        let state = &self.0.code_producer;
+        if self.0.provenance != Provenance::CodeJournaled || state.poisoned.load(Ordering::Acquire)
+        {
+            return Err(DirectoryLeaseError::InvalidState);
+        }
+        let permit = state
+            .gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| DirectoryLeaseError::InUse)?;
+        if state.poisoned.load(Ordering::Acquire) {
+            return Err(DirectoryLeaseError::InvalidState);
+        }
+        Ok(CodeProducerGuard {
+            state: state.clone(),
+            _permit: permit,
+            clean: AtomicBool::new(false),
+        })
     }
 
     pub(super) fn code_journaled(&self) -> bool {
@@ -174,7 +231,7 @@ impl DirectoryLease {
         .await
     }
 
-    pub(super) fn same_instance(&self, other: &Self) -> bool {
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
@@ -238,20 +295,21 @@ impl DirectoryLease {
 
     #[cfg(test)]
     pub(super) fn testing(owner: Uuid, run: Uuid) -> Self {
-        Self(Arc::new(Lease {
-            owner,
-            run,
-            transaction: Arc::new(Semaphore::new(1)),
-            provenance: Provenance::Journaled,
-            guard: {
-                let root = tempfile::tempdir().unwrap();
-                let directory = File::open(root.path()).unwrap();
-                LeaseGuard::Testing {
+        let root = tempfile::tempdir().unwrap();
+        let directory = File::open(root.path()).unwrap();
+        Self(Arc::new(
+            Lease::builder()
+                .owner(owner)
+                .run(run)
+                .transaction(Arc::new(Semaphore::new(1)))
+                .code_producer(Arc::new(CodeProducerState::new()))
+                .provenance(Provenance::Journaled)
+                .guard(LeaseGuard::Testing {
                     directory,
                     _root: root,
-                }
-            },
-        }))
+                })
+                .build(),
+        ))
     }
 }
 
@@ -399,16 +457,19 @@ fn acquire_profile(
     namespace.sync_all()?;
     root.sync_all()?;
     control.check()?;
-    Ok(DirectoryLease(Arc::new(Lease {
-        owner,
-        run: Uuid::new_v4(),
-        transaction: Arc::new(Semaphore::new(1)),
-        provenance,
-        guard: LeaseGuard::Held {
-            directory: namespace,
-            _lock: lock,
-        },
-    })))
+    Ok(DirectoryLease(Arc::new(
+        Lease::builder()
+            .owner(owner)
+            .run(Uuid::new_v4())
+            .transaction(Arc::new(Semaphore::new(1)))
+            .code_producer(Arc::new(CodeProducerState::new()))
+            .provenance(provenance)
+            .guard(LeaseGuard::Held {
+                directory: namespace,
+                _lock: lock,
+            })
+            .build(),
+    )))
 }
 
 fn open_root(path: &Path, control: &Control) -> Result<File, DirectoryLeaseError> {

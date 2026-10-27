@@ -241,7 +241,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 55-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 56-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -252,15 +252,17 @@ running Docker resources.
 The code-volume prerequisite also transfers an immutable ZIP through a never-started
 RW loader and executes its program from an actual RO volume, checking ownership,
 modes, kernel read-only enforcement and writable `/tmp`. This transport component
-does not enable ordinary Docker ZIP Lambda execution; durable volume ownership
-and the runtime/provider consumer remain required. See the
+does not enable ordinary Docker ZIP Lambda execution; the runtime/provider
+consumer remains required. See the
 [ZIP delivery contract](../specs/rustack-workflows-20-lambda-runtime-design.md#61-provided-runtime-zip-delivery-contract-d89).
 
 The library's explicit code namespace uses a fresh `RSDKOWN3` ownership root;
 existing Image roots are never automatically upgraded. Startup can reopen that
 root to retire recorded loaders/volumes before image pins, with complete volume
 audits. Unknown creation followed by404 remains quarantined. The retained
-producing manager and ordinary ZIP invocation are still required. See the
+producing manager is now available as a library component: capture its preparation
+retirement receipt, retain code leases through consumer cleanup, and join code
+ownership before image ownership. Ordinary ZIP invocation remains required. See the
 [code recovery contract](../specs/rustack-workflows-20-lambda-runtime-design.md#66-code-namespace-provenance-and-recovery-boundary-d90).
 
 The management IO cases hold actual Create/Tag acknowledgments and owned DELETE

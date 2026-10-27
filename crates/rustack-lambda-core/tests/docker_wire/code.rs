@@ -13,7 +13,8 @@ use http::StatusCode;
 use rustack_lambda_core::{
     artifact::Architecture,
     docker::{
-        DockerCodeArchive, DockerError, DockerKey, FunctionLogs, OwnerFilter,
+        CodeRetirement, CodeVolumeConfig, CodeVolumeIdentity, CodeVolumeManager, DockerCodeArchive,
+        DockerError, DockerKey, FunctionLogs, OwnerFilter, PinnedCode,
         models::{
             ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, HostConfig,
             Mount, MountType, MountVolumeOptions,
@@ -82,11 +83,18 @@ struct Fixture {
     volume_phase: VolumePhase,
     loader_phase: ContainerPhase,
     function_phase: ContainerPhase,
+    manager: Option<CodeVolumeManager>,
+    ready: Option<PinnedCode>,
+    retirement: Option<CodeRetirement>,
 }
 
 impl Fixture {
     async fn new() -> Result<Self> {
-        let mut environment = Environment::new().await?;
+        Self::new_with_manager(false).await
+    }
+
+    async fn new_with_manager(managed: bool) -> Result<Self> {
+        let mut environment = Environment::new_with_code(managed).await?;
         let root = environment
             .directory
             .as_mut()
@@ -117,6 +125,9 @@ impl Fixture {
             volume_phase: VolumePhase::Unissued,
             loader_phase: ContainerPhase::Unissued,
             function_phase: ContainerPhase::Unissued,
+            manager: None,
+            ready: None,
+            retirement: None,
         })
     }
 
@@ -352,6 +363,57 @@ impl Fixture {
         Ok(())
     }
 
+    async fn exercise_managed(&mut self) -> Result<()> {
+        let (code, architecture) = self.prepare_code().await?;
+        let base = self
+            .environment
+            .artifacts
+            .last()
+            .context("source pin")?
+            .clone();
+        let manager = CodeVolumeManager::start(
+            self.environment.docker.clone(),
+            self.environment.lease.clone(),
+            CodeVolumeConfig::default(),
+        )?;
+        let port = manager.port();
+        self.manager = Some(manager);
+        let preparation = port.start_preparation(
+            CodeVolumeIdentity::new(Uuid::new_v4(), Uuid::new_v4())?,
+            code,
+            base,
+            deadline() + Duration::from_secs(120),
+        )?;
+        self.retirement = Some(preparation.retirement());
+        let ready = preparation.wait().await?;
+        self.volume = ready.volume_name().clone();
+        ensure!(
+            ready.base_image_id().as_str() == self.image,
+            "changed base image"
+        );
+        let mount = ready.mount()?;
+        self.ready = Some(ready);
+        ensure!(
+            port.status().volumes == 1 && port.status().preparing == 0,
+            "Ready admission"
+        );
+        self.function_phase = ContainerPhase::Uncertain;
+        self.record().await?;
+        let mut body = self.body(false);
+        body.host_config.as_mut().context("consumer policy")?.mounts = Some(vec![mount]);
+        self.environment
+            .docker
+            .create_container_on_platform(&self.function, &body, architecture, deadline())
+            .await?;
+        let function = self.observe(false).await?;
+        self.consume_probe(&function).await?;
+        ensure!(
+            port.status().volumes == 1,
+            "consumer must retain code ownership"
+        );
+        Ok(())
+    }
+
     async fn consume_probe(&mut self, function: &DockerKey) -> Result<()> {
         self.environment.logs = Some(FunctionLogs::start(
             self.environment
@@ -489,6 +551,13 @@ impl Fixture {
 
     async fn cleanup(&mut self) -> Result<()> {
         self.retire(false).await?;
+        if let Some(manager) = &mut self.manager {
+            self.ready.take();
+            if let Some(retirement) = &mut self.retirement {
+                retirement.wait(deadline()).await?;
+            }
+            manager.shutdown(deadline()).await?;
+        }
         self.retire(true).await?;
         if self.volume_phase != VolumePhase::Unissued {
             match self
@@ -541,6 +610,29 @@ impl Fixture {
         );
         self.environment.cleanup().await
     }
+}
+
+#[tokio::test]
+#[ignore = "requires actual retained code owner; run make test-lambda-docker"]
+async fn test_should_prepare_code_with_retained_owner_and_consume_it_read_only() -> Result<()> {
+    let mut fixture = Fixture::new_with_manager(true).await?;
+    let result = timeout_at(
+        deadline() + Duration::from_secs(180),
+        fixture.exercise_managed(),
+    )
+    .await
+    .context("managed code fixture observer expired")
+    .and_then(|result| result);
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup?;
+    fixture
+        .environment
+        .directory
+        .as_mut()
+        .context("code evidence root")?
+        .disable_cleanup(false);
+    Ok(())
 }
 
 fn package(bootstrap: &[u8]) -> Result<Vec<u8>> {

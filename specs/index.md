@@ -60,6 +60,11 @@ The [pinned Docker transport study](../docs/research/study-bollard-docker-transp
 
 The new set supersedes conflicting historical Docker plans while preserving the hardening contracts. Ordinary Lambda invocation already waits for its result; `.sync` is implemented for nested Step Functions, not an invalid `lambda:invoke.sync` resource.
 
+
+D90 is implemented and independently reviewed: [durable code namespace recovery](./rustack-workflows-20-lambda-runtime-design.md#66-code-namespace-provenance-and-recovery-boundary-d90) adds an explicit code provenance generation and reader/recovery boundary before its retained producing actor. Both retained full55-resource gates and standard/strict/Native/security checks pass, with zero owned remnants and eight actual provisioned sources preserved per engine. Producing ownership is covered by D91 below; ordinary ZIP and complete M4 remain open.
+
+D91 is implemented and independently reviewed: [retained producing code-volume management](./rustack-workflows-20-lambda-runtime-design.md#67-retained-producing-code-volume-manager-d91) consumes D90 recovery and D89 typed code transfer. Both retained full56-resource gates and standard/strict/Native/security checks pass, with zero remnants and eight actual provisioned sources preserved per engine. Ordinary ZIP startup/provider/invocation and archives are next; complete M4 remains active.
+
 ## 推荐阅读顺序
 
 1. [系统审查与改进 spec](./rustack-system-review.md)：安全、正确性、架构及开发者体验；按 R01–R18 定位问题，按 M0–M4 安排修复。
@@ -122,5 +127,3 @@ The new set supersedes conflicting historical Docker plans while preserving the 
 | [ruststack-snapshot-binary-archive-design](./ruststack-snapshot-binary-archive-design.md) | Design：当前二进制归档目标 |
 | [ruststack-snapshot-impl-plan](./ruststack-snapshot-impl-plan.md) | Impl plan：依赖顺序与实施阶段 |
 | [ruststack-snapshot-verification-plan](./ruststack-snapshot-verification-plan.md) | Verification plan：快照测试与验收 |
-
-D90 is implemented and independently reviewed: [durable code namespace recovery](./rustack-workflows-20-lambda-runtime-design.md#66-code-namespace-provenance-and-recovery-boundary-d90) adds an explicit code provenance generation and reader/recovery boundary before its retained producing actor. Both retained full55-resource gates and standard/strict/Native/security checks pass, with zero owned remnants and eight actual provisioned sources preserved per engine. The retained producing owner, ordinary ZIP and complete M4 remain open.

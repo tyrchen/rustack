@@ -1215,6 +1215,7 @@ lambda-zip-code-build:
 	@cargo lambda build --locked -p rustack-lambda-echo-bootstrap --bin zip-code-bootstrap --features zip-code --target "$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu" --release --lambda-dir "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)"
 
 test-lambda-code-fixture:
+	@cargo test --locked -p rustack-lambda-core --lib docker::code_volume::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::ownership::codes::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::recovery::code::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::code::tests

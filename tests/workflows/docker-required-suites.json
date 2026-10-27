@@ -56,7 +56,8 @@
       "tests": [
         "test_should_execute_real_ric_over_production_wire_with_large_binary_frames_and_cleanup",
         "test_should_preserve_empty_overrides_in_actual_docker_create_merging",
-        "code::test_should_upload_zip_code_to_a_private_volume_and_consume_it_read_only"
+        "code::test_should_upload_zip_code_to_a_private_volume_and_consume_it_read_only",
+        "code::test_should_prepare_code_with_retained_owner_and_consume_it_read_only"
       ]
     },
     {

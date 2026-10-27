@@ -109,12 +109,20 @@ struct Environment {
 }
 impl Environment {
     async fn new() -> Result<Self> {
+        Self::new_with_code(false).await
+    }
+
+    async fn new_with_code(code: bool) -> Result<Self> {
         let socket = env::var("RUSTACK_RUNTIME_DOCKER_SOCKET")
             .context("explicit test Docker socket required")?;
         let socket: DockerSocket = format!("unix://{socket}").parse()?;
         let wire = DockerWire::connect(socket, deadline()).await?;
         let directory = tempfile::tempdir()?;
-        let lease = DirectoryLease::acquire(directory.path().to_path_buf(), deadline()).await?;
+        let lease = if code {
+            DirectoryLease::acquire_code(directory.path().to_path_buf(), deadline()).await?
+        } else {
+            DirectoryLease::acquire(directory.path().to_path_buf(), deadline()).await?
+        };
         let run = lease.run_id();
         let owner = lease.owner_id();
         let docker = wire.port().bind_directory(&lease, deadline()).await?;

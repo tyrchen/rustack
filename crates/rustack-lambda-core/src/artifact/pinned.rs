@@ -14,6 +14,7 @@ use tokio::sync::{OwnedSemaphorePermit, watch};
 use typed_builder::TypedBuilder;
 
 use super::{ArtifactError, MAX_IMAGE_BYTES, ResolvedImage};
+use crate::docker::DirectoryLease;
 
 /// Positive daemon-reported unpacked image storage, within the local10GiB quota.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +74,39 @@ impl PreparationAdmission {
 /// Shared acceptance receipt; clearing it releases guards retained above workers.
 pub(crate) type PreparationReceipt = watch::Sender<Option<PreparationAdmission>>;
 
+/// Availability view with no pin-release sender or directory/resource ownership.
+#[derive(Debug, Clone)]
+pub(crate) struct ImageLiveness {
+    active: Arc<AtomicBool>,
+    stop: watch::Receiver<bool>,
+}
+impl ImageLiveness {
+    pub(crate) fn is_live(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+            && !*self.stop.borrow()
+            && self.stop.has_changed().is_ok()
+    }
+    pub(crate) async fn revoked(&self) {
+        let mut stop = self.stop.clone();
+        while self.is_live() {
+            if stop.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Runtime-owned pins carry the exact acquired directory; fixtures cannot grant it.
+#[derive(Debug)]
+pub(crate) enum ImageLeaseContext {
+    #[cfg(test)]
+    Fixture,
+    Owned {
+        directory: DirectoryLease,
+        preparation: Option<PreparationReceipt>,
+    },
+}
+
 #[derive(TypedBuilder)]
 struct Lease {
     resolved: ResolvedImage,
@@ -80,7 +114,7 @@ struct Lease {
     release: watch::Sender<()>,
     active: Arc<AtomicBool>,
     stop: watch::Receiver<bool>,
-    preparation: Option<PreparationReceipt>,
+    context: ImageLeaseContext,
 }
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -121,16 +155,23 @@ impl PinnedImage {
         active: Arc<AtomicBool>,
         stop: watch::Receiver<bool>,
     ) -> Self {
-        Self::with_receipt(resolved, size, release, active, stop, None)
+        Self::with_context(
+            resolved,
+            size,
+            release,
+            active,
+            stop,
+            ImageLeaseContext::Fixture,
+        )
     }
 
-    pub(crate) fn with_receipt(
+    pub(crate) fn with_context(
         resolved: ResolvedImage,
         size: UnpackedImageSize,
         release: watch::Sender<()>,
         active: Arc<AtomicBool>,
         stop: watch::Receiver<bool>,
-        preparation: Option<PreparationReceipt>,
+        context: ImageLeaseContext,
     ) -> Self {
         Self(Arc::new(
             Lease::builder()
@@ -139,15 +180,36 @@ impl PinnedImage {
                 .release(release)
                 .active(active)
                 .stop(stop)
-                .preparation(preparation)
+                .context(context)
                 .build(),
         ))
     }
 
     /// Confirm a validated consumed artifact or a committed deployment CAS.
     pub(crate) fn accept_preparation(&self) {
-        if let Some(receipt) = &self.0.preparation {
+        if let ImageLeaseContext::Owned {
+            preparation: Some(receipt),
+            ..
+        } = &self.0.context
+        {
             receipt.send_replace(None);
+        }
+    }
+
+    pub(crate) fn liveness(&self) -> ImageLiveness {
+        ImageLiveness {
+            active: self.0.active.clone(),
+            stop: self.0.stop.clone(),
+        }
+    }
+
+    pub(crate) fn belongs_to(&self, directory: &DirectoryLease) -> bool {
+        match &self.0.context {
+            ImageLeaseContext::Owned {
+                directory: origin, ..
+            } => origin.same_instance(directory),
+            #[cfg(test)]
+            ImageLeaseContext::Fixture => false,
         }
     }
 
