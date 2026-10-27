@@ -10,7 +10,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, watch};
+use typed_builder::TypedBuilder;
 
 use super::{ArtifactError, MAX_IMAGE_BYTES, ResolvedImage};
 
@@ -52,12 +53,34 @@ impl UnpackedImageSize {
 #[non_exhaustive]
 pub struct PinnedImage(Arc<Lease>);
 
+/// Admission retained by the image actor until a consumed handoff or physical retirement.
+#[derive(Debug)]
+pub(crate) struct PreparationAdmission {
+    _image: OwnedSemaphorePermit,
+    _deployment: Option<Arc<OwnedSemaphorePermit>>,
+}
+impl PreparationAdmission {
+    pub(crate) fn new(
+        image: OwnedSemaphorePermit,
+        deployment: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> Self {
+        Self {
+            _image: image,
+            _deployment: deployment,
+        }
+    }
+}
+/// Shared acceptance receipt; clearing it releases guards retained above workers.
+pub(crate) type PreparationReceipt = watch::Sender<Option<PreparationAdmission>>;
+
+#[derive(TypedBuilder)]
 struct Lease {
     resolved: ResolvedImage,
     size: UnpackedImageSize,
     release: watch::Sender<()>,
     active: Arc<AtomicBool>,
     stop: watch::Receiver<bool>,
+    preparation: Option<PreparationReceipt>,
 }
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -90,6 +113,7 @@ impl PinnedImage {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         resolved: ResolvedImage,
         size: UnpackedImageSize,
@@ -97,13 +121,34 @@ impl PinnedImage {
         active: Arc<AtomicBool>,
         stop: watch::Receiver<bool>,
     ) -> Self {
-        Self(Arc::new(Lease {
-            resolved,
-            size,
-            release,
-            active,
-            stop,
-        }))
+        Self::with_receipt(resolved, size, release, active, stop, None)
+    }
+
+    pub(crate) fn with_receipt(
+        resolved: ResolvedImage,
+        size: UnpackedImageSize,
+        release: watch::Sender<()>,
+        active: Arc<AtomicBool>,
+        stop: watch::Receiver<bool>,
+        preparation: Option<PreparationReceipt>,
+    ) -> Self {
+        Self(Arc::new(
+            Lease::builder()
+                .resolved(resolved)
+                .size(size)
+                .release(release)
+                .active(active)
+                .stop(stop)
+                .preparation(preparation)
+                .build(),
+        ))
+    }
+
+    /// Confirm a validated consumed artifact or a committed deployment CAS.
+    pub(crate) fn accept_preparation(&self) {
+        if let Some(receipt) = &self.0.preparation {
+            receipt.send_replace(None);
+        }
     }
 
     /// Immutable metadata captured by preparation; never resolve a mutable tag.

@@ -180,7 +180,7 @@ struct Envelope {
 #[derive(Debug)]
 struct Row {
     pending: Arc<Pending>,
-    _slot: OwnedSemaphorePermit,
+    _slot: Arc<OwnedSemaphorePermit>,
 }
 #[derive(Debug)]
 struct Reservation {
@@ -509,11 +509,12 @@ impl Actor {
             slot,
             deadline,
         } = envelope;
+        let slot = Arc::new(slot);
         self.rows.insert(
             id,
             Row {
                 pending: pending.clone(),
-                _slot: slot,
+                _slot: slot.clone(),
             },
         );
         let preparation = self.preparation.clone();
@@ -526,7 +527,7 @@ impl Actor {
                 !health.crash_worker.swap(false, Ordering::AcqRel),
                 "injected deployment worker failure"
             );
-            let outcome = prepare(&pending, preparation, control, deadline).await;
+            let outcome = prepare(&pending, preparation, control, deadline, slot).await;
             let outcome = if pending.health.failed.load(Ordering::Acquire) {
                 Err(ImageDeploymentFailure::SupervisorFailed)
             } else {
@@ -601,13 +602,15 @@ async fn prepare(
     preparation: ImageLeasePort,
     mut control: watch::Receiver<Mode>,
     deadline: Instant,
+    admission: Arc<OwnedSemaphorePermit>,
 ) -> Result<PinnedImage, ImageDeploymentFailure> {
     let mut changes = pending.store.changes();
-    let preparation = preparation.prepare(
+    let preparation = preparation.prepare_deployment(
         pending.job.reference(),
         pending.job.architecture(),
         pending.job.image_config(),
         deadline,
+        admission,
     );
     tokio::pin!(preparation);
     let result = loop {

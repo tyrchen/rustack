@@ -458,6 +458,7 @@ impl FunctionStore {
         if !job.matches(&before) {
             return Ok(false);
         }
+        let receipt = outcome.as_ref().ok().cloned();
         let prepared = match outcome {
             Ok(image) => {
                 if !image.is_live()
@@ -488,7 +489,7 @@ impl FunctionStore {
             }
             Err(failure) => Err(failure),
         };
-        match self.update(&job.name, |record| {
+        let committed = match self.update(&job.name, |record| {
             if !job.matches(record) {
                 return false;
             }
@@ -506,7 +507,13 @@ impl FunctionStore {
         }) {
             Err(LambdaServiceError::FunctionNotFound { .. }) => Ok(false),
             result => result,
+        }?;
+        if committed {
+            if let Some(image) = receipt {
+                image.accept_preparation();
+            }
         }
+        Ok(committed)
     }
 }
 

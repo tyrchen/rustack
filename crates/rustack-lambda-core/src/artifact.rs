@@ -20,6 +20,7 @@ pub use image::{
     Architecture, ArtifactError, ImageMetadata, ImageReference, ResolvedImage, Sha256Digest,
 };
 pub use pinned::{PinnedImage, UnpackedImageSize};
+pub(crate) use pinned::{PreparationAdmission, PreparationReceipt};
 use tempfile::TempDir;
 
 use crate::storage::compute_sha256;

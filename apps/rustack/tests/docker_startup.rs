@@ -6,6 +6,8 @@
 mod custom;
 #[path = "docker_startup/faults.rs"]
 mod faults;
+#[path = "docker_startup/io_faults.rs"]
+mod io_faults;
 #[path = "docker_startup/process.rs"]
 mod process;
 #[path = "workflows_sdk/runner.rs"]
@@ -323,4 +325,17 @@ async fn test_should_settle_real_image_faults_and_public_cancellation_admission(
         .context("fault evidence guard")?
         .disable_cleanup(false);
     Ok(())
+}
+
+#[rstest]
+#[case::allocating(io_faults::Case::Create)]
+#[case::cleanup(io_faults::Case::Delete)]
+#[case::daemon_loss(io_faults::Case::Loss)]
+#[case::deployment_saturation(io_faults::Case::Saturation)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit real-daemon IO proxy fixtures; run make test-lambda-io-faults-docker"]
+async fn test_should_retain_actual_management_io_through_cancellation_and_deployment_faults(
+    #[case] case: io_faults::Case,
+) -> Result<()> {
+    io_faults::exercise(case).await
 }

@@ -1245,3 +1245,52 @@ test-lambda-fault-fixture: workflows-sdk-python
 	@cargo clippy --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 
 .PHONY: test-lambda-fault-fixture
+
+# Real management IO barriers keep the ordinary server and real daemon in charge.
+test-lambda-io-faults-docker: test-lambda-startup-docker
+
+test-lambda-io-faults: workflows-sdk-python
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_docker_io_proxy.py -v
+
+.PHONY: test-lambda-io-faults test-lambda-io-faults-docker
+
+# Fixed inventories are compared before any resource test is executed.
+test-lambda-docker-manifest:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_required_suites.py -v
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_docker_required_suites.py -v
+	@set -eu; docker_manifest_dir="$$(mktemp -d)"; \
+		trap 'rm -rf "$$docker_manifest_dir"' EXIT; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions -- --ignored --list --color never >"$$docker_manifest_dir/ordinary-startup.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --lib -- --ignored --list --color never >"$$docker_manifest_dir/docker-core.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_environment -- --ignored --list --color never >"$$docker_manifest_dir/docker-environment.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_executor -- --ignored --list --color never >"$$docker_manifest_dir/docker-executor.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_endpoint -- --ignored --list --color never >"$$docker_manifest_dir/docker-endpoint.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --list --color never >"$$docker_manifest_dir/docker-probe.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --list --color never >"$$docker_manifest_dir/docker-wire.txt"; \
+		cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --list --color never >"$$docker_manifest_dir/relay-runtime.txt"; \
+		python3 -B tests/workflows/docker_required_suites.py "$$docker_manifest_dir"
+
+WORKFLOWS_DOCKER_TEST_ENV = PATH="$(dir $(WORKFLOWS_DOCKER_BIN)):$(PATH)" \
+	RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" \
+	RUSTACK_OTHER_DOCKER_SOCKET="$(WORKFLOWS_OTHER_DOCKER_SOCKET)" \
+	RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" \
+	RUSTACK_RUNTIME_NETWORK="$(WORKFLOWS_NETWORK)" RUSTACK_RUNTIME_GATEWAY_HOST="$(WORKFLOWS_GATEWAY_HOST)" \
+	RUSTACK_CUSTOM_IMAGE_A="rustack-custom-ric:a-$(WORKFLOWS_ARCH)" RUSTACK_CUSTOM_IMAGE_B="rustack-custom-ric:b-$(WORKFLOWS_ARCH)" \
+	RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" \
+	RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python"
+
+# Functional image scope only. Keep orchestration sequential even under parent make -j.
+test-lambda-docker:
+	@test -n "$(WORKFLOWS_DOCKER_SOCKET)" && test -n "$(WORKFLOWS_OTHER_DOCKER_SOCKET)" && test "$(WORKFLOWS_DOCKER_SOCKET)" != "$(WORKFLOWS_OTHER_DOCKER_SOCKET)" && test -n "$(WORKFLOWS_NETWORK)" && test -n "$(WORKFLOWS_GATEWAY_HOST)" && test -x "$(WORKFLOWS_DOCKER_BIN)"
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images workflows-sdk-python test-lambda-io-faults test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-docker-manifest
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --lib -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_environment -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_executor -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_endpoint -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --nocapture --test-threads=1
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --nocapture --test-threads=1
+	@echo 'Verified docker-image-functional resources; interrupted-pull/Node/archive/ZIP/handler-SDK/IaC/reference-platform/full-release acceptance remains required.'
+
+.PHONY: test-lambda-docker-manifest test-lambda-docker

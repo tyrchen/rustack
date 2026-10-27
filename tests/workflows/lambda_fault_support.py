@@ -125,10 +125,21 @@ class Metadata:
             current = identity(self.read(connection, "/v" + self.api + "/info")["ID"])
             assert self.engine == current, "independent metadata daemon changed"
             assert connection.sock is not None, "metadata identity fence lost its connection"
-            assert path.startswith("/containers/") and len(path) <= 2048
+            assert path.startswith(("/containers/", "/images/")) and len(path) <= 2048
+            if path.startswith("/images/"):
+                alias = urllib.parse.unquote(path[len("/images/"):-len("/json")])
+                assert path.endswith("/json") and alias.startswith("rustack-internal/lambda-" + uuid.UUID(self.owner).hex + "/")
             return self.read(connection, "/v" + self.api + path)
         finally:
             connection.close()
+
+    def image_id(self, alias):
+        assert isinstance(alias, str) and len(alias) <= 256
+        result = self.get("/images/" + urllib.parse.quote(alias, safe="") + "/json")
+        key = result["Id"]
+        assert isinstance(key, str) and len(key) == 71 and key.startswith("sha256:")
+        assert all(character in "0123456789abcdef" for character in key[7:])
+        return key
 
     def rows(self):
         query = urllib.parse.urlencode({"all": "true", "filters": json.dumps({

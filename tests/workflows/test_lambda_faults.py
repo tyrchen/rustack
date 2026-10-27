@@ -152,6 +152,15 @@ class FaultControls(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 metadata.ids()
 
+    def test_should_refuse_foreign_private_image_before_forwarding_its_inspection(self):
+        engine, owner, foreign = (str(uuid.uuid4()) for _ in range(3))
+        with engine_fixture(engine, []) as (path, calls):
+            metadata = Metadata(path, owner, engine)
+            alias = "rustack-internal/lambda-" + uuid.UUID(foreign).hex + "/" + uuid.uuid4().hex + ":" + uuid.uuid4().hex
+            with self.assertRaises(AssertionError):
+                metadata.image_id(alias)
+            self.assertFalse(any("/images/" in target for target in calls))
+
     def test_should_bound_metadata_body_before_materializing_json(self):
         engine, owner = str(uuid.uuid4()), str(uuid.uuid4())
         with engine_fixture(engine, "x"*(1024*1024+1)) as (path, _calls):

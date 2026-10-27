@@ -1,4 +1,4 @@
-"""Fail-closed preflight for the reviewed native workflow resource inventory.
+"""Bounded exact-inventory decoder and native workflow resource entrypoint.
 
 Make owns compilation, inventory creation and subsequent resource execution.
 This module validates data only; manifest contents never become commands.
@@ -57,7 +57,8 @@ def _name(value):
     return value
 
 
-def parse_manifest(raw):
+def parse_manifest(raw, *, expected_suites=SUITES, profile="rustack-standard-jsonpath-v1",
+                   qualification="native-workflow-only"):
     """Validate the complete bounded schema, suite set and exact test names."""
     if len(raw) > MANIFEST_LIMIT:
         raise ManifestError("manifest byte limit exceeded")
@@ -71,19 +72,19 @@ def parse_manifest(raw):
         raise ManifestError("invalid manifest fields")
     if type(document["schemaVersion"]) is not int or document["schemaVersion"] != 1:
         raise ManifestError("unsupported manifest schema")
-    if document["profile"] != "rustack-standard-jsonpath-v1":
+    if document["profile"] != profile:
         raise ManifestError("unsupported workflow profile")
-    if document["qualification"] != "native-workflow-only":
-        raise ManifestError("manifest cannot certify release or image platforms")
+    if document["qualification"] != qualification:
+        raise ManifestError("unsupported manifest qualification")
     suites = document["suites"]
-    if not isinstance(suites, list) or len(suites) != len(SUITES):
+    if not isinstance(suites, list) or len(suites) != len(expected_suites):
         raise ManifestError("incomplete required suite set")
     result = {}
     for suite in suites:
         if not isinstance(suite, dict) or set(suite) != {"id", "tests"}:
             raise ManifestError("invalid suite fields")
         identity = suite["id"]
-        if not isinstance(identity, str) or identity not in SUITES or identity in result:
+        if not isinstance(identity, str) or identity not in expected_suites or identity in result:
             raise ManifestError("unknown or repeated required suite")
         tests = suite["tests"]
         if not isinstance(tests, list) or not 1 <= len(tests) <= 128:
@@ -98,7 +99,7 @@ def parse_manifest(raw):
         ):
             raise ManifestError("bridge case is outside the Native selection")
         result[identity] = names
-    if set(result) != SUITES:
+    if set(result) != expected_suites:
         raise ManifestError("incomplete required suite set")
     return result
 
@@ -133,11 +134,11 @@ def parse_inventory(raw):
     return frozenset(names)
 
 
-def verify(required, inventories):
+def verify(required, inventories, *, expected_suites=SUITES):
     """Require exact complete agreement, including unexpected ignored cases."""
-    if set(required) != SUITES or set(inventories) != SUITES:
+    if set(required) != expected_suites or set(inventories) != expected_suites:
         raise ManifestError("incomplete inventory inputs")
-    for identity in sorted(SUITES):
+    for identity in sorted(expected_suites):
         if parse_inventory(inventories[identity]) != required[identity]:
             raise ManifestError("compiled inventory differs from required suite: " + identity)
     return sum(map(len, required.values()))

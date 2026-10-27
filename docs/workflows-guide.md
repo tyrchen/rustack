@@ -209,6 +209,39 @@ explicit images, daemon, bridge and function-visible host. Allocation/cleanup
 IO fault injection, daemon loss and pull/deployment saturation remain separate
 release requirements.
 
+The complete current Docker functional resource gate is explicit:
+
+```bash
+make test-lambda-docker \
+  WORKFLOWS_ARCH=arm64 \
+  WORKFLOWS_DOCKER_SOCKET=/absolute/selected/docker.sock \
+  WORKFLOWS_OTHER_DOCKER_SOCKET=/absolute/other/docker.sock \
+  WORKFLOWS_NETWORK=existing-user-bridge \
+  WORKFLOWS_GATEWAY_HOST=192.168.5.2 \
+  WORKFLOWS_DOCKER_BIN=/absolute/path/to/docker \
+  WORKFLOWS_IMAGE_BUILDER=/absolute/path/to/docker-buildx
+```
+
+Choose values for your actual two distinct daemons and function-visible gateway;
+the addresses above are placeholders. The gate builds fixtures, compares eight
+compiled inventories against the [frozen 44-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+resource sequentially. Missing/extra/renamed ignored tests fail preflight.
+It includes the standalone relay suite and real cross-daemon binding; run each
+selected architecture with the other daemon supplied. This qualifies the
+`docker-image-functional` profile, while final platform/release requirements
+remain open. `make test-lambda-docker-manifest` checks inventories without
+running Docker resources.
+
+The management IO cases hold actual Create/Tag acknowledgments and owned DELETE
+requests. Deleting a Pending deployment cannot release its quota while critical
+image mutation/retirement remains owned. Admission transfers only when a live
+artifact is consumed or its exact deployment commits. Whole transport loss can
+revoke backend readiness and reject Invoke while diagnostics remain reachable;
+restoring the test transport does not revive a failed owner. The test keeps that
+transport alive through joined server cleanup, preserving any specific shutdown
+failure. `make test-lambda-io-faults` runs the proxy's framing/lifecycle controls;
+`test-lambda-io-faults-docker` runs the full ordinary startup/fault suite.
+
 ## Enable trusted-host Lambda tasks
 
 Build with the Lambda feature and select the backend explicitly. Override the

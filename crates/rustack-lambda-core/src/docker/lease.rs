@@ -30,7 +30,8 @@ use super::{
 };
 use crate::{
     artifact::{
-        Architecture, ImageReference, PinnedImage, ResolvedImage, Sha256Digest, UnpackedImageSize,
+        Architecture, ImageReference, PinnedImage, PreparationAdmission, PreparationReceipt,
+        ResolvedImage, Sha256Digest, UnpackedImageSize,
     },
     executor::ExecutorError,
     function_config::validate_image_config,
@@ -175,7 +176,9 @@ struct Request {
     deadline: Instant,
     cancelled: watch::Receiver<()>,
     reply: oneshot::Sender<Result<PinnedImage, DockerError>>,
-    slot: OwnedSemaphorePermit,
+    slot: Option<OwnedSemaphorePermit>,
+    #[builder(default)]
+    retained_admission: Option<Arc<OwnedSemaphorePermit>>,
 }
 impl fmt::Debug for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -237,6 +240,37 @@ impl ImageLeasePort {
         overrides: Option<&ImageConfig>,
         deadline: Instant,
     ) -> Result<PinnedImage, DockerError> {
+        self.prepare_guarded(reference, architecture, overrides, deadline, None)
+            .await
+    }
+
+    pub(crate) async fn prepare_deployment(
+        &self,
+        reference: &ImageReference,
+        architecture: Architecture,
+        overrides: Option<&ImageConfig>,
+        deadline: Instant,
+        admission: Arc<OwnedSemaphorePermit>,
+    ) -> Result<PinnedImage, DockerError> {
+        self.prepare_guarded(
+            reference,
+            architecture,
+            overrides,
+            deadline,
+            Some(admission),
+        )
+        .await
+    }
+
+    async fn prepare_guarded(
+        &self,
+        reference: &ImageReference,
+        architecture: Architecture,
+        overrides: Option<&ImageConfig>,
+        deadline: Instant,
+        retained_admission: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> Result<PinnedImage, DockerError> {
+        let deployment = retained_admission.is_some();
         self.available()?;
         if self
             .platform
@@ -264,7 +298,8 @@ impl ImageLeasePort {
             .deadline(deadline)
             .cancelled(cancelled)
             .reply(reply)
-            .slot(slot)
+            .slot(Some(slot))
+            .retained_admission(retained_admission)
             .build();
         self.sender
             .try_send(Envelope {
@@ -285,7 +320,11 @@ impl ImageLeasePort {
         if Instant::now() >= deadline {
             return Err(DockerError::Deadline);
         }
-        result
+        let image = result?;
+        if !deployment {
+            image.accept_preparation();
+        }
+        Ok(image)
     }
     /// Observe release of every pin reservation without stopping admission.
     ///
@@ -526,6 +565,7 @@ struct Record {
     pin: ImagePin,
     progress: Arc<Progress>,
     permit: PinPermit,
+    _admission: PreparationReceipt,
 }
 
 type PinJob = (Uuid, Result<(), DockerError>);
@@ -589,7 +629,7 @@ impl Actor {
             Ok(())
         }
     }
-    fn start(&mut self, envelope: Envelope) {
+    fn start(&mut self, mut envelope: Envelope) {
         if self.health.check().is_err()
             || *self.control.borrow()
             || envelope.request.reply.is_closed()
@@ -599,6 +639,16 @@ impl Actor {
             let _ = envelope.request.reply.send(Err(DockerError::Stopped));
             return;
         }
+        let Some(slot) = envelope.request.slot.take() else {
+            self.health.failed.store(true, Ordering::Release);
+            self.control.send_replace(true);
+            let _ = envelope.request.reply.send(Err(DockerError::Worker));
+            return;
+        };
+        let (admission, _) = watch::channel(Some(PreparationAdmission::new(
+            slot,
+            envelope.request.retained_admission.take(),
+        )));
         let (phase, _) = watch::channel(Phase::Unissued);
         let (release, released) = watch::channel(());
         let progress = Arc::new(Progress {
@@ -623,6 +673,7 @@ impl Actor {
                 pin: envelope.pin,
                 progress,
                 permit: envelope.permit,
+                _admission: admission.clone(),
             },
         );
         let health = self.health.clone();
@@ -633,7 +684,7 @@ impl Actor {
                 control,
                 finished: false,
             };
-            let result = worker.run(envelope.request, release).await;
+            let result = worker.run(envelope.request, release, admission).await;
             guard.finished = true;
             (id, result)
         });
@@ -838,6 +889,7 @@ impl Worker {
         mut self,
         request: Request,
         release: watch::Sender<()>,
+        admission: PreparationReceipt,
     ) -> Result<(), DockerError> {
         let Request {
             reference,
@@ -846,7 +898,8 @@ impl Worker {
             deadline,
             mut cancelled,
             reply,
-            slot,
+            slot: _,
+            retained_admission: _,
         } = request;
         let staged = self
             .stage(
@@ -862,25 +915,29 @@ impl Worker {
         match staged {
             Ok((resolved, size)) => {
                 self.progress.active.store(true, Ordering::Release);
-                let image = PinnedImage::new(
+                let image = PinnedImage::with_receipt(
                     resolved,
                     size,
                     release,
                     self.progress.active.clone(),
                     self.control.subscribe(),
+                    Some(admission),
                 );
-                match self.check(deadline, &cancelled) {
-                    Ok(()) => {
-                        let _ = reply.send(Ok(image));
-                    }
+                let delivered = match self.check(deadline, &cancelled) {
+                    Ok(()) => reply.send(Ok(image)).is_ok(),
                     Err(error) => {
                         self.progress.active.store(false, Ordering::Release);
                         drop(image);
                         let _ = reply.send(Err(error));
+                        false
                     }
-                }
+                };
                 drop(cancelled);
-                drop(slot);
+                if !delivered {
+                    self.progress.active.store(false, Ordering::Release);
+                    self.retire().await;
+                    return Ok(());
+                }
                 let mut released = self.progress.released.clone();
                 let mut stop = self.control.subscribe();
                 tokio::select! {biased;()=stopped(&mut stop)=>{},_ = released.changed()=>{}}
@@ -889,7 +946,6 @@ impl Worker {
             Err(error) => {
                 let _ = reply.send(Err(error));
                 self.retire().await;
-                drop(slot);
             }
         }
         Ok(())

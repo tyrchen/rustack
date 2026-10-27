@@ -3,7 +3,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
 
@@ -70,6 +70,7 @@ pub(super) struct Server {
     pub endpoint: String,
     profile: Profile,
     sources: Vec<(ImageReference, String)>,
+    socket_override: Option<PathBuf>,
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
@@ -96,6 +97,12 @@ pub(super) fn socket() -> Result<String> {
 }
 impl Server {
     pub async fn spawn(profile: Profile) -> Result<Self> {
+        Self::spawn_with_socket(profile, None).await
+    }
+    pub async fn spawn_with_socket(
+        profile: Profile,
+        socket_override: Option<&Path>,
+    ) -> Result<Self> {
         let root = tempfile::tempdir()?;
         let reserved = TcpListener::bind("0.0.0.0:0").await?;
         let port = reserved.local_addr()?.port();
@@ -147,13 +154,14 @@ impl Server {
         stopped?;
         let sources = result?;
         fs::copy(env!("CARGO_BIN_EXE_rustack"), root.path().join("rustack")).await?;
-        let child = launch(root.path(), profile, port).await?;
+        let child = launch(root.path(), profile, port, socket_override).await?;
         Ok(Self {
             child,
             root: Some(root),
             endpoint: format!("http://127.0.0.1:{port}"),
             profile,
             sources,
+            socket_override: socket_override.map(Path::to_path_buf),
         })
     }
     pub async fn track_image(&mut self, source: &str) -> Result<String> {
@@ -251,6 +259,30 @@ impl Server {
         }
     }
     pub async fn stop(&mut self, success: bool) -> Result<()> {
+        let status = self.stop_status().await?;
+        ensure!(
+            status.success() == success,
+            "unexpected ordinary server exit status"
+        );
+        Ok(())
+    }
+    pub async fn stop_after_transport_loss(&mut self) -> Result<()> {
+        let status = self.stop_status().await?;
+        if !status.success() {
+            let file = fs::File::open(self.path()?.join("server.log")).await?;
+            let mut raw = Vec::new();
+            file.take(32769).read_to_end(&mut raw).await?;
+            ensure!(raw.len() <= 32768, "transport-loss diagnostic cap");
+            let text = String::from_utf8_lossy(&raw);
+            ensure!(
+                text.contains("Error: Docker not available")
+                    || text.contains("Lambda quiesce did not confirm all invocation cleanup"),
+                "unrelated shutdown error after transport loss"
+            );
+        }
+        Ok(())
+    }
+    async fn stop_status(&mut self) -> Result<ExitStatus> {
         if self.child.try_wait()?.is_none() {
             let id = self.child.id().context("owned server PID")?;
             kill(Pid::from_raw(id.try_into()?), Signal::SIGTERM)?;
@@ -263,11 +295,7 @@ impl Server {
             timeout(Duration::from_secs(5), self.child.wait()).await??;
             anyhow::bail!("forced server reap; graceful cleanup unproven");
         };
-        ensure!(
-            status.success() == success,
-            "unexpected ordinary server exit status"
-        );
-        Ok(())
+        Ok(status)
     }
     pub async fn restart(&mut self) -> Result<()> {
         let port = self
@@ -276,7 +304,13 @@ impl Server {
             .next()
             .context("owned endpoint port")?
             .parse()?;
-        self.child = launch(self.path()?, self.profile, port).await?;
+        self.child = launch(
+            self.path()?,
+            self.profile,
+            port,
+            self.socket_override.as_deref(),
+        )
+        .await?;
         Ok(())
     }
     pub async fn audit(&self) -> Result<()> {
@@ -364,7 +398,12 @@ async fn observation_record(path: PathBuf, length: usize, magic: &[u8; 8]) -> Re
     );
     Ok(raw)
 }
-async fn launch(root: &Path, profile: Profile, port: u16) -> Result<Child> {
+async fn launch(
+    root: &Path,
+    profile: Profile,
+    port: u16,
+    socket_override: Option<&Path>,
+) -> Result<Child> {
     let log = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -380,7 +419,13 @@ async fn launch(root: &Path, profile: Profile, port: u16) -> Result<Child> {
         .env("RUSTACK_CONFIG", root.join("config.yaml"))
         .env("DATA_DIR", root.join("data"))
         .env("LAMBDA_EXECUTOR", "docker")
-        .env("LAMBDA_DOCKER_SOCKET", socket()?)
+        .env(
+            "LAMBDA_DOCKER_SOCKET",
+            match socket_override {
+                Some(path) => format!("unix://{}", path.display()),
+                None => socket()?,
+            },
+        )
         .env(
             "LAMBDA_DOCKER_RELAY_IMAGE",
             if profile == Profile::MissingRelay {

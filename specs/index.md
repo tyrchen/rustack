@@ -12,6 +12,8 @@ P3's explicit structured supervisor now owns asynchronous Parallel/Map calls, re
 
 D83 adds permanent-memory rejection before allocation, a captured Docker final-cleanup reserve, and ordinary-service fault/cancellation/admission qualification. The complete Native verifier is rerun first, following the requested execution order. See the [D83 review](./rustack-workflows-93-review.md#p1-real-image-faults-and-public-cancellationadmission-review) for causal deadlines, retained resource ownership and exact evidence; remaining Docker fault injection, image archive/ZIP, handler SDK/IaC and platform release gates stay open.
 
+D84 adds consumed image-preparation admission receipts retained above worker unwind, real management-IO barriers and an exact eight-target Docker resource inventory. The unified functional gate includes all 44 current Docker resources and preserves the separate Native policy. See the [management IO design](./rustack-workflows-20-lambda-runtime-design.md#414-causal-management-io-fault-qualification-d84) and [verification contract](./rustack-workflows-70-verification-plan.md#management-io-faults-and-exact-docker-resource-inventory-d84); full M0–M4 acceptance stays open.
+
 | Order | Specification | Type / purpose |
 |---|---|---|
 | 00 | [Workflows PRD](./rustack-workflows-00-prd.md) | Product goals, compatibility profile and complete M0–M4 scope |

@@ -78,6 +78,10 @@ impl Fixture {
     async fn idle(&self) {
         until(|| self.manager.status().accepted == 0).await;
     }
+    async fn failed_preparation(&self, reason: ImageDeploymentFailure) {
+        until(|| latest(&self.store).deployment == DeploymentState::CreateFailed(reason)).await;
+        assert_eq!(self.manager.status().accepted, 1);
+    }
     async fn ready(&self) {
         let pending = self.manager.create(record()).unwrap();
         assert_eq!(pending.latest.deployment.state(), "Pending");
@@ -130,13 +134,16 @@ async fn test_should_reject_capacity_before_resource_insertion_and_drain_after_c
     ));
     assert!(!fixture.store.contains("other").unwrap());
     assert!(fixture.manager.shutdown(Instant::now()).await.is_err());
-    fixture.idle().await;
+    fixture
+        .failed_preparation(ImageDeploymentFailure::Cancelled)
+        .await;
     assert_eq!(
         latest(&fixture.store).deployment,
         DeploymentState::CreateFailed(ImageDeploymentFailure::Cancelled)
     );
     assert!(fixture.images.port().status().pins > 0);
     fixture.fake.commands.send(Command::Commit).await.unwrap();
+    fixture.idle().await;
     assert_eq!(fixture.fake.stats.tags.load(Ordering::Acquire), 1);
     fixture.close(false).await;
 }
@@ -197,13 +204,16 @@ async fn test_should_keep_deployment_deadline_absolute_and_leave_critical_tag_cl
             })
             .unwrap();
     }
-    fixture.idle().await;
+    fixture
+        .failed_preparation(ImageDeploymentFailure::DeadlineExceeded)
+        .await;
     assert_eq!(
         latest(&fixture.store).deployment,
         DeploymentState::CreateFailed(ImageDeploymentFailure::DeadlineExceeded)
     );
     assert!(fixture.images.port().status().pins > 0);
     fixture.fake.commands.send(Command::Commit).await.unwrap();
+    fixture.idle().await;
     fixture.close(false).await;
 }
 
@@ -221,7 +231,8 @@ async fn test_should_cancel_deleted_generation_without_waiting_for_its_deploymen
     replacement.latest.description = "replacement".into();
     let resource = replacement.resource_id;
     fixture.store.insert(replacement).unwrap();
-    fixture.idle().await;
+    fixture.manager.quiesce(deadline()).await.unwrap();
+    assert_eq!(fixture.manager.status().accepted, 1);
     assert_eq!(
         fixture.store.get("worker").unwrap().unwrap().resource_id,
         resource
@@ -229,6 +240,7 @@ async fn test_should_cancel_deleted_generation_without_waiting_for_its_deploymen
     assert_eq!(latest(&fixture.store).description, "replacement");
     assert!(latest(&fixture.store).image.pinned().is_none());
     fixture.fake.commands.send(Command::Commit).await.unwrap();
+    fixture.idle().await;
     fixture.close(false).await;
 }
 
@@ -270,12 +282,15 @@ async fn test_should_retain_join_when_drain_or_shutdown_waiter_is_abandoned() {
         .as_mut()
         .poll(&mut Context::from_waker(Waker::noop()));
     drop(waiter);
-    fixture.idle().await;
+    fixture
+        .failed_preparation(ImageDeploymentFailure::Cancelled)
+        .await;
     assert_eq!(
         latest(&fixture.store).deployment,
         DeploymentState::CreateFailed(ImageDeploymentFailure::Cancelled)
     );
     fixture.fake.commands.send(Command::Commit).await.unwrap();
+    fixture.idle().await;
     fixture.close(false).await;
 }
 
@@ -355,7 +370,7 @@ async fn test_should_recover_joined_rows_after_root_drop_outside_an_entered_runt
         .unwrap();
     emergency.wait().await.unwrap();
     assert!(health.failed.load(Ordering::Acquire));
-    assert_eq!(capacity.available_permits(), 1);
+    assert_eq!(capacity.available_permits(), 0);
     assert_eq!(
         latest(&store).deployment,
         DeploymentState::CreateFailed(ImageDeploymentFailure::SupervisorFailed)
@@ -363,6 +378,7 @@ async fn test_should_recover_joined_rows_after_root_drop_outside_an_entered_runt
     fake.commands.send(Command::Commit).await.unwrap();
     drop(store);
     images.shutdown(deadline()).await.unwrap();
+    assert_eq!(capacity.available_permits(), 1);
     fake.close().await;
 }
 
@@ -727,6 +743,67 @@ async fn test_should_validate_image_code_dry_run_without_preparation_or_state_ch
     assert_eq!(fake.stats.absent.load(Ordering::Acquire), 0);
     provider.shutdown().await;
     drop(provider);
+    images.shutdown(deadline()).await.unwrap();
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn test_should_keep_cancelled_deployment_admission_after_outer_worker_join_until_image_io_retires()
+ {
+    let fake = FakePins::new(DaemonMode::Never).await;
+    let mut images = fake.owner(4, 1);
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(FunctionStore::new(root.path()));
+    let job = store.insert_image_deployment(record()).unwrap();
+    let health = Arc::new(Health::default());
+    let (control, _) = watch::channel(Mode::Running);
+    let (sender, inbox) = mpsc::channel(1);
+    let mut actor = Actor::builder()
+        .inbox(inbox)
+        .preparation(images.port())
+        .control(control.clone())
+        .health(health.clone())
+        .runtime(Handle::current())
+        .emergency(Arc::new(CleanupTask::default()))
+        .build();
+    let capacity = Arc::new(Semaphore::new(1));
+    let pending = Arc::new(
+        Pending::builder()
+            .job(job)
+            .store(store.clone())
+            .health(health)
+            .control(control)
+            .build(),
+    );
+    actor.start(Envelope {
+        id: Uuid::new_v4(),
+        pending: pending.clone(),
+        slot: capacity.clone().acquire_owned().await.unwrap(),
+        deadline: deadline(),
+    });
+    fake.stats
+        .until(|| fake.stats.tags.load(Ordering::Acquire) == 1)
+        .await;
+    store.remove("worker").unwrap();
+    until(|| pending.settled.load(Ordering::Acquire)).await;
+    let joined = timeout(Duration::from_secs(2), actor.jobs.join_next_with_id())
+        .await
+        .unwrap()
+        .unwrap();
+    actor.reap(&joined);
+    assert!(actor.rows.is_empty());
+    assert_eq!(capacity.available_permits(), 0);
+    assert!(capacity.clone().try_acquire_owned().is_err());
+    assert_eq!(images.port().status().preparing, 1);
+    fake.commands.send(Command::Commit).await.unwrap();
+    until(|| images.port().status().pins == 0).await;
+    assert_eq!(capacity.available_permits(), 1);
+    assert!(!store.contains("worker").unwrap());
+    drop(sender);
+    timeout(Duration::from_secs(2), actor.run())
+        .await
+        .unwrap()
+        .unwrap();
     images.shutdown(deadline()).await.unwrap();
     fake.close().await;
 }

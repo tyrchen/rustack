@@ -932,6 +932,47 @@ Real function init/error, bootstrap timeout, handler timeout, early exit and dae
 
 An invalid Runtime API request receives its own bounded HTTP4xx and cannot settle a different/valid invocation. Do not reinterpret unrelated malformed requests as authorization to kill the active invocation: D82's foreign/malformed/stale rejection controls and the runtime HTTP boundary tests preserve this isolation. Dedicated real transport interruption/allocating/cleanup controls remain separate from init/busy caller cancellation.
 
+## 4.14 Causal management-IO fault qualification (D84)
+
+Existing allocation and cleanup ownership must survive lost callers while daemon acknowledgments are pending. A definitely issued Create remains uncertain until its exact effect is identified and its journal settles; a physically removed container alone cannot release a still-pending wire/journal/cleanup receipt. Deployment capacity similarly includes canceled preparations until the retained preparation worker settles. An unavailable daemon or failed update never publishes an Active placeholder or replaces an existing successful revision.
+
+Qualify these contracts through an ordinary strict-auth server behind a fixture-owned transparent Unix HTTP proxy, never a production injection hook. The proxy forwards version, identity and management requests to one explicit real daemon; an identity check and following operation keep the same downstream connection. It neither fabricates metadata/results nor owns runtime resource mutation. Direct independent observations use the D83 owner/expected-engine fence. Only fixture-created sockets/threads and the exact server child are controlled; shared Docker services and source images are preserved.
+
+```text
+signed SDK/client       ordinary Rustack       test Unix proxy       real daemon
+      │                       │                      │                    │
+      ├─ Invoke / deploy ─────►│ /info + operation ──►│ same connection ──►│
+      │                       │                      │                    │
+      │   create case: real201 + physical created ID ◄───────────────────┤
+      │                       │◄── hold201 ───────────┤                    │
+      ├─ disconnect ──────────►│ retain work/IO/journal│                    │
+      │   release held201     │◄──────────────────────┤                    │
+      │                       ├─ identify/retire ────────────────────────►│
+      │                       │                      │                    │
+      │   cleanup case: owned function DELETE ──────►│ hold before effect │
+      ├─ disconnect ──────────►│ capacity stays charged                    │
+      │   release DELETE      │──────────────────────────────────────────►│
+      │                       │◄─ real absence + journal settlement ──────┤
+      └─ cold recovery ──────►│ release capacity only after retained join │
+```
+
+Actual D84 qualification exposed that a deleted deployment can finish its outer observer before the independently retained image IO. Carry a shared accepted-deployment permit into the private image-preparation request, in addition to the deployment actor row. The image actor record above the worker JoinSet retains both preparation and deployment admission through worker/root unwind and physical recovery. A shared private receipt releases these guards only after a caller consumes a validated live artifact (ordinary prepare), or after the exact deployment CAS commits (deployment prepare); successful oneshot enqueue alone is not handoff. The image worker retains it through canceled/failed preparation retirement even if the caller future/row is gone; only a successfully delivered live artifact releases preparation admission early. Keep the existing public prepare API unchanged via a private guarded preparation path. An artifact rejected by a closed/unconsumed preparation response is not successful handoff and must retire before releasing either preparation/deployment admission. After live-artifact delivery, its independent image lease continues to charge pin/cleanup quotas. Worker supervision failure still closes admission rather than reviving a failed runtime. Qualify isolated management acknowledgment loss/old-revision preservation separately from full loss of live environment IO; the latter revokes backend readiness and rejects business execution while diagnostic ingress remains available. Restore only the test transport so the retained owner can physically clean up; server shutdown may succeed or preserve the specific cached Docker/quiesce failure, but a forced kill or unrelated error cannot qualify.
+
+```text
+accepted deployment permit (shared ownership)
+        ├─ deployment actor row / observer
+        └─ image actor record above JoinSet
+              ├─ preparation permit + deployment permit
+              ├─ shared receipt → worker → offered PinnedImage
+              │      ├─ consumed validated ordinary prepare ──┐
+              │      └─ exact successful deployment CAS ──────┤ clear receipt
+              │                                               └─ live pin quota remains
+              └─ cancel / failed handoff / worker or root unwind
+                     └─ retained recovery → physical retirement → drop guards
+```
+
+The proxy is test infrastructure, not a new supported runtime transport. Preserve production limits and ordinary bootstrap/init/handler deadlines. Tests prove retained pending work and timely post-release cleanup, not impossible settlement while an unacknowledged effect remains held. See [D84 verification](./rustack-workflows-70-verification-plan.md#management-io-faults-and-exact-docker-resource-inventory-d84).
+
 ## 5. Isolation and resource limits
 
 - Initial Docker transport is a local Unix socket only. Disable implicit TCP/SSH fallback. Explicit docker configuration requires a startup daemon/version/relay-image/resource-limit probe; failure aborts startup. Default remains disabled. Auto does not acquire a new Docker fallback; Image on native/squib/auto fails explicitly.

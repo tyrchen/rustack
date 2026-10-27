@@ -633,3 +633,11 @@ Use an independent bounded Rust RIC in an explicitly built test image and ordina
 ## D83 — Reject impossible memory charges and qualify real fault settlement
 
 Separate a permanently impossible function+relay charge from temporary environment contention. Reject the former before admission and pool queue/eviction as typed MemoryLimit mapped to429, while preserving bounded temporary waiting. Consume ordinary Docker through real failing user code and causal stage holds, not timers that infer invocation progress. Independent bounded read-only daemon observations prove physical retirement; a later PID barrier hands graceful server shutdown to its existing Rust child owner while the128 accepted-work backlog remains held. Keep global32 unit/state evidence distinct from two-container-pair functional observations. See [verification D83](./rustack-workflows-70-verification-plan.md#real-image-faults-caller-cancellation-and-public-admission-d83).
+
+
+## D84 — Control actual daemon acknowledgments, not fabricated runtime state
+
+Use a fixture-owned transparent Unix proxy to hold actual Create/private-Tag acknowledgments and pending owned DELETE requests. Preserve same-connection daemon identity, duplex attach and exact retained ownership; independently observe the real daemon. Keep the proxy alive until the exact ordinary server has stopped, including semantic-error paths. A frozen statically scoped Docker resource inventory complements the Native manifest without claiming complete release/platform acceptance. See [D84 verification](./rustack-workflows-70-verification-plan.md#management-io-faults-and-exact-docker-resource-inventory-d84).
+
+
+D84's consuming tests also require admission to cross the ownership boundary: an image actor record keeps the accepted deployment permit above worker/root failure, and a shared artifact receipt acknowledges only validated consumption or successful image CAS. A queued result is not consumption. Canceled/failed retirement and live-pin storage use their respective retained quotas. Diagnose full transport loss through readiness/business rejection; retain diagnostics and physical cleanup without adding implicit owner revival or a new health-triggered listener shutdown policy.

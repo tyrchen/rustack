@@ -7,7 +7,8 @@ import sys
 import time
 import urllib.parse
 
-print(os.getpid(), flush=True)
+if __name__ == "__main__":
+    print(os.getpid(), flush=True)
 import boto3
 from botocore.config import Config
 from botocore.auth import SigV4Auth
@@ -42,7 +43,7 @@ class Faults(Matrix):
             operation()
         except ClientError as error:
             assert error.response["Error"]["Code"] == code, error.response["Error"]["Code"]
-            assert error.response["ResponseMetadata"]["HTTPStatusCode"] == (429 if code == "TooManyRequestsException" else 500 if code == "ServiceException" else 400)
+            assert error.response["ResponseMetadata"]["HTTPStatusCode"] == {"TooManyRequestsException":429, "ServiceException":500, "ResourceNotFoundException":404, "ResourceConflictException":409, "ResourceNotReadyException":502}.get(code, 400)
             text = error.response["Error"].get("Message", "")
             assert "fixture-init-payload-sentinel" not in text
             if message is not None:
@@ -133,20 +134,21 @@ class Faults(Matrix):
             self.ready()
             self.client.update_function_configuration(FunctionName=name, Environment={"Variables":{}})
             self.settled(name, updating=True)
-            recovery_deadline = min(cutoff, time.monotonic() + 5)
-            def recover(remaining):
-                connect_budget = min(0.1, remaining / 10)
-                with contextlib.closing(boto3.client(
-                        "lambda", endpoint_url=self.endpoint, region_name="us-east-1",
-                        aws_access_key_id="local-key", aws_secret_access_key="local-secret",
-                        config=self.client.meta.config.merge(Config(
-                            connect_timeout=connect_budget,
-                            read_timeout=remaining - connect_budget)))) as client:
-                    return self.invoke(name, {"value":8}, client=client)
-            output, _ = recover_before(recovery_deadline, recover, lambda: not self.metadata.ids())
+            output, _ = self.cold_recovery(name, min(cutoff, time.monotonic() + 5))
             assert output["computed"] == 15 and output["counter"] == 1
             self.delete(name)
         return ["reserved-zero-no-allocation", "reserved-range-atomic", "held-reserved-one", stage + "-disconnect-removal-before-expiry", "cold-recovery"]
+
+    def cold_recovery(self, name, deadline):
+        def invoke(remaining):
+            connect = min(0.1, remaining / 10)
+            with contextlib.closing(boto3.client(
+                    "lambda", endpoint_url=self.endpoint, region_name="us-east-1",
+                    aws_access_key_id="local-key", aws_secret_access_key="local-secret",
+                    config=self.client.meta.config.merge(Config(
+                        connect_timeout=connect, read_timeout=remaining - connect)))) as client:
+                return self.invoke(name, {"value":8}, client=client)
+        return recover_before(deadline, invoke, lambda: not self.metadata.ids())
 
     def event(self, name, event):
         reply = self.client.invoke(FunctionName=name, InvocationType="Event", Payload=json.dumps(event).encode())

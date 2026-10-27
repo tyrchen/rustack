@@ -656,23 +656,29 @@ fn test_should_reject_invalid_pin_scope_and_preparation_configuration() {
 }
 
 #[tokio::test]
-async fn test_should_retire_an_image_sent_to_a_response_channel_with_no_consuming_waiter() {
-    let fake = FakePins::new(Mode::Normal).await;
+async fn test_should_retain_an_unaccepted_prepared_artifact_until_physical_retirement() {
+    let fake = FakePins::new(Mode::HoldDelete).await;
     let mut owner = fake.owner(2, 1);
     let port = owner.port();
     let reference = "worker:v1".parse().unwrap();
-    let mut request = Box::pin(port.prepare(&reference, Architecture::Arm64, None, deadline()));
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(request.as_mut().poll(&mut context).is_pending());
-    let accepted = timeout_at(deadline(), port.slots.clone().acquire_owned())
+    let capacity = Arc::new(Semaphore::new(1));
+    let admission = Arc::new(capacity.clone().acquire_owned().await.unwrap());
+    let image = port
+        .prepare_deployment(&reference, Architecture::Arm64, None, deadline(), admission)
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(port.status().pins, 1);
-    drop(request);
-    drop(accepted);
+    assert_eq!(capacity.available_permits(), 0);
+    assert_eq!(port.status().preparing, 1);
+    drop(image);
+    fake.stats
+        .until(|| fake.stats.deletes.load(Ordering::Acquire) > 0)
+        .await;
+    assert_eq!(capacity.available_permits(), 0);
+    assert_eq!(port.status().preparing, 1);
+    fake.commands.send(Command::AllowDeletes).await.unwrap();
     port.wait_empty(deadline()).await.unwrap();
-    assert_eq!(fake.stats.deletes.load(Ordering::Acquire), 1);
+    assert_eq!(capacity.available_permits(), 1);
+    assert_eq!(port.status().preparing, 0);
     owner.shutdown(deadline()).await.unwrap();
     fake.close().await;
 }
@@ -709,7 +715,7 @@ async fn test_should_report_root_failure_even_when_no_pin_has_started() {
 async fn test_should_recover_owned_aliases_after_worker_or_off_runtime_root_failure(
     #[case] off_runtime: bool,
 ) {
-    let fake = FakePins::new(Mode::Normal).await;
+    let fake = FakePins::new(Mode::HoldDelete).await;
     let config = config(1, 1);
     let pin = scope().allocate().unwrap();
     let resolved = ImageResolver::new(fake.wire.port())
@@ -751,6 +757,12 @@ async fn test_should_recover_owned_aliases_after_worker_or_off_runtime_root_fail
     let health = Arc::new(Health::default());
     let emergency = Arc::new(CleanupTask::default());
     let id = pin.id;
+    let capacity = Arc::new(Semaphore::new(1));
+    let preparation = Arc::new(Semaphore::new(1));
+    let admission = PreparationAdmission::new(
+        preparation.clone().acquire_owned().await.unwrap(),
+        Some(Arc::new(capacity.clone().acquire_owned().await.unwrap())),
+    );
     let mut jobs: JoinSet<PinJob> = JoinSet::new();
     let job = jobs.spawn(async { panic!("controlled image worker failure") });
     let actor = Actor::builder()
@@ -768,11 +780,12 @@ async fn test_should_recover_owned_aliases_after_worker_or_off_runtime_root_fail
                 pin,
                 progress,
                 permit,
+                _admission: watch::channel(Some(admission)).0,
             },
         )]))
         .index(HashMap::from([(job.id(), id)]))
         .build();
-    if off_runtime {
+    let joined = if off_runtime {
         let thread = std::thread::spawn(move || drop(actor));
         timeout_at(
             deadline(),
@@ -782,21 +795,30 @@ async fn test_should_recover_owned_aliases_after_worker_or_off_runtime_root_fail
         .unwrap()
         .unwrap()
         .unwrap();
-        timeout_at(deadline(), emergency.wait())
-            .await
-            .unwrap()
-            .unwrap();
+        let emergency = emergency.clone();
+        tokio::spawn(async move { emergency.wait().await.map_err(|_| DockerError::Worker) })
     } else {
-        let result = timeout_at(deadline(), tokio::spawn(actor.run()))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::spawn(actor.run())
+    };
+    fake.stats
+        .until(|| fake.stats.deletes.load(Ordering::Acquire) > 0)
+        .await;
+    assert_eq!(capacity.available_permits(), 0);
+    assert_eq!(preparation.available_permits(), 0);
+    fake.commands.send(Command::AllowDeletes).await.unwrap();
+    let result = timeout_at(deadline(), joined).await.unwrap().unwrap();
+    if off_runtime {
+        assert!(result.is_ok());
+    } else {
         assert!(matches!(result, Err(DockerError::Worker)));
     }
+    assert_eq!(capacity.available_permits(), 1);
+    assert_eq!(preparation.available_permits(), 1);
     assert!(health.failed.load(Ordering::Acquire));
     assert!(!image.is_live());
     assert_eq!(budget.count.load(Ordering::Acquire), 0);
-    assert_eq!(fake.stats.deletes.load(Ordering::Acquire), 1);
+    assert!(fake.stats.deletes.load(Ordering::Acquire) >= 2);
+    assert_eq!(fake.stats.aliases.load(Ordering::Acquire), 0);
     emergency.wait().await.unwrap();
     drop(sender);
     drop(image);
