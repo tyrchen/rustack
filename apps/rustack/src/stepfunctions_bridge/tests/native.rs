@@ -16,8 +16,8 @@ use rustack_lambda_model::input::{
 };
 use rustack_stepfunctions_core::{
     ChildPattern, ChildStartParameters, ExecutionSnapshot, PreparedDefinition, Registry,
-    RegistryCommand, RegistryError, RegistryLimits, RegistryResult, StateMachineArn, StateSupport,
-    Tags,
+    RegistryCommand, RegistryError, RegistryLimits, RegistryResult, SnapshotLimits,
+    StateMachineArn, StateSupport, Tags,
 };
 use rustack_stepfunctions_http::{RequestScope, StepFunctionsHttpConfig, StepFunctionsHttpService};
 use tokio::{
@@ -563,6 +563,56 @@ async fn native_e2e_should_execute_captured_registry_revisions_and_read_after_ma
     assert!(workflow.is_ok(), "registry cleanup: {workflow:?}");
     assert!(calls.is_ok(), "bridge cleanup: {calls:?}");
     let (first, captured, second) = result.unwrap();
+    let archived =
+        serde_json::to_value(registry.export_snapshot(SnapshotLimits::default()).unwrap()).unwrap();
+    assert_eq!(archived.get("machines"), Some(&json!([])));
+    assert_eq!(archived.get("lambdaSupport"), Some(&json!(true)));
+    assert_eq!(
+        archived
+            .get("revisions")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    for execution in [&captured, &second] {
+        let saved = archived
+            .get("executions")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|row| row.get("arn").and_then(Value::as_str) == Some(execution.arn().as_str()))
+            .unwrap();
+        let saved_output: Value = serde_json::from_str(
+            saved
+                .pointer("/outcome/output")
+                .and_then(Value::as_str)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(&saved_output, output(execution.view().outcome().unwrap()));
+        let history = saved.get("history").and_then(Value::as_array).unwrap();
+        assert_eq!(
+            history.len(),
+            usize::try_from(execution.view().history().len()).unwrap()
+        );
+        for (row, event) in history.iter().zip(
+            execution
+                .view()
+                .history()
+                .page(1, 100, true)
+                .unwrap()
+                .events(),
+        ) {
+            assert_eq!(
+                row.get("eventJson"),
+                Some(&json!(serde_json::to_string(event).unwrap()))
+            );
+            assert_eq!(
+                row.get("timestamp"),
+                Some(&serde_json::to_value(event.timestamp).unwrap())
+            );
+        }
+    }
     assert_eq!(first.revision().id(), captured.revision().id());
     assert_ne!(captured.revision().id(), second.revision().id());
     let first_result = output(captured.view().outcome().unwrap());

@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     future::pending,
+    mem::take,
     sync::Arc,
     time::Duration,
 };
@@ -24,6 +25,7 @@ use super::{
         ChildError, Lineage, Request,
         owner::{Inbox as ChildInbox, Owner as ChildOwner},
     },
+    snapshot::{CapturedExecution, SealedRegistry},
     types::{ExecutionIdentity, ExecutionRecord, MachineIdentity, RevisionData, TagAllocation},
 };
 use crate::{
@@ -53,6 +55,7 @@ struct Executions {
     limits: ExecutionLimits,
 }
 struct Io {
+    sealed: watch::Sender<Option<Arc<SealedRegistry>>>,
     children: mpsc::Receiver<Request>,
     receiver: mpsc::Receiver<Envelope>,
     closing: watch::Sender<bool>,
@@ -72,6 +75,7 @@ struct State {
 }
 pub(super) struct Owner {
     state: Option<State>,
+    capture: Option<SealedRegistry>,
 }
 impl Owner {
     pub(super) fn new(
@@ -90,7 +94,9 @@ impl Owner {
                 registry,
             },
         ) = channels;
+        let sealed = registry.sealed.clone();
         Self {
+            capture: None,
             state: Some(State {
                 children: ChildOwner::new(registry),
                 resources: Resources {
@@ -109,6 +115,7 @@ impl Owner {
                 },
                 runtime,
                 io: Io {
+                    sealed,
                     children,
                     receiver,
                     closing,
@@ -127,14 +134,23 @@ impl Owner {
             Some(state) => state.run(stop).await,
             None => Err(RegistryError::Unavailable),
         };
-        if result.is_ok() {
-            drop(self.state.take());
-        }
-        result
+        result?;
+        let state = self.state.as_mut().ok_or(RegistryError::Unavailable)?;
+        self.capture = Some(state.seal()?);
+        let sealed = state.io.sealed.clone();
+        // Finish all potentially panicking owner/port destruction before publish.
+        drop(self.state.take());
+        let capture = self.capture.take().ok_or(RegistryError::Unavailable)?;
+        sealed.send_replace(Some(Arc::new(capture)));
+        Ok(())
     }
 }
 impl Drop for Owner {
     fn drop(&mut self) {
+        if let Some(capture) = self.capture.take() {
+            // A post-drain destructor panic still forbids releasing retained ownership.
+            let _retained = Box::leak(Box::new(capture));
+        }
         if let Some(mut state) = self.state.take() {
             state.io.closing.send_replace(true);
             state.runtime.close();
@@ -229,6 +245,50 @@ impl State {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+    fn seal(&mut self) -> Result<SealedRegistry, RegistryError> {
+        let clock = ClockSample::new(Instant::now().into_std(), Utc::now());
+        self.seal_at(clock)
+    }
+    fn seal_at(&mut self, clock: ClockSample) -> Result<SealedRegistry, RegistryError> {
+        self.maintain(Instant::from_std(clock.monotonic));
+        if self.io.sealed.borrow().is_some() || self.runtime.owned_executions() != 0 {
+            return Err(RegistryError::Unavailable);
+        }
+        if self.executions.claims.values().any(Option::is_none) {
+            return Err(RegistryError::Unavailable);
+        }
+        let mut executions = Vec::new();
+        executions
+            .try_reserve_exact(self.executions.records.len())
+            .map_err(|_| RegistryError::Capacity)?;
+        for (arn, entry) in &self.executions.records {
+            let view = entry.record.handle.snapshot();
+            let closed = entry.closed.ok_or(RegistryError::Unavailable)?;
+            if view.outcome().is_none()
+                || view.stop_date().is_none()
+                || view.cleanup() != CleanupState::Clean
+                || self.executions.claims.get(arn) != Some(&Some(closed))
+            {
+                return Err(RegistryError::Unavailable);
+            }
+            executions.push(CapturedExecution {
+                record: entry.record.clone(),
+                view,
+                closed,
+            });
+        }
+        Ok(SealedRegistry {
+            scope: self.resources.scope.clone(),
+            states: self.resources.states,
+            lambda: self.runtime.lambda_support(),
+            callbacks: self.runtime.callback_scope().is_some(),
+            clock,
+            retention: self.resources.limits.retention,
+            machines: take(&mut self.resources.machines),
+            executions,
+            names: take(&mut self.executions.claims),
+        })
     }
     #[tracing::instrument(name = "stepfunctions.registry.command", skip_all)]
     async fn dispatch(&mut self, envelope: Envelope) {
@@ -651,6 +711,7 @@ impl Resources {
 #[cfg(test)]
 mod clock_tests {
     mod children;
+    mod snapshot;
     use std::{
         future::{Future, poll_fn},
         task::Poll,

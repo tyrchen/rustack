@@ -21,6 +21,7 @@ mod callback;
 mod child;
 mod domain;
 mod error;
+mod snapshot;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -38,6 +39,7 @@ pub use child::{
 };
 pub use domain::{ExecutionArn, ExecutionName, RoleArn, StateMachineArn, StateMachineName, Tags};
 pub use error::RegistryError;
+pub use snapshot::{RegistrySnapshot, SnapshotLimits};
 pub use types::{
     DefinitionRevision, ExecutionSnapshot, MachineSnapshot, MachineStatus, PreparedDefinition,
     RegistryCapacities, RegistryLimits, StopReason,
@@ -115,6 +117,7 @@ struct Profile {
     states: StateSupport,
 }
 struct Shared {
+    sealed: watch::Sender<Option<Arc<snapshot::SealedRegistry>>>,
     child_sender: mpsc::Sender<child::Request>,
     child_capacity: Arc<Semaphore>,
     child_wake: Arc<Notify>,
@@ -150,7 +153,9 @@ fn admission(
         ready: true,
         owned_executions: 0,
     });
+    let (sealed, _) = watch::channel(None);
     let shared = Arc::new(Shared {
+        sealed,
         child_sender,
         child_capacity: Arc::new(Semaphore::new(child_limit)),
         child_wake: Arc::new(Notify::new()),
@@ -302,6 +307,30 @@ impl Registry {
                 result: None,
             },
         ))
+    }
+    /// Export the exact retained cut after successful joined registry shutdown.
+    ///
+    /// Run this synchronous payload copy under the embedding caller's bounded
+    /// CPU owner. This does not certify callback/bridge/provider shutdown.
+    ///
+    /// # Errors
+    /// Rejects a live, closing or failed root, inconsistent state, or copy-budget
+    /// exhaustion. Failure preserves the same capture and never dispatches work.
+    ///
+    /// ```no_run
+    /// # fn export(registry:&rustack_stepfunctions_core::Registry){let snapshot=registry.export_snapshot(Default::default());}
+    /// ```
+    pub fn export_snapshot(
+        &self,
+        limits: SnapshotLimits,
+    ) -> Result<RegistrySnapshot, RegistryError> {
+        let capture = self
+            .shared
+            .sealed
+            .borrow()
+            .clone()
+            .ok_or(RegistryError::Unavailable)?;
+        capture.export(limits)
     }
     /// Read readiness/owned execution counts without using command admission.
     ///

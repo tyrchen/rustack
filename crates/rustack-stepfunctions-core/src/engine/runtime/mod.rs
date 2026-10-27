@@ -105,6 +105,9 @@ pub struct ExecutionSupervisor {
     state: OwnerState,
 }
 impl ExecutionSupervisor {
+    pub(crate) fn lambda_support(&self) -> bool {
+        self.shared.port.is_some()
+    }
     pub(crate) fn open_limit(&self) -> usize {
         self.shared.pools.open_limit
     }

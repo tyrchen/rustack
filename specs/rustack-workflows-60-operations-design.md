@@ -253,6 +253,58 @@ Reserve terminal-record and name-tombstone capacity at Start admission so accept
 
 There is no WAL: SIGKILL may lose all requests since the previous completed snapshot. A running-record conversion can explain an imported historical record; it does not recover executions that were never saved. Old completed snapshots remain recoverable under the existing replacement protocol. Restored pagination handles are invalid, and this epoch boundary is advertised.
 
+### 3.1 Sealed registry ownership and durable export
+
+Before workflow import, retain the actual registry state across its successful shutdown and implement the complete library export boundary. `Registry::export_snapshot(SnapshotLimits)` returns an owned, redacted-Debug, serde-Serialize `RegistrySnapshot` only after the unique registry root has drained every execution and proved physical cleanup. An accepting, merely closing, failed, panicked or quarantined root is not a sealed snapshot; an observer timeout while drain is still pending cannot expose one. The snapshot API does not use ordinary command admission and never starts/cancels work. The main snapshot coverage stays unsupported until the consuming restore/archive service is installed and qualified.
+
+The root retains its state above every await as today. On successful drain, perform final maintenance, validate that every retained record has one terminal outcome, stop date and Clean cleanup and that every name claim has a terminal close observation. Move resource maps, immutable terminal views and name reservations into one immutable capture published through a watch slot shared with Registry. Retain the prepared capture in the unique owner's failure guard while destroying the drained runtime/port owner before publishing: a destructor panic must expose no cut and preserve the original allocations in bounded quarantine. Publish at most once before root success; do not serialize/clone all payloads inside the actor. The capture retains the same revision/tag/record/history allocations and permits through the last shared observer, including after a shutdown controller is dropped. Root failure publishes no capture and preserves the existing quarantined graph. This is the registry's consistency cut only; the main supervisor still must join callbacks/bridge/providers before global snapshot publication.
+
+```text
+Registry commands / child submissions → unique registry root
+                                            │ close; original drain owner
+                                            ▼
+                           executions settle + physical cleanup joins
+                                            │ final maintenance / invariants
+                     ┌──────────────────────▼────────────────────────┐
+                     │ immutable sealed capture (one watch slot)    │
+                     │ moved resources + exact terminal read views  │
+                     │ original allocation permits + name claims   │
+                     └──────────────────────┬────────────────────────┘
+                                            │ retained after root join
+                         bounded caller CPU ▼
+                     export_snapshot(SnapshotLimits) → durable DTO
+                         error: retain same cut; no dispatch or replay
+                                            │ later consuming service
+                                            ▼
+                         CBOR/archive boundary§4.2 → atomic save
+
+root failure/quarantine → no sealed capture; no successful snapshot cut
+main shutdown still joins callbacks → bridge → Lambda before global publish
+```
+
+Capture one adjacent paired Tokio-monotonic/UTC sample before final maintenance and capture traversal. Perform final maintenance relative to that same monotonic cut; never pair an early monotonic reading with UTC observed after a long traversal. Retained record expiry is close-observation+configured retention; name expiry is close-observation+90days. Project the remaining monotonic interval onto that sample's UTC without millisecond truncation, so restart downtime ages the remaining reservation and rounding never shortens it. Expired clean records/names are removed by final maintenance; uncertain cleanup cannot be archived. Freeze the timestamps once: repeated exports from the same capture are identical even when observed later. Preserve existing separate record/name TTL semantics, deletion/recreation identities and independent caller snapshot allocations.
+
+Schema/profile versions start at1. Profile1 retains the existing effective STANDARD/JSONPath/OFF/tracing-disabled service contract; no unsupported mutable settings are invented. All DTO field names use camelCase; rows have deterministic order. The export is data only:
+
+| Root / row | Durable fields |
+|---|---|
+| Root | schemaVersion, profileVersion, scope(partition/region/account), stateSupport(sequential/structured), lambdaSupport, callbackSupport, capturedAt, resources, revisions, machines, executions, names |
+| resources (resourceId order) | resourceId, arn, createdAt; include identities captured by executions even after deletion/recreation |
+| revisions (revisionId order) | revisionId, resourceId, definition(exact UTF-8 source), sourceHash(32 bytes), roleArn, publishedAt; include old captured revisions once |
+| machines (ARN order) | resourceId, revisionId, status(active/deleting), updatedAt, tags |
+| executions (execution ARN order) | arn, resourceId, revisionId, input(exact original JSON text), optional traceHeader, startedAt, stoppedAt, expiresAt, outcome, history |
+| outcome (status tag) | SUCCEEDED + exact output text; FAILED or ABORTED + separately omitted/empty error/cause; TIMED_OUT without invented failure fields |
+| history | rows {timestamp, eventJson} in ascending event ID order: timestamp is the exact ordinary UTC datetime; eventJson is the complete official JSON DTO string, including its public numeric timestamp and all payload text/causal fields |
+| names (execution ARN order) | arn, expiresAt; include reservations whose retained execution has already expired |
+
+HistoryEvent's generated epoch_seconds adapter is JSON-only and truncates to milliseconds; never serialize that DTO directly as CBOR. The separate ordinary timestamp retains nanoseconds. A future importer must validate eventJson as the official DTO, cross-check its numeric timestamp against the public projection of the exact timestamp, then restore the exact UTC instant; a disagreement rejects the archive. Preserve all other official fields byte-for-byte through the JSON string and keep injected-token projections intact. Qualify an actual Ciborium wrapper round trip with a nanosecond timestamp and demonstrate the direct-DTO CBOR failure/precision loss as a negative control.
+
+Serialize no compiled heap layout, actor/channel/permit, monotonic Instant, task token/hash/epoch, pagination handle, child runtime lineage, live deadline, port, infrastructure diagnostic/source error or cleanup handle. Persist the installed instruction/Lambda/callback profile, not an inferred capability from definition text. Root `Debug` and errors expose fixed classes, not rows. Intentional definition/input/output/history data remain available to the authorized archive consumer; injected callback credentials stay absent through the already qualified history provenance boundary.
+
+SnapshotLimits is a validated library source-copy budget of1byte..1GiB, default512MiB. Before cloning source/history data, conservatively charge4096 bytes of root/metadata allowance per resource/revision/machine/execution,512 per name, all exact definition/role/tag/input/output/error/cause/trace text bytes, and history's complete charged_bytes (which includes its fixed and terminal reserve allowances). Deduplicate shared resource/revision identities using borrowed keys before copying. Reject checked-arithmetic overflow, inconsistent UUID bindings or a budget overrun without returning a partial DTO or releasing the sealed source. History extraction must use bounded direct traversal, preserving every event rather than an API page; reserve its vectors fallibly. The embedding encoder independently enforces actual encoded section/archive bytes. This budget is an explicit bound on export work, not a claim that serialized bytes or total RSS equal it. Async embeddings must call synchronous export/serialization under their retained bounded CPU owner; no detached background encoder is introduced here.
+
+Qualification: live/closing/saturated-command roots reject export; clean shutdown (including controller loss) publishes exactly one deterministic capture; timed-out/dropped observers resume the same root and cannot expose premature state; failed/quarantined cleanup never seals. Exercise deleted/recreated identities, captured old revisions/roles/raw input, tags, all terminal outcomes, causal/full histories beyond page boundaries, independent name/record expiry with fractional intervals, conservative budget failures/retry and redacted Debug. An actual Native workflow must export computed terminal output and original history after joined cleanup. Source allocations stay charged through existing retained read handles and the sealed capture. This dependency does not implement restore or advertise the CLI archive service; those remain mandatory next tasks under5.2.
+
 ## 4. Debugging and engineering contract
 
 Diagnostics identify deployment Pending/Failed, backend unavailable, invalid image architecture, missing Runtime API polling, handler error, Task timeout, callback expiry, child failure and cleanup quarantine separately. Payload-bearing execution history is an intentional API capability; infrastructure logs are redacted. Operator log access remains a trust boundary.

@@ -313,6 +313,31 @@ impl ExecutionHistory {
         }
         Ok(HistoryPage { events, next })
     }
+    pub(crate) fn snapshot_events(
+        &self,
+    ) -> Result<impl Iterator<Item = &HistoryEvent>, ExecutionError> {
+        let count = usize::try_from(self.count).map_err(|_| ExecutionError::Invalid)?;
+        let mut chunks = Vec::new();
+        chunks
+            .try_reserve_exact(count.div_ceil(PAGE_EVENTS))
+            .map_err(|_| ExecutionError::Capacity)?;
+        let mut head = self.head.as_deref();
+        let mut actual = 0_usize;
+        while let Some(chunk) = head {
+            actual = actual
+                .checked_add(chunk.events.len())
+                .ok_or(ExecutionError::Invalid)?;
+            chunks.push(chunk);
+            head = chunk.previous.as_deref();
+        }
+        if actual != count {
+            return Err(ExecutionError::Invalid);
+        }
+        Ok(chunks
+            .into_iter()
+            .rev()
+            .flat_map(|chunk| chunk.events.iter().map(|stored| &stored.event)))
+    }
     fn push(&mut self, event: Arc<StoredEvent>) {
         let (previous, mut events) = match &self.head {
             Some(head) if head.events.len() < PAGE_EVENTS => {

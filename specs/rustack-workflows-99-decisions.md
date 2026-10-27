@@ -568,3 +568,7 @@ Upgrade direct snapshot zstd to the patched0.14.3 cohort and apply a provenance-
 ## D70 — Preflight the complete CBOR section before typed archive allocation
 
 Install one borrowed structural preflight and capped fallible encoder in the existing snapshot CBOR helpers before workflow import. Enforce the explicit v2 profile, decoded-key uniqueness, byte/depth/node/collection/scalar/key ceilings, exact single-root consumption and redacted failures. Keep existing envelope/DTO/codec semantics; workflow staging, compilation and live history quotas remain separate required work. See [operations§4.2](./rustack-workflows-60-operations-design.md#42-bounded-cbor-import-boundary).
+
+## D71 — Preserve a sealed registry cut and export durable rows after joined cleanup
+
+Move registry resources, terminal immutable views and name reservations into a single retained capture only after the root proves clean execution shutdown. Preserve their original allocation charges and one paired-clock expiry projection. Export versioned deterministic data-only rows under a conservative validated source-copy budget, with exact captured definitions/input/history and no live/token/pagination/diagnostic state. Keep main persistence unavailable until staged restore and archive registration follow. See [operations§3.1](./rustack-workflows-60-operations-design.md#31-sealed-registry-ownership-and-durable-export).

@@ -21,6 +21,8 @@ use crate::{
 mod children;
 #[path = "tests/nested.rs"]
 mod nested;
+#[path = "tests/snapshot.rs"]
+mod snapshot;
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
@@ -49,7 +51,7 @@ fn definition(value: i64, wait: bool) -> PreparedDefinition {
             .clone(),
     )
 }
-fn registry(
+pub(super) fn registry(
     limits: RegistryLimits,
     port: Option<Arc<dyn LambdaTaskPort>>,
 ) -> (Registry, RegistrySupervisor) {
@@ -71,7 +73,7 @@ fn registry(
 async fn result(reg: &Registry, command: RegistryCommand) -> Result<RegistryResult, RegistryError> {
     reg.submit(command)?.wait(deadline()).await
 }
-async fn machine(reg: &Registry, value: i64, wait: bool) -> MachineSnapshot {
+pub(super) async fn machine(reg: &Registry, value: i64, wait: bool) -> MachineSnapshot {
     match result(
         reg,
         RegistryCommand::Create(

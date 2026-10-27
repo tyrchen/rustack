@@ -240,6 +240,14 @@ test-workflows-archive:
 
 .PHONY: test-workflows-archive
 
+# D71: sealed ownership/export, exact history codec and selected runtime consumer.
+test-workflows-snapshot-export:
+	@cargo test --locked -p rustack-stepfunctions-core snapshot
+	@cargo test --locked -p rustack-stepfunctions-core --features serde_json/preserve_order snapshot
+	@cargo clippy --locked -p rustack-stepfunctions-core --lib --no-deps -- -D warnings -W clippy::pedantic -W clippy::missing_errors_doc -W clippy::doc_markdown -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: test-workflows-snapshot-export
+
 deny-codegen:
 	@cargo deny --manifest-path codegen/Cargo.toml check
 
