@@ -14,7 +14,7 @@ use crate::{
         ImageLeaseManager, ImageLeasePort, ImagePinScope, PoolSettings, ProbeSettings,
         ownership::DirectoryAcquisition,
         probe_endpoint, probe_environment, reconcile_namespace,
-        recovery::inventory::{containers, images},
+        recovery::inventory::{containers, images, volumes},
     },
     executor::{Executor, ExecutorError},
 };
@@ -96,7 +96,10 @@ impl State {
             .await?;
         self.bound = Some(docker.clone());
         let recovery = reconcile_namespace(&directory, &docker, step(at, 60)).await?;
-        if recovery.containers.remaining != 0 || recovery.pins.remaining != 0 {
+        if recovery.containers.remaining != 0
+            || recovery.pins.remaining != 0
+            || recovery.code.remaining != 0
+        {
             return Err(DockerError::Quarantined.into());
         }
         let info = docker
@@ -371,8 +374,10 @@ impl State {
             let at = Instant::now() + Duration::from_secs(60);
             containers(directory, docker, at).await?;
             images(directory, docker, at).await?;
+            volumes(directory, docker, at).await?;
             if !directory.container_records(at).await?.is_empty()
                 || !directory.image_records(at).await?.is_empty()
+                || !directory.code_records(at).await?.is_empty()
             {
                 return Err(DockerError::Quarantined.into());
             }

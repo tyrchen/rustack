@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 pub(super) use self::{images::ImageRecord, journal::ContainerRecord};
 
+pub(super) mod codes;
 mod daemon;
 mod images;
 mod journal;
@@ -48,6 +49,7 @@ const LOCK: &str = "lease.lock";
 const OWNER: &str = "owner.v1";
 const PENDING: &str = "owner.pending";
 const MAGIC: &[u8; 8] = b"RSDKOWN2";
+const CODE_MAGIC: &[u8; 8] = b"RSDKOWN3";
 const LEGACY_MAGIC: &[u8; 8] = b"RSDKOWN1";
 const OWNER_BYTES: usize = 56;
 static WORKERS: Semaphore = Semaphore::const_new(4);
@@ -108,6 +110,7 @@ pub struct DirectoryLease(Arc<Lease>);
 enum Provenance {
     Legacy,
     Journaled,
+    CodeJournaled,
 }
 
 struct Lease {
@@ -136,9 +139,39 @@ impl fmt::Debug for DirectoryLease {
 impl DirectoryLease {
     pub(super) fn require_journaled(&self) -> Result<(), DirectoryLeaseError> {
         match self.0.provenance {
-            Provenance::Journaled => Ok(()),
+            Provenance::Journaled | Provenance::CodeJournaled => Ok(()),
             Provenance::Legacy => Err(DirectoryLeaseError::Legacy),
         }
+    }
+
+    pub(super) fn code_journaled(&self) -> bool {
+        self.0.provenance == Provenance::CodeJournaled
+    }
+
+    /// Acquire a fresh code-capable namespace; existing Image roots are refused.
+    ///
+    /// Never upgrades or rewrites an existing owner. General acquisition can
+    /// reopen this generation to recover its recorded effects.
+    ///
+    /// # Errors
+    /// Returns acquisition errors, including `InvalidState` for older provenance.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), rustack_lambda_core::docker::DirectoryLeaseError> {
+    /// let lease = rustack_lambda_core::docker::DirectoryLease::acquire_code(
+    ///     "/tmp/rustack-code-data".into(),
+    ///     tokio::time::Instant::now() + std::time::Duration::from_secs(5)).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn acquire_code(
+        directory: PathBuf,
+        deadline: Instant,
+    ) -> Result<Self, DirectoryLeaseError> {
+        let directory = DataDirectory::try_from(directory)?;
+        run(&WORKERS, deadline, move |control| {
+            acquire_profile(&directory, control, Provenance::CodeJournaled)
+        })
+        .await
     }
 
     pub(super) fn same_instance(&self, other: &Self) -> bool {
@@ -321,6 +354,14 @@ fn acquire(
     directory: &DataDirectory,
     control: &Control,
 ) -> Result<DirectoryLease, DirectoryLeaseError> {
+    acquire_profile(directory, control, Provenance::Journaled)
+}
+
+fn acquire_profile(
+    directory: &DataDirectory,
+    control: &Control,
+    requested: Provenance,
+) -> Result<DirectoryLease, DirectoryLeaseError> {
     control.check()?;
     let root = open_root(&directory.0, control)?;
     match mkdirat(&root, NAMESPACE, Mode::from_bits_truncate(0o700)) {
@@ -349,8 +390,12 @@ fn acquire(
         owner
     } else {
         pristine_namespace(&namespace, control)?;
-        (publish_owner(&namespace, control)?, Provenance::Journaled)
+        (publish_owner(&namespace, control, requested)?, requested)
     };
+    if requested == Provenance::CodeJournaled && provenance != requested {
+        return Err(DirectoryLeaseError::InvalidState);
+    }
+    codes::check_profile(&namespace, owner, provenance)?;
     namespace.sync_all()?;
     root.sync_all()?;
     control.check()?;
@@ -540,10 +585,13 @@ fn read_owner(directory: &File) -> Result<Option<(Uuid, Provenance)>, DirectoryL
     let payload = bytes.get(..24).ok_or(DirectoryLeaseError::InvalidState)?;
     let checksum = Sha256::digest(payload);
     let expected: &[u8] = checksum.as_ref();
-    let journaled = bytes.get(..8) == Some(MAGIC.as_slice());
-    if (!journaled && bytes.get(..8) != Some(LEGACY_MAGIC.as_slice()))
-        || bytes.get(24..) != Some(expected)
-    {
+    let provenance = match bytes.get(..8) {
+        Some(magic) if magic == MAGIC => Provenance::Journaled,
+        Some(magic) if magic == CODE_MAGIC => Provenance::CodeJournaled,
+        Some(magic) if magic == LEGACY_MAGIC => Provenance::Legacy,
+        _ => return Err(DirectoryLeaseError::InvalidState),
+    };
+    if bytes.get(24..) != Some(expected) {
         return Err(DirectoryLeaseError::InvalidState);
     }
     let owner = Uuid::from_slice(bytes.get(8..24).ok_or(DirectoryLeaseError::InvalidState)?)
@@ -551,14 +599,7 @@ fn read_owner(directory: &File) -> Result<Option<(Uuid, Provenance)>, DirectoryL
     if owner.is_nil() {
         return Err(DirectoryLeaseError::InvalidState);
     }
-    Ok(Some((
-        owner,
-        if journaled {
-            Provenance::Journaled
-        } else {
-            Provenance::Legacy
-        },
-    )))
+    Ok(Some((owner, provenance)))
 }
 
 fn pristine_namespace(directory: &File, control: &Control) -> Result<(), DirectoryLeaseError> {
@@ -581,14 +622,22 @@ fn pristine_namespace(directory: &File, control: &Control) -> Result<(), Directo
     Ok(())
 }
 
-fn publish_owner(directory: &File, control: &Control) -> Result<Uuid, DirectoryLeaseError> {
+fn publish_owner(
+    directory: &File,
+    control: &Control,
+    provenance: Provenance,
+) -> Result<Uuid, DirectoryLeaseError> {
     control.check()?;
     let owner = Uuid::new_v4();
     let mut bytes = [0; OWNER_BYTES];
     bytes
         .get_mut(..8)
         .ok_or(DirectoryLeaseError::InvalidState)?
-        .copy_from_slice(MAGIC);
+        .copy_from_slice(if provenance == Provenance::CodeJournaled {
+            CODE_MAGIC
+        } else {
+            MAGIC
+        });
     bytes
         .get_mut(8..24)
         .ok_or(DirectoryLeaseError::InvalidState)?

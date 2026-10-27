@@ -7,6 +7,7 @@
       "id": "docker-core",
       "tests": [
         "docker::binding::tests::real::test_should_bind_real_installation_across_reacquisition_and_reject_other_daemon",
+        "docker::recovery::code::tests::real::test_should_recover_real_code_volume_and_unstarted_loader_across_reacquisition",
         "docker::pull::tests::real::test_should_pull_approved_immutable_image_prepare_live_pin_and_join_cleanup",
         "docker::recovery::images::tests::test_should_recover_real_private_alias_across_directory_reacquisition::case_1_unknown_visible",
         "docker::recovery::images::tests::test_should_recover_real_private_alias_across_directory_reacquisition::case_2_committed_absent",

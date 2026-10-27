@@ -5,7 +5,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::{
-    ContainerRecovery, ImagePinRecovery, inventory, reconcile_containers, reconcile_image_pins,
+    CodeRecovery, ContainerRecovery, ImagePinRecovery, code::reconcile_code, inventory,
+    reconcile_containers, reconcile_image_pins,
 };
 use crate::docker::{DirectoryLease, DockerError, DockerPort, EnvironmentError, check_deadline};
 
@@ -17,6 +18,8 @@ pub struct NamespaceRecovery {
     pub containers: ContainerRecovery,
     /// Historical pin records settled/retained by this pass.
     pub pins: ImagePinRecovery,
+    /// Historical code records settled/retained by this pass.
+    pub code: CodeRecovery,
 }
 
 /// Drain recorded historical effects and audit the complete observed namespace.
@@ -55,16 +58,22 @@ pub async fn reconcile_namespace(
     }
     let containers = directory.container_records(deadline).await?;
     let pins = directory.image_records(deadline).await?;
+    let code = directory.code_records(deadline).await?;
     if containers
         .iter()
         .any(|record| record.run == directory.run_id())
         || pins.iter().any(|record| record.run == directory.run_id())
+        || code.iter().any(|record| record.run == directory.run_id())
     {
         return Err(DockerError::Quarantined.into());
     }
     let containers = reconcile_containers(directory, docker, deadline).await?;
     let mut report = NamespaceRecovery {
         containers,
+        code: CodeRecovery {
+            settled: 0,
+            remaining: code.len(),
+        },
         pins: ImagePinRecovery {
             settled: 0,
             remaining: pins.len(),
@@ -74,7 +83,13 @@ pub async fn reconcile_namespace(
         check_deadline(deadline)?;
         return Ok(report);
     }
+    report.code = reconcile_code(directory, docker, deadline).await?;
+    if report.code.remaining != 0 {
+        check_deadline(deadline)?;
+        return Ok(report);
+    }
     inventory::containers(directory, docker, deadline).await?;
+    inventory::volumes(directory, docker, deadline).await?;
     report.pins = reconcile_image_pins(directory, docker, deadline).await?;
     if report.pins.remaining != 0 {
         check_deadline(deadline)?;
@@ -82,8 +97,10 @@ pub async fn reconcile_namespace(
     }
     inventory::images(directory, docker, deadline).await?;
     inventory::containers(directory, docker, deadline).await?;
+    inventory::volumes(directory, docker, deadline).await?;
     if !directory.container_records(deadline).await?.is_empty()
         || !directory.image_records(deadline).await?.is_empty()
+        || !directory.code_records(deadline).await?.is_empty()
     {
         return Err(DockerError::Quarantined.into());
     }

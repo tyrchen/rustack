@@ -4,6 +4,7 @@ use http::StatusCode;
 use tokio::time::Instant;
 
 pub use self::{
+    code::CodeRecovery,
     images::{ImagePinRecovery, reconcile_image_pins},
     namespace::{NamespaceRecovery, reconcile_namespace},
 };
@@ -12,6 +13,7 @@ use super::{
     ownership::ContainerRecord,
 };
 
+mod code;
 mod images;
 pub(super) mod inventory;
 mod namespace;

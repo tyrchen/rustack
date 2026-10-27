@@ -122,3 +122,5 @@ The new set supersedes conflicting historical Docker plans while preserving the 
 | [ruststack-snapshot-binary-archive-design](./ruststack-snapshot-binary-archive-design.md) | Design：当前二进制归档目标 |
 | [ruststack-snapshot-impl-plan](./ruststack-snapshot-impl-plan.md) | Impl plan：依赖顺序与实施阶段 |
 | [ruststack-snapshot-verification-plan](./ruststack-snapshot-verification-plan.md) | Verification plan：快照测试与验收 |
+
+D90 is implemented and independently reviewed: [durable code namespace recovery](./rustack-workflows-20-lambda-runtime-design.md#66-code-namespace-provenance-and-recovery-boundary-d90) adds an explicit code provenance generation and reader/recovery boundary before its retained producing actor. Both retained full55-resource gates and standard/strict/Native/security checks pass, with zero owned remnants and eight actual provisioned sources preserved per engine. The retained producing owner, ordinary ZIP and complete M4 remain open.

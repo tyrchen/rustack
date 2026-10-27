@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::{
     DirectoryLease, DirectoryLeaseError,
+    codes::{CodeCodec, check_profile},
     images::ImageCodec,
     journal::ContainerCodec,
     snapshot::{Codec, read, write},
@@ -21,7 +22,9 @@ impl DirectoryLease {
         identity: DaemonIdentity,
         deadline: Instant,
     ) -> Result<(), DirectoryLeaseError> {
+        let provenance = self.0.provenance;
         self.transaction(deadline, move |directory, owner, control| {
+            check_profile(directory, owner, provenance)?;
             let existing = read::<DaemonCodec>(directory, owner)?;
             control.check()?;
             match existing.as_slice() {
@@ -29,6 +32,7 @@ impl DirectoryLease {
                 [] => {
                     if !read::<ContainerCodec>(directory, owner)?.is_empty()
                         || !read::<ImageCodec>(directory, owner)?.is_empty()
+                        || !read::<CodeCodec>(directory, owner)?.is_empty()
                     {
                         return Err(DirectoryLeaseError::InvalidState);
                     }

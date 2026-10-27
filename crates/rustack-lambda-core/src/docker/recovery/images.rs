@@ -51,6 +51,9 @@ pub async fn reconcile_image_pins(
     {
         return Err(DockerError::Quarantined);
     }
+    if !directory.code_records(deadline).await?.is_empty() {
+        return Err(DockerError::Quarantined);
+    }
     let records = directory.image_records(deadline).await?;
     let mut report = ImagePinRecovery {
         settled: 0,

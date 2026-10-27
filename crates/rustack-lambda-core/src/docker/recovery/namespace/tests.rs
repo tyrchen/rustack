@@ -354,7 +354,9 @@ async fn test_should_resume_recorded_cleanup_after_abandoned_observer() {
         image_inventory(&mut daemon, b"[]").await;
         empty_container(&mut daemon, &directory).await;
     });
-    let NamespaceRecovery { containers, pins } = report.unwrap();
+    let NamespaceRecovery {
+        containers, pins, ..
+    } = report.unwrap();
     assert_eq!(containers.settled, 1);
     assert_eq!(pins.remaining, 0);
     wire.shutdown().await.unwrap();

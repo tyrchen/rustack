@@ -76,7 +76,7 @@ pub use probe::{
 };
 pub use pull::{ImagePullPolicy, RegistryCredential, RegistryCredentials, RegistryHost};
 pub use recovery::{
-    ContainerRecovery, ImagePinRecovery, NamespaceRecovery, reconcile_containers,
+    CodeRecovery, ContainerRecovery, ImagePinRecovery, NamespaceRecovery, reconcile_containers,
     reconcile_image_pins, reconcile_namespace,
 };
 use rustack_core::json::{JsonLimits, from_slice};

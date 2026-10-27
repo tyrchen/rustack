@@ -1215,6 +1215,8 @@ lambda-zip-code-build:
 	@cargo lambda build --locked -p rustack-lambda-echo-bootstrap --bin zip-code-bootstrap --features zip-code --target "$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu" --release --lambda-dir "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)"
 
 test-lambda-code-fixture:
+	@cargo test --locked -p rustack-lambda-core --lib docker::ownership::codes::tests
+	@cargo test --locked -p rustack-lambda-core --lib docker::recovery::code::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::code::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::volumes::tests
 	@cargo test --locked -p rustack-lambda-core --lib storage::zip_layout::tests
@@ -1336,3 +1338,9 @@ test-lambda-docker:
 	@echo 'Verified docker-image-functional resources; Node/ZIP/handler-SDK/IaC/reference-platform/full-release acceptance remains required.'
 
 .PHONY: test-lambda-docker-manifest test-lambda-docker
+
+# Durable code namespace recovery only; no production ZIP capability.
+test-lambda-code-recovery-docker: lambda-runtime-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test --locked -p rustack-lambda-core --lib docker::recovery::code::tests::real::test_should_recover_real_code_volume_and_unstarted_loader_across_reacquisition -- --ignored --exact --nocapture --test-threads=1
+
+.PHONY: test-lambda-code-recovery-docker

@@ -124,3 +124,18 @@ fn check_tags(
 
 #[cfg(test)]
 mod tests;
+
+pub(in crate::docker) async fn volumes(
+    directory: &DirectoryLease,
+    docker: &DockerPort,
+    deadline: Instant,
+) -> Result<(), DockerError> {
+    docker.require_directory(directory)?;
+    if directory.code_journaled() {
+        let scope = OwnerFilter::new(directory.owner_id(), None, None)?;
+        if !docker.list_volumes(scope, deadline).await?.is_empty() {
+            return Err(DockerError::Quarantined);
+        }
+    }
+    check_deadline(deadline)
+}

@@ -1159,6 +1159,60 @@ Enable `DockerCapabilities.zip` and ordinary ZIP Create/Update/Invoke only after
 
 Implement5.1a typed conversion and bounded archive/volume transport first;5.1b consumes them in the durable volume owner/recovery;5.1c installs the real runtime/provider and ordinary SDK/ASL acceptance. No prerequisite alone closes5.1/P5. Controlled tests must cover malformed ELF/ZIP/paths/attributes/CRC/expansion, global conversion/buffer admission and cancellation, exact large-body framing, volume/helper create acknowledgment loss, upload loss, late side effects, panics and consumer-before-volume-before-pin retirement. Actual ordinary signed clients must deploy the same cross-built bootstrap ZIP used by Native qualification, compute cold/warm results, invoke published/alias A while latest becomesB, distinguish init/error/timeout/exit, cancel in allocation/init/busy/cleanup, and prove read-only task code with writable bounded `/tmp`. Exercise both retained functional architectures, exact source preservation and zero containers/private volumes/image aliases after joined cleanup. Retain native-reference/platform/Node/handler SDK/IaC and complete M4 requirements. Use explicit Make targets and freeze any new resource names before execution; standard/strict/Native/security/text gates and independent review remain mandatory.
 
+### 6.6 Code namespace provenance and recovery boundary (D90)
+
+Deliver 5.1b in dependency order: the durable decoder/recovery boundary in D90, then the retained producing manager, then 5.1c ordinary runtime consumption. D90 installs no production code-volume producer and does not enable ZIP capabilities. Test producers exercise the actual published format and wire cleanup; do not expose a speculative public journal-writing API before its retained owner exists.
+
+**Namespace.** Preserve fresh Image-only `RSDKOWN2` and legacy `RSDKOWN1` behavior. Explicit `DirectoryLease::acquire_code` creates fresh `RSDKOWN3` with the same 56-byte owner layout (magic (8 bytes), nonnil owner UUID (16 bytes), SHA-256 (32 bytes)). It rejects existing generations 1/2 before any Docker effect and never upgrades or rewrites their owner. General acquisition accepts 3 so Image-only startup can drain a previous code namespace. Generation 3 is deliberately unreadable by older binaries. Journal provenance accepts 2/3; code provenance accepts 3 only. Both `code.v1` and `code.pending`, even empty/safe, are forbidden under generations 1/2. Validate this during acquisition and daemon binding, including when a binding already exists. First daemon binding additionally requires an empty code journal. Preserve all existing container/image/daemon formats.
+
+**Format.** Publish `code.v1` through descriptor-relative private `code.pending`, using the existing serialized bounded blocking transaction, file fsync, atomic rename and directory fsync. Header: `RSDKCOD1` (8 bytes), owner (16 bytes), record count u8. Up to 32 fixed 194-byte records follow, then SHA-256 (32 bytes) of the preceding bytes; maximum 6,265 bytes. Each record is run/environment/resource/revision UUIDs (16 bytes each), original ZIP SHA-256 (32 bytes), immutable base parent ID (32 bytes), base inspection fingerprint (32 bytes), volume state u8, loader state u8 and loader full ID (32 bytes). IDs are nonnil; environment IDs are unique across all runs; states are canonical. Volume states 0 Planned/1 Uncertain/2 Known/3 Retired; loader states use the same tags, but Known requires the recorded full ID and other states require all-zero padding. A loader Uncertain/Known requires a Known volume; a Retired volume requires a Retired loader. A Planned/Uncertain volume requires a Planned loader. No host paths, code bytes, credentials or executable configuration enter the journal. Invalid checksum/owner/count/length/state/padding/duplicates fail closed, including syntactically valid recomputed checksums.
+
+Record offsets are relative to the beginning of each 194-byte row:
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 16 | Run UUID |
+| 16 | 16 | Environment UUID (unique across the snapshot) |
+| 32 | 16 | Function resource UUID |
+| 48 | 16 | Revision UUID |
+| 64 | 32 | Original ZIP SHA-256 |
+| 96 | 32 | Immutable base image parent ID |
+| 128 | 32 | Base inspection fingerprint |
+| 160 | 1 | Volume state tag |
+| 161 | 1 | Loader state tag |
+| 162 | 32 | Known loader ID, otherwise zero padding |
+
+| Volume state | Permitted loader states |
+|---|---|
+| Planned | Planned |
+| Uncertain | Planned |
+| Known | Planned, Uncertain, Known, Retired |
+| Retired | Retired |
+
+**Identity.** Derive `rustack-code-{environment}` and `rustack-code-loader-{environment}` from the recorded random UUID. Exact label maps include ownerId, runId, environmentId, functionResourceId, revisionId, codeSha256 (lowercase hex), baseFingerprint (lowercase hex) and role (`code` or `code-loader`), all under `rustack.lambda.`. A volume must have this exact map, local driver/scope and empty options. A loader must have the exact reserved `rustack.lambda.*` map/name (additional non-reserved inherited image labels are permitted; maximum 64 total labels, 128-byte allowlisted keys and 256-byte control-free values), immutable Config.Image and inspected Image parent ID, canonical matching full 64-character lowercase ID, and exactly one named-volume mount at `/var/task`, writable, with matching name and local driver. It must have non-running `created` state and no prior start (`StartedAt` is absent/empty/zero Docker timestamp). Recovery never starts, kills or waits for a loader. A running/exited/restarted or identity-conflicting loader is quarantined without destructive requests. The controlled producer must use NoCopy and the sandbox contract in§6.3; recovery does not infer execution readiness from these observations.
+
+**Monotonic recovery.** Under an exact bound directory/daemon port and one startup coordinator, refuse all current-run records before destructive work. Drain recorded function/relay consumers first. For code-generation roots, do not run the empty container inventory until recorded loaders are retired. Process each historical code record loader first, volume second, image pins last. For `(volume Planned, loader Planned)`, atomically persist both Retired without Docker requests because no create may precede durable Uncertain. For `(volume Uncertain, loader Planned)`, retain loader Planned while inspecting the volume: unknown404 leaves both unchanged; an exactly matching positive observation permits durable volume Known, then retire the Planned loader and finally the volume. This observation order does not authorize volume deletion before loader retirement. Other Planned loaders can retire individually while their volume remains Known. Uncertain absence remains unresolved; only an observed exactly matching resource can become Known. Publish Known/full loader ID before DELETE with force=false, re-inspect that exact ID and revalidate identity before deleting, then positively inspect404 before Retired. Known initial404 can retire; identity-fence404 never becomes resource absence. Known volume deletion revalidates exact identity, uses force=false and positively observes404. Failed DELETE may still be followed by a valid absence proof. Any unknown/mismatched/retained code record blocks pin retirement; no list or empty scan settles it. Persist progress after each effect and erase only when both effects are Retired; retry after observer loss resumes that same snapshot. Recovery does not erase source images, mountpoint files, unrecorded volumes or foreign helpers.
+
+```text
+exclusive lease + same-daemon fence
+           │ current-run preflight (containers / code / pins)
+           ▼
+recorded function + relay retirement
+           ▼
+code records: loader (full ID) → volume (exact name + labels)
+           │ any uncertain absence → retain journal + pins; stop
+           ▼
+complete owner container + volume audits (no adoption)
+           ▼
+recorded image-pin retirement → complete image / container / volume audits
+           ▼
+all three journals empty → subsequent startup qualification
+```
+
+Generation 2 has no code-volume inventory RPC and retains existing query/effect ordering; it cannot have controlled code effects. Generation 3 always includes complete owner-volume audits and the code journal in startup/shutdown completion. `NamespaceRecovery.code` reports settled/remaining records, not individual effects or readiness. Public ordinary startup must reject nonzero code.remaining. Direct container/pin recovery remains a low-level operation with an explicit prerequisite that consumers/code owners have joined; only namespace recovery composes the full ordering. Final Image-only startup shutdown on a generation 3 root audits volumes even though no ZIP producer is installed.
+
+**Verification.** Corrupt every format/identity/state field with recomputed checksums, duplicate records, maximum 32 versus33, safe torn staging, symlink/hardlink/mode/oversize refusal and generation compatibility/no rewrite. Controlled wire tests cover Planned/Uncertain/Known/Retired, known versus unknown404, publication before DELETE, identity recheck, daemon-fence404, loader start refusal, mount/label/base/full-ID conflicts, attached-volume conflict, observer loss/retry, current-run preflight, consumer-before-code-before-pin order and orphan/full volume audits. Actual retained arm64/amd64 resource qualification must recover a journaled unstarted loader and local volume across directory reacquisition, preserve source images and prove zero owned remnants. Freeze the resource inventory before execution. The retained producing actor, uncertain mutation receipts/admission/source pin ownership, upload-loss/panic handling and ordinary ZIP execution remain required after this boundary; D90 alone does not close 5.1b/P5.
+
 ## 7. Rust engineering contract
 
 Apply AGENTS.md § Error Handling/Async/Type/Safety: thiserror sources; retain async-trait for the existing dyn Executor and document object safety; concrete internal actors use ordinary async methods. Use Bytes/Arc revisions, validated artifact enums, redacted Debug, checked memory/deadline arithmetic, forbid unsafe, IO deadlines and supervised JoinSet tasks. Serde control envelopes use camelCase; Runtime API uses AWS headers. Validate raw lengths before parsing. Tests use actual RIC images and cancellation/failure matrices. Tracing contains IDs, durations and classes, not payloads. Avoid per-invoke pull/inspect. Public APIs document Errors and examples; operational docs cover both deployment topologies.
