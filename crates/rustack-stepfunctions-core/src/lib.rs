@@ -42,9 +42,11 @@ pub use expression::{Expression, SystemUuidSource, UuidSource};
 pub use path::{MatchKind, Path, PathMatches, ReferencePath, ResultPath};
 pub use payload::{EvaluationContext, MAX_PAYLOAD_BYTES, Payload};
 pub use registry::{
-    ChildError, ChildExecution, ChildExecutionPort, ChildParent, ChildPattern,
-    ChildStartParameters, ChildSubmission, DefinitionRevision, ExecutionArn, ExecutionName,
-    ExecutionSnapshot, MachineSnapshot, MachineStatus, PreparedDefinition, Registry,
+    CallbackAck, CallbackAttempt, CallbackCommand, CallbackError, CallbackLimits, CallbackMint,
+    CallbackOutcome, CallbackRegistry, CallbackStatus, CallbackSupervisor, CallbackTask,
+    CallbackTimeout, CallbackToken, ChildError, ChildExecution, ChildExecutionPort, ChildParent,
+    ChildPattern, ChildStartParameters, ChildSubmission, DefinitionRevision, ExecutionArn,
+    ExecutionName, ExecutionSnapshot, MachineSnapshot, MachineStatus, PreparedDefinition, Registry,
     RegistryCapacities, RegistryCommand, RegistryError, RegistryLimits, RegistryReceipt,
     RegistryResult, RegistryStatus, RegistrySupervisor, RoleArn, StateMachineArn, StateMachineName,
     StopReason, Tags,

@@ -751,6 +751,21 @@ Integrations§4.2/D61 compose the atomic child port with compiler, exact parent 
 
 Final gates: workspace build/all-target tests pass3,164 cases with431 separately gated; Clippy, denied-warning rustdoc and nightly formatting pass. Core600 units/245 doctests, all preserve_order/strict checks, full/minimal main77/57, Native12 and ordinary SDK/single-dispatch/runner4 required cases pass. All264 local links in the six changed spec documents resolve. No dependency package/version or advisory ignore changes. The deferred Docker-image worktree remains untouched. Fresh audit still reports4 vulnerabilities/10 warnings across481 dependencies/1,378 advisories; deny advisories fail while bans/licenses/sources pass (B06 remains open).
 
+## P4 callback registry foundation independent review
+
+Integrations§5.1/D62 implement the scoped callback protocol dependency; ASL/API callback capabilities remain disabled. Final independent read-only source review reports no remaining finding after W177. Self-review also closes W178 with explicit observer races.
+
+| ID | Priority / source | Resolution | Regression evidence |
+|---|---|---|---|
+| W177 | P1; `registry/callback/actor.rs`, independent retained-payload review | On terminal publication, take/drop the outcome sender and invocation receiver, retaining only lightweight token classification/identity rather than business outputs/causes through tombstone TTL | A weak terminal-outcome Arc expires after caller Task/result observers drop, while the token still reports TaskTimedOut; retirement later restores capacity for another actual parent execution |
+| W178 | P2; `registry/callback/receipts.rs`, self-review of late-ready owner loss | Cache mint/API success/errors/owner loss before the post-await observer fence; apply the Task watch observer's fresh fence to both success and closed-channel errors | Manual polling with controlled clock proves late-ready mint/API/Task success, rejection and owner loss return Deadline first and preserve the same later observation without resending or revoking |
+
+The callback suite covers provisional/late success/failure, Lambda failure after early callback, captured-time heartbeat start/reset/absolute limits, two hundred distinct heartbeat deadlines retaining exactly one timer, closed/foreign/forged/old generation classification, parent Stop and retention, command saturation with independent revoke, bounded retained entropy, observer loss, joined controller shutdown and runtime/root worker failure. Debug/secret-wrapper checks and the actor's hash-only table/index types prevent structural plaintext token retention. This is foundation evidence, not actual callback handler, ASL token provenance or SDK SendTask acceptance.
+
+Final gates: core630 units/267 doctests; preserve_order91 compiler/35 effect/22 scheduler/10 async/30 callback/17 nested/19 atomic-child/2 controlled cases and strict production checks pass. Feature-enabled workspace build/all-target tests pass3,194 cases with431 separately gated, followed by Clippy, denied-warning rustdoc and nightly formatting. Both full/minimal main77/57 and the existing actual signed SDK/single-dispatch Native/runner4 required cases pass.
+
+One new pure Rust package, secrecy0.10.3, reuses existing zeroize; core additionally uses the already resolved workspace subtle/hex cohort. No advisory/lint ignores are added. Fresh audit scans482 dependencies/1,378 advisories and still reports the existing4 vulnerabilities/10 warnings; deny advisories fail while bans/licenses/sources pass (B06 remains open). Docker-image checkpoint and all final platform gates remain unchanged.
+
 ## Cross-references
 
 - ← [implementation plan](./rustack-workflows-90-impl-plan.md)

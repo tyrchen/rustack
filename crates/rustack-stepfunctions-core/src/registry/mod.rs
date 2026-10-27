@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod actor;
+mod callback;
 mod child;
 mod domain;
 mod error;
@@ -24,6 +25,11 @@ mod error;
 mod tests;
 mod types;
 
+pub use callback::{
+    CallbackAck, CallbackAttempt, CallbackCommand, CallbackError, CallbackLimits, CallbackMint,
+    CallbackOutcome, CallbackRegistry, CallbackStatus, CallbackSupervisor, CallbackTask,
+    CallbackTimeout, CallbackToken,
+};
 use child::owner::Inbox as ChildInbox;
 pub use child::{
     ChildError, ChildExecution, ChildExecutionPort, ChildParent, ChildPattern,
