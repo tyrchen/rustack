@@ -12,7 +12,7 @@ use tokio::{
     time::{Instant, sleep_until, timeout_at},
 };
 
-use super::{ProbeError, REPORT_BYTES, collect};
+use super::{EndpointChallenge, ProbeError, REPORT_BYTES, collect, endpoint};
 use crate::{metadata::deadline_from_unix_ms, protocol::AttemptId};
 
 struct Reply {
@@ -75,7 +75,18 @@ fn header<'a>(headers: &'a HeaderMap, key: &str, cap: usize) -> Result<&'a str, 
     }
     value.to_str().map_err(|_| ProbeError::Protocol)
 }
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    Resource,
+    Endpoint,
+}
 pub(super) async fn run() -> Result<(), ProbeError> {
+    run_probe(Mode::Resource).await
+}
+pub(super) async fn run_endpoint() -> Result<(), ProbeError> {
+    run_probe(Mode::Endpoint).await
+}
+async fn run_probe(mode: Mode) -> Result<(), ProbeError> {
     if !cfg!(target_os = "linux")
         || env::var("AWS_LAMBDA_RUNTIME_API").as_deref() != Ok("127.0.0.1:9001")
     {
@@ -88,7 +99,9 @@ pub(super) async fn run() -> Result<(), ProbeError> {
         Instant::now() + Duration::from_secs(60),
     )
     .await?;
-    if challenge.status != StatusCode::OK || challenge.body.as_ref() != b"{}" {
+    if challenge.status != StatusCode::OK
+        || (!matches!(mode, Mode::Endpoint) && challenge.body.as_ref() != b"{}")
+    {
         return Err(ProbeError::Protocol);
     }
     let attempt: AttemptId = header(&challenge.headers, "lambda-runtime-aws-request-id", 36)?
@@ -98,19 +111,29 @@ pub(super) async fn run() -> Result<(), ProbeError> {
         .parse::<NonZeroU64>()
         .map_err(|_| ProbeError::Protocol)?;
     let deadline = deadline_from_unix_ms(wall).map_err(|_| ProbeError::Deadline)?;
-    let (suffix, body) = match collect::collect(attempt, deadline).await {
-        Ok(report) => {
-            let bytes =
-                serde_json::to_vec(&report).map_err(|error| ProbeError::Report(Arc::new(error)))?;
-            if bytes.len() > REPORT_BYTES {
-                return Err(ProbeError::Protocol);
-            }
-            ("response", Bytes::from(bytes))
+    let observation = if matches!(mode, Mode::Endpoint) {
+        match EndpointChallenge::decode(&challenge.body) {
+            Ok(challenge) => endpoint::observe(&challenge, attempt, deadline)
+                .await
+                .and_then(|report| {
+                    serde_json::to_vec(&report).map_err(|error| ProbeError::Report(Arc::new(error)))
+                }),
+            Err(error) => Err(error),
         }
+    } else {
+        collect::collect(attempt, deadline)
+            .await
+            .and_then(|report| {
+                serde_json::to_vec(&report).map_err(|error| ProbeError::Report(Arc::new(error)))
+            })
+    };
+    let (suffix, body) = match observation {
+        Ok(bytes) if bytes.len() <= REPORT_BYTES => ("response", Bytes::from(bytes)),
+        Ok(_) => return Err(ProbeError::Protocol),
         Err(_) => (
             "error",
             Bytes::from_static(
-                br#"{"errorType":"Rustack.ProbeFailed","errorMessage":"resource probe failed"}"#,
+                br#"{"errorType":"Rustack.ProbeFailed","errorMessage":"runtime probe failed"}"#,
             ),
         ),
     };

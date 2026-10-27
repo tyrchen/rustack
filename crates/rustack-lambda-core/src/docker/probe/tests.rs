@@ -10,7 +10,7 @@ use crate::docker::{
     tests::Daemon,
 };
 
-fn report(attempt: AttemptId) -> ResourceReport {
+pub(super) fn report(attempt: AttemptId) -> ResourceReport {
     ResourceReport::builder()
         .version(1)
         .attempt(attempt)

@@ -11,6 +11,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+getrandom = { workspace = true }
+url = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 ciborium = { workspace = true }
 http = { workspace = true }
@@ -28,6 +33,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+rcgen = { workspace = true }
 anyhow = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }

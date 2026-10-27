@@ -67,8 +67,8 @@ pub use pin::{ImagePin, ImagePinScope};
 pub use plan::{ContainerPolicy, EnvironmentPlan, NetworkSelection, RelayBudgets};
 pub use pool::{EnvironmentPool, PoolConfig, PoolInvocation, PoolPort, PoolSettings, PoolStatus};
 pub use probe::{
-    EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, ProbeFailure, ProbeSettings,
-    probe_environment,
+    EndpointProbe, EndpointProbeConfig, EnvironmentProbe, EnvironmentProbeConfig,
+    EnvironmentProbeError, ProbeFailure, ProbeSettings, probe_endpoint, probe_environment,
 };
 pub use pull::{ImagePullPolicy, RegistryCredential, RegistryCredentials, RegistryHost};
 pub use recovery::{
@@ -77,6 +77,7 @@ pub use recovery::{
 };
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
+pub use rustack_lambda_runtime::probe::{GatewayInstanceId, GatewayReply};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{ReadHalf, WriteHalf, split},

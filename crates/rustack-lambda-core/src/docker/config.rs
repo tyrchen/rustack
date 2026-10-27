@@ -11,9 +11,9 @@ use std::{
 
 pub use auth::RegistryAuthError;
 use rustack_core::settings::RuntimeBudgets;
+use rustack_lambda_runtime::probe::GatewayEndpoint;
 use tokio::time::Instant;
 use typed_builder::TypedBuilder;
-use url::Url;
 
 use super::{
     ContainerPolicy, DockerError, DockerSocket, ImagePullPolicy, NetworkSelection,
@@ -22,9 +22,9 @@ use super::{
 use crate::artifact::ImageReference;
 
 /// Operator-selected function endpoint, independent of request Host and readiness.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct DockerGatewayEndpoint(String);
+pub struct DockerGatewayEndpoint(GatewayEndpoint);
 impl fmt::Debug for DockerGatewayEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("DockerGatewayEndpoint(<redacted>)")
@@ -33,43 +33,9 @@ impl fmt::Debug for DockerGatewayEndpoint {
 impl FromStr for DockerGatewayEndpoint {
     type Err = DockerError;
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        if raw.is_empty()
-            || raw.len() > 2048
-            || raw.chars().any(char::is_control)
-            || raw.bytes().any(|byte| byte.is_ascii_whitespace())
-            || raw.contains('\\')
-            || !raw.contains("://")
-        {
-            return Err(DockerError::Configuration);
-        }
-        let rest = raw
-            .split_once("://")
-            .map(|(_, rest)| rest)
-            .ok_or(DockerError::Configuration)?;
-        let authority = rest
-            .split(['/', '?', '#'])
-            .next()
-            .ok_or(DockerError::Configuration)?;
-        let tail = rest
-            .strip_prefix(authority)
-            .ok_or(DockerError::Configuration)?;
-        if authority.contains('@') || !matches!(tail, "" | "/") {
-            return Err(DockerError::Configuration);
-        }
-        let url = Url::parse(raw).map_err(|_| DockerError::Configuration)?;
-        if !matches!(url.scheme(), "http" | "https")
-            || url.host_str().is_none()
-            || url.port() == Some(0)
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.path() != "/"
-            || url.as_str().len() > 2048
-        {
-            return Err(DockerError::Configuration);
-        }
-        Ok(Self(url.into()))
+        raw.parse()
+            .map(Self)
+            .map_err(|_| DockerError::Configuration)
     }
 }
 impl DockerGatewayEndpoint {
@@ -81,7 +47,13 @@ impl DockerGatewayEndpoint {
     /// ```
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
+    }
+}
+
+impl From<DockerGatewayEndpoint> for GatewayEndpoint {
+    fn from(endpoint: DockerGatewayEndpoint) -> Self {
+        endpoint.0
     }
 }
 

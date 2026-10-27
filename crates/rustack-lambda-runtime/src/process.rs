@@ -48,6 +48,11 @@ pub(crate) async fn run() -> Result<(), RelayError> {
                 .await
                 .map_err(|_| RelayError::Configuration);
         }
+        Some(command) if command == "endpoint-probe" && arguments.next().is_none() => {
+            return rustack_lambda_runtime::probe::run_endpoint()
+                .await
+                .map_err(|_| RelayError::Configuration);
+        }
         Some(_) => return Err(RelayError::Configuration),
     }
     let environment =

@@ -1,8 +1,10 @@
 //! Actual resource qualification through the retained environment owner.
 
+mod endpoint;
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+pub use endpoint::{EndpointProbe, EndpointProbeConfig, probe_endpoint};
 use rustack_core::json::{JsonError, JsonLimits, from_slice};
 use rustack_lambda_model::types::ImageConfig;
 use rustack_lambda_runtime::{
@@ -66,6 +68,9 @@ pub enum ProbeFailure {
     /// The effective tmp mount differs from the captured policy.
     #[error("resource probe temporary filesystem mismatch")]
     Temporary,
+    /// The observed gateway was not the exact expected instance/attempt/platform.
+    #[error("endpoint probe identity mismatch")]
+    Endpoint,
     /// The trusted probe did not return a report.
     #[error("resource probe execution failed")]
     Outcome,
@@ -217,10 +222,77 @@ pub async fn probe_environment(
     deadline: Instant,
 ) -> Result<EnvironmentProbe, EnvironmentProbeError> {
     let deadline = deadline.min(Instant::now() + config.settings.start);
-    check_deadline(deadline).map_err(EnvironmentError::from)?;
-    if !config.environments.same_scope(&config.directory) || !config.relay.is_live() {
+    let payload = Payload::try_from(Bytes::from_static(b"{}"))
+        .map_err(|_| EnvironmentProbeError::Configuration)?;
+    let (report, policy) = invoke_probe(
+        &config,
+        ProbeCommand::Resource,
+        payload,
+        deadline,
+        |bytes, attempt, architecture, policy| {
+            let report = decode_report(bytes)?;
+            verify(&report, attempt, architecture, policy)?;
+            Ok(report)
+        },
+    )
+    .await?;
+    check_live(&config, deadline)?;
+    Ok(EnvironmentProbe {
+        report,
+        directory: config.directory,
+        relay: config.relay,
+        policy,
+        environments: config.environments,
+    })
+}
+#[derive(Debug, Clone, Copy)]
+enum ProbeCommand {
+    Resource,
+    Endpoint,
+}
+impl ProbeCommand {
+    fn entry(self) -> &'static str {
+        match self {
+            Self::Resource => "probe",
+            Self::Endpoint => "endpoint-probe",
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Resource => "rustack-runtime-probe",
+            Self::Endpoint => "rustack-endpoint-probe",
+        }
+    }
+}
+fn check_live(
+    config: &EnvironmentProbeConfig,
+    deadline: Instant,
+) -> Result<(), EnvironmentProbeError> {
+    if Instant::now() >= deadline {
+        return Err(EnvironmentError::Deadline.into());
+    }
+    if !config.environments.same_scope(&config.directory)
+        || !config.relay.is_live()
+        || !config.environments.status().accepting
+    {
         return Err(EnvironmentProbeError::Configuration);
     }
+    Ok(())
+}
+async fn invoke_probe<T>(
+    config: &EnvironmentProbeConfig,
+    command: ProbeCommand,
+    payload: Payload,
+    deadline: Instant,
+    validate: impl FnOnce(
+        &[u8],
+        AttemptId,
+        Architecture,
+        &ContainerPolicy,
+    ) -> Result<T, EnvironmentProbeError>,
+) -> Result<(T, ContainerPolicy), EnvironmentProbeError> {
+    check_deadline(deadline).map_err(EnvironmentError::from)?;
+    check_live(config, deadline)?;
     let policy = config
         .network
         .apply(&config.policy)
@@ -230,14 +302,17 @@ pub async fn probe_environment(
         .resource_id(FunctionResourceId::new())
         .revision_id(Uuid::new_v4().to_string())
         .backend(ExecutorBackend::Docker)
-        .function_name("rustack-runtime-probe".into())
+        .function_name(command.name().into())
         .qualifier("$LATEST".into())
         .runtime(None)
         .handler(None)
         .architecture(architecture)
         .artifact(DeploymentArtifact::Image(config.relay.clone()))
         .image_config(Some(ImageConfig {
-            entry_point: Some(vec!["/rustack-lambda-runtime".into(), "probe".into()]),
+            entry_point: Some(vec![
+                "/rustack-lambda-runtime".into(),
+                command.entry().into(),
+            ]),
             command: Some(vec![]),
             working_directory: None,
         }))
@@ -260,45 +335,33 @@ pub async fn probe_environment(
     let call = Invocation::new(
         attempt,
         deadline,
-        "arn:aws:lambda:us-east-1:000000000000:function:rustack-runtime-probe"
-            .parse()
-            .map_err(|_| EnvironmentProbeError::Configuration)?,
+        format!(
+            "arn:aws:lambda:us-east-1:000000000000:function:{}",
+            command.name()
+        )
+        .parse()
+        .map_err(|_| EnvironmentProbeError::Configuration)?,
         local_trace_id().map_err(|_| EnvironmentProbeError::Configuration)?,
-        Payload::try_from(Bytes::from_static(b"{}"))
-            .map_err(|_| EnvironmentProbeError::Configuration)?,
+        payload,
     )
     .map_err(|_| EnvironmentProbeError::Configuration)?;
     let mut environment = config.environments.spawn(plan, deadline)?;
-    let result: Result<ResourceReport, EnvironmentProbeError> = async {
+    let result = async {
         environment.wait_ready(deadline).await?;
         let response = environment.invoke(call, false).await?;
         let RuntimeResult::Success(payload) = response.result else {
             return Err(ProbeFailure::Outcome.into());
         };
-        let report = decode_report(payload.as_ref())?;
-        verify(&report, attempt, architecture, &policy)?;
-        Ok(report)
+        validate(payload.as_ref(), attempt, architecture, &policy)
     }
     .await;
     environment
         .shutdown(Instant::now() + config.settings.cleanup)
         .await
         .map_err(EnvironmentProbeError::Cleanup)?;
-    let report = result?;
-    if Instant::now() >= deadline {
-        return Err(EnvironmentError::Deadline.into());
-    }
-    if !config.relay.is_live() || !config.environments.status().accepting {
-        return Err(EnvironmentProbeError::Configuration);
-    }
-    Ok(EnvironmentProbe {
-        report,
-        directory: config.directory,
-        relay: config.relay,
-        policy,
-        environments: config.environments,
-    })
+    Ok((result?, policy))
 }
+
 fn decode_report(bytes: &[u8]) -> Result<ResourceReport, EnvironmentProbeError> {
     Ok(from_slice(
         bytes,

@@ -122,6 +122,11 @@ http-body-util = "0.1"
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }
 # Reuse config's audited event-parser cohort for shallow private credentials.
 yaml-rust2 = { version = "~0.11.1", default-features = false }
+# Owned endpoint probe TLS; explicitly select aws-lc despite feature unification.
+rustls = { version = "~0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+tokio-rustls = { version = "~0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+webpki-roots = "~1.0.11"
+rcgen = { version = "~0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 url = "2.5.8"
 
 # Serialization

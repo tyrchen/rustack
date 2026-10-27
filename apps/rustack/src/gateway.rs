@@ -16,7 +16,7 @@ use std::{
 use bytes::Bytes;
 use http::{
     Method, Response, StatusCode,
-    header::{CONTENT_TYPE, RETRY_AFTER},
+    header::{ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER},
 };
 use http_body_util::BodyExt;
 use hyper::{
@@ -27,6 +27,8 @@ use rustack_core::{
     http::{BodyBudget, BudgetedBody},
     settings::RuntimeBudgets,
 };
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::docker::{GatewayInstanceId, GatewayReply};
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -35,9 +37,13 @@ use crate::{
     service::{GatewayBody, ServiceRouter, gateway_body_from_string},
 };
 
+const RUNTIME_PROBE_PATH: &str = "/_rustack/runtime-probe";
+
 /// Process state is independent from whether any service supports snapshots.
 #[derive(Debug)]
 pub(crate) struct RuntimeStatus {
+    #[cfg(feature = "lambda")]
+    instance: Option<GatewayInstanceId>,
     ready: AtomicBool,
     workers: Arc<RuntimeWorkers>,
 }
@@ -76,6 +82,8 @@ impl GatewayService {
             admission: Arc::new(Semaphore::new(budgets.requests)),
             budgets,
             state: Arc::new(RuntimeStatus {
+                #[cfg(feature = "lambda")]
+                instance: None,
                 ready: AtomicBool::new(true),
                 workers: Arc::new(RuntimeWorkers::default()),
             }),
@@ -85,12 +93,56 @@ impl GatewayService {
 
     pub(crate) fn with_workers(mut self, workers: Arc<RuntimeWorkers>) -> Self {
         self.state = Arc::new(RuntimeStatus {
-            ready: AtomicBool::new(true),
+            #[cfg(feature = "lambda")]
+            instance: self.state.instance,
+            ready: AtomicBool::new(self.state.ready.load(Ordering::Acquire)),
             workers,
         });
         self
     }
 
+    #[cfg(feature = "lambda")]
+    pub(crate) fn with_runtime_identity(mut self, instance: GatewayInstanceId) -> Self {
+        self.state = Arc::new(RuntimeStatus {
+            ready: AtomicBool::new(self.state.ready.load(Ordering::Acquire)),
+            workers: self.state.workers.clone(),
+            instance: Some(instance),
+        });
+        self
+    }
+    fn runtime_probe<T: Serialize>(method: &Method, installed: Option<T>) -> Response<GatewayBody> {
+        let mut response = match installed {
+            Some(reply) if matches!(*method, Method::GET | Method::HEAD) => {
+                json_response(StatusCode::OK, &reply)
+            }
+            Some(_) => {
+                let mut reply = json_response(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    &serde_json::json!({"error":"runtime probe requires GET or HEAD"}),
+                );
+                reply
+                    .headers_mut()
+                    .insert(ALLOW, http::HeaderValue::from_static("GET, HEAD"));
+                reply
+            }
+            None => json_response(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({"error":"runtime probe is not installed"}),
+            ),
+        };
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+        if *method == Method::HEAD {
+            if let Some(size) = response.body().size_hint().exact() {
+                response
+                    .headers_mut()
+                    .insert(CONTENT_LENGTH, http::HeaderValue::from(size));
+            }
+            *response.body_mut() = gateway_body_from_string("");
+        }
+        response
+    }
     #[cfg(all(test, feature = "stepfunctions"))]
     pub(crate) fn with_request_seconds(mut self, seconds: std::num::NonZeroU64) -> Self {
         self.budgets.request_seconds = seconds.get();
@@ -113,6 +165,13 @@ impl GatewayService {
 
     fn diagnostics(&self, req: &http::Request<Incoming>) -> Option<Response<GatewayBody>> {
         let path = req.uri().path();
+        if path == RUNTIME_PROBE_PATH {
+            #[cfg(feature = "lambda")]
+            let reply = self.state.instance.map(GatewayReply::new);
+            #[cfg(not(feature = "lambda"))]
+            let reply = None::<serde_json::Value>;
+            return Some(Self::runtime_probe(req.method(), reply));
+        }
         if !(is_health_check(req.method(), path)
             || matches!(*req.method(), Method::GET | Method::HEAD)
                 && path == "/_rustack/capabilities")
@@ -328,7 +387,7 @@ fn unavailable(message: &str) -> Response<GatewayBody> {
     response
 }
 
-fn json_response(status: StatusCode, value: &serde_json::Value) -> Response<GatewayBody> {
+fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<GatewayBody> {
     let (status, body) = match serde_json::to_string(value) {
         Ok(body) => (status, body),
         Err(_) => (
@@ -394,3 +453,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod endpoint_tests;

@@ -1088,6 +1088,20 @@ test-lambda-executor-docker: lambda-runtime-image lambda-runtime-fixture-image
 
 .PHONY: test-lambda-executor test-lambda-executor-docker
 
+# Container-origin gateway proof requires an explicit operator bridge/host.
+WORKFLOWS_GATEWAY_HOST ?=
+
+test-lambda-endpoints:
+	@cargo test --locked -p rustack-lambda-runtime --lib probe::endpoint
+	@cargo test --locked -p rustack-lambda-runtime --lib diagnostics::
+	@cargo test --locked -p rustack-lambda-core --lib docker::probe
+	@cargo test --locked -p rustack-cli --bin rustack gateway::endpoint_tests
+
+test-lambda-endpoints-docker: lambda-runtime-image lambda-runtime-fixture-image
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" RUSTACK_RUNTIME_NETWORK="$(WORKFLOWS_NETWORK)" RUSTACK_RUNTIME_GATEWAY_HOST="$(WORKFLOWS_GATEWAY_HOST)" cargo test --locked -p rustack-lambda-core --test docker_endpoint -- --ignored --nocapture --test-threads=1
+
+.PHONY: test-lambda-endpoints test-lambda-endpoints-docker
+
 # The bridge lane requires an explicit pre-provisioned operator network.
 test-lambda-probes:
 	@cargo test -p rustack-lambda-runtime --lib probe::

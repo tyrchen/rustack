@@ -139,6 +139,8 @@ use rustack_lambda_core::code::{S3CodeFetcher, UnavailableS3CodeFetcher};
 #[cfg(feature = "lambda")]
 use rustack_lambda_core::config::LambdaConfig;
 #[cfg(feature = "lambda")]
+use rustack_lambda_core::docker::GatewayInstanceId;
+#[cfg(feature = "lambda")]
 use rustack_lambda_core::handler::RustackLambdaHandler;
 #[cfg(feature = "lambda")]
 use rustack_lambda_core::provider::RustackLambda;
@@ -1484,6 +1486,20 @@ async fn run() -> Result<()> {
     }
     config.validate_credentials(&enabled)?;
     info!(settings = ?config, "validated runtime configuration");
+    let startup_deadline =
+        Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds);
+    #[cfg(feature = "lambda")]
+    let gateway_instance = if enabled.iter().any(|name| name == "lambda") {
+        Some(
+            GatewayInstanceId::generate_owned(
+                startup_deadline.min(Instant::now() + Duration::from_secs(60)),
+            )
+            .await
+            .context("generate runtime gateway identity")?,
+        )
+    } else {
+        None
+    };
     let mut runtime = build_services(|name| enabled.iter().any(|s| s == name))?;
 
     if runtime.services.is_empty() {
@@ -1493,8 +1509,6 @@ async fn run() -> Result<()> {
         );
     }
 
-    let startup_deadline =
-        Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds);
     let mut snapshot = SnapshotSession::new(snapshot_config);
     let startup = tokio::time::timeout_at(startup_deadline, async {
         snapshot.load(&runtime.providers, startup_deadline).await?;
@@ -1533,6 +1547,11 @@ async fn run() -> Result<()> {
     } = runtime;
     let workers = Arc::new(workers);
     let gateway = GatewayService::new(services).with_workers(Arc::clone(&workers));
+    #[cfg(feature = "lambda")]
+    let gateway = match gateway_instance {
+        Some(instance) => gateway.with_runtime_identity(instance),
+        None => gateway,
+    };
     let service_names = gateway.service_names();
 
     info!(

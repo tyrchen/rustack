@@ -15,6 +15,15 @@ struct RuntimeSubscriber {
 
 fn allowed(metadata: &Metadata<'_>) -> bool {
     let target = metadata.target();
+    let tls = ["rustls", "tokio_rustls"].iter().any(|name| {
+        target == *name
+            || target
+                .strip_prefix(name)
+                .is_some_and(|suffix| suffix.starts_with("::"))
+    });
+    if tls {
+        return false;
+    }
     let dependency = ["hyper", "hyper_util", "bollard"].iter().any(|name| {
         target == *name
             || target
@@ -69,7 +78,9 @@ impl Subscriber for RuntimeSubscriber {
 
 /// Capture application context while denying verbose transport dependency logs.
 ///
-/// The policy covers Hyper, `hyper_util` and Bollard independently of `RUST_LOG`.
+/// The policy covers verbose Hyper/`hyper_util`/Bollard and all rustls/
+/// tokio-rustls events independently of `RUST_LOG`; TLS diagnostics may contain
+/// operator server names or peer certificate data even at warning levels.
 /// Apply the dispatch to construction and every poll/spawned transport worker.
 ///
 /// ```
@@ -83,4 +94,54 @@ pub fn runtime_dispatch() -> Dispatch {
             parent: parent.clone(),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    use tracing::{Level, dispatcher};
+
+    use super::runtime_dispatch;
+
+    #[derive(Debug, Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let mut output = self.0.lock().unwrap();
+            if output.len().saturating_add(bytes.len()) > 16_384 {
+                return Err(io::Error::other("fixture capture exceeded budget"));
+            }
+            output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn test_should_filter_all_tls_peer_events_while_preserving_application_diagnostics() {
+        let capture = Capture(Arc::default());
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let dispatch = runtime_dispatch();
+            dispatcher::with_default(&dispatch, || {
+                tracing::trace!(target:"rustls","PRIVATE-TLS-TRACE");
+                tracing::warn!(target:"rustls::client","PRIVATE-PEER-CERT");
+                tracing::error!(target:"tokio_rustls","PRIVATE-SNI");
+                tracing::info!("owned_application_event");
+            });
+        });
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("owned_application_event"));
+        assert!(!output.contains("PRIVATE"));
+    }
 }

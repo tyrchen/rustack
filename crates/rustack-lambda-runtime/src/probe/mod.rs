@@ -4,11 +4,16 @@
 mod client;
 #[cfg(unix)]
 mod collect;
+mod endpoint;
 #[cfg(any(unix, test))]
 mod parse;
 
 use std::{fmt, io, sync::Arc};
 
+pub use endpoint::types::{
+    EndpointChallenge, EndpointReport, GATEWAY_PROBE_PATH, GatewayEndpoint, GatewayInstanceId,
+    GatewayReply,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use typed_builder::TypedBuilder;
@@ -22,6 +27,15 @@ pub const REPORT_BYTES: usize = 4096;
 #[derive(Clone, Error)]
 #[non_exhaustive]
 pub enum ProbeError {
+    /// No runtime or retained probe worker failed to join.
+    #[error("runtime probe worker failed")]
+    Worker,
+    /// The OS randomness source failed; no identity fallback is generated.
+    #[error("runtime probe entropy failed")]
+    Entropy,
+    /// TLS configuration or certificate/name verification failed; peer text is discarded.
+    #[error("runtime probe TLS failed")]
+    Tls,
     /// Unsupported platform, arguments or private API configuration.
     #[error("invalid runtime probe configuration")]
     Configuration,
@@ -137,4 +151,18 @@ pub struct ResourceReport {
 #[cfg(unix)]
 pub async fn run() -> Result<(), ProbeError> {
     client::run().await
+}
+
+/// Run one pinned gateway probe from the actual function network.
+/// # Errors
+/// Rejects invalid private challenges, unreachable/wrong endpoints, TLS/protocol
+/// failure or expiry. The host owns physical function retirement.
+/// ```no_run
+/// # #[cfg(unix)] async fn probe(){
+/// let result=rustack_lambda_runtime::probe::run_endpoint().await;
+/// # }
+/// ```
+#[cfg(unix)]
+pub async fn run_endpoint() -> Result<(), ProbeError> {
+    client::run_endpoint().await
 }
