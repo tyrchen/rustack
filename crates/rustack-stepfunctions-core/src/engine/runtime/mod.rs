@@ -138,6 +138,9 @@ impl ExecutionSupervisor {
     pub(crate) fn callback_scope(&self) -> Option<&TenantScope> {
         self.shared.callbacks.as_ref().map(CallbackRegistry::scope)
     }
+    pub(crate) fn callbacks(&self) -> Option<CallbackRegistry> {
+        self.shared.callbacks.clone()
+    }
     /// Construct bounded pools/history accounting without spawning or enabling APIs.
     ///
     /// # Errors

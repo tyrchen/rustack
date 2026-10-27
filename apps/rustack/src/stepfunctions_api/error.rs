@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use http::StatusCode;
-use rustack_stepfunctions_core::{ExecutionError, RegistryError};
+use rustack_stepfunctions_core::{CallbackError, ExecutionError, RegistryError};
 use rustack_stepfunctions_model::{
     StepFunctionsError, StepFunctionsErrorCode as Code, StepFunctionsOperation,
 };
@@ -81,5 +81,22 @@ pub(super) fn check(deadline: Instant) -> Result<(), StepFunctionsError> {
         Err(error(Code::RequestTimeoutException))
     } else {
         Ok(())
+    }
+}
+
+pub(super) fn callback(cause: CallbackError) -> StepFunctionsError {
+    source(callback_code(&cause), cause)
+}
+fn callback_code(cause: &CallbackError) -> Code {
+    match cause {
+        CallbackError::Cached(cause) => callback_code(cause),
+        CallbackError::InvalidToken => Code::InvalidToken,
+        CallbackError::TaskTimedOut => Code::TaskTimedOut,
+        CallbackError::Data(_) => Code::InvalidOutput,
+        CallbackError::Validation => Code::ValidationException,
+        CallbackError::Capacity => Code::ThrottlingException,
+        CallbackError::Deadline => Code::RequestTimeoutException,
+        CallbackError::Unavailable => Code::ServiceUnavailable,
+        _ => Code::InternalFailure,
     }
 }

@@ -120,7 +120,7 @@ struct Shared {
     child_wake: Arc<Notify>,
     scope: TenantScope,
     states: StateSupport,
-    callbacks: bool,
+    callbacks: Option<CallbackRegistry>,
     sender: mpsc::Sender<Envelope>,
     capacity: Arc<Semaphore>,
     closing: watch::Sender<bool>,
@@ -141,7 +141,7 @@ fn admission(
     limits: RegistryLimits,
     support: StateSupport,
     child_limit: usize,
-    callbacks: bool,
+    callbacks: Option<CallbackRegistry>,
 ) -> Admission {
     let (sender, receiver) = mpsc::channel(limits.commands);
     let (child_sender, children) = mpsc::channel(child_limit);
@@ -269,7 +269,7 @@ impl Registry {
         {
             return Err(RegistryError::Validation);
         }
-        let callbacks = runtime.callback_scope().is_some();
+        let callbacks = runtime.callbacks();
         let Admission { shared, channels } = admission(
             scope.clone(),
             limits,
@@ -371,7 +371,30 @@ impl Registry {
     /// ```
     #[must_use]
     pub fn callback_support(&self) -> bool {
-        self.shared.callbacks
+        self.shared.callbacks.is_some()
+    }
+    /// Submit to the execution owner's exact scoped callback registry once.
+    ///
+    /// Accepted actions survive a dropped or expired acknowledgment observer.
+    /// This uses independent callback admission, not the metadata command lane.
+    ///
+    /// # Errors
+    /// Rejects missing/closed ownership, exhausted capacity or invalid tokens.
+    ///
+    /// ```no_run
+    /// # fn submit(registry:&rustack_stepfunctions_core::Registry,command:rustack_stepfunctions_core::CallbackCommand){
+    /// let acknowledgment=registry.submit_callback(command);
+    /// # }
+    /// ```
+    pub fn submit_callback(&self, command: CallbackCommand) -> Result<CallbackAck, CallbackError> {
+        if !self.status().ready {
+            return Err(CallbackError::Unavailable);
+        }
+        self.shared
+            .callbacks
+            .as_ref()
+            .ok_or(CallbackError::Unavailable)?
+            .submit(&self.shared.scope, command)
     }
     /// Validate and synchronously transfer one command to retained ownership.
     ///
@@ -388,7 +411,7 @@ impl Registry {
         command.check(
             &self.shared.scope,
             self.shared.states,
-            self.shared.callbacks,
+            self.callback_support(),
         )?;
         if *self.shared.closing.borrow() {
             return Err(RegistryError::Unavailable);

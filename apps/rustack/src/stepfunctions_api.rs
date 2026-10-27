@@ -165,6 +165,7 @@ impl StepFunctionsApi {
         if scope.partition() != other.partition()
             || scope.region() != other.region()
             || scope.account() != other.account()
+            || registry.callback_support() && tasks != TaskSupport::Lambda
         {
             return Err(ApiError::Configuration);
         }

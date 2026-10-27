@@ -3128,6 +3128,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rstest",
  "rustack-apigatewayv2-core",
  "rustack-apigatewayv2-http",
  "rustack-auth",

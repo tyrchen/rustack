@@ -151,7 +151,12 @@ fn request(action: &str, body: impl Into<Bytes>) -> http::Request<Full<Bytes>> {
         .unwrap()
 }
 async fn data(response: http::Response<StepFunctionsBody>) -> Value {
-    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    }
 }
 fn cases() -> Vec<(Op, Value)> {
     vec![
@@ -220,7 +225,17 @@ async fn test_should_dispatch_all_typed_actions_without_enum_wrappers_or_data_in
             .unwrap()
             .parse::<uuid::Uuid>()
             .unwrap();
+        let callback = matches!(
+            op,
+            Op::SendTaskSuccess | Op::SendTaskFailure | Op::SendTaskHeartbeat
+        );
+        if callback {
+            assert_eq!(response.headers()["content-length"], "0");
+        }
         let decoded = data(response).await;
+        if callback {
+            assert_eq!(decoded, Value::Null);
+        }
         if op == Op::StartExecution {
             assert_eq!(decoded["startDate"], json!(-1.25));
             assert!(!decoded.as_object().unwrap().contains_key("StartExecution"));

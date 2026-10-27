@@ -66,7 +66,12 @@ pub(crate) fn success(
     value: &Response,
     id: Uuid,
 ) -> Result<http::Response<StepFunctionsBody>, HttpError> {
-    let bytes = encode(|writer| value.encode(writer))?;
+    let bytes = match value {
+        Response::SendTaskSuccess(_)
+        | Response::SendTaskFailure(_)
+        | Response::SendTaskHeartbeat(_) => Bytes::new(),
+        _ => encode(|writer| value.encode(writer))?,
+    };
     build(bytes, StatusCode::OK, id, None)
 }
 #[derive(Serialize)]

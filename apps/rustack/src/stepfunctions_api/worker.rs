@@ -5,7 +5,7 @@ use std::{future::Future, sync::Arc};
 use rustack_stepfunctions_core::{AslCompiler, ExecutionError, RegistryCommand, RegistryResult};
 use rustack_stepfunctions_http::{Request, Response};
 use rustack_stepfunctions_model::{
-    StepFunctionsError, StepFunctionsErrorCode as Code, StepFunctionsOperation as Op,
+    StepFunctionsError, StepFunctionsErrorCode as Code, StepFunctionsOperation as Op, output,
 };
 use tokio::{
     sync::oneshot,
@@ -15,7 +15,7 @@ use tokio::{
 
 use super::{
     Context,
-    error::{check, error, registry, source},
+    error::{callback, check, error, registry, source},
     pages,
     prepare::{self, Prepared},
     render,
@@ -29,19 +29,35 @@ pub(super) async fn run(
     let scope = context.scope.clone();
     let tasks = context.tasks;
     let states = context.registry.state_support();
+    let callbacks = context.registry.callback_support();
     let prepared = cpu(&context, deadline, move || {
         prepare::prepare(
             request,
             &AslCompiler::new(scope.clone(), tasks)
                 .with_state_support(states)
-                .with_child_support(true),
+                .with_child_support(true)
+                .with_callback_support(callbacks),
             &scope,
+            callbacks,
         )
     })
     .await?;
     check(deadline)?;
     match prepared {
         Prepared::Ready(response) => Ok(response),
+        Prepared::Callback(command, op) => {
+            let mut acknowledgment = context
+                .registry
+                .submit_callback(command)
+                .map_err(callback)?;
+            acknowledgment.wait(deadline).await.map_err(callback)?;
+            match op {
+                Op::SendTaskSuccess => Ok(output::SendTaskSuccessOutput::default().into()),
+                Op::SendTaskFailure => Ok(output::SendTaskFailureOutput::default().into()),
+                Op::SendTaskHeartbeat => Ok(output::SendTaskHeartbeatOutput::default().into()),
+                _ => Err(error(Code::InternalFailure)),
+            }
+        }
         Prepared::Command(command, op) => {
             let mut result = submit_registry(&context, command, op, deadline).await?;
             if op == Op::StopExecution {

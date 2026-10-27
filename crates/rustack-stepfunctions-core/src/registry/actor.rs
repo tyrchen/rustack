@@ -692,7 +692,7 @@ mod clock_tests {
             limits,
             StateSupport::Sequential,
             runtime.open_limit(),
-            false,
+            None,
         );
         Owner::new(
             TenantScope::default(),

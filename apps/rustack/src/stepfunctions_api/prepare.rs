@@ -1,8 +1,8 @@
 //! Retained blocking preparation under the installed STANDARD/JSONPath profile.
 
 use rustack_stepfunctions_core::{
-    AslCompiler, DiagnosticSeverity, ExecutionArn, Payload, PreparedDefinition, RegistryCommand,
-    RoleArn, StateMachineArn, StopReason, Tags, TenantScope,
+    AslCompiler, CallbackCommand, CallbackToken, DiagnosticSeverity, ExecutionArn, Payload,
+    PreparedDefinition, RegistryCommand, RoleArn, StateMachineArn, StopReason, Tags, TenantScope,
 };
 use rustack_stepfunctions_http::{HttpError, Request, Response};
 use rustack_stepfunctions_model::{
@@ -17,19 +17,21 @@ use rustack_stepfunctions_model::{
 };
 
 use super::{
-    error::{error, source},
+    error::{callback, error, source},
     pages::{Binding, Flags},
 };
 
 pub(super) enum Prepared {
     Command(RegistryCommand, Op),
     Page(Binding, Option<String>, RegistryCommand),
+    Callback(CallbackCommand, Op),
     Ready(Response),
 }
 pub(super) fn prepare(
     request: Request,
     compiler: &AslCompiler,
     scope: &TenantScope,
+    callbacks: bool,
 ) -> Result<Prepared, StepFunctionsError> {
     request.validate().map_err(|e| {
         let code = match &e {
@@ -121,10 +123,35 @@ pub(super) fn prepare(
             ));
         }
         Request::GetExecutionHistory(v) => return history(*v, scope),
-        _ => return Err(error(Code::UnsupportedOperation)),
+        request => return callback_request(request, callbacks),
     };
     Ok(Prepared::Command(command, op))
 }
+fn callback_request(request: Request, enabled: bool) -> Result<Prepared, StepFunctionsError> {
+    if !enabled {
+        return Err(error(Code::UnsupportedOperation));
+    }
+    let op = request.operation();
+    let command = match request {
+        Request::SendTaskSuccess(v) => CallbackCommand::success(
+            CallbackToken::try_from(v.task_token).map_err(callback)?,
+            v.output.as_bytes(),
+        )
+        .map_err(callback)?,
+        Request::SendTaskFailure(v) => CallbackCommand::failure(
+            CallbackToken::try_from(v.task_token).map_err(callback)?,
+            v.error,
+            v.cause,
+        )
+        .map_err(callback)?,
+        Request::SendTaskHeartbeat(v) => {
+            CallbackCommand::heartbeat(CallbackToken::try_from(v.task_token).map_err(callback)?)
+        }
+        _ => return Err(error(Code::UnsupportedOperation)),
+    };
+    Ok(Prepared::Callback(command, op))
+}
+
 fn history(
     v: input::GetExecutionHistoryInput,
     scope: &TenantScope,

@@ -64,7 +64,7 @@ The embedding gateway owns bounded connection/request admission; this service sp
 
 ### 1.3 Retained real API adapter and preparation
 
-The binary-support `stepfunctions_api` module implements StepFunctionsHandler over the real core Registry; it never imports Lambda-core or supplies an executor fallback. Its constructor receives validated scope, actual compiler TaskSupport and Registry, returning an Arc handler plus a unique ApiSupervisor. Main routing/configuration remains a separately verified composition consumer. All15 M1 operations use real core semantics; the three M3 callback transport variants return UnsupportedOperation until their owner is implemented.
+The binary-support `stepfunctions_api` module implements StepFunctionsHandler over the real core Registry; it never imports Lambda-core or supplies an executor fallback. Its constructor receives validated scope, actual compiler TaskSupport and Registry, returning an Arc handler plus a unique ApiSupervisor. Main routing/configuration remains a separately verified composition consumer. All15 M1 operations use real core semantics. With the registered callback owner installed, the three M3 callback actions follow§1.4; unbound registries return UnsupportedOperation after common request validation. Main activation/configuration and handler-originated SDK acceptance remain separately qualified.
 
 Before queueing, validate trusted RequestContext scope/deadline; the HTTP boundary already bounds decoded DTOs. The retained CPU preparation revalidates all Request field/count/JSON bounds before domain submission, including trusted typed callers. Scope mismatch is AccessDeniedException. Bounded accepted work defaults32 (1..128), CPU workers8 (1..32,≤accepted), pagination handles10,000 (1..100,000), incremental pagination bytes64MiB (8MiB..1GiB). Accepted admission remains charged through pending preparation, worker joins and unobserved replies; unexpected worker failure retains its slot. The root owns all jobs/slots above workers and preserves unresolved state on abnormal Drop/runtime loss. Clean shutdown joins the same jobs after closing admission; observer timeout never restarts work. Independent API close precedes registry close, followed by Lambda bridge/provider close.
 
@@ -91,6 +91,34 @@ Generate common AccessDeniedException403, InternalFailure500, RequestTimeoutExce
 │ close → join same workers → Clean / retained failed ownership     │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### 1.4 Registry-bound public callback adapter
+
+Install SendTaskSuccess, SendTaskFailure and SendTaskHeartbeat in the existing retained API owner when and only when its Registry has the actual callback registry installed by integrations§5.5/D66. Preserve constructor compatibility: derive both compiler capability and callback submission from the same Registry, without a separate caller-supplied registry/boolean that could route to another token epoch. Registry retains the immutable callback handle rather than a redundant capability flag and exposes a typed submit_callback command boundary bound to its own trusted scope. No callback command uses the ordinary metadata queue, creates a new token, reconstructs an execution or holds a Lambda dispatch permit. A closed/failed registry rejects new callback submission. Unbound registries keep all three APIs UnsupportedOperation and compiler callback support false. Main activation/configuration/SDK handler acceptance remain a subsequent composition gate.
+
+The retained CPU preparation validates the same bounded Request as other actions, converts the owned taskToken String into the noncloneable/nonserializable CallbackToken and prepares CallbackCommand. Move a validated owned token into SecretString; do not keep an extra plaintext credential copy for diagnostics. The raw bounded HTTP buffer/decoded request necessarily exists at ingress; zeroizing the owned domain token does not claim erasure of every wire-buffer copy. Success parses a UTF-8 JSON document≤262,144 bytes once into the existing Payload, preserving JSON scalar/array/object/null semantics without double encoding. Failure preserves omitted versus empty error/cause with256/32,768-byte limits. Heartbeat carries only the token. In the installed local profile tokens are64 lowercase hexadecimal bytes; malformed/unknown/foreign-scope tokens return InvalidToken. All preparation/error/request Debug remains redacted.
+
+Immediately before domain submission, refresh the caller deadline. Submit exactly once through Registry.submit_callback and observe its retained CallbackAck with the same absolute deadline. Dropped/expired HTTP observation never revokes the token, undoes the callback or resends it. Already accepted token actions remain callback-actor-owned; API shutdown joins its retained workers before registry/token shutdown. Actual callback-result finality still depends on the real invocation report, and successful SendTask acknowledgment need not imply the ASL execution is terminal or physically clean. Preserve callback-root errors as typed sources with static public text.
+
+Map recursive cached callback errors as follows: InvalidToken→InvalidToken400; TaskTimedOut→TaskTimedOut400; Data→InvalidOutput400; Validation→ValidationException400; Capacity→ThrottlingException400; Deadline→RequestTimeoutException408; Unavailable→ServiceUnavailable503; ownership/progress/worker/entropy/attempt inconsistency→InternalFailure500. Failure-field bounds remain ValidationException, independent of success JSON errors. Known completed/revoked/timed-out tokens remain TaskTimedOut through bounded tombstone retention; a fresh/foreign epoch token remains InvalidToken. Heartbeat reset does not create history or extend absolute Task duration.
+
+Return the correctly correlated generated empty output DTO internally; the HTTP success encoder emits status200, content-length0 and no body for the three callback variants, retaining normal content type/request-ID/server headers. Error bodies retain the existing bounded JSON envelope and all other action encodings stay unchanged. These shapes and limits follow [SendTaskSuccess](https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskSuccess.html), [SendTaskFailure](https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskFailure.html), and [SendTaskHeartbeat](https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskHeartbeat.html), verified2026-10-26. The lowercase-hex local credential format and existing static common-error mappings are Rustack profile choices.
+
+```text
+Bounded HTTP / trusted typed caller
+  │ scope + caller deadline
+  ▼ retained API admission + CPU preparation
+  │ move secret token, parse success / bounded failure / heartbeat
+  ▼ Registry.submit_callback (same installed scope/epoch)
+  │ separate bounded callback command lane; submit exactly once
+  ▼ Callback actor: token hash → provisional action / terminal classification
+  │ retained acknowledgment, no business payload/token in response
+  ▼ typed empty DTO → HTTP200, zero-byte body
+  │
+  └─ abandoned/late observer: actor action stays owned; no revoke/replay
+```
+
+Acceptance: real typed HTTP→API→registered ASL tests for early/late callback success, explicit failure, heartbeat without history mutation, invocation failure overriding early success, Retry fresh-token isolation, Stop/expiry/closed-token responses, invalid/foreign credentials and invalid JSON/bounds; scope/deadline and shutdown/abandoned-observer tests; exact empty success wire metadata; error-source/redaction scans and all existing15-action/default-unbound regressions. Use a controlled observed port for adapter determinism and retain actual Native consumer acceptance independently. Both ordinary handler-originated SDKs and main-service capability/configuration/shutdown composition must pass before M3 release or callbacks=true publication.
 
 ## 2. API coverage
 

@@ -39,10 +39,23 @@ impl Fixture {
             ExecutionLimits::default(),
         )
         .unwrap();
-        let (handle, api) =
-            StepFunctionsApi::new(scope, TaskSupport::Disabled, registry, limits).unwrap();
+        Self::from_registry(registry, owner, TaskSupport::Disabled, limits)
+    }
+    fn from_registry(
+        registry: Registry,
+        owner: RegistrySupervisor,
+        tasks: TaskSupport,
+        limits: ApiLimits,
+    ) -> Self {
+        let scope = registry.scope().clone();
+        let (handle, api) = StepFunctionsApi::new(scope.clone(), tasks, registry, limits).unwrap();
         let config = StepFunctionsHttpConfig::new(
-            RequestScope::new("aws".into(), "us-east-1".into(), "000000000000".into()).unwrap(),
+            RequestScope::new(
+                scope.partition().into(),
+                scope.region().into(),
+                scope.account().into(),
+            )
+            .unwrap(),
             true,
             None,
         )
@@ -66,7 +79,14 @@ impl Fixture {
         let status = response.status();
         assert!(response.headers().contains_key("x-amzn-requestid"));
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        (status, serde_json::from_slice(&body).unwrap())
+        (
+            status,
+            if body.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&body).unwrap()
+            },
+        )
     }
     async fn create(&self, name: &str, definition: Value) -> String {
         let(status,response)=self.call("CreateStateMachine",json!({"name":name,"roleArn":"arn:aws:iam::000000000000:role/Workflow","definition":definition.to_string()})).await;
@@ -95,6 +115,8 @@ impl Fixture {
         assert!(registry.is_ok(), "{registry:?}");
     }
 }
+
+mod callback;
 fn succeed() -> Value {
     json!({"StartAt":"Done","States":{"Done":{"Type":"Succeed"}}})
 }
