@@ -22,9 +22,9 @@ use tokio::{
 
 use super::*;
 use crate::{
-    AslCompiler, ClockSample, DriverStep, EvaluationContext, ExecutionDriver, ExecutionLimits,
-    ExecutionSnapshot, ExecutionSupervisor, FrameCallId, FrameCapacity, FrameLimits,
-    FrameScheduler, FrameUpdate, HistoryLimits, Payload, PreparedDefinition, Registry,
+    AslCompiler, ClockSample, DataFlow, DriverStep, EvaluationContext, ExecutionDriver,
+    ExecutionLimits, ExecutionSnapshot, ExecutionSupervisor, FrameCallId, FrameCapacity,
+    FrameLimits, FrameScheduler, FrameUpdate, HistoryLimits, Payload, PreparedDefinition, Registry,
     RegistryCommand, RegistryLimits, RegistryResult, RegistrySupervisor, RuntimeLimits,
     SystemUuidSource, Tags, TaskSupport,
 };
@@ -1075,4 +1075,39 @@ fn test_should_preserve_unavailable_receipts_and_typed_root_failure_after_runtim
         assert!(f.registry_owner.shutdown(deadline()).await.is_err());
         Ok::<_, Box<dyn Error>>(())
     })
+}
+
+#[tokio::test]
+async fn test_should_prepare_real_registered_token_once_with_separate_safe_history() -> TestResult {
+    let mut f = Fixture::new(CallbackLimits::default()).await?;
+    let mut task = f.task(0, 60, None).await?;
+    let original = Payload::parse(b"{\"n\":21}")?;
+    let base = EvaluationContext::from_value(&json!({"Execution":{"Name":"Run"}}))?;
+    let flow = DataFlow::compile(
+        &json!({"Parameters":{"FunctionName":"Worker","Payload":{"token.$":"$$.Task.Token","n.$":"$.n"}}}),
+    )?;
+    let parameters = flow.prepare_callback_with_source(
+        &original,
+        &base,
+        task.token(),
+        &mut SystemUuidSource::default(),
+    )?;
+    let exposed: CallbackToken = parameters.outbound().value()["Payload"]["token"]
+        .as_str()
+        .ok_or("outbound token")?
+        .parse()?;
+    assert_eq!(exposed.digest(), task.token().digest());
+    assert!(parameters.history().payload().value()["Payload"]["token"].is_null());
+    assert_eq!(parameters.history().payload().value()["Payload"]["n"], 21);
+    assert!(matches!(
+        task.snapshot().as_ref(),
+        CallbackOutcome::Invoking
+    ));
+    assert!(base.value().get("Task").is_none());
+    task.revoke();
+    assert!(matches!(
+        task.wait(deadline()).await?.as_ref(),
+        CallbackOutcome::Revoked
+    ));
+    f.close().await
 }

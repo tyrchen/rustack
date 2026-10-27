@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod callback_parameters;
 mod choice;
 mod compiler;
 mod dataflow;
@@ -21,6 +22,7 @@ mod task;
 mod template;
 mod wait;
 
+pub use callback_parameters::{CallbackHistory, CallbackParameters};
 pub use choice::Predicate;
 pub use compiler::{
     AslCompiler, CatchResult, Catcher, Compilation, CompileError, CompiledMachine, Diagnostic,

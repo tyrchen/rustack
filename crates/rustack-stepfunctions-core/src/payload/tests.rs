@@ -155,3 +155,106 @@ fn test_should_bound_exact_internal_context_encoding_bytes() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn test_should_share_ordinary_context_and_keep_sensitive_storage_until_last_arc_drop() -> TestResult
+{
+    use super::ContextStorage;
+    use crate::CallbackToken;
+
+    let input = Payload::parse(br#"{"n":21}"#)?;
+    let base = EvaluationContext::from(&input);
+    let ContextStorage::Plain(shared) = &base.value else {
+        return Err("ordinary context storage".into());
+    };
+    assert!(std::sync::Arc::ptr_eq(shared, &input.value));
+    let token: CallbackToken = "a".repeat(64).parse()?;
+    let scoped = base.for_callback(&token)?;
+    let clone = scoped.clone();
+    let weak = match &scoped.value {
+        ContextStorage::Sensitive(value) => {
+            assert_eq!(std::sync::Arc::strong_count(value), 2);
+            std::sync::Arc::downgrade(value)
+        }
+        ContextStorage::Plain(_) => return Err("sensitive context storage".into()),
+    };
+    drop(scoped);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(clone.value()["n"], 21);
+    assert!(base.value().get("Task").is_none());
+    for rendered in [format!("{clone:?}"), format!("{:?}", clone.value)] {
+        assert!(!rendered.contains(token.expose()));
+    }
+    drop(clone);
+    assert!(weak.upgrade().is_none());
+    Ok(())
+}
+#[test]
+fn test_should_zeroize_only_the_injected_token_string_and_preserve_business_context() {
+    use super::SensitiveContext;
+
+    let mut sensitive = SensitiveContext {
+        value: json!({"Task":{"Token":"a".repeat(64)},"Execution":{"Name":"Run"}}),
+    };
+    sensitive.clear_token();
+    assert_eq!(sensitive.value["Task"]["Token"], "");
+    assert_eq!(sensitive.value["Execution"]["Name"], "Run");
+    sensitive.clear_token();
+    assert_eq!(sensitive.value["Task"]["Token"], "");
+}
+#[test]
+fn test_should_check_exact_callback_context_byte_headroom_without_serializing_secret_in_constructor()
+-> TestResult {
+    use super::CONTEXT_LIMITS;
+    use crate::CallbackToken;
+
+    let token: CallbackToken = "a".repeat(64).parse()?;
+    let empty = EvaluationContext::from_value(&json!({}))?;
+    assert_eq!(
+        serde_json::to_vec(empty.for_callback(&token)?.value())?.len(),
+        serde_json::to_vec(&json!({"Task":{"Token":token.expose()}}))?.len()
+    );
+    let extra = serde_json::to_vec(&json!({"Task":{"Token":token.expose()}}))?.len() - 1;
+    for offset in [0, 1] {
+        let target = CONTEXT_LIMITS.bytes - extra + offset;
+        let mut fields = serde_json::Map::new();
+        for index in 0..15 {
+            fields.insert(
+                format!("field{index}"),
+                json!("x".repeat(MAX_PAYLOAD_BYTES)),
+            );
+        }
+        fields.insert("last".into(), json!(""));
+        let overhead = serde_json::to_vec(&fields)?.len();
+        fields.insert("last".into(), json!("x".repeat(target - overhead)));
+        let base = EvaluationContext::from_value(&Value::Object(fields))?;
+        let result = base.for_callback(&token);
+        if offset == 0 {
+            assert_eq!(
+                serde_json::to_vec(result?.value())?.len(),
+                CONTEXT_LIMITS.bytes
+            );
+        } else {
+            assert!(matches!(result, Err(AslError::DataLimit)));
+        }
+        assert!(base.value().get("Task").is_none());
+    }
+    Ok(())
+}
+#[test]
+fn test_should_reject_injected_context_member_exhaustion_without_mutating_valid_base() -> TestResult
+{
+    use super::CONTEXT_LIMITS;
+    use crate::CallbackToken;
+
+    let base = EvaluationContext::from_value(
+        &json!({"values":vec![Value::Null;CONTEXT_LIMITS.members-1]}),
+    )?;
+    let token: CallbackToken = "a".repeat(64).parse()?;
+    assert!(matches!(
+        base.for_callback(&token),
+        Err(AslError::Json(JsonError::Members))
+    ));
+    assert!(base.value().get("Task").is_none());
+    Ok(())
+}

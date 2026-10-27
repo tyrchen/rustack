@@ -257,6 +257,25 @@ impl Path {
         self.select_with_work(data, context, &mut remaining)
     }
 
+    pub(crate) fn callback_sensitive(&self, input_sensitive: bool) -> bool {
+        // Task/Token are object members, and the injected token is a scalar
+        // String. This path profile cannot traverse a scalar after that address.
+        if self.root == Root::Data {
+            return input_sensitive;
+        }
+        if self.segments.len() > 2 {
+            return false;
+        }
+        self.segments
+            .iter()
+            .zip(["Task", "Token"])
+            .all(|(segment, expected)| match segment {
+                Segment::Member(member) => member == expected,
+                Segment::Wildcard => true,
+                Segment::Index(_) | Segment::Slice { .. } => false,
+            })
+    }
+
     pub(crate) fn select_with_work<'a>(
         &self,
         data: &'a Payload,

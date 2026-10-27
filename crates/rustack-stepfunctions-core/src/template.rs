@@ -9,7 +9,8 @@ use serde::{
 use serde_json::Value;
 
 use crate::{
-    AslError, EvaluationContext, Expression, Payload, SystemUuidSource, UuidSource,
+    AslError, CallbackHistory, CallbackParameters, EvaluationContext, Expression, Payload,
+    SystemUuidSource, UuidSource,
     expression::Budget,
     payload::{encode, parse_component, validate_component},
 };
@@ -31,7 +32,7 @@ enum Prepared<'a> {
     Object(Vec<(&'a str, Self)>),
     Array(Vec<Self>),
     Literal(&'a Value),
-    Dynamic(Payload),
+    Dynamic { value: Payload, sensitive: bool },
 }
 
 impl fmt::Debug for Template {
@@ -139,10 +140,46 @@ impl Template {
         source: &mut S,
         budget: &mut Budget,
     ) -> Result<Payload, AslError> {
-        let prepared = prepare(&self.0, data, context, source, budget)?;
+        let prepared = prepare(&self.0, data, context, source, budget, None)?;
         let result = Payload::from_bytes(encode(&prepared)?)?;
         budget.result(&result)?;
         Ok(result)
+    }
+    pub(crate) fn evaluate_callback<S: UuidSource + ?Sized>(
+        &self,
+        data: &Payload,
+        context: &EvaluationContext,
+        source: &mut S,
+        budget: &mut Budget,
+        input_sensitive: bool,
+    ) -> Result<CallbackParameters, AslError> {
+        let prepared = prepare(
+            &self.0,
+            data,
+            context,
+            source,
+            budget,
+            Some(input_sensitive),
+        )?;
+        let outbound = Payload::from_bytes(encode(&prepared)?)?;
+        budget.result(&outbound)?;
+        let redacted = prepared.sensitive();
+        let history = if redacted {
+            Payload::from_bytes(encode(&Projection {
+                node: &prepared,
+                history: true,
+            })?)?
+        } else {
+            outbound.clone()
+        };
+        budget.result(&history)?;
+        Ok(CallbackParameters {
+            outbound,
+            history: CallbackHistory {
+                payload: history,
+                redacted,
+            },
+        })
     }
 }
 
@@ -191,48 +228,83 @@ fn prepare<'a, S: UuidSource + ?Sized>(
     context: &EvaluationContext,
     source: &mut S,
     budget: &mut Budget,
+    input_sensitive: Option<bool>,
 ) -> Result<Prepared<'a>, AslError> {
     budget.work(1)?;
     match node {
         Node::Literal(value) => Ok(Prepared::Literal(value)),
         Node::Dynamic(expression) => expression
             .evaluate_scoped(data, context, source, budget)
-            .map(Prepared::Dynamic),
+            .map(|value| Prepared::Dynamic {
+                value,
+                sensitive: input_sensitive
+                    .is_some_and(|input| expression.callback_sensitive(input)),
+            }),
         Node::Object(fields) => fields
             .iter()
             .map(|(key, value)| {
-                prepare(value, data, context, source, budget).map(|value| (key.as_str(), value))
+                prepare(value, data, context, source, budget, input_sensitive)
+                    .map(|value| (key.as_str(), value))
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Prepared::Object),
         Node::Array(values) => values
             .iter()
-            .map(|value| prepare(value, data, context, source, budget))
+            .map(|value| prepare(value, data, context, source, budget, input_sensitive))
             .collect::<Result<Vec<_>, _>>()
             .map(Prepared::Array),
     }
 }
 
-impl Serialize for Prepared<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+struct Projection<'node, 'template> {
+    node: &'node Prepared<'template>,
+    history: bool,
+}
+impl Prepared<'_> {
+    fn sensitive(&self) -> bool {
+        match self {
+            Self::Dynamic { sensitive, .. } => *sensitive,
+            Self::Object(fields) => fields.iter().any(|(_, node)| node.sensitive()),
+            Self::Array(nodes) => nodes.iter().any(Self::sensitive),
+            Self::Literal(_) => false,
+        }
+    }
+    fn serialize_projection<S: Serializer>(
+        &self,
+        serializer: S,
+        history: bool,
+    ) -> Result<S::Ok, S::Error> {
         match self {
             Self::Literal(value) => value.serialize(serializer),
-            Self::Dynamic(value) => value.value().serialize(serializer),
+            Self::Dynamic {
+                sensitive: true, ..
+            } if history => serializer.serialize_none(),
+            Self::Dynamic { value, .. } => value.value().serialize(serializer),
             Self::Object(fields) => {
                 let mut output = serializer.serialize_map(Some(fields.len()))?;
-                for (key, value) in fields {
-                    output.serialize_entry(key, value)?;
+                for (key, node) in fields {
+                    output.serialize_entry(key, &Projection { node, history })?;
                 }
                 output.end()
             }
-            Self::Array(values) => {
-                let mut output = serializer.serialize_seq(Some(values.len()))?;
-                for value in values {
-                    output.serialize_element(value)?;
+            Self::Array(nodes) => {
+                let mut output = serializer.serialize_seq(Some(nodes.len()))?;
+                for node in nodes {
+                    output.serialize_element(&Projection { node, history })?;
                 }
                 output.end()
             }
         }
+    }
+}
+impl Serialize for Prepared<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.serialize_projection(serializer, false)
+    }
+}
+impl Serialize for Projection<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.node.serialize_projection(serializer, self.history)
     }
 }
 

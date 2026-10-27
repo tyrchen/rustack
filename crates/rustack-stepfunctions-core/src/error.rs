@@ -10,6 +10,9 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum AslError {
+    /// Callback preparation requires an object without stale reserved Task context.
+    #[error("invalid callback preparation context")]
+    InvalidCallbackContext,
     /// Inline Map input or dynamically selected concurrency violates the profile.
     #[error("invalid Inline Map input or concurrency")]
     InvalidMap,

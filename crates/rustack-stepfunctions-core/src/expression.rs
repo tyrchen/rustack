@@ -178,6 +178,17 @@ impl Expression {
         eval::node(&self.0, data, context, source, budget)
     }
 
+    pub(crate) fn callback_sensitive(&self, input_sensitive: bool) -> bool {
+        fn sensitive(node: &Node, input_sensitive: bool) -> bool {
+            match node {
+                Node::Path(path) => path.callback_sensitive(input_sensitive),
+                Node::Literal(_) => false,
+                Node::Call { args, .. } => args.iter().any(|arg| sensitive(arg, input_sensitive)),
+            }
+        }
+        sensitive(&self.0, input_sensitive)
+    }
+
     pub(crate) fn node_count(&self) -> usize {
         fn count(node: &Node) -> usize {
             match node {

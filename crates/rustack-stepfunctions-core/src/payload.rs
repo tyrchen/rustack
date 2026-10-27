@@ -4,10 +4,11 @@ use std::{fmt, io, sync::Arc};
 
 use bytes::Bytes;
 use rustack_core::json::{JsonError, JsonLimits, from_slice};
+use secrecy::zeroize::Zeroize;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::AslError;
+use crate::{AslError, CallbackToken};
 
 /// Maximum original or materialized UTF-8 JSON payload size.
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
@@ -133,7 +134,41 @@ impl Payload {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct EvaluationContext {
-    value: Arc<Value>,
+    value: ContextStorage,
+}
+#[derive(Clone)]
+enum ContextStorage {
+    Plain(Arc<Value>),
+    Sensitive(Arc<SensitiveContext>),
+}
+struct SensitiveContext {
+    value: Value,
+}
+impl fmt::Debug for ContextStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ContextStorage(<redacted>)")
+    }
+}
+impl fmt::Debug for SensitiveContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SensitiveContext(<redacted>)")
+    }
+}
+impl SensitiveContext {
+    fn clear_token(&mut self) {
+        if let Some(Value::String(token)) = self
+            .value
+            .get_mut("Task")
+            .and_then(|task| task.get_mut("Token"))
+        {
+            token.zeroize();
+        }
+    }
+}
+impl Drop for SensitiveContext {
+    fn drop(&mut self) {
+        self.clear_token();
+    }
 }
 
 impl fmt::Debug for EvaluationContext {
@@ -145,7 +180,7 @@ impl fmt::Debug for EvaluationContext {
 impl From<&Payload> for EvaluationContext {
     fn from(payload: &Payload) -> Self {
         Self {
-            value: payload.value.clone(),
+            value: ContextStorage::Plain(payload.value.clone()),
         }
     }
 }
@@ -154,7 +189,7 @@ impl EvaluationContext {
     /// Validate an internal context before cloning its tree.
     ///
     /// Borrowing prevents recursive destruction of rejected caller-owned trees.
-    /// Schema/scoping and Task.Token access are owned by the future typed engine.
+    /// The typed engine owns schema/scope; callback preparation owns scoped Task.Token.
     ///
     /// # Errors
     /// Rejects the internal context's independent byte/depth/member/string limits.
@@ -171,7 +206,7 @@ impl EvaluationContext {
         validate_value(value, CONTEXT_LIMITS)?;
         encode_with_limit(value, CONTEXT_LIMITS.bytes)?;
         Ok(Self {
-            value: Arc::new(value.clone()),
+            value: ContextStorage::Plain(Arc::new(value.clone())),
         })
     }
 
@@ -185,7 +220,40 @@ impl EvaluationContext {
     /// ```
     #[must_use]
     pub fn value(&self) -> &Value {
-        &self.value
+        match &self.value {
+            ContextStorage::Plain(value) => value,
+            ContextStorage::Sensitive(value) => &value.value,
+        }
+    }
+
+    pub(crate) fn for_callback(&self, token: &CallbackToken) -> Result<Self, AslError> {
+        let fields = self
+            .value()
+            .as_object()
+            .ok_or(AslError::InvalidCallbackContext)?;
+        if fields.contains_key("Task") {
+            return Err(AslError::InvalidCallbackContext);
+        }
+        // Measure only the nonsensitive base. The token is validated ASCII hex;
+        // this fixed envelope needs no escaping and is never serialized for size.
+        let extra = b"\"Task\":{\"Token\":\"\"}"
+            .len()
+            .checked_add(token.expose().len())
+            .and_then(|size| size.checked_add(usize::from(!fields.is_empty())))
+            .ok_or(AslError::DataLimit)?;
+        let size = encode_with_limit(self.value(), CONTEXT_LIMITS.bytes)?.len();
+        if size.checked_add(extra).ok_or(AslError::DataLimit)? > CONTEXT_LIMITS.bytes {
+            return Err(AslError::DataLimit);
+        }
+        let mut value = fields.clone();
+        value.insert("Task".into(), json!({"Token":token.expose()}));
+        let sensitive = SensitiveContext {
+            value: Value::Object(value),
+        };
+        validate_value(&sensitive.value, CONTEXT_LIMITS)?;
+        Ok(Self {
+            value: ContextStorage::Sensitive(Arc::new(sensitive)),
+        })
     }
 }
 

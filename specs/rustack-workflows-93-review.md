@@ -766,6 +766,22 @@ Final gates: core630 units/267 doctests; preserve_order91 compiler/35 effect/22 
 
 One new pure Rust package, secrecy0.10.3, reuses existing zeroize; core additionally uses the already resolved workspace subtle/hex cohort. No advisory/lint ignores are added. Fresh audit scans482 dependencies/1,378 advisories and still reports the existing4 vulnerabilities/10 warnings; deny advisories fail while bans/licenses/sources pass (B06 remains open). Docker-image checkpoint and all final platform gates remain unchanged.
 
+## P4 callback history schema clarification
+
+| ID | Priority / source | Resolution / required evidence |
+|---|---|---|
+| W179 | P2 spec defect; integrations§5 and generated `TaskScheduledEventDetails` | **Closed for schema clarification and pure projection:** D63/§5.2 clarify that TaskScheduled has no truncated metadata member. Preserve the official required parameters string with typed null-redaction; expose internal policy and mark omitted callback result data only on TaskSubmitted's supported outputDetails. Do not invent fields or mark unrelated state input. The generated-model serialization test now pins the allowed wire fields and null-redacted parameters. Actual TaskSubmitted truncation and journal/persistence integration remain consuming P4 work. |
+
+## P4 callback parameter provenance independent review
+
+Integrations§5.2/D63 implement the pure credential/materialization boundary. Final independent read-only review has no remaining findings. The bracket-wildcard forms match the existing JSONPath profile; no parser widening or fake AWS metadata is introduced.
+
+Fifty-six preparation cases cover compiled token/ancestor/wildcard/bracket paths, all12 intrinsic operations, sensitive InputPath propagation, nested templates, exactly-once UUID acquisition, unchanged raw input/base context, stale Task rejection, typed source failures and no partial output, independent actual/history byte limits, and generated TaskScheduled DTO round trips. Two512-case properties check successful compiled path projections and arbitrary untainted business data. Business values equal to a credential remain unchanged unless structurally sourced from Task.Token. Four payload-context cases check ordinary Arc sharing, sensitive clone/final-drop lifetime, zeroize of the injected String, exact4MiB context headroom and context member exhaustion. A real registered-token case checks digest identity, safe history and untouched Invoking state before explicit revoke.
+
+Final gates pass691 core units/273 doctests and preserve_order56 preparation/10 payload/91 compiler/35 effects/22 scheduler/10 async/31 callback/17 nested/19 atomic-child/2 controlled cases, with standard and strict Clippy. Full workspace build/all-target tests pass3,255 cases with431 separately gated, followed by denied-warning Clippy/rustdoc and nightly formatting. Existing full/minimal main77/57 and actual signed SDK/single-dispatch Native/runner4 regressions pass. All266 local links across the six changed specs resolve. Fresh audit still reports4 vulnerabilities/10 warnings across482 dependencies/1,378 advisories; deny advisories fail while bans/licenses/sources pass. No new dependency or ignore is introduced.
+
+The public combined Parameters type deliberately lacks Serialize, protected by a compile-fail doctest. Typed CallbackHistory has no unchecked public constructor. Temporary token context is never serialized for size measurement or stored in the driver. These proofs do not claim ASL callback admission, actual callback Lambda execution, persistent history or SendTask API acceptance. Docker remains deferred, and existing B06 is not waived.
+
 ## Cross-references
 
 - ← [implementation plan](./rustack-workflows-90-impl-plan.md)

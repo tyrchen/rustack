@@ -5,7 +5,8 @@ use std::fmt;
 use serde_json::Value;
 
 use crate::{
-    AslError, EvaluationContext, Path, Payload, ResultPath, SystemUuidSource, Template, UuidSource,
+    AslError, CallbackHistory, CallbackParameters, CallbackToken, EvaluationContext, Path, Payload,
+    ResultPath, SystemUuidSource, Template, UuidSource,
     expression::Budget,
     payload::{parse_component, validate_component},
 };
@@ -153,6 +154,59 @@ impl DataFlow {
         }
     }
 
+    /// Prepare callback invocation/history projections with one scoped credential.
+    ///
+    /// Call only after real callback registration and under bounded CPU admission.
+    /// The transient context never changes the supplied original/base context.
+    ///
+    /// # Errors
+    /// Rejects stale reserved Task context, invalid transformations, source failure
+    /// and independent context/outbound/history byte/depth/member/work limits.
+    ///
+    /// ```
+    /// use rustack_stepfunctions_core::{CallbackTask, DataFlow, Payload, EvaluationContext, SystemUuidSource};
+    /// # fn prepare(task: &CallbackTask) -> Result<(),Box<dyn std::error::Error>> {
+    /// let flow = DataFlow::parse(br#"{"Parameters":{"token.$":"$$.Task.Token","n.$":"$.n"}}"#)?;
+    /// let input = Payload::parse(br#"{"n":21}"#)?;
+    /// let result = flow.prepare_callback_with_source(&input, &EvaluationContext::from_value(&serde_json::json!({}))?, task.token(), &mut SystemUuidSource::default())?;
+    /// assert!(result.outbound().value()["token"].is_string());
+    /// assert!(result.history().payload().value()["token"].is_null());
+    /// assert!(result.history().redacted());
+    /// # Ok(()) }
+    /// ```
+    pub fn prepare_callback_with_source<S: UuidSource + ?Sized>(
+        &self,
+        original: &Payload,
+        base_context: &EvaluationContext,
+        token: &CallbackToken,
+        source: &mut S,
+    ) -> Result<CallbackParameters, AslError> {
+        let context = base_context.for_callback(token)?;
+        let mut budget = Budget::new();
+        let input = apply(&self.input, original, &context, &mut budget)?;
+        let sensitive = match &self.input {
+            Filter::Empty => false,
+            Filter::Path(path) => path.callback_sensitive(false),
+        };
+        if let Some(template) = &self.parameters {
+            template.evaluate_callback(&input, &context, source, &mut budget, sensitive)
+        } else {
+            let history = if sensitive {
+                Payload::parse(b"null")?
+            } else {
+                input.clone()
+            };
+            budget.result(&history)?;
+            Ok(CallbackParameters {
+                outbound: input,
+                history: CallbackHistory {
+                    payload: history,
+                    redacted: sensitive,
+                },
+            })
+        }
+    }
+
     /// Select raw result, merge into original state input, then apply `OutputPath`.
     ///
     /// # Errors
@@ -236,5 +290,8 @@ fn apply(
     }
 }
 
+#[cfg(test)]
+#[path = "dataflow/callback_tests.rs"]
+mod callback_tests;
 #[cfg(test)]
 mod tests;
