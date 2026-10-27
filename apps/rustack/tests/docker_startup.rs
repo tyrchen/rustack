@@ -2,6 +2,8 @@
 #![cfg(all(unix, feature = "lambda", feature = "stepfunctions"))]
 #![forbid(unsafe_code)]
 
+#[path = "docker_startup/custom.rs"]
+mod custom;
 #[path = "docker_startup/process.rs"]
 mod process;
 #[path = "workflows_sdk/runner.rs"]
@@ -254,4 +256,33 @@ fn test_should_reject_earlier_startup_failure_as_negative_stage_evidence() {
     assert!(!Profile::MissingRelay.matches_failure(
         "Docker startup relay preparation failed: Docker response status 500 Internal Server Error"
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit custom RIC images and bridge; run make test-lambda-custom-ric-docker"]
+async fn test_should_execute_custom_ric_imageconfig_and_immutable_revisions_through_ordinary_service()
+-> Result<()> {
+    let mut server = Server::spawn(Profile::Connected).await?;
+    // Keep alias intent even if the outer test panics or its future is dropped.
+    server
+        .root
+        .as_mut()
+        .context("custom fixture evidence")?
+        .disable_cleanup(true);
+    eprintln!("custom RIC evidence: {}", server.path()?.display());
+    let result = custom::exercise(&mut server).await;
+    let cleanup = server.stop(true).await;
+    let audit = server.audit().await;
+    if result.is_err() || cleanup.is_err() || audit.is_err() {
+        server.retain_on_error().await;
+    }
+    result?;
+    cleanup?;
+    audit?;
+    server
+        .root
+        .as_mut()
+        .context("custom fixture evidence")?
+        .disable_cleanup(false);
+    Ok(())
 }

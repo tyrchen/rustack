@@ -79,7 +79,7 @@ pub(super) fn architecture() -> Result<String> {
 pub(super) fn handler() -> Result<String> {
     Ok(format!("rustack-p0-handler:{}", architecture()?))
 }
-fn socket() -> Result<String> {
+pub(super) fn socket() -> Result<String> {
     Ok(format!(
         "unix://{}",
         env::var("RUSTACK_RUNTIME_DOCKER_SOCKET")?
@@ -145,6 +145,24 @@ impl Server {
             profile,
             sources,
         })
+    }
+    pub async fn track_image(&mut self, source: &str) -> Result<String> {
+        let reference: ImageReference = source.parse()?;
+        let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+        let result = wire.port().inspect_image(&reference, deadline()).await;
+        let stopped = wire.shutdown().await;
+        stopped?;
+        let id = result?.id.context("fixture source identity")?;
+        ensure!(
+            id.len() == 71
+                && id.starts_with("sha256:")
+                && id
+                    .get(7..)
+                    .is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit())),
+            "invalid source content identity"
+        );
+        self.sources.push((reference, id.clone()));
+        Ok(id)
     }
     pub fn path(&self) -> Result<&Path> {
         Ok(self.root.as_ref().context("owned evidence root")?.path())

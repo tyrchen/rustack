@@ -1202,7 +1202,31 @@ test-lambda-startup:
 	@cargo test --locked -p rustack-lambda-core --lib docker::ownership::tests
 	@cargo test --locked -p rustack-cli --bin rustack --features stepfunctions lambda_docker
 
-test-lambda-startup-docker: lambda-runtime-image lambda-runtime-fixture-image workflows-sdk-python
-	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" RUSTACK_RUNTIME_NETWORK="$(WORKFLOWS_NETWORK)" RUSTACK_RUNTIME_GATEWAY_HOST="$(WORKFLOWS_GATEWAY_HOST)" RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions -- --ignored --nocapture --test-threads=1
+test-lambda-startup-docker: lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images workflows-sdk-python
+	@RUSTACK_CUSTOM_IMAGE_A="rustack-custom-ric:a-$(WORKFLOWS_ARCH)" RUSTACK_CUSTOM_IMAGE_B="rustack-custom-ric:b-$(WORKFLOWS_ARCH)" RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" RUSTACK_RUNTIME_NETWORK="$(WORKFLOWS_NETWORK)" RUSTACK_RUNTIME_GATEWAY_HOST="$(WORKFLOWS_GATEWAY_HOST)" RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions -- --ignored --nocapture --test-threads=1
 
 .PHONY: test-lambda-startup test-lambda-startup-docker
+
+
+# Independent custom Rust RIC fixtures consumed through ordinary production startup.
+LAMBDA_IMAGE_FIXTURE_DIR ?= /tmp/rustack-image-fixture
+lambda-custom-ric-build:
+	@case "$(WORKFLOWS_ARCH)" in arm64|amd64) ;; *) echo "WORKFLOWS_ARCH must be arm64 or amd64" >&2; exit 1;; esac
+	@cargo lambda build --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap --target "$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu" --release --lambda-dir "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)"
+
+lambda-custom-ric-images: lambda-custom-ric-build
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/image.Dockerfile --build-arg IMAGE_REVISION=A --tag "rustack-custom-ric:a-$(WORKFLOWS_ARCH)" "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/image-bootstrap"
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/image.Dockerfile --build-arg IMAGE_REVISION=B --tag "rustack-custom-ric:b-$(WORKFLOWS_ARCH)" "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/image-bootstrap"
+
+.PHONY: lambda-custom-ric-build lambda-custom-ric-images
+
+WORKFLOWS_DOCKER_BIN ?= $(shell command -v docker)
+test-lambda-custom-ric-docker: test-lambda-startup-docker
+
+.PHONY: test-lambda-custom-ric-docker
+
+test-lambda-custom-ric-fixture: workflows-sdk-python
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_custom_ric_collector.py -v
+	@cargo clippy --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: test-lambda-custom-ric-fixture

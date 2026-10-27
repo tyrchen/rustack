@@ -163,7 +163,7 @@ Docker is currently image-only: ZIP creation/configured ZIP sources and ZIP
 archives reject explicitly. Image archives also reject before import/backup
 retirement until immutable live-lease restoration lands; a changed source tag
 cannot substitute for saved code. Named Native/pure workflow snapshots remain
-available within their documented profile. Full L01–L09/custom-RIC, image ZIP,
+available within their documented profile. The remaining L01–L09 fault/admission matrix, image ZIP,
 immutable archive restoration, handler SDK networking, IaC/native reference and
 final platform/release gates remain open.
 
@@ -173,6 +173,21 @@ so concurrent plain/minimal builds cannot replace it. It requires the explicit
 socket, architecture, fixture images and (for connected cases) an owned user bridge
 and function-visible host. Missing prerequisites fail; it uses actual startup
 receipts and ordinary signed SDKs, without injected readiness.
+
+The custom Rust RIC acceptance fixture is built explicitly with
+`make lambda-custom-ric-images` for the chosen architecture/socket. The
+`test-lambda-custom-ric-docker` target runs the complete ordinary startup suite,
+including signed Rust SDK computation and boto3 ImageConfig, mutable-tag/update,
+publication/alias and active cross-invocation identity cases. Supply the same
+explicit owned bridge and function-visible host as endpoint qualification. Its
+bounded fixture-only collector holds both consumed requests until each rejects
+foreign/stale completions; it also proves a published A call finishes as A after
+latest updates successfully to B. Cold published-A/latest-B launches must also
+return counter=1 after other resources displace their environments. Test source tags are uniquely owned and checked
+before removal. The collector is a test barrier, not a required user endpoint or
+handler SDK compatibility claim. Official Python and independent Rust RIC
+functional evidence do not qualify the remaining Node/fault/admission/platform
+matrix. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
 
 ## Enable trusted-host Lambda tasks
 

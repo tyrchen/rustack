@@ -623,3 +623,8 @@ Add a pinned one-shot endpoint probe with independently observed gateway instanc
 ## D81 — Consume startup receipts in one retained production owner
 
 Use a new immutable owner magic as a journal-before-effect provenance/downgrade barrier, never upgrade legacy uncertainty from empty inventories. Qualify the exact bound runtime graph behind a diagnostic-only same-listener phase, install private live receipts, and retain one ordered resumable cleanup owner through failure/cancellation. Main consumes fallible Lambda shutdown and advertises only actual selected-platform/image/endpoint capabilities. See [runtime§4.12](./rustack-workflows-20-lambda-runtime-design.md#412-production-startup-provenance-and-retained-owner-composition). Immutable restored-image lease reacquisition and the full platform/release gates remain mandatory consuming work.
+
+
+## D82 — Qualify custom RIC and immutable revisions through ordinary startup
+
+Use an independent bounded Rust RIC in an explicitly built test image and ordinary signed clients to consume the production runtime, preserving fixture source content IDs. Own any deliberately movable test source alias separately from runtime-private pins, refuse preexisting/conflicting tags and clean only its captured identities. Distinguish absent/empty argv and inspect actual argv/cwd/results inside the image. Real concurrent functions must reject forged/stale Runtime API completions before valid responses. These consuming semantic cases do not replace the remaining fault/admission/archive/platform matrix. See [verification D82](./rustack-workflows-70-verification-plan.md#custom-rust-ric-and-immutable-image-revision-qualification-d82).

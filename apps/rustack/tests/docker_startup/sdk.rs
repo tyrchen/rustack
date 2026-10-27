@@ -282,3 +282,34 @@ async fn workflow_image(endpoint: &str, function: &str) -> Result<()> {
         .await?;
     Ok(())
 }
+
+pub(super) async fn custom_compute(endpoint: &str, image: &str, architecture: &str) -> Result<()> {
+    let client = lambda(endpoint);
+    let name = format!("RustCustom{}", Uuid::new_v4().simple());
+    client
+        .create_function()
+        .function_name(&name)
+        .role("arn:aws:iam::000000000000:role/Docker")
+        .package_type(PackageType::Image)
+        .architectures(if architecture == "arm64" {
+            Architecture::Arm64
+        } else {
+            Architecture::X8664
+        })
+        .memory_size(128)
+        .timeout(30)
+        .code(FunctionCode::builder().image_uri(image).build())
+        .send()
+        .await?;
+    active(&client, &name, "Active").await?;
+    let (output, error) = invoke(&client, &name, json!({"value":35})).await?;
+    ensure!(
+        error.is_none()
+            && output["computed"] == 42
+            && output["counter"] == 1
+            && output["imageRevision"] == "A",
+        "Rust SDK custom RIC did not compute"
+    );
+    client.delete_function().function_name(&name).send().await?;
+    Ok(())
+}
