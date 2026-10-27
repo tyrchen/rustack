@@ -1,5 +1,5 @@
 use std::{
-    future::Future,
+    future::{Future, pending},
     task::{Context, Waker},
 };
 
@@ -12,7 +12,7 @@ use tokio::{
 use super::*;
 
 #[derive(Debug, Clone)]
-struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+pub(super) struct LogWriter(pub(super) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 impl Write for LogWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut output = self.0.lock().unwrap();
@@ -353,6 +353,7 @@ async fn test_should_bound_request_serialization_and_redact_request_debug() {
         ..Default::default()
     };
     let request = RawRequest {
+        pull: None,
         binding: None,
         mutation: None,
         operation: Operation::Create,
@@ -452,6 +453,7 @@ async fn test_should_keep_cleanup_capacity_while_business_calls_and_mailbox_are_
             .business
             .try_send(Envelope {
                 request: RawRequest {
+                    pull: None,
                     binding: None,
                     mutation: None,
                     operation: Operation::Info,
@@ -742,12 +744,17 @@ async fn test_should_cache_supervision_failure_when_priority_stop_wins() {
     let (_business, requests) = mpsc::channel(32);
     let (_cleanup, priority) = mpsc::channel(8);
     let (_waits, waits) = mpsc::channel(8);
+    let (_pulls, pulls) = mpsc::channel(8);
     let (control, _) = watch::channel(true);
+    let emergency = Arc::new(CleanupTask::default());
     let mut actor = Actor::builder()
+        .runtime(Handle::current())
+        .emergency(emergency.clone())
         .socket(PathBuf::from("/unused-fixture-socket"))
         .business(requests)
         .cleanup(priority)
         .waits(waits)
+        .pulls(pulls)
         .control(control.clone())
         .build();
     let failed = actor
@@ -758,8 +765,10 @@ async fn test_should_cache_supervision_failure_when_priority_stop_wins() {
     }
     let task = tokio::spawn(actor.run());
     let mut owner = Owner {
+        emergency,
         stop: control,
         task: Some(task),
+        primary: None,
         settlement: None,
     };
     assert!(matches!(owner.shutdown().await, Err(DockerError::Worker)));
@@ -874,4 +883,34 @@ async fn test_should_resolve_preloaded_images_with_versioned_platform_selection(
     );
     wire.shutdown().await.unwrap();
     daemon.close().await;
+}
+
+#[tokio::test]
+async fn test_should_retain_failed_wire_root_across_abandoned_emergency_shutdown_waiter() {
+    let emergency = Arc::new(CleanupTask::default());
+    let (release, wait) = oneshot::channel();
+    assert!(emergency.start(move || async move {
+        wait.await
+            .map_err(|_| ExecutorError::CleanupFailed("fixture release closed".into()))
+    }));
+    let (stop, _) = watch::channel(false);
+    let task = tokio::spawn(pending::<Result<(), DockerError>>());
+    task.abort();
+    let mut owner = Owner {
+        emergency,
+        stop,
+        task: Some(task),
+        primary: None,
+        settlement: None,
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), owner.shutdown())
+            .await
+            .is_err()
+    );
+    assert!(owner.task.is_none());
+    assert!(matches!(owner.primary, Some(Err(DockerError::Worker))));
+    release.send(()).unwrap();
+    assert!(matches!(owner.shutdown().await, Err(DockerError::Worker)));
+    assert!(matches!(owner.shutdown().await, Err(DockerError::Worker)));
 }

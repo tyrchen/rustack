@@ -22,7 +22,8 @@ use typed_builder::TypedBuilder;
 use uuid::Uuid;
 
 use super::{
-    DockerError, DockerPort, ImagePin, ImagePinScope, ImageResolver, check_deadline,
+    DockerError, DockerPort, ImagePin, ImagePinScope, ImagePullPolicy, ImageResolver,
+    check_deadline,
     connection::stopped,
     mutation::{MutationGuard, MutationReceipt},
     ownership::ImageRecord,
@@ -351,6 +352,27 @@ impl ImageLeaseManager {
         scope: ImagePinScope,
         config: ImageLeaseConfig,
     ) -> Result<Self, DockerError> {
+        Self::start_with_pull(docker, scope, config, ImagePullPolicy::default())
+    }
+
+    /// Start with an explicit validated operator pull policy.
+    ///
+    /// # Errors
+    /// Rejects absent runtime or a port not bound to this exact directory.
+    /// No startup readiness is granted by this constructor.
+    ///
+    /// ```no_run
+    /// # fn start(port:rustack_lambda_core::docker::DockerPort,scope:rustack_lambda_core::docker::ImagePinScope)->Result<(),rustack_lambda_core::docker::DockerError> {
+    /// let policy=rustack_lambda_core::docker::ImagePullPolicy::if_missing(vec!["registry.example".parse()?],Default::default(),std::time::Duration::from_secs(300))?;
+    /// let images=rustack_lambda_core::docker::ImageLeaseManager::start_with_pull(port,scope,Default::default(),policy)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn start_with_pull(
+        docker: DockerPort,
+        scope: ImagePinScope,
+        config: ImageLeaseConfig,
+        policy: ImagePullPolicy,
+    ) -> Result<Self, DockerError> {
         docker.require_directory(scope.directory())?;
         let runtime = Handle::try_current().map_err(|_| DockerError::Worker)?;
         let (sender, requests) = mpsc::channel(32);
@@ -368,6 +390,7 @@ impl ImageLeaseManager {
             .build();
         let actor = Actor::builder()
             .docker(docker)
+            .policy(policy)
             .config(config)
             .inbox(requests)
             .control(stop)
@@ -476,6 +499,8 @@ type PinJoin = Result<(Id, PinJob), JoinError>;
 #[derive(Debug, TypedBuilder)]
 struct Actor {
     docker: DockerPort,
+    #[builder(default)]
+    policy: ImagePullPolicy,
     config: ImageLeaseConfig,
     inbox: mpsc::Receiver<Envelope>,
     control: watch::Sender<bool>,
@@ -549,6 +574,7 @@ impl Actor {
         let id = envelope.pin.id;
         let worker = Worker::builder()
             .docker(self.docker.clone())
+            .policy(self.policy.clone())
             .config(self.config)
             .pin(envelope.pin.clone())
             .progress(progress.clone())
@@ -751,6 +777,8 @@ impl Drop for Dirty {
 #[derive(Debug, TypedBuilder)]
 struct Worker {
     docker: DockerPort,
+    #[builder(default)]
+    policy: ImagePullPolicy,
     config: ImageLeaseConfig,
     pin: ImagePin,
     progress: Arc<Progress>,
@@ -842,7 +870,24 @@ impl Worker {
         self.check(deadline, cancel)?;
         let resolver = ImageResolver::new(self.docker.clone());
         let mut stop = self.control.subscribe();
-        let image = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.resolve_local(reference,architecture,overrides,deadline.min(self.config.deadline()))=>result?,};
+        let root = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(reference,deadline.min(self.config.deadline()))=>result,};
+        let root = match root {
+            Err(DockerError::Status(StatusCode::NOT_FOUND)) => {
+                self.policy
+                    .pull(
+                        &self.docker,
+                        reference,
+                        architecture,
+                        cancel.clone(),
+                        self.control.subscribe(),
+                    )
+                    .await?;
+                self.check(deadline, cancel)?;
+                tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(reference,deadline.min(self.config.deadline()))=>result?,}
+            }
+            result => result?,
+        };
+        let image = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.resolve_captured(reference,architecture,overrides,root,deadline.min(self.config.deadline()))=>result?,};
         self.check(deadline, cancel)?;
         let expected = image.metadata().image_id.clone();
         self.progress

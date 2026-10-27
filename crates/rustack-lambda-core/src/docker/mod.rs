@@ -18,6 +18,7 @@ mod pin;
 mod plan;
 mod pool;
 mod probe;
+mod pull;
 mod recovery;
 mod types;
 
@@ -25,6 +26,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     io::{self, Write},
+    mem,
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -64,6 +66,7 @@ pub use probe::{
     EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, ProbeFailure, ProbeSettings,
     probe_environment,
 };
+pub use pull::{ImagePullPolicy, RegistryCredential, RegistryCredentials, RegistryHost};
 pub use recovery::{
     ContainerRecovery, ImagePinRecovery, NamespaceRecovery, reconcile_containers,
     reconcile_image_pins, reconcile_namespace,
@@ -73,6 +76,7 @@ use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{ReadHalf, WriteHalf, split},
+    runtime::Handle,
     sync::{mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{Instant, timeout_at},
@@ -83,7 +87,11 @@ pub use types::{ApiVersion, DockerError, DockerKey, DockerSocket};
 use uuid::Uuid;
 
 use self::binding::DaemonBinding;
-use crate::artifact::{Architecture, ImageReference};
+use crate::{
+    artifact::{Architecture, ImageReference},
+    executor::ExecutorError,
+    invocation::CleanupTask,
+};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
@@ -104,6 +112,7 @@ enum Operation {
     Remove,
     List,
     ListImages,
+    Pull,
     Attach,
 }
 impl Operation {
@@ -122,6 +131,7 @@ impl Operation {
 }
 
 struct RawRequest {
+    pull: Option<pull::Transfer>,
     binding: Option<Arc<DaemonBinding>>,
     mutation: Option<mutation::MutationGuard>,
     operation: Operation,
@@ -140,12 +150,14 @@ impl fmt::Debug for RawRequest {
     }
 }
 enum RawReply {
+    Pulled,
     Body { status: StatusCode, bytes: Bytes },
     Upgrade(TokioIo<Upgraded>),
 }
 impl fmt::Debug for RawReply {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Pulled => formatter.write_str("DockerPull(<complete>)"),
             Self::Body { status, bytes } => formatter
                 .debug_struct("DockerReply")
                 .field("status", status)
@@ -168,15 +180,43 @@ struct RawPort {
     business: mpsc::Sender<Envelope>,
     cleanup: mpsc::Sender<Envelope>,
     waits: mpsc::Sender<Envelope>,
+    pulls: mpsc::Sender<Envelope>,
     stop: watch::Sender<bool>,
 }
 impl RawPort {
     async fn request(
         &self,
-        mut request: RawRequest,
+        request: RawRequest,
         deadline: Instant,
     ) -> Result<RawReply, DockerError> {
-        request.binding = self.binding.clone();
+        let response = self.enqueue(request, deadline)?;
+        let result = timeout_at(deadline, response)
+            .await
+            .map_err(|_| DockerError::Deadline)?
+            .map_err(|_| DockerError::Worker)?;
+        if Instant::now() >= deadline {
+            return Err(DockerError::Deadline);
+        }
+        result
+    }
+    async fn request_owned(
+        &self,
+        request: RawRequest,
+        deadline: Instant,
+    ) -> Result<RawReply, DockerError> {
+        let response = self.enqueue(request, deadline)?;
+        let result = response.await.map_err(|_| DockerError::Worker)?;
+        if Instant::now() >= deadline {
+            return Err(DockerError::Deadline);
+        }
+        result
+    }
+    fn enqueue(
+        &self,
+        mut request: RawRequest,
+        deadline: Instant,
+    ) -> Result<oneshot::Receiver<Result<RawReply, DockerError>>, DockerError> {
+        request.binding.clone_from(&self.binding);
         if *self.stop.borrow() {
             return Err(DockerError::Stopped);
         }
@@ -184,7 +224,9 @@ impl RawPort {
         if request.target.len() > 4096 || request.body.len() > MAX_BODY_BYTES {
             return Err(DockerError::TooLarge);
         }
-        let sender = if matches!(request.operation, Operation::Wait) {
+        let sender = if matches!(request.operation, Operation::Pull) {
+            &self.pulls
+        } else if matches!(request.operation, Operation::Wait) {
             &self.waits
         } else if request.operation.cleanup() {
             &self.cleanup
@@ -202,14 +244,7 @@ impl RawPort {
                 mpsc::error::TrySendError::Full(_) => DockerError::Busy,
                 mpsc::error::TrySendError::Closed(_) => DockerError::Stopped,
             })?;
-        let result = timeout_at(deadline, response)
-            .await
-            .map_err(|_| DockerError::Deadline)?
-            .map_err(|_| DockerError::Worker)?;
-        if Instant::now() >= deadline {
-            return Err(DockerError::Deadline);
-        }
-        result
+        Ok(response)
     }
 }
 
@@ -462,6 +497,7 @@ impl DockerPort {
             self.raw
                 .request(
                     RawRequest {
+                        pull: None,
                         binding: None,
                         mutation,
                         operation: Operation::Create,
@@ -610,7 +646,7 @@ impl DockerPort {
             .await?;
         match reply {
             RawReply::Upgrade(io) => Ok(DockerAttachment(io)),
-            RawReply::Body { .. } => Err(DockerError::Protocol),
+            RawReply::Body { .. } | RawReply::Pulled => Err(DockerError::Protocol),
         }
     }
 
@@ -627,6 +663,7 @@ impl DockerPort {
         self.raw
             .request(
                 RawRequest {
+                    pull: None,
                     binding: None,
                     mutation: None,
                     operation,
@@ -672,6 +709,7 @@ impl DockerWire {
             let response = raw
                 .request(
                     RawRequest {
+                        pull: None,
                         binding: None,
                         mutation: None,
                         operation: Operation::Version,
@@ -735,8 +773,10 @@ impl DockerWire {
 
 #[derive(Debug)]
 struct Owner {
+    emergency: Arc<CleanupTask>,
     stop: watch::Sender<bool>,
     task: Option<JoinHandle<Result<(), DockerError>>>,
+    primary: Option<Result<(), DockerError>>,
     settlement: Option<Result<(), DockerError>>,
 }
 impl Owner {
@@ -744,19 +784,26 @@ impl Owner {
         let (business, requests) = mpsc::channel(32);
         let (cleanup, priority) = mpsc::channel(8);
         let (waits, pending_waits) = mpsc::channel(8);
+        let (pulls, pending_pulls) = mpsc::channel(8);
         let (stop, _) = watch::channel(false);
+        let emergency = Arc::new(CleanupTask::default());
         let actor = Actor::builder()
+            .runtime(Handle::current())
+            .emergency(emergency.clone())
             .socket(socket)
             .business(requests)
             .cleanup(priority)
             .waits(pending_waits)
+            .pulls(pending_pulls)
             .control(stop.clone())
             .build();
         let task = tokio::spawn(actor.run().with_subscriber(runtime_dispatch()));
         (
             Self {
+                emergency,
                 stop: stop.clone(),
                 task: Some(task),
+                primary: None,
                 settlement: None,
             },
             RawPort {
@@ -764,6 +811,7 @@ impl Owner {
                 business,
                 cleanup,
                 waits,
+                pulls,
                 stop,
             },
         )
@@ -773,14 +821,22 @@ impl Owner {
         if let Some(result) = &self.settlement {
             return result.clone();
         }
-        let result = match self.task.as_mut() {
-            Some(task) => task
-                .await
-                .map_err(|_| DockerError::Worker)
-                .and_then(|result| result),
-            None => Ok(()),
+        let result = if let Some(result) = &self.primary {
+            result.clone()
+        } else {
+            let result = match self.task.as_mut() {
+                Some(task) => task
+                    .await
+                    .map_err(|_| DockerError::Worker)
+                    .and_then(|result| result),
+                None => Ok(()),
+            };
+            self.task.take();
+            self.primary = Some(result.clone());
+            result
         };
-        self.task.take();
+        let emergency = self.emergency.wait().await.map_err(|_| DockerError::Worker);
+        let result = result.and(emergency);
         self.settlement = Some(result.clone());
         result
     }
@@ -793,10 +849,13 @@ impl Drop for Owner {
 
 #[derive(Debug, TypedBuilder)]
 struct Actor {
+    runtime: Handle,
+    emergency: Arc<CleanupTask>,
     socket: PathBuf,
     business: mpsc::Receiver<Envelope>,
     cleanup: mpsc::Receiver<Envelope>,
     waits: mpsc::Receiver<Envelope>,
+    pulls: mpsc::Receiver<Envelope>,
     control: watch::Sender<bool>,
     #[builder(default)]
     jobs: JoinSet<(Lane, bool)>,
@@ -809,12 +868,14 @@ enum Lane {
     Business,
     Cleanup,
     Wait,
+    Pull,
 }
 #[derive(Debug, Default)]
 struct Counts {
     business: usize,
     cleanup: usize,
     waits: usize,
+    pulls: usize,
 }
 impl Counts {
     fn get_mut(&mut self, lane: Lane) -> &mut usize {
@@ -822,6 +883,7 @@ impl Counts {
             Lane::Business => &mut self.business,
             Lane::Cleanup => &mut self.cleanup,
             Lane::Wait => &mut self.waits,
+            Lane::Pull => &mut self.pulls,
         }
     }
 }
@@ -841,6 +903,7 @@ impl Actor {
                 },
                 envelope = self.cleanup.recv(), if self.counts.cleanup < 2 => match envelope { Some(envelope) => self.start(envelope, Lane::Cleanup), None => break Err(DockerError::Stopped) },
                 envelope = self.waits.recv(), if self.counts.waits < 32 => match envelope { Some(envelope) => self.start(envelope, Lane::Wait), None => break Err(DockerError::Stopped) },
+                envelope = self.pulls.recv(), if self.counts.pulls < 4 => match envelope { Some(envelope) => self.start(envelope, Lane::Pull), None => break Err(DockerError::Stopped) },
                 envelope = self.business.recv(), if self.counts.business < 6 => match envelope { Some(envelope) => self.start(envelope, Lane::Business), None => break Err(DockerError::Stopped) },
             }
         };
@@ -848,6 +911,7 @@ impl Actor {
         self.business.close();
         self.cleanup.close();
         self.waits.close();
+        self.pulls.close();
         while let Ok(envelope) = self.business.try_recv() {
             let _ = envelope.reply.send(Err(DockerError::Stopped));
         }
@@ -855,6 +919,9 @@ impl Actor {
             let _ = envelope.reply.send(Err(DockerError::Stopped));
         }
         while let Ok(envelope) = self.waits.try_recv() {
+            let _ = envelope.reply.send(Err(DockerError::Stopped));
+        }
+        while let Ok(envelope) = self.pulls.try_recv() {
             let _ = envelope.reply.send(Err(DockerError::Stopped));
         }
         while let Some(result) = self.jobs.join_next().await {
@@ -891,6 +958,31 @@ impl Actor {
     }
 }
 
+impl Drop for Actor {
+    fn drop(&mut self) {
+        self.control.send_replace(true);
+        if self.jobs.is_empty() {
+            return;
+        }
+        let mut jobs = mem::take(&mut self.jobs);
+        self.emergency.start_on(&self.runtime, move || async move {
+            let mut failed = false;
+            while let Some(result) = jobs.join_next().await {
+                if !matches!(result, Ok((_, false))) {
+                    failed = true;
+                }
+            }
+            if failed {
+                Err(ExecutorError::CleanupFailed(
+                    "Docker wire cleanup failed".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
 fn escaped(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
@@ -914,7 +1006,7 @@ fn decode<T: DeserializeOwned>(reply: RawReply, deadline: Instant) -> Result<T, 
             JsonLimits::new(MAX_BODY_BYTES, 32, 4096, 16 * 1024, 256)?,
         )
         .map_err(DockerError::from),
-        RawReply::Upgrade(_) => Err(DockerError::Protocol),
+        RawReply::Upgrade(_) | RawReply::Pulled => Err(DockerError::Protocol),
     };
     if Instant::now() >= deadline {
         return Err(DockerError::Deadline);

@@ -82,6 +82,7 @@ All budgets are validated once; limits below are local defaults and safe configu
 | workflowCallbackCommands / workflowCallbackWorkers |1,024 /8|1..100,000 /1..128; commands include accepted actions and ready acknowledgments; workers bound retained mint entropy |
 | lambdaDockerEnvironments |32|1..32 initially, including busy/idle/quarantined environments |
 | lambdaDockerMemoryBytes |8 GiB|256 MiB..1 TiB; includes relay caps and all allocated environments |
+| lambdaDockerPullSeconds |300|1..600; one absolute queue/connect/progress deadline, independent of metadata IO |
 | lambdaDockerDeploymentJobs |8|1..32; queued plus running deployments;≤image preparation capacity and pin budget |
 | lambdaDockerDeploymentSeconds |300|1..3,600; absolute queue plus preparation deadline |
 | lambdaDockerImagePins |1024|1..8,192; preparations, live revisions/captures and quarantined aliases |
@@ -465,3 +466,7 @@ Qualification must exercise real manifest/service/data-directory round trips, th
 
 - ← [runtime hardening](./rustack-runtime-hardening-design.md), [binary archives](./ruststack-snapshot-binary-archive-design.md)
 - ↔ [verification](./rustack-workflows-70-verification-plan.md), [implementation](./rustack-workflows-90-impl-plan.md), [decisions D8/D10](./rustack-workflows-99-decisions.md)
+
+### Controlled pull library dependency
+
+[Runtime§2.14](./rustack-workflows-20-lambda-runtime-design.md#214-controlled-if-missing-pulls-and-retained-progress-transport) supplies validated registry/credential policy and retained ifMissing preparation. Main must load the bounded private YAML credential file, construct these types and select start_with_pull explicitly; default start never pulls. Only initial missing-image lookup triggers network work. The daemon performs registry networking; exact allowlist matching is not a guarantee about its mirrors/DNS/redirects. Close/join preparation and wire work during shutdown, and never delete source cache references as runtime cleanup. YAML loading, endpoint/readiness and final startup acceptance remain required consuming work.

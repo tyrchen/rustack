@@ -156,6 +156,7 @@ impl DockerPort {
             .raw
             .request(
                 RawRequest {
+                    pull: None,
                     binding: None,
                     mutation,
                     operation: Operation::TagPin,

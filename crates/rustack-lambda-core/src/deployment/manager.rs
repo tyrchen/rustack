@@ -671,6 +671,8 @@ fn map_failure(error: &DockerError) -> ImageDeploymentFailure {
         | DockerError::Image(_)
         | DockerError::Json(_)
         | DockerError::Protocol
+        | DockerError::PullDenied
+        | DockerError::PullFailed
         | DockerError::TooLarge => ImageDeploymentFailure::InvalidImage,
         _ => ImageDeploymentFailure::RuntimeUnavailable,
     }

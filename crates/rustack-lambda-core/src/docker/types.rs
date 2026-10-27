@@ -19,6 +19,12 @@ pub enum DockerError {
     /// The runtime port cannot prove the persisted daemon/directory association.
     #[error("Docker daemon binding failed")]
     DaemonBinding,
+    /// Pulling is not authorized for this exact operator-selected registry.
+    #[error("Docker registry pull is not allowed")]
+    PullDenied,
+    /// The daemon reported an in-band pull failure; peer text is discarded.
+    #[error("Docker image pull failed")]
+    PullFailed,
     /// The connection identity stage failed before the requested operation.
     #[error("Docker connection identity check failed")]
     IdentityCheck(#[source] Arc<DockerError>),

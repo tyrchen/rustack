@@ -66,6 +66,23 @@ impl ImageResolver {
             validate_image_config(overrides).map_err(|_| DockerError::Configuration)?;
         }
         let root = self.port.inspect_image(reference, deadline).await?;
+        self.resolve_captured(reference, architecture, overrides, root, deadline)
+            .await
+    }
+
+    /// Resolve the one already captured initial/post-pull root without another tag lookup.
+    pub(super) async fn resolve_captured(
+        &self,
+        reference: &ImageReference,
+        architecture: Architecture,
+        overrides: Option<&ImageConfig>,
+        root: ImageInspect,
+        deadline: Instant,
+    ) -> Result<ResolvedImage, DockerError> {
+        super::check_deadline(deadline)?;
+        if let Some(overrides) = overrides {
+            validate_image_config(overrides).map_err(|_| DockerError::Configuration)?;
+        }
         let launch_id: Sha256Digest = root.id.as_deref().ok_or_else(invalid)?.parse()?;
         let inspected = if self.port.api_version().minor() >= 49 {
             drop(root);

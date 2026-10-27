@@ -1,6 +1,6 @@
 # Workflows 99: Key Decisions and Glossary
 
-Status: accepted for specification; implementation requires P0 evidence · Date: 2026-10-25
+Status: accepted design decisions; implementation evidence is tracked in the phase ledger/review · Date: 2026-10-27
 
 Supersede decisions with a new ID rather than rewriting their rationale after implementation. Component documents own detailed behavior; this document owns the reasons.
 
@@ -605,3 +605,7 @@ A socket path can lead to another daemon after restart or while a wire is alive.
 ## D77 — Drain recorded effects and audit complete observed namespaces without adoption
 
 Compose historical container-before-pin retirement under an exact bound lease, then require untruncated all-state owner-container lists and a bounded full image-tag prefix scan before reporting zero remaining. Existing operational limit64 listings and reference globs are not complete absence proofs. Fail closed on current-run records, unrecorded owned resources, inventory limits and late observations; never turn names/labels into authority to adopt/delete an effect without its journal. Empty observations cannot discharge unknown intents or pre-journal legacy uncertainty. This produces data-only counters for the future exclusive startup coordinator, not readiness. See [runtime§4.10](./rustack-workflows-20-lambda-runtime-design.md#410-recorded-namespace-retirement-and-complete-observed-inventories).
+
+## D78 — Isolate controlled pull streams and retain terminal ownership before pin preparation
+
+Keep never-pull as default; only a missing initial image lookup may trigger an explicitly allowlisted ifMissing pull with selected secret credentials. Use a dedicated bounded wire lane and incremental bounded NDJSON rather than ordinary response collection. Retain the accepted request through cancellation/deadline and actual driver join, then revalidate image/platform/defaults/size before private pin/publication. Remote cache effects may outlive a closed Docker request; never clean operator source tags or treat progress/cache changes as a live revision. On abrupt wire-root failure, transfer accepted exchanges to retained fallback cleanup and join them after signalling stop; never abort their exchange futures and detach HTTP drivers. Main YAML/auth-file/startup consumes these library types later. See [runtime§2.14](./rustack-workflows-20-lambda-runtime-design.md#214-controlled-if-missing-pulls-and-retained-progress-transport).

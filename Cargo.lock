@@ -3758,6 +3758,7 @@ dependencies = [
  "rustack-lambda-http",
  "rustack-lambda-model",
  "rustack-lambda-runtime",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",

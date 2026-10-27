@@ -111,6 +111,7 @@ impl DockerPort {
                 .raw
                 .request(
                     RawRequest {
+                        pull: None,
                         binding: None,
                         mutation: None,
                         operation: Operation::Info,

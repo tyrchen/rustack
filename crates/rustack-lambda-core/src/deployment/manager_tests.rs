@@ -384,6 +384,9 @@ fn test_should_validate_deployment_budgets_and_map_bounded_failure_classes() {
         map_failure(&DockerError::Protocol),
         ImageDeploymentFailure::InvalidImage
     );
+    for error in [DockerError::PullDenied, DockerError::PullFailed] {
+        assert_eq!(map_failure(&error), ImageDeploymentFailure::InvalidImage);
+    }
     assert_eq!(
         map_failure(&DockerError::Worker),
         ImageDeploymentFailure::SupervisorFailed

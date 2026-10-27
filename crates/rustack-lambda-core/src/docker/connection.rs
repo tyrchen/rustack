@@ -1,10 +1,10 @@
 //! One owned Unix HTTP exchange; the driver is joined on every outcome.
 
-use std::{path::Path, sync::Arc};
+use std::{future::pending, path::Path, sync::Arc};
 
 use bytes::Bytes;
 use http::{
-    Method, Request, Response, StatusCode,
+    HeaderValue, Method, Request, Response, StatusCode,
     header::{
         CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING,
         UPGRADE,
@@ -18,6 +18,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
+use secrecy::ExposeSecret;
 use tokio::{
     net::UnixStream,
     sync::watch,
@@ -30,14 +31,22 @@ use super::{
     DockerError, MAX_BODY_BYTES, RawReply, RawRequest,
     binding::{DaemonBinding, DaemonIdentity},
     check_deadline,
+    pull::progress::{MAX_TOTAL, Progress},
 };
 
 pub(super) async fn exchange(
     path: &Path,
-    request: RawRequest,
+    mut request: RawRequest,
     deadline: Instant,
     mut stop: watch::Receiver<bool>,
 ) -> Result<RawReply, DockerError> {
+    // The exchange retains directory exclusion through every driver-join outcome.
+    let binding = request.binding.take();
+    let mut pull_stop = request.pull.as_ref().map(|transfer| transfer.stop.clone());
+    let mut pull_cancel = request
+        .pull
+        .as_ref()
+        .map(|transfer| transfer.cancel.clone());
     if Instant::now() >= deadline {
         return Err(DockerError::Deadline);
     }
@@ -53,6 +62,7 @@ pub(super) async fn exchange(
     let (mut sender, connection) = tokio::select! {
         biased;
         () = stopped(&mut stop) => return Err(DockerError::Stopped),
+        error = pull_cancelled(&mut pull_stop,&mut pull_cancel) => return Err(error),
         result = timeout_at(deadline, connected) => result.map_err(|_| DockerError::Deadline)??,
     };
     if Instant::now() >= deadline {
@@ -62,6 +72,7 @@ pub(super) async fn exchange(
         return Err(DockerError::Stopped);
     }
     let expected = request.expected;
+    let pulling = request.pull.is_some();
     let upgraded = request.expected == StatusCode::SWITCHING_PROTOCOLS;
     let mut driver = tokio::spawn(
         async move {
@@ -77,7 +88,7 @@ pub(super) async fn exchange(
     );
     let operation_stop = stop.clone();
     let operation = async {
-        if let Some(binding) = &request.binding {
+        if let Some(binding) = &binding {
             check_identity(&mut sender, binding, deadline)
                 .await
                 .map_err(|source| DockerError::IdentityCheck(Arc::new(source)))?;
@@ -87,31 +98,23 @@ pub(super) async fn exchange(
         if *operation_stop.borrow() {
             return Err(DockerError::Stopped);
         }
-        let mut mutation = request.mutation;
-        let mut builder = Request::builder()
-            .method(request.method)
-            .uri(request.target)
-            .header(HOST, "docker")
-            .header(CONTENT_LENGTH, request.body.len())
-            .header(CONNECTION, if upgraded { "Upgrade" } else { "close" });
-        if upgraded {
-            builder = builder.header(UPGRADE, "tcp");
-        }
-        if !request.body.is_empty() {
-            builder = builder.header(CONTENT_TYPE, "application/json");
-        }
-        let request = builder
-            .body(Full::new(request.body))
-            .map_err(|_| DockerError::Protocol)?;
+        let mut request = request;
+        let mut mutation = request.mutation.take();
+        let request = prepare_request(request, upgraded)?;
         if let Some(mutation) = &mut mutation {
             mutation.issued();
         }
         let response = sender.send_request(request).await?;
-        read_response(response, expected, deadline).await
+        if pulling {
+            read_pull(response, deadline).await
+        } else {
+            read_response(response, expected, deadline).await
+        }
     };
     let outcome = tokio::select! {
         biased;
         () = stopped(&mut stop) => Err(DockerError::Stopped),
+        error = pull_cancelled(&mut pull_stop,&mut pull_cancel) => Err(error),
         result = timeout_at(deadline, operation) => result.map_err(|_| DockerError::Deadline).and_then(|result| result),
     };
     drop(sender);
@@ -133,6 +136,71 @@ pub(super) async fn exchange(
         (Ok(reply), Ok(())) => Ok(reply),
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
+}
+
+fn prepare_request(
+    request: RawRequest,
+    upgraded: bool,
+) -> Result<Request<Full<Bytes>>, DockerError> {
+    let mut builder = Request::builder()
+        .method(request.method)
+        .uri(request.target)
+        .header(HOST, "docker")
+        .header(CONTENT_LENGTH, request.body.len())
+        .header(CONNECTION, if upgraded { "Upgrade" } else { "close" });
+    if upgraded {
+        builder = builder.header(UPGRADE, "tcp");
+    }
+    if !request.body.is_empty() {
+        builder = builder.header(CONTENT_TYPE, "application/json");
+    }
+    if let Some(auth) = request
+        .pull
+        .as_ref()
+        .and_then(|transfer| transfer.auth.as_ref())
+    {
+        let mut header =
+            HeaderValue::from_str(auth.expose_secret()).map_err(|_| DockerError::Configuration)?;
+        header.set_sensitive(true);
+        builder = builder.header("X-Registry-Auth", header);
+    }
+    builder
+        .body(Full::new(request.body))
+        .map_err(|_| DockerError::Protocol)
+}
+
+async fn pull_cancelled(
+    stop: &mut Option<watch::Receiver<bool>>,
+    cancel: &mut Option<watch::Receiver<()>>,
+) -> DockerError {
+    tokio::select! { biased;
+        () = async { match stop {Some(stop)=>stopped(stop).await,None=>pending().await} } => DockerError::Stopped,
+        () = async { match cancel {Some(cancel)=>{let _=cancel.changed().await;},None=>pending().await} } => DockerError::Cancelled,
+    }
+}
+async fn read_pull(
+    response: Response<Incoming>,
+    deadline: Instant,
+) -> Result<RawReply, DockerError> {
+    if response.status() != StatusCode::OK {
+        return read_response(response, StatusCode::OK, deadline).await;
+    }
+    check_headers_limit(&response, MAX_TOTAL)?;
+    let mut body = response.into_body();
+    let mut progress = Progress::default();
+    let mut quantum = 0_u8;
+    while let Some(frame) = body.frame().await {
+        check_deadline(deadline)?;
+        let data = frame?.into_data().map_err(|_| DockerError::Protocol)?;
+        progress.push(&data)?;
+        quantum = quantum.saturating_add(1);
+        if quantum == 64 {
+            tokio::task::yield_now().await;
+            quantum = 0;
+        }
+    }
+    progress.finish()?;
+    Ok(RawReply::Pulled)
 }
 
 async fn check_identity(
@@ -232,6 +300,9 @@ pub(super) async fn stopped(stop: &mut watch::Receiver<bool>) {
 }
 
 fn check_headers(response: &Response<Incoming>) -> Result<(), DockerError> {
+    check_headers_limit(response, MAX_BODY_BYTES)
+}
+fn check_headers_limit(response: &Response<Incoming>, max_bytes: usize) -> Result<(), DockerError> {
     let headers = response.headers();
     if headers.len() > 64 {
         return Err(DockerError::TooLarge);
@@ -263,7 +334,7 @@ fn check_headers(response: &Response<Incoming>) -> Result<(), DockerError> {
             return Err(DockerError::Protocol);
         }
         if value.parse::<u64>().map_err(|_| DockerError::Protocol)?
-            > u64::try_from(MAX_BODY_BYTES).map_err(|_| DockerError::TooLarge)?
+            > u64::try_from(max_bytes).map_err(|_| DockerError::TooLarge)?
         {
             return Err(DockerError::TooLarge);
         }

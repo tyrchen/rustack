@@ -49,6 +49,7 @@ async fn test_should_fence_issue_on_the_checked_connection(#[case] mode: u8) {
         request_port
             .request(
                 RawRequest {
+                    pull: None,
                     binding: None,
                     mutation: Some(guard),
                     operation: Operation::TagPin,

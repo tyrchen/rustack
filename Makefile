@@ -1141,6 +1141,17 @@ test-lambda-namespace-docker: lambda-runtime-image
 
 .PHONY: test-lambda-namespace test-lambda-namespace-docker
 
+# Exact registry policy, retained pull streams and image-preparation integration.
+WORKFLOWS_PULL_IMAGE ?= public.ecr.aws/lambda/nodejs@sha256:92b7cccd985332238af80ac8da42d6965d418552e88955e315da4e3c0c76ca79
+
+test-lambda-pull:
+	@cargo test --locked -p rustack-lambda-core --lib docker::pull
+
+test-lambda-pull-docker:
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" cargo test --locked -p rustack-lambda-core --lib docker::pull::tests::real::test_should_pull_approved_immutable_image_prepare_live_pin_and_join_cleanup -- --ignored --exact --nocapture --test-threads=1
+
+.PHONY: test-lambda-pull test-lambda-pull-docker
+
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:
 	@cargo test -p rustack-lambda-runtime --lib
