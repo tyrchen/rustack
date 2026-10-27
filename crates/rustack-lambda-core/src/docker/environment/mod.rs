@@ -103,6 +103,9 @@ pub enum EnvironmentError {
     /// Allocation or command capacity is exhausted.
     #[error("environment capacity exhausted")]
     Busy,
+    /// Function plus relay cannot fit the configured total memory, even when idle.
+    #[error("function and relay memory exceed the configured environment memory limit")]
+    MemoryLimit,
     /// Explicit cancellation or abandoned owner/caller.
     #[error("environment cancelled")]
     Cancelled,
@@ -441,6 +444,9 @@ impl EnvironmentPort {
         deadline: Instant,
     ) -> Result<EnvironmentHandle, EnvironmentError> {
         self.spawn_shared(Arc::new(plan), deadline)
+    }
+    pub(super) fn check_memory(&self, memory: u64) -> Result<(), EnvironmentError> {
+        self.budget.check_memory(memory)
     }
     pub(super) fn spawn_shared(
         &self,

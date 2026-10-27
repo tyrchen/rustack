@@ -408,3 +408,29 @@ async fn test_should_hold_work_supervisor_concurrency_through_docker_cancellatio
     executor.shutdown().await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn test_should_reject_impossible_memory_before_provider_admission_as_a_throttle() {
+    let fixture = Fixture::new().await;
+    let executor = Arc::new(DockerExecutor::new(fixture.config()).unwrap());
+    let mut oversized = request();
+    Arc::make_mut(&mut oversized.revision).memory_mb = 10240;
+    assert!(matches!(
+        executor.available(&oversized),
+        Err(ExecutorError::Docker(DockerExecutorError::Environment(
+            EnvironmentError::MemoryLimit
+        )))
+    ));
+    let work = WorkManager::new();
+    assert!(matches!(
+        work.submit(executor.clone(), oversized, Some(1), false, None)
+            .await,
+        Err(LambdaServiceError::TooManyRequests)
+    ));
+    assert_eq!(fixture.environments.port().status().allocated, 0);
+    assert_eq!(fixture.environments.port().status().memory_bytes, 0);
+    assert!(executor.available(&request()).is_ok());
+    work.quiesce(Duration::from_secs(1)).await.unwrap();
+    executor.shutdown().await.unwrap();
+    fixture.close().await;
+}

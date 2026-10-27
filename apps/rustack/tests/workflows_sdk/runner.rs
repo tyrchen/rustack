@@ -54,8 +54,16 @@ impl Runner {
         Ok(Self { child })
     }
     pub async fn await_pid(&mut self) -> Result<u32> {
+        self.await_pid_before(Instant::now() + Duration::from_secs(5))
+            .await
+    }
+    pub async fn await_pid_before(&mut self, deadline: Instant) -> Result<u32> {
+        ensure!(
+            Instant::now() < deadline,
+            "PID barrier deadline already expired"
+        );
         let expected = self.child.id().context("owned Python PID")?;
-        timeout(Duration::from_secs(5), async {
+        let observed = timeout_at(deadline, async {
             let output = self.child.stdout.as_mut().context("PID barrier stdout")?;
             let mut text = Vec::new();
             loop {
@@ -74,7 +82,9 @@ impl Runner {
             Ok(observed)
         })
         .await
-        .context("Python execution barrier deadline")?
+        .context("Python execution barrier deadline")??;
+        ensure!(Instant::now() < deadline, "late PID barrier observation");
+        Ok(observed)
     }
     pub async fn wait(mut self, deadline: Instant) -> Result<Report> {
         let pid = self.child.id().context("owned Python PID")?;

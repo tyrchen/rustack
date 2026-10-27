@@ -57,7 +57,9 @@ impl From<ExecutorError> for LambdaServiceError {
             #[cfg(unix)]
             ExecutorError::Docker(error) => match &error {
                 DockerExecutorError::Unavailable => Self::DockerNotAvailable,
-                DockerExecutorError::Environment(EnvironmentError::Busy) => Self::TooManyRequests,
+                DockerExecutorError::Environment(
+                    EnvironmentError::Busy | EnvironmentError::MemoryLimit,
+                ) => Self::TooManyRequests,
                 _ => Self::Internal {
                     message: error.to_string(),
                 },

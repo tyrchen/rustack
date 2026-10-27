@@ -163,8 +163,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def collecting():
-    server = Collector()
+def collecting(factory=Collector):
+    server = factory()
     worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     worker.start()
     try:
@@ -201,16 +201,16 @@ class Matrix:
         name = "CustomImage" + uuid.uuid4().hex
         self.client.create_function(
             FunctionName=name, Role="arn:aws:iam::000000000000:role/Docker",
-            PackageType="Image", Architectures=[self.architecture], Timeout=30,
-            MemorySize=128, Code={"ImageUri": self.image}, **fields,
+            PackageType="Image", Architectures=[self.architecture], Timeout=fields.pop("Timeout", 30),
+            MemorySize=fields.pop("MemorySize", 128), Code={"ImageUri": self.image}, **fields,
         )
         self.functions.append(name)
         self.settled(name)
         return name
 
-    def invoke(self, name, event=None, qualifier=None, failed=False):
+    def invoke(self, name, event=None, qualifier=None, failed=False, client=None):
         options = {} if qualifier is None else {"Qualifier": qualifier}
-        response = self.client.invoke(FunctionName=name, Payload=json.dumps(event or {}).encode(), **options)
+        response = (self.client if client is None else client).invoke(FunctionName=name, Payload=json.dumps(event or {}).encode(), **options)
         with response["Payload"] as body:
             raw = body.read(65537)
         assert len(raw) <= 65536

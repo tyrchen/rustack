@@ -159,6 +159,15 @@ does not reclaim old resources. Never delete/reset owner, lock, daemon binding o
 journals to bypass refusal. Shutdown retains exact cleanup ownership and removes
 only recorded private resources, preserving operator source images/cache.
 
+An invocation whose function memory plus the64MiB relay charge exceeds
+`lambdaDockerMemoryBytes` returns429 before allocation. Temporary contention
+uses the bounded runtime queue. For a qualified Docker backend, shutdown reserves
+`lambdaDockerCleanupSeconds`, capped at half of `shutdownSeconds`, for final
+cleanup inside the original shutdown deadline. Native/pure workflows keep their
+existing grace period. An unfinished accepted-work drain still exits with an
+error and does not publish a successful snapshot, even if container cleanup
+succeeds.
+
 Docker is currently image-only: ZIP creation/configured ZIP sources and ZIP
 archives reject explicitly. Image archives also reject before import/backup
 retirement until immutable live-lease restoration lands; a changed source tag
@@ -188,6 +197,17 @@ before removal. The collector is a test barrier, not a required user endpoint or
 handler SDK compatibility claim. Official Python and independent Rust RIC
 functional evidence do not qualify the remaining Node/fault/admission/platform
 matrix. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
+
+`make test-lambda-faults-docker` runs that complete startup suite plus real
+initialization/error/exit/OOM/timeout, signed initializing/busy caller
+disconnects, reserved quotas and128 accepted Event requests under two actual
+environment pairs. Its held backlog must report unfinished draining while
+still cleaning owned containers before natural expiry. The bounded observer
+controls run with `make test-lambda-fault-fixture`; library memory/admission
+regressions run with `make test-lambda-faults`. These gates require the same
+explicit images, daemon, bridge and function-visible host. Allocation/cleanup
+IO fault injection, daemon loss and pull/deployment saturation remain separate
+release requirements.
 
 ## Enable trusted-host Lambda tasks
 

@@ -665,6 +665,7 @@ fn build_credential_provider() -> Option<Arc<dyn rustack_auth::CredentialProvide
 async fn serve(
     listener: Arc<TcpListener>,
     service: GatewayService,
+    cleanup_reserve: Duration,
 ) -> Result<(Instant, Result<()>)> {
     let budgets = settings::budgets();
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
@@ -722,7 +723,7 @@ async fn serve(
     drop(listener);
     let deadline = Instant::now() + Duration::from_secs(budgets.shutdown_seconds);
     info!("stopped ingress; draining connections");
-    let drain_deadline = deadline - shutdown_cleanup_reserve();
+    let drain_deadline = deadline - cleanup_reserve;
     let drained = tokio::time::timeout_at(drain_deadline, graceful.shutdown())
         .await
         .context("HTTP drain deadline exceeded");
@@ -1448,8 +1449,9 @@ fn lambda_data_directory() -> std::path::PathBuf {
     )
 }
 
-fn shutdown_cleanup_reserve() -> Duration {
-    (Duration::from_secs(settings::budgets().shutdown_seconds) / 10).min(Duration::from_secs(1))
+fn shutdown_cleanup_reserve(shutdown: Duration, docker_cleanup: Option<Duration>) -> Duration {
+    let floor = (shutdown / 10).min(Duration::from_secs(1));
+    docker_cleanup.map_or(floor, |cleanup| cleanup.min(shutdown / 2).max(floor))
 }
 
 fn main() -> Result<()> {
@@ -1726,14 +1728,25 @@ async fn run() -> Result<()> {
         "starting Rustack Server",
     );
 
-    let (deadline, serve_result) = match serve(listener, gateway).await {
+    #[cfg(all(feature = "lambda", unix))]
+    let docker_cleanup = workers
+        .docker
+        .as_ref()
+        .map(|_| Duration::from_secs(settings::budgets().lambda_docker_cleanup_seconds));
+    #[cfg(not(all(feature = "lambda", unix)))]
+    let docker_cleanup = None;
+    let cleanup_reserve = shutdown_cleanup_reserve(
+        Duration::from_secs(settings::budgets().shutdown_seconds),
+        docker_cleanup,
+    );
+    let (deadline, serve_result) = match serve(listener, gateway, cleanup_reserve).await {
         Ok(outcome) => outcome,
         Err(error) => (
             Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds),
             Err(error),
         ),
     };
-    let work_deadline = deadline - shutdown_cleanup_reserve();
+    let work_deadline = deadline - cleanup_reserve;
     let save_result = async {
         serve_result?;
         workers.quiesce_producers(work_deadline).await?;
@@ -1782,6 +1795,26 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_should_reserve_docker_cleanup_within_the_deadline_and_preserve_native_grace() {
+        for (seconds, cleanup, expected_millis) in [
+            (30, None, 1000),
+            (60, None, 1000),
+            (1, None, 100),
+            (30, Some(10), 10000),
+            (60, Some(60), 30000),
+            (1, Some(60), 500),
+        ] {
+            assert_eq!(
+                shutdown_cleanup_reserve(
+                    Duration::from_secs(seconds),
+                    cleanup.map(Duration::from_secs)
+                ),
+                Duration::from_millis(expected_millis)
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_should_refuse_expired_startup_before_opening_listener() -> Result<()> {
         let reservation = TcpListener::bind("127.0.0.1:0").await?;

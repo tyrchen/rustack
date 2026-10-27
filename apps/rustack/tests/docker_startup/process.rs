@@ -1,6 +1,11 @@
 //! Exact owned executable, data directory and post-exit daemon audit.
 
-use std::{env, path::Path, process::Stdio, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use nix::{
@@ -26,6 +31,7 @@ use tokio::{
 pub(super) enum Profile {
     Disconnected,
     Connected,
+    Controlled,
     MissingRelay,
     Legacy,
     WrongEndpoint,
@@ -51,7 +57,10 @@ impl Profile {
         text.contains(expected)
     }
     fn network(self) -> bool {
-        matches!(self, Self::Connected | Self::WrongEndpoint)
+        matches!(
+            self,
+            Self::Connected | Self::Controlled | Self::WrongEndpoint
+        )
     }
 }
 #[derive(Debug)]
@@ -92,14 +101,15 @@ impl Server {
         let port = reserved.local_addr()?.port();
         drop(reserved);
         let config = root.path().join("config.yaml");
-        fs::write(
-            &config,
-            "budgets:\n  startupSeconds: 180\n  shutdownSeconds: 60\n  lambdaDockerIoSeconds: \
-             60\n  lambdaDockerStartSeconds: 60\n  lambdaDockerCleanupSeconds: 60\n  \
-             lambdaDockerEnvironments: 2\n  lambdaDockerImagePins: 16\n  \
-             lambdaDockerDeploymentJobs: 2\n",
-        )
-        .await?;
+        let mut text = "budgets:\n  startupSeconds: 180\n  shutdownSeconds: 60\n  \
+                        lambdaDockerIoSeconds: 60\n  lambdaDockerStartSeconds: 60\n  \
+                        lambdaDockerCleanupSeconds: 60\n  lambdaDockerEnvironments: 2\n  \
+                        lambdaDockerImagePins: 16\n  lambdaDockerDeploymentJobs: 2\n"
+            .to_owned();
+        if profile == Profile::Controlled {
+            text.push_str("  lambdaDockerMemoryBytes: 402653184\n");
+        }
+        fs::write(&config, text).await?;
         if profile == Profile::Legacy {
             let lease = DirectoryLease::acquire(root.path().join("data"), deadline()).await?;
             drop(lease);
@@ -163,6 +173,20 @@ impl Server {
         );
         self.sources.push((reference, id.clone()));
         Ok(id)
+    }
+    pub async fn observation_identity(&self) -> Result<(String, String)> {
+        let base = self.path()?.join("data/.rustack-lambda-docker");
+        let owner = observation_record(base.join("owner.v1"), 56, b"RSDKOWN2").await?;
+        let id = uuid::Uuid::from_slice(owner.get(8..24).context("owner UUID")?)?;
+        ensure!(!id.is_nil(), "nil owner identity");
+        let daemon = observation_record(base.join("daemon.v1"), 72, b"RSDKDMD1").await?;
+        ensure!(
+            daemon.get(8..24) == Some(id.as_bytes().as_slice()),
+            "daemon record owner differs"
+        );
+        let engine = uuid::Uuid::from_slice(daemon.get(24..40).context("daemon UUID")?)?;
+        ensure!(!engine.is_nil(), "nil daemon identity");
+        Ok((id.to_string(), engine.to_string()))
     }
     pub fn path(&self) -> Result<&Path> {
         Ok(self.root.as_ref().context("owned evidence root")?.path())
@@ -321,6 +345,25 @@ impl Server {
         }
     }
 }
+async fn observation_record(path: PathBuf, length: usize, magic: &[u8; 8]) -> Result<Vec<u8>> {
+    ensure!((32..=72).contains(&length), "invalid fixture record cap");
+    let file = fs::File::open(path).await?;
+    let mut raw = Vec::new();
+    file.take(u64::try_from(length)? + 1)
+        .read_to_end(&mut raw)
+        .await?;
+    ensure!(
+        raw.len() == length && raw.get(..8) == Some(magic.as_slice()),
+        "unexpected runtime identity record"
+    );
+    let payload_end = length.checked_sub(32).context("identity checksum offset")?;
+    let payload = raw.get(..payload_end).context("identity payload")?;
+    ensure!(
+        raw.get(payload_end..) == Some(Sha256::digest(payload).as_slice()),
+        "identity record checksum"
+    );
+    Ok(raw)
+}
 async fn launch(root: &Path, profile: Profile, port: u16) -> Result<Child> {
     let log = fs::OpenOptions::new()
         .create(true)
@@ -354,7 +397,14 @@ async fn launch(root: &Path, profile: Profile, port: u16) -> Result<Child> {
                 "false"
             },
         )
-        .env("LAMBDA_INIT_TIMEOUT_SECS", "5")
+        .env(
+            "LAMBDA_INIT_TIMEOUT_SECS",
+            if profile == Profile::Controlled {
+                "20"
+            } else {
+                "5"
+            },
+        )
         .env("LAMBDA_SKIP_SIGNATURE_VALIDATION", "false")
         .env("STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION", "false")
         .env("ACCESS_KEY", "local-key")

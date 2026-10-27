@@ -74,7 +74,15 @@ impl Budget {
         self.maximum
             .saturating_sub(self.capacity.available_permits())
     }
+    pub(super) fn check_memory(&self, memory: u64) -> Result<(), EnvironmentError> {
+        if memory > self.limit {
+            Err(EnvironmentError::MemoryLimit)
+        } else {
+            Ok(())
+        }
+    }
     pub(super) fn reserve(self: &Arc<Self>, memory: u64) -> Result<Reservation, EnvironmentError> {
+        self.check_memory(memory)?;
         let permit = self
             .capacity
             .clone()

@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::{sync::atomic::AtomicUsize, time::Duration};
 
-use super::*;
+use super::{actor::testing_start, *};
 use crate::docker::{
-    DirectoryLease, EnvironmentConfig, EnvironmentManager, RelayBudgets,
+    DirectoryLease, EnvironmentConfig, EnvironmentManager, EnvironmentSettings, RelayBudgets,
+    environment::test_peer::pair,
     plan::tests::{image_with, policy, revision},
     tests::Daemon,
 };
@@ -673,6 +674,57 @@ async fn test_should_retire_successful_excess_concurrent_returns(
     for peer in peers {
         peer.await.unwrap();
     }
+    environments.shutdown(deadline()).await.unwrap();
+    wire.shutdown().await.unwrap();
+    daemon.close().await;
+}
+
+#[tokio::test]
+async fn test_should_reject_impossible_memory_without_evicting_warm_work_or_blocking_fitting_calls()
+{
+    let daemon = Daemon::new();
+    let mut wire = daemon.wire().await;
+    let lease = directory();
+    let config = EnvironmentSettings::builder()
+        .memory_bytes(256 * 1024 * 1024)
+        .build()
+        .try_into()
+        .unwrap();
+    let mut environments = EnvironmentManager::start(wire.port(), lease.clone(), config).unwrap();
+    let fitting = plan(&lease);
+    let (handle, peer) = pair();
+    let count = Arc::new(AtomicUsize::new(0));
+    let served = tokio::spawn(peer.serve(count.clone()));
+    let mut pool = testing_start(
+        environments.port(),
+        PoolConfig::default(),
+        vec![(fitting.warm_key().into(), handle)],
+    );
+    let mut oversized = revision();
+    oversized.memory_mb = 256;
+    let oversized = EnvironmentPlan::new(
+        lease,
+        image_with("1000", vec![]),
+        Arc::new(oversized),
+        policy(),
+    )
+    .unwrap();
+    assert!(matches!(
+        pool.port()
+            .invoke(oversized, invocation(deadline()), false)
+            .await,
+        Err(EnvironmentError::MemoryLimit)
+    ));
+    assert_eq!(pool.port().status().warm, 1);
+    pool.port()
+        .invoke(fitting, invocation(deadline()), false)
+        .await
+        .unwrap();
+    idle(&pool.port()).await;
+    assert_eq!(count.load(Ordering::Acquire), 1);
+    assert_eq!(environments.port().status().allocated, 0);
+    pool.shutdown(deadline()).await.unwrap();
+    served.await.unwrap();
     environments.shutdown(deadline()).await.unwrap();
     wire.shutdown().await.unwrap();
     daemon.close().await;

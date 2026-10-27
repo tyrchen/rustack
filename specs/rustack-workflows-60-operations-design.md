@@ -537,3 +537,23 @@ The qualified platform is the Linux daemon architecture. Cross-architecture fals
 This coordinator rejects a configured ZIP runtime source, Docker ZIP creation and ZIP archive import. Until immutable image-lease restoration is installed, image archives reject before store import or previous-generation retirement; source tags are never followed to replace saved code. Snapshot scope remains the installed profile, not Docker image-resume support. Provider quiescence additionally checks backend health before permitting save. Main uses fallible shutdown_before and retains the first fault while performing dependency-safe physical cleanup: executor/pool, environments, image pins, current namespace audit, wire and final handle release. Timed-out observers keep the same cleanup operation, exact lease and bounded admission. Physical retirement can still return an earlier owner fault; unresolved resources retain exclusion. Inactive provider/installation/status handles may continue retaining the directory until dropped, consistent with DirectoryLease clone lifetime.
 
 The actual ordinary-binary gate covers signed Rust SDK/boto3 computed warm Image execution, FunctionError, published alias capture, wrong-architecture failure, no-RIC initialization timeout, real ASL Image task, same-owner/fresh-instance restart, missing relay/legacy/wrong-endpoint refusal and byte-identical current/previous image-archive rejection. It uses no injected readiness. Full custom-RIC/L01–L09 matrix closure, Docker ZIP, immutable archive lease restore, handler SDK networking/callback images, IaC/reference/platform and complete M0–M4 release remain required.
+
+
+### 1.11 Docker final-cleanup reserve and unfinished Event drain (D83)
+
+Capture one cleanup reserve for both HTTP drain and the main consistency phase. Preserve the existing non-Docker reserve min(shutdown/10,1s). When a qualified Docker runtime is installed, reserve max(that floor, min(lambdaDockerCleanupSeconds, shutdown/2)) for final owner cleanup; do not let connection/accepted-work draining consume all but one second of a configured Docker cleanup window. The captured absolute global deadline never changes, and Native/pure grace behavior remains unchanged. Producer→workflow→Lambda quiescence still precedes any snapshot; final pool/environment/pin/wire cleanup retains the original graph and is independently attempted after the consistency result.
+
+A backlog deliberately held past the drain cutoff cannot claim successful quiescence or snapshot. Preserve the original typed drain failure and nonzero process exit even when subsequent cancellation physically cleans every resource. Qualification must assert that precise failure, joined child exit without forced kill and zero owned resources before natural function/collector expiry. Physical cleanup and successful graceful draining are distinct outcomes; never weaken either assertion to make the other appear successful.
+
+```text
+signal / close ingress             work cutoff           original global deadline
+          │                            │                           │
+          ├─ HTTP / producer drain ─────┤                           │
+          │  workflow → Lambda settle  │                           │
+          │  snapshot only on success │                           │
+          │                            ├─ retained final cleanup ──┤
+          │                            │ pool → environments → pins│
+          │                            │ → wire → directory lease  │
+          │                            └─ keep original drain error│
+          └─ one captured reserve: max(floor, min(cleanup, total/2))┘
+```

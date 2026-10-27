@@ -1230,3 +1230,18 @@ test-lambda-custom-ric-fixture: workflows-sdk-python
 	@cargo clippy --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 
 .PHONY: test-lambda-custom-ric-fixture
+
+# Real user-code failures, causal signed client cancellation and Event admission.
+test-lambda-faults-docker: test-lambda-startup-docker
+
+test-lambda-faults:
+	@cargo test --locked -p rustack-lambda-core --lib impossible_memory
+	@cargo test --locked -p rustack-lambda-core --lib work::tests
+
+.PHONY: test-lambda-faults test-lambda-faults-docker
+
+test-lambda-fault-fixture: workflows-sdk-python
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_lambda_faults.py -v
+	@cargo clippy --locked -p rustack-lambda-echo-bootstrap --bin image-bootstrap -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: test-lambda-fault-fixture

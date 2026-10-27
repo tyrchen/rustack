@@ -4,6 +4,8 @@
 
 #[path = "docker_startup/custom.rs"]
 mod custom;
+#[path = "docker_startup/faults.rs"]
+mod faults;
 #[path = "docker_startup/process.rs"]
 mod process;
 #[path = "workflows_sdk/runner.rs"]
@@ -283,6 +285,42 @@ async fn test_should_execute_custom_ric_imageconfig_and_immutable_revisions_thro
         .root
         .as_mut()
         .context("custom fixture evidence")?
+        .disable_cleanup(false);
+    Ok(())
+}
+
+#[rstest]
+#[case::typed_faults(faults::Case::Faults)]
+#[case::initializing_disconnect(faults::Case::Initializing)]
+#[case::busy_disconnect(faults::Case::Busy)]
+#[case::accepted_work_shutdown(faults::Case::Saturation)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real Docker fault fixtures; run make test-lambda-faults-docker"]
+async fn test_should_settle_real_image_faults_and_public_cancellation_admission(
+    #[case] case: faults::Case,
+) -> Result<()> {
+    let mut server = Server::spawn(case.profile()).await?;
+    server
+        .root
+        .as_mut()
+        .context("fault evidence guard")?
+        .disable_cleanup(true);
+    eprintln!("fault evidence: {}", server.path()?.display());
+    let result = faults::exercise(&mut server, case).await;
+    let cleanup = server.stop(case != faults::Case::Saturation).await;
+    let audit = server.audit().await;
+    let logs = faults::check_logs(&server).await;
+    if result.is_err() || cleanup.is_err() || audit.is_err() || logs.is_err() {
+        server.retain_on_error().await;
+    }
+    result?;
+    cleanup?;
+    audit?;
+    logs?;
+    server
+        .root
+        .as_mut()
+        .context("fault evidence guard")?
         .disable_cleanup(false);
     Ok(())
 }

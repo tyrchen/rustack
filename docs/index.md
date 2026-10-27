@@ -1,6 +1,6 @@
 # Documentation
 
-- [Step Functions and Lambda workflows](./workflows-guide.md) - Source feature selection, strict-auth pure example, explicit Native and qualified Docker Image execution, supported ASL/integrations, snapshots and exact native qualification.
+- [Step Functions and Lambda workflows](./workflows-guide.md) - Source feature selection, strict-auth pure example, explicit Native and qualified Docker Image execution, supported ASL/integrations, snapshots, memory/admission and shutdown behavior, real Image fault gates and exact native qualification.
 
 - [Local smoke tests](./smoke-tests.md) - Functional SDK/HTTP checks, recent-change regressions, and Pulumi smoke coverage.
 - [Pulumi](./pulumi.md) - Use Rustack as a Pulumi AWS provider deployment target.

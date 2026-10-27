@@ -1,7 +1,9 @@
 //! Independent bounded custom Rust Runtime Interface Client for real Image tests.
 #![forbid(unsafe_code)]
 
-use std::{env, io::Read, net::SocketAddr, path::Path, thread, time::Duration};
+use std::{
+    env, hint::black_box, io::Read, net::SocketAddr, path::Path, process, thread, time::Duration,
+};
 
 use serde_json::{Value, json};
 use ureq::{Agent, AgentBuilder, Error};
@@ -119,6 +121,60 @@ fn barrier(agent: &Agent, phase: &str, body: &Value) -> Result<Value> {
     }
     serde_json::from_slice(&raw).map_err(|_| "fixture collector response is not JSON")
 }
+fn hold(stage: &str, id: Option<&str>) -> Result<()> {
+    let agent = http_agent(Duration::from_secs(240));
+    let name = variable("AWS_LAMBDA_FUNCTION_NAME")?;
+    let release = barrier(
+        &agent,
+        "hold",
+        &json!({"stage":stage,"functionName":name,"pid":process::id(),"requestId":id}),
+    )?;
+    if release.get("release") != Some(&Value::Bool(true)) {
+        return Err("fixture hold was not released");
+    }
+    Ok(())
+}
+fn initialize(agent: &Agent, root: &str) -> Result<()> {
+    let mode = match env::var("IMAGE_FIXTURE_INIT_MODE") {
+        Ok(mode) => mode,
+        Err(env::VarError::NotPresent) => return Ok(()),
+        Err(_) => return Err("invalid fixture init mode"),
+    };
+    match mode.as_str() {
+        "error" => {
+            if post(
+                agent,
+                root,
+                "init/error",
+                r#"{"errorType":"FixtureInitError","errorMessage":"fixture-init-payload-sentinel"}"#,
+            )? != 202
+            {
+                return Err("fixture initialization error was not accepted");
+            }
+            thread::sleep(Duration::from_secs(30));
+            Err("failed-init fixture was not retired")
+        }
+        "exit" => process::exit(42),
+        "stall" => {
+            thread::sleep(Duration::from_secs(30));
+            Err("stalled-init fixture was not retired")
+        }
+        "hold" => hold("initializing", None),
+        _ => Err("unsupported fixture init mode"),
+    }
+}
+fn exhaust_cgroup_memory() -> Result<()> {
+    let mut memory = Vec::new();
+    memory
+        .try_reserve_exact(256 * 1024 * 1024)
+        .map_err(|_| "fixture virtual allocation failed")?;
+    let block = [0x5a_u8; 8 * 1024];
+    for _ in 0..32768 {
+        memory.extend_from_slice(&block);
+        black_box(memory.as_slice());
+    }
+    Err("fixture unexpectedly survived its cgroup memory limit")
+}
 fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Result<()> {
     let mut counter = 0_u32;
     let mut previous = None::<String>;
@@ -143,6 +199,15 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
             .unwrap_or("compute");
         let statuses = match mode {
             "compute" | "error" => Vec::new(),
+            "hold" => {
+                hold("busy", Some(&id))?;
+                Vec::new()
+            }
+            "exit" => process::exit(42),
+            "oom" => {
+                exhaust_cgroup_memory()?;
+                return Err("OOM fixture was not killed");
+            }
             "forge" => forged(agent, root, &event, previous.as_deref())?,
             "barrier-forge" => {
                 let lane = variable("IMAGE_FIXTURE_LANE")?;
@@ -182,6 +247,12 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
         previous = Some(id);
     }
 }
+fn http_agent(timeout: Duration) -> Agent {
+    AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .timeout(timeout)
+        .build()
+}
 fn main() -> Result<()> {
     let address: SocketAddr = variable("AWS_LAMBDA_RUNTIME_API")?
         .parse()
@@ -194,14 +265,8 @@ fn main() -> Result<()> {
     if arguments.len() > 16 || arguments.iter().any(|arg| arg.len() > 4096) {
         return Err("fixture argv exceeds limit");
     }
-    let agent = AgentBuilder::new()
-        .try_proxy_from_env(false)
-        .timeout(Duration::from_secs(120))
-        .build();
-    execute(
-        &agent,
-        &format!("http://{address}/2018-06-01/runtime"),
-        &image,
-        &arguments,
-    )
+    let agent = http_agent(Duration::from_secs(120));
+    let root = format!("http://{address}/2018-06-01/runtime");
+    initialize(&agent, &root)?;
+    execute(&agent, &root, &image, &arguments)
 }

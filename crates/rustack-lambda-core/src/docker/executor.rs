@@ -243,6 +243,7 @@ impl DockerExecutor {
             return Err(DockerExecutorError::Configuration);
         }
         Payload::try_from(request.payload.clone())?;
+        self.config.environments.check_memory(plan.memory_bytes())?;
         Ok(plan)
     }
     fn start_cleanup(&self) {

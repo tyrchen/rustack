@@ -708,3 +708,30 @@ async fn test_should_publish_intent_before_create_and_retain_reservation_until_d
     wire.shutdown().await.unwrap();
     daemon.close().await;
 }
+
+#[test]
+fn test_should_distinguish_impossible_memory_from_temporary_contention_without_spending_capacity() {
+    let config = EnvironmentSettings::builder()
+        .environments(1)
+        .memory_bytes(256 * 1024 * 1024)
+        .build()
+        .try_into()
+        .unwrap();
+    let budget = Arc::new(Budget::new(config));
+    assert!(matches!(
+        budget.reserve(256 * 1024 * 1024 + 1),
+        Err(EnvironmentError::MemoryLimit)
+    ));
+    assert_eq!(budget.count(), 0);
+    assert_eq!(budget.memory.load(Ordering::Acquire), 0);
+    let exact = budget.reserve(256 * 1024 * 1024).unwrap();
+    assert!(matches!(budget.reserve(1), Err(EnvironmentError::Busy)));
+    assert!(matches!(
+        budget.reserve(256 * 1024 * 1024 + 1),
+        Err(EnvironmentError::MemoryLimit)
+    ));
+    assert_eq!(budget.count(), 1);
+    drop(exact);
+    assert_eq!(budget.count(), 0);
+    assert_eq!(budget.memory.load(Ordering::Acquire), 0);
+}
