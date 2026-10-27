@@ -6,6 +6,8 @@
 
 ## Research
 
+- [Native-host Workflows Performance Review](./research/workflows-native-performance-review.md) - Actual signed SDK50-state latency, live-loop health/history exhaustion and100 single-slot Stop cycles; raw host measurements, process cleanup and source/binary fingerprints, with Linux reference qualification still pending.
+
 - [Bollard Docker Transport Boundaries](./research/study-bollard-docker-transport-boundaries.md) - Pinned response collection, attach framing/EOF and diagnostic behavior; generated-type reuse, bounded production wire implementation, platform identity/default merge validation, owned image pin/quota/cleanup preparation and actual RIC/diagnostic qualification; Bollard and historical Moby sources are pinned.
 - [Container Lambda Relay Spike](./research/spike-lambda-container-relay.md) - Actual binary attach/shared-netns/official-RIC execution on arm64 and emulated amd64, with reproducible probes and explicit qualification limits.
 - [Step Functions Semantic Oracle Spike](./research/spike-stepfunctions-semantic-oracle.md) - Pinned Smithy/SDK/fixture evidence, independently reproduced numeric timestamp gap, callback errors, AWS-validated nested result shapes and historical intrinsic rounding/split boundaries.

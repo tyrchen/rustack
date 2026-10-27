@@ -267,6 +267,15 @@ test-workflows-persistence:
 
 .PHONY: test-workflows-persistence
 
+# D74: actual pure-workflow latency, bounded loops and one-slot Stop reuse.
+test-workflows-performance:
+	@cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions performance::
+	@cargo build --locked -p rustack-lambda-echo-bootstrap --bin bootstrap
+	@RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions performance:: -- --ignored --test-threads=1 --nocapture
+	@cargo clippy --locked -p rustack-cli --test workflows_sdk --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic
+
+.PHONY: test-workflows-performance
+
 deny-codegen:
 	@cargo deny --manifest-path codegen/Cargo.toml check
 

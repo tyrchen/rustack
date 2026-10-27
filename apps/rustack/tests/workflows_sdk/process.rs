@@ -1,4 +1,10 @@
 //! Retained real server ownership; all SDK observers are separate from process life.
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 
 use std::{
     env,
@@ -47,6 +53,31 @@ struct Owner {
     state: Option<Resources>,
     stop: watch::Receiver<Stop>,
 }
+#[derive(Debug, Clone, Copy)]
+enum Profile {
+    Semantic,
+    Performance,
+}
+impl Profile {
+    fn settings(self, dispatch: usize) -> String {
+        let limits = match self {
+            Self::Semantic => {
+                "workflowTransitions: 80\n  workflowHistoryBytes: 1048576\n  \
+                 workflowTotalHistoryBytes: 8388608"
+            }
+            Self::Performance => {
+                "workflowOpenExecutions: 1\n  workflowTransitions: 1000000\n  \
+                 workflowHistoryBytes: 33554432\n  workflowTotalHistoryBytes: 134217728"
+            }
+        };
+        format!(
+            "budgets:\n  {limits}\n  workflowDrainSeconds: 0\n  workflowDispatches: {dispatch}\n  \
+             workflowCallbackTokens: 2\n  workflowCallbackTombstones: 64\n  \
+             workflowCallbackCommands: 8\n  workflowCallbackWorkers: 1\n"
+        )
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Server {
     pub pid: u32,
@@ -78,13 +109,31 @@ impl Server {
         Self::start_with_dispatch(32).await
     }
     pub async fn start_with_dispatch(dispatch: usize) -> Result<Self> {
-        Self::start_options(dispatch, None, false).await
+        Self::start_options(dispatch, None, false, Profile::Semantic).await
+    }
+    pub async fn start_performance() -> Result<Self> {
+        Self::start_options(1, None, false, Profile::Performance).await
+    }
+    pub async fn readiness(&self) -> Result<()> {
+        let address = self
+            .endpoint
+            .strip_prefix("http://")
+            .context("owned server endpoint")?;
+        let began = Instant::now();
+        let result = timeout(Duration::from_secs(2), health(address))
+            .await
+            .context("readiness observation expired")?;
+        ensure!(
+            began.elapsed() < Duration::from_secs(2),
+            "late readiness result"
+        );
+        result
     }
     pub async fn start_named(root: &Path) -> Result<Self> {
-        Self::start_options(32, Some(root), false).await
+        Self::start_options(32, Some(root), false, Profile::Semantic).await
     }
     pub async fn reject_named(root: &Path) -> Result<()> {
-        let mut server = Self::start_options(32, Some(root), true).await?;
+        let mut server = Self::start_options(32, Some(root), true, Profile::Semantic).await?;
         server
             .observe(Instant::now() + Duration::from_secs(40))
             .await?;
@@ -102,6 +151,7 @@ impl Server {
         dispatch: usize,
         named: Option<&Path>,
         expect_startup_failure: bool,
+        profile: Profile,
     ) -> Result<Self> {
         ensure!(
             (1..=32).contains(&dispatch),
@@ -127,17 +177,7 @@ impl Server {
             fs::create_dir_all(path).await?;
         }
         let config = directory.path().join("rustack.yaml");
-        fs::write(
-            &config,
-            format!(
-                "budgets:\n  workflowTransitions: 80\n  workflowHistoryBytes: 1048576\n  \
-                 workflowTotalHistoryBytes: 8388608\n  workflowDrainSeconds: 0\n  \
-                 workflowDispatches: {dispatch}\n  workflowCallbackTokens: 2\n  \
-                 workflowCallbackTombstones: 64\n  workflowCallbackCommands: 8\n  \
-                 workflowCallbackWorkers: 1\n"
-            ),
-        )
-        .await?;
+        fs::write(&config, profile.settings(dispatch)).await?;
         let reservation = TcpListener::bind("127.0.0.1:0").await?;
         let address = reservation.local_addr()?;
         drop(reservation);
@@ -383,7 +423,8 @@ async fn health(address: &str) -> Result<()> {
     let (_, body) = text.split_once("\r\n\r\n").context("health envelope")?;
     let value: serde_json::Value = serde_json::from_str(body)?;
     ensure!(
-        text.starts_with("HTTP/1.1 200") && value["ready"] == true,
+        text.starts_with("HTTP/1.1 200")
+            && value.get("ready") == Some(&serde_json::Value::Bool(true)),
         "server not ready"
     );
     Ok(())
