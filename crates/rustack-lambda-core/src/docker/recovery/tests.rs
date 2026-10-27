@@ -26,6 +26,7 @@ async fn fixture() -> (
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let plan = EnvironmentPlan::new(
         directory.clone(),
         image_with("1000", vec![]),
@@ -70,7 +71,11 @@ async fn test_should_keep_unknown_absence_and_block_relay_then_recover_late_comm
     let (_root, directory, records, inspected) = fixture().await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let recover = reconcile_containers(&directory, &port, deadline());
     let serve = async {
         let request = daemon.next().await;
@@ -89,7 +94,11 @@ async fn test_should_keep_unknown_absence_and_block_relay_then_recover_late_comm
         directory.container_records(deadline()).await.unwrap(),
         records
     );
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let recover = reconcile_containers(&directory, &port, deadline());
     let serve = async {
         for value in &inspected {
@@ -131,7 +140,11 @@ async fn test_should_settle_only_durable_known_absence() {
     }
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (result, ()) = tokio::join!(reconcile_containers(&directory, &port, deadline()), async {
         for _ in 0..2 {
             let request = daemon.next().await;
@@ -158,7 +171,11 @@ async fn test_should_never_mutate_foreign_or_malformed_resources(#[case] field: 
     *inspected[0].pointer_mut(field).unwrap() = json!("foreign");
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (result, ()) = tokio::join!(
         reconcile_containers(&directory, &port, deadline()),
         respond(&mut daemon, &inspected[0])
@@ -202,10 +219,18 @@ async fn test_should_never_reconcile_current_run_records() {
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     assert_eq!(
-        reconcile_containers(&directory, &wire.port(), deadline())
-            .await
-            .unwrap()
-            .remaining,
+        reconcile_containers(
+            &directory,
+            &wire
+                .port()
+                .bind_directory(&directory, deadline())
+                .await
+                .unwrap(),
+            deadline()
+        )
+        .await
+        .unwrap()
+        .remaining,
         1
     );
     assert!(
@@ -239,9 +264,10 @@ async fn test_should_reconcile_real_previous_run_containers_from_durable_intents
     let mut wire = DockerWire::connect(format!("unix://{socket}").parse()?, limit()).await?;
     let root = tempfile::tempdir()?;
     let directory = DirectoryLease::acquire(root.path().into(), limit()).await?;
+    let docker = wire.port().bind_directory(&directory, limit()).await?;
     let previous_run = directory.run_id();
     let mut images = ImageLeaseManager::start(
-        wire.port(),
+        docker.clone(),
         ImagePinScope::new(directory.clone()),
         ImageLeaseConfig::default(),
     )?;
@@ -259,11 +285,11 @@ async fn test_should_reconcile_real_previous_run_containers_from_durable_intents
                 .prepare_container(ContainerRecord::from_plan(&plan, role)?, limit())
                 .await?;
             let created = match role {
-                ContainerRole::Relay => plan.create_relay(&wire.port(), limit()).await?,
-                ContainerRole::Function => plan.create_function(&wire.port(), limit()).await?,
+                ContainerRole::Relay => plan.create_relay(&docker.clone(), limit()).await?,
+                ContainerRole::Function => plan.create_function(&docker.clone(), limit()).await?,
             };
             if matches!(role, ContainerRole::Relay) {
-                wire.port()
+                docker
                     .start_container(&created.id.parse()?, limit())
                     .await?;
             }
@@ -273,11 +299,13 @@ async fn test_should_reconcile_real_previous_run_containers_from_durable_intents
     .await;
     let image_cleanup = images.shutdown(limit()).await;
     drop(images);
+    drop(docker);
     drop(directory);
     let recovery = async {
         let next = DirectoryLease::acquire(root.path().into(), limit()).await?;
         ensure!(next.run_id() != previous_run, "run identity did not change");
-        let report = reconcile_containers(&next, &wire.port(), limit()).await?;
+        let docker = wire.port().bind_directory(&next, limit()).await?;
+        let report = reconcile_containers(&next, &docker, limit()).await?;
         ensure!(
             next.container_records(limit()).await?.is_empty(),
             "durable records remain"
@@ -311,7 +339,11 @@ async fn test_should_resume_known_identity_after_recovery_waiter_is_aborted() {
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     let lease = directory.clone();
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { reconcile_containers(&lease, &port, deadline()).await });
     respond(&mut daemon, &inspected[0]).await;
     let held = daemon.next().await;
@@ -326,7 +358,11 @@ async fn test_should_resume_known_identity_after_recovery_waiter_is_aborted() {
             .iter()
             .any(|record| record.function() && record.known.is_some())
     );
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (result, ()) = tokio::join!(reconcile_containers(&directory, &port, deadline()), async {
         let known = daemon.next().await;
         assert!(known.head.contains(&"a".repeat(64)));

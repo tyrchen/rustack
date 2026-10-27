@@ -4,6 +4,7 @@ build:
 # P0 evidence tooling is isolated from the production workspace/runtime.
 WORKFLOWS_SPIKE_DIR ?= /tmp/rustack-spikes
 WORKFLOWS_DOCKER_SOCKET ?= /var/run/docker.sock
+WORKFLOWS_OTHER_DOCKER_SOCKET ?=
 WORKFLOWS_ARCH ?= $(if $(filter arm64 aarch64,$(shell uname -m)),arm64,amd64)
 WORKFLOWS_IMAGE_BUILDER ?= docker buildx
 LAMBDA_RUNTIME_DIR ?= /tmp/rustack-lambda-runtime
@@ -1119,6 +1120,16 @@ test-lambda-image-recovery-docker: lambda-runtime-image
 	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test -p rustack-lambda-core --lib docker::recovery::images::tests::test_should_recover_real_private_alias_across_directory_reacquisition -- --ignored --test-threads=1
 
 .PHONY: test-lambda-image-recovery test-lambda-image-recovery-docker
+
+# Persisted engine scope and same-connection identity fences before owned IO.
+test-lambda-daemon-binding:
+	@cargo test -p rustack-lambda-core --lib docker::binding::tests
+	@cargo test -p rustack-lambda-core --lib docker::ownership::daemon::tests
+
+test-lambda-daemon-binding-docker:
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_OTHER_DOCKER_SOCKET="$(WORKFLOWS_OTHER_DOCKER_SOCKET)" cargo test -p rustack-lambda-core --lib docker::binding::tests::real::test_should_bind_real_installation_across_reacquisition_and_reject_other_daemon -- --ignored --exact --test-threads=1
+
+.PHONY: test-lambda-daemon-binding test-lambda-daemon-binding-docker
 
 # Delivery clocks, protocol-v2 correlation and actual Native process retirement.
 test-lambda-timeouts:

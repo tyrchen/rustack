@@ -34,7 +34,7 @@ async fn test_should_qualify_actual_kernel_limits_and_join_probe_retirement(
             "none".parse()?
         };
         let deadline = Instant::now() + Duration::from_secs(60);
-        let network = selection.qualify(&fixture.wire.port(), deadline).await?;
+        let network = selection.qualify(&fixture.docker, deadline).await?;
         ensure!(network.disconnected() != bridge, "network mode differs");
         let policy = ContainerPolicy::new(
             selection,

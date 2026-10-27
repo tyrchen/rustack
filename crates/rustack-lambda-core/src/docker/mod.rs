@@ -3,6 +3,7 @@
 //! This layer owns HTTP connections, not container policy or lifetime. Callers
 //! retain preallocated identities and reservations through reconciliation.
 
+mod binding;
 mod connection;
 mod environment;
 mod executor;
@@ -25,6 +26,7 @@ use std::{
     fmt,
     io::{self, Write},
     path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 
@@ -79,6 +81,7 @@ use typed_builder::TypedBuilder;
 pub use types::{ApiVersion, DockerError, DockerKey, DockerSocket};
 use uuid::Uuid;
 
+use self::binding::DaemonBinding;
 use crate::artifact::{Architecture, ImageReference};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -116,6 +119,7 @@ impl Operation {
 }
 
 struct RawRequest {
+    binding: Option<Arc<DaemonBinding>>,
     mutation: Option<mutation::MutationGuard>,
     operation: Operation,
     method: Method,
@@ -157,6 +161,7 @@ struct Envelope {
 
 #[derive(Debug, Clone)]
 struct RawPort {
+    binding: Option<Arc<DaemonBinding>>,
     business: mpsc::Sender<Envelope>,
     cleanup: mpsc::Sender<Envelope>,
     waits: mpsc::Sender<Envelope>,
@@ -165,9 +170,10 @@ struct RawPort {
 impl RawPort {
     async fn request(
         &self,
-        request: RawRequest,
+        mut request: RawRequest,
         deadline: Instant,
     ) -> Result<RawReply, DockerError> {
+        request.binding = self.binding.clone();
         if *self.stop.borrow() {
             return Err(DockerError::Stopped);
         }
@@ -449,6 +455,7 @@ impl DockerPort {
             self.raw
                 .request(
                     RawRequest {
+                        binding: None,
                         mutation,
                         operation: Operation::Create,
                         method: Method::POST,
@@ -613,6 +620,7 @@ impl DockerPort {
         self.raw
             .request(
                 RawRequest {
+                    binding: None,
                     mutation: None,
                     operation,
                     method,
@@ -657,6 +665,7 @@ impl DockerWire {
             let response = raw
                 .request(
                     RawRequest {
+                        binding: None,
                         mutation: None,
                         operation: Operation::Version,
                         method: Method::GET,
@@ -744,6 +753,7 @@ impl Owner {
                 settlement: None,
             },
             RawPort {
+                binding: None,
                 business,
                 cleanup,
                 waits,

@@ -541,8 +541,9 @@ impl EnvironmentManager {
     /// Start ownership on the current runtime under a real directory capability.
     ///
     /// # Errors
-    /// Returns Worker when a Tokio runtime is unavailable. This alone does not
-    /// establish historical reconciliation or production Docker readiness.
+    /// Rejects a port not bound to this exact directory, or returns Worker when
+    /// a Tokio runtime is unavailable. This alone does not establish historical
+    /// reconciliation or production Docker readiness.
     ///
     /// ```no_run
     /// # fn start(docker: rustack_lambda_core::docker::DockerPort, lease: rustack_lambda_core::docker::DirectoryLease) { let manager = rustack_lambda_core::docker::EnvironmentManager::start(docker,lease,Default::default()); }
@@ -552,6 +553,7 @@ impl EnvironmentManager {
         directory: DirectoryLease,
         config: EnvironmentConfig,
     ) -> Result<Self, EnvironmentError> {
+        docker.require_directory(&directory)?;
         let runtime = Handle::try_current().map_err(|_| EnvironmentError::Worker)?;
         let (sender, inbox) = mpsc::channel(32);
         let (control, _) = watch::channel(false);

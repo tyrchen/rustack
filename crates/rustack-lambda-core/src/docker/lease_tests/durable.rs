@@ -37,10 +37,14 @@ async fn test_should_publish_intent_before_tag_and_commit_before_live_lease_or_d
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     let mut owner = ImageLeaseManager::start(
-        wire.port(),
+        wire.port()
+            .bind_directory(&directory, deadline())
+            .await
+            .unwrap(),
         ImagePinScope::new(directory.clone()),
         config(1, 1),
     )
@@ -100,10 +104,14 @@ async fn test_should_retain_pin_capacity_when_no_effect_record_cannot_be_erased(
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     let mut owner = ImageLeaseManager::start(
-        wire.port(),
+        wire.port()
+            .bind_directory(&directory, deadline())
+            .await
+            .unwrap(),
         ImagePinScope::new(directory.clone()),
         config(1, 1),
     )
@@ -156,10 +164,14 @@ async fn test_should_retain_acknowledgement_through_failed_commit_then_settle_ab
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     let mut owner = ImageLeaseManager::start(
-        wire.port(),
+        wire.port()
+            .bind_directory(&directory, deadline())
+            .await
+            .unwrap(),
         ImagePinScope::new(directory.clone()),
         config(1, 1),
     )
@@ -233,6 +245,7 @@ async fn test_should_retain_positive_inspection_through_failed_commit_and_retire
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let pin = ImagePinScope::new(directory.clone()).allocate().unwrap();
     let expected: Sha256Digest = digest('a').parse().unwrap();
     directory
@@ -252,7 +265,12 @@ async fn test_should_retain_positive_inspection_through_failed_commit_and_retire
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     let worker = Worker::builder()
-        .docker(wire.port())
+        .docker(
+            wire.port()
+                .bind_directory(&directory, deadline())
+                .await
+                .unwrap(),
+        )
         .config(config(1, 1))
         .pin(pin)
         .progress(progress.clone())
@@ -304,6 +322,7 @@ async fn test_should_erase_preparing_or_definitely_unissued_intent_without_daemo
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let pin = ImagePinScope::new(directory.clone()).allocate().unwrap();
     let expected: Sha256Digest = digest('a').parse().unwrap();
     directory
@@ -327,7 +346,12 @@ async fn test_should_erase_preparing_or_definitely_unissued_intent_without_daemo
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     Worker::builder()
-        .docker(wire.port())
+        .docker(
+            wire.port()
+                .bind_directory(&directory, deadline())
+                .await
+                .unwrap(),
+        )
         .config(config(1, 1))
         .pin(pin)
         .progress(progress.clone())

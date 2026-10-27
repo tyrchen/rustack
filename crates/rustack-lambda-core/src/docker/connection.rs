@@ -1,17 +1,21 @@
 //! One owned Unix HTTP exchange; the driver is joined on every outcome.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use bytes::Bytes;
 use http::{
-    Request, Response, StatusCode,
+    Method, Request, Response, StatusCode,
     header::{
         CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING,
         UPGRADE,
     },
 };
 use http_body_util::{BodyExt, Full};
-use hyper::{body::Incoming, client::conn::http1::Builder, upgrade::on};
+use hyper::{
+    body::Incoming,
+    client::conn::http1::{Builder, SendRequest},
+    upgrade::on,
+};
 use hyper_util::rt::TokioIo;
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 use tokio::{
@@ -22,7 +26,11 @@ use tokio::{
 };
 use tracing::instrument::WithSubscriber;
 
-use super::{DockerError, MAX_BODY_BYTES, RawReply, RawRequest};
+use super::{
+    DockerError, MAX_BODY_BYTES, RawReply, RawRequest,
+    binding::{DaemonBinding, DaemonIdentity},
+    check_deadline,
+};
 
 pub(super) async fn exchange(
     path: &Path,
@@ -67,7 +75,18 @@ pub(super) async fn exchange(
         }
         .with_subscriber(runtime_dispatch()),
     );
+    let operation_stop = stop.clone();
     let operation = async {
+        if let Some(binding) = &request.binding {
+            check_identity(&mut sender, binding, deadline)
+                .await
+                .map_err(|source| DockerError::IdentityCheck(Arc::new(source)))?;
+            sender.ready().await?;
+        }
+        check_deadline(deadline)?;
+        if *operation_stop.borrow() {
+            return Err(DockerError::Stopped);
+        }
         let mut mutation = request.mutation;
         let mut builder = Request::builder()
             .method(request.method)
@@ -114,6 +133,27 @@ pub(super) async fn exchange(
         (Ok(reply), Ok(())) => Ok(reply),
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
+}
+
+async fn check_identity(
+    sender: &mut SendRequest<Full<Bytes>>,
+    binding: &DaemonBinding,
+    deadline: Instant,
+) -> Result<(), DockerError> {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/info")
+        .header(HOST, "docker")
+        .header(CONTENT_LENGTH, 0)
+        .header(CONNECTION, "keep-alive")
+        .body(Full::new(Bytes::new()))
+        .map_err(|_| DockerError::Protocol)?;
+    let response = sender.send_request(request).await?;
+    let reply = read_response(response, StatusCode::OK, deadline).await?;
+    if DaemonIdentity::decode(reply, deadline)? != binding.identity {
+        return Err(DockerError::DaemonBinding);
+    }
+    Ok(())
 }
 
 async fn read_response(

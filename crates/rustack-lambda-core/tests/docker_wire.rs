@@ -93,6 +93,7 @@ impl Drop for Runtime {
 #[derive(Debug)]
 struct Environment {
     wire: DockerWire,
+    docker: DockerPort,
     names: Names,
     runtime: Option<Runtime>,
     logs: Option<FunctionLogs>,
@@ -112,8 +113,9 @@ impl Environment {
         let lease = DirectoryLease::acquire(directory.path().to_path_buf(), deadline()).await?;
         let run = lease.run_id();
         let owner = lease.owner_id();
+        let docker = wire.port().bind_directory(&lease, deadline()).await?;
         let images = ImageLeaseManager::start(
-            wire.port(),
+            docker.clone(),
             ImagePinScope::new(lease.clone()),
             ImageLeaseConfig::default(),
         )?;
@@ -126,6 +128,7 @@ impl Environment {
         );
         Ok(Self {
             wire,
+            docker,
             names: Names {
                 relay: format!("rustack-wire-relay-{run}").parse()?,
                 function: format!("rustack-wire-function-{run}").parse()?,
@@ -171,7 +174,7 @@ impl Environment {
             _ => bail!("architecture must be arm64 or amd64"),
         };
         let relay = env::var("RUSTACK_RUNTIME_IMAGE").context("relay fixture image required")?;
-        let port = self.wire.port();
+        let port = self.docker.clone();
         let info = port.info(deadline()).await?;
         ensure!(
             info.os_type.as_deref() == Some("linux")
@@ -317,7 +320,7 @@ impl Environment {
     }
 
     async fn cleanup(&mut self) -> Result<()> {
-        let port = self.wire.port();
+        let port = self.docker.clone();
         let function = remove(&port, &self.names.function).await;
         let logs = if let Some(logs) = &mut self.logs {
             logs.shutdown().await.map(drop).map_err(anyhow::Error::from)
@@ -481,7 +484,7 @@ async fn test_should_preserve_empty_overrides_in_actual_docker_create_merging() 
             environment
                 .start_with(Some(overrides.clone()), false)
                 .await?;
-            let port = environment.wire.port();
+            let port = environment.docker.clone();
             let expected = environment
                 .artifacts
                 .last()

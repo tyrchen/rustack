@@ -30,6 +30,7 @@ async fn fixture(
     let directory = DirectoryLease::acquire(root.path().into(), deadline())
         .await
         .unwrap();
+    Daemon::bind_fixture(&directory).await;
     let pin = ImagePinScope::new(directory.clone()).allocate().unwrap();
     let record =
         ImageRecord::new(&pin, &format!("sha256:{}", "a".repeat(64)).parse().unwrap()).unwrap();
@@ -83,7 +84,11 @@ async fn test_should_retain_unknown_absence_then_commit_and_remove_exact_histori
     let (_root, directory, record, pin) = fixture(false, false).await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (report, ()) = tokio::join!(reconcile_image_pins(&directory, &port, deadline()), async {
         daemon.next().await.reply(404, b"{}").await;
     });
@@ -135,7 +140,11 @@ async fn test_should_settle_absence_only_after_durable_commitment() {
     let (_root, directory, _, _pin) = fixture(true, false).await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (report, ()) = tokio::join!(reconcile_image_pins(&directory, &port, deadline()), async {
         daemon.next().await.reply(404, b"{}").await;
     });
@@ -157,7 +166,11 @@ async fn test_should_never_delete_a_mismatching_alias(#[case] after_commit: bool
     let (_root, directory, _, _pin) = fixture(false, false).await;
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (result, ()) = tokio::join!(reconcile_image_pins(&directory, &port, deadline()), async {
         if after_commit {
             matching(&mut daemon).await;
@@ -190,7 +203,16 @@ async fn test_should_block_alias_mutations_while_historical_container_intents_re
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     assert!(matches!(
-        reconcile_image_pins(&directory, &wire.port(), deadline()).await,
+        reconcile_image_pins(
+            &directory,
+            &wire
+                .port()
+                .bind_directory(&directory, deadline())
+                .await
+                .unwrap(),
+            deadline()
+        )
+        .await,
         Err(DockerError::Quarantined)
     ));
     assert_eq!(directory.image_records(deadline()).await.unwrap().len(), 1);
@@ -217,10 +239,18 @@ async fn test_should_exclude_current_run_aliases() {
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     assert_eq!(
-        reconcile_image_pins(&directory, &wire.port(), deadline())
-            .await
-            .unwrap()
-            .remaining,
+        reconcile_image_pins(
+            &directory,
+            &wire
+                .port()
+                .bind_directory(&directory, deadline())
+                .await
+                .unwrap(),
+            deadline()
+        )
+        .await
+        .unwrap()
+        .remaining,
         1
     );
     assert!(
@@ -237,7 +267,11 @@ async fn test_should_resume_after_waiter_abandonment_with_persisted_commitment()
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
     let retained = directory.clone();
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let task =
         tokio::spawn(async move { reconcile_image_pins(&retained, &port, deadline()).await });
     matching(&mut daemon).await;
@@ -246,7 +280,11 @@ async fn test_should_resume_after_waiter_abandonment_with_persisted_commitment()
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     held.reply(200, b"{}").await;
-    let port = wire.port();
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
     let (report, ()) = tokio::join!(reconcile_image_pins(&directory, &port, deadline()), async {
         daemon.next().await.reply(404, b"{}").await;
     });
@@ -303,8 +341,9 @@ async fn test_should_recover_real_private_alias_across_directory_reacquisition(
     let mut alias = None;
     let setup = async {
         let directory = DirectoryLease::acquire(evidence.path()?.into(), limit()).await?;
+        let docker = wire.port().bind_directory(&directory, limit()).await?;
         previous = Some(directory.run_id());
-        let resolved = ImageResolver::new(wire.port())
+        let resolved = ImageResolver::new(docker.clone())
             .resolve_local(&reference, architecture, None, limit())
             .await?;
         let expected = resolved.metadata().image_id.clone();
@@ -313,10 +352,10 @@ async fn test_should_recover_real_private_alias_across_directory_reacquisition(
         alias = Some(pin.reference().clone());
         let record = ImageRecord::new(&pin, &expected)?;
         directory.prepare_image(record.clone(), limit()).await?;
-        wire.port().tag_image_pin(&expected, &pin, limit()).await?;
+        docker.tag_image_pin(&expected, &pin, limit()).await?;
         if committed_absent {
             directory.commit_image(record, limit()).await?;
-            wire.port().remove_image_pin(&pin, limit()).await?;
+            docker.remove_image_pin(&pin, limit()).await?;
         }
         anyhow::Ok(())
     }
@@ -327,7 +366,8 @@ async fn test_should_recover_real_private_alias_across_directory_reacquisition(
             Some(next.run_id()) != previous,
             "run identity did not change"
         );
-        let report = reconcile_image_pins(&next, &wire.port(), limit()).await?;
+        let docker = wire.port().bind_directory(&next, limit()).await?;
+        let report = reconcile_image_pins(&next, &docker, limit()).await?;
         ensure!(
             report.settled == 1 && report.remaining == 0,
             "historical pin not settled"
@@ -336,7 +376,7 @@ async fn test_should_recover_real_private_alias_across_directory_reacquisition(
             next.image_records(limit()).await?.is_empty(),
             "durable pin records remain"
         );
-        let source = wire.port().inspect_image(&reference, limit()).await?;
+        let source = docker.inspect_image(&reference, limit()).await?;
         ensure!(
             source.id.as_deref()
                 == Some(original.as_ref().context("captured source image")?.as_str()),
@@ -344,7 +384,7 @@ async fn test_should_recover_real_private_alias_across_directory_reacquisition(
         );
         ensure!(
             matches!(
-                wire.port()
+                docker
                     .inspect_image(alias.as_ref().context("captured private alias")?, limit())
                     .await,
                 Err(DockerError::Status(StatusCode::NOT_FOUND))

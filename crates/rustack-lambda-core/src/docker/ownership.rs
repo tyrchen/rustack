@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 pub(super) use self::{images::ImageRecord, journal::ContainerRecord};
 
+mod daemon;
 mod images;
 mod journal;
 mod snapshot;
@@ -119,6 +120,14 @@ impl fmt::Debug for DirectoryLease {
     }
 }
 impl DirectoryLease {
+    pub(super) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn synthetic(&self) -> bool {
+        matches!(self.0.guard, LeaseGuard::Testing { .. })
+    }
     /// Acquire a private namespace, retaining exclusion until the last clone drops.
     ///
     /// # Errors

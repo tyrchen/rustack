@@ -5,8 +5,8 @@ use anyhow::{Context, Result, ensure};
 use rustack_lambda_core::{
     artifact::{Architecture, PinnedImage},
     docker::{
-        DirectoryLease, DockerWire, EnvironmentConfig, EnvironmentManager, EnvironmentSettings,
-        ImageLeaseConfig, ImageLeaseManager, ImagePinScope, OwnerFilter,
+        DirectoryLease, DockerPort, DockerWire, EnvironmentConfig, EnvironmentManager,
+        EnvironmentSettings, ImageLeaseConfig, ImageLeaseManager, ImagePinScope, OwnerFilter,
     },
 };
 use tempfile::TempDir;
@@ -18,6 +18,7 @@ pub(crate) struct Fixture {
     pub(crate) owner: EnvironmentManager,
     pub(crate) images: ImageLeaseManager,
     pub(crate) wire: DockerWire,
+    pub(crate) docker: DockerPort,
     pub(crate) lease: DirectoryLease,
     pub(crate) relay: Option<PinnedImage>,
     pub(crate) function: Option<PinnedImage>,
@@ -30,8 +31,9 @@ impl Fixture {
         let wire = DockerWire::connect(format!("unix://{socket}").parse()?, deadline()).await?;
         let directory = tempfile::tempdir()?;
         let lease = DirectoryLease::acquire(directory.path().into(), deadline()).await?;
+        let docker = wire.port().bind_directory(&lease, deadline()).await?;
         let images = ImageLeaseManager::start(
-            wire.port(),
+            docker.clone(),
             ImagePinScope::new(lease.clone()),
             ImageLeaseConfig::default(),
         )?;
@@ -48,11 +50,12 @@ impl Fixture {
                 .start(Duration::from_secs(60))
                 .build(),
         )?;
-        let owner = EnvironmentManager::start(wire.port(), lease.clone(), config)?;
+        let owner = EnvironmentManager::start(docker.clone(), lease.clone(), config)?;
         let mut fixture = Self {
             owner,
             images,
             wire,
+            docker,
             lease,
             relay: None,
             function: None,
@@ -106,8 +109,7 @@ impl Fixture {
                 "allocation reservation remains"
             );
             let containers = self
-                .wire
-                .port()
+                .docker
                 .list_containers(
                     OwnerFilter::new(self.lease.owner_id(), Some(self.lease.run_id()), None)?,
                     deadline(),

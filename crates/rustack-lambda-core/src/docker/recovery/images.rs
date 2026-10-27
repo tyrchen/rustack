@@ -26,9 +26,9 @@ pub struct ImagePinRecovery {
 /// # Errors
 /// Returns ownership/budget/wire failures, Quarantined for remaining historical
 /// containers or mismatching alias identity, and protocol failures. This does
-/// not grant readiness or release another owner's live allocations. The trusted
-/// caller must bind this directory to the same daemon that received its intents;
-/// a fresh socket connection alone is not persistent daemon identity.
+/// not grant readiness or release another owner's live allocations. Requires a
+/// port from `DockerPort::bind_directory` for this exact lease; each connection
+/// verifies its persisted installation identity before the actual operation.
 ///
 /// ```no_run
 /// # async fn recover(directory: &rustack_lambda_core::docker::DirectoryLease, docker: &rustack_lambda_core::docker::DockerPort) -> Result<(), rustack_lambda_core::docker::DockerError> {
@@ -42,6 +42,7 @@ pub async fn reconcile_image_pins(
     docker: &DockerPort,
     deadline: Instant,
 ) -> Result<ImagePinRecovery, DockerError> {
+    docker.require_directory(directory)?;
     if directory
         .container_records(deadline)
         .await?

@@ -32,6 +32,7 @@ pub struct ContainerRecovery {
 /// Returns invalid/expired budgets, unsafe/corrupt/unavailable ownership storage,
 /// daemon transport/protocol failures or foreign resource identity. No error
 /// grants readiness, and previous successfully settled records remain settled.
+/// Requires a port from `DockerPort::bind_directory` for this exact lease.
 ///
 /// ```no_run
 /// # async fn recover(directory: &rustack_lambda_core::docker::DirectoryLease, docker: &rustack_lambda_core::docker::DockerPort) -> Result<(), rustack_lambda_core::docker::EnvironmentError> {
@@ -46,6 +47,7 @@ pub async fn reconcile_containers(
     docker: &DockerPort,
     deadline: Instant,
 ) -> Result<ContainerRecovery, EnvironmentError> {
+    docker.require_directory(directory)?;
     check_deadline(deadline)?;
     let mut records = directory.container_records(deadline).await?;
     records.sort_by_key(|record| (!record.function(), record.environment));

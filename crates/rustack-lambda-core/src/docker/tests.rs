@@ -58,13 +58,27 @@ impl IncomingRequest {
     }
 }
 
+pub(super) const DAEMON_ID: &str = "44ca5378-c28c-4bac-b6ed-2b298f02ecb5";
+
 pub(super) struct Daemon {
     directory: TempDir,
     pub(super) requests: mpsc::Receiver<IncomingRequest>,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+    pub(super) identity: watch::Sender<String>,
+    pub(super) identity_status: watch::Sender<u16>,
 }
 impl Daemon {
+    pub(super) async fn bind_fixture(directory: &DirectoryLease) {
+        directory
+            .bind_daemon(
+                binding::DaemonIdentity::try_from(DAEMON_ID).unwrap(),
+                deadline(),
+            )
+            .await
+            .unwrap();
+    }
+
     pub(super) fn new() -> Self {
         Self::with_version("1.53")
     }
@@ -73,6 +87,8 @@ impl Daemon {
         let listener = UnixListener::bind(directory.path().join("docker.sock")).unwrap();
         let (requests, received) = mpsc::channel(32);
         let (stop, mut stopped) = watch::channel(false);
+        let (identity, daemon_identity) = watch::channel(DAEMON_ID.to_owned());
+        let (identity_status, daemon_status) = watch::channel(200);
         let task = tokio::spawn(async move {
             let mut jobs = JoinSet::new();
             loop {
@@ -82,14 +98,25 @@ impl Daemon {
                     job = jobs.join_next(), if !jobs.is_empty() => { job.unwrap().unwrap(); },
                     stream = listener.accept(), if jobs.len() < 16 => {
                         let requests = requests.clone();
+                        let daemon_identity = daemon_identity.clone();
+                        let daemon_status = daemon_status.clone();
                         let (stream, _) = stream.unwrap();
                         jobs.spawn(async move {
                             // Closing a fixture connection during shutdown is
                             // normal. Panics still fail the joined server task.
-                            if let Ok(incoming) = read_request(stream).await {
+                            let mut stream = stream;
+                            while let Ok(mut incoming) = read_request(stream).await {
                                 if incoming.head.starts_with("GET /version ") {
                                     incoming.reply(200, format!(r#"{{"ApiVersion":"{version}","MinAPIVersion":"1.44"}}"#).as_bytes()).await;
-                                } else { let _ = requests.send(incoming).await; }
+                                    break;
+                                } else if incoming.head.starts_with("GET /info ") {
+                                    let body = serde_json::to_vec(&serde_json::json!({"ID":daemon_identity.borrow().clone()})).unwrap();
+                                    let status = *daemon_status.borrow();
+                                    let head = format!("HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n", body.len());
+                                    if incoming.stream.write_all(head.as_bytes()).await.is_err()
+                                        || incoming.stream.write_all(&body).await.is_err() { break; }
+                                    stream = incoming.stream;
+                                } else { let _ = requests.send(incoming).await; break; }
                             }
                         });
                     }
@@ -107,6 +134,8 @@ impl Daemon {
             requests: received,
             stop,
             task,
+            identity,
+            identity_status,
         }
     }
     fn socket(&self) -> DockerSocket {
@@ -136,7 +165,7 @@ impl Daemon {
     }
 }
 
-async fn read_request(mut stream: UnixStream) -> io::Result<IncomingRequest> {
+pub(super) async fn read_request(mut stream: UnixStream) -> io::Result<IncomingRequest> {
     timeout_at(deadline(), async {
         let mut input = Vec::new();
         let boundary = loop {
@@ -324,6 +353,7 @@ async fn test_should_bound_request_serialization_and_redact_request_debug() {
         ..Default::default()
     };
     let request = RawRequest {
+        binding: None,
         mutation: None,
         operation: Operation::Create,
         method: Method::POST,
@@ -422,6 +452,7 @@ async fn test_should_keep_cleanup_capacity_while_business_calls_and_mailbox_are_
             .business
             .try_send(Envelope {
                 request: RawRequest {
+                    binding: None,
                     mutation: None,
                     operation: Operation::Info,
                     method: Method::GET,

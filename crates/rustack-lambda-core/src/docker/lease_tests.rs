@@ -282,10 +282,12 @@ pub(crate) struct FakePins {
     pub(crate) commands: mpsc::Sender<Command>,
     task: Option<JoinHandle<()>>,
     pub(crate) stats: Arc<Stats>,
+    pub(crate) identity_status: watch::Sender<u16>,
 }
 impl FakePins {
     pub(crate) async fn new(mode: Mode) -> Self {
         let daemon = Daemon::new();
+        let identity_status = daemon.identity_status.clone();
         let wire = daemon.wire().await;
         let (stop, stopping) = watch::channel(false);
         let (commands, receiver) = mpsc::channel(8);
@@ -299,6 +301,7 @@ impl FakePins {
             .build();
         Self {
             wire,
+            identity_status,
             stop,
             commands,
             task: Some(tokio::spawn(script.run())),
@@ -328,8 +331,16 @@ async fn test_should_retain_the_directory_lock_through_abandoned_image_owner_cle
         .await
         .unwrap();
     let identity = lease.owner_id();
-    let owner = ImageLeaseManager::start(fake.wire.port(), ImagePinScope::new(lease), config(2, 1))
-        .unwrap();
+    let owner = ImageLeaseManager::start(
+        fake.wire
+            .port()
+            .bind_directory(&lease, deadline())
+            .await
+            .unwrap(),
+        ImagePinScope::new(lease),
+        config(2, 1),
+    )
+    .unwrap();
     let image = owner
         .port()
         .prepare(

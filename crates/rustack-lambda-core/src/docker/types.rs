@@ -16,6 +16,12 @@ pub enum DockerError {
     /// Invalid local configuration or identifier.
     #[error("invalid Docker configuration")]
     Configuration,
+    /// The runtime port cannot prove the persisted daemon/directory association.
+    #[error("Docker daemon binding failed")]
+    DaemonBinding,
+    /// The connection identity stage failed before the requested operation.
+    #[error("Docker connection identity check failed")]
+    IdentityCheck(#[source] Arc<DockerError>),
     /// The local daemon's API range is incompatible.
     #[error("unsupported Docker API version")]
     Version,

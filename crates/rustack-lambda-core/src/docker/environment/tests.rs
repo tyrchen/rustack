@@ -666,9 +666,15 @@ async fn test_should_publish_intent_before_create_and_retain_reservation_until_d
         .unwrap();
     let mut daemon = Daemon::new();
     let mut wire = daemon.wire().await;
-    let mut manager =
-        EnvironmentManager::start(wire.port(), directory.clone(), EnvironmentConfig::default())
-            .unwrap();
+    let mut manager = EnvironmentManager::start(
+        wire.port()
+            .bind_directory(&directory, deadline())
+            .await
+            .unwrap(),
+        directory.clone(),
+        EnvironmentConfig::default(),
+    )
+    .unwrap();
     let mut handle = manager.port().spawn(plan(&directory), deadline()).unwrap();
     let create = daemon.next().await;
     assert!(create.head.starts_with("POST "));

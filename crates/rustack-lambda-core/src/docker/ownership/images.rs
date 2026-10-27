@@ -139,7 +139,7 @@ impl DirectoryLease {
         .await
     }
 }
-struct ImageCodec;
+pub(super) struct ImageCodec;
 impl Codec for ImageCodec {
     type Record = ImageRecord;
     const PUBLISHED: &'static str = PUBLISHED;

@@ -131,7 +131,7 @@ async fn test_should_retire_running_code_after_abandoned_call_and_join_all_owned
         let mut handle = fixture.owner.port().spawn(plan, deadline())?;
         handle.wait_ready(deadline()).await?;
         let mut observed = FunctionLogs::start(
-            fixture.wire.port().attach_logs(&key, deadline()).await?,
+            fixture.docker.attach_logs(&key, deadline()).await?,
             Duration::from_secs(60),
             262_144,
         )?;
@@ -285,7 +285,7 @@ async fn test_should_join_pool_retirement_after_cancelling_an_observed_running_h
         let plan = fixture.plan_revision(revision.clone())?;
         let event = invocation(&json!({"value":1,"sleep":true}))?;
         let mut observed = FunctionLogs::start(
-            fixture.wire.port().attach_logs(&key, deadline()).await?,
+            fixture.docker.attach_logs(&key, deadline()).await?,
             Duration::from_secs(60),
             262_144,
         )?;
@@ -327,11 +327,7 @@ async fn test_should_join_pool_retirement_after_cancelling_an_observed_running_h
         );
         ensure!(
             matches!(
-                fixture
-                    .wire
-                    .port()
-                    .inspect_container(&key, deadline())
-                    .await,
+                fixture.docker.inspect_container(&key, deadline()).await,
                 Err(rustack_lambda_core::docker::DockerError::Status(
                     http::StatusCode::NOT_FOUND
                 ))

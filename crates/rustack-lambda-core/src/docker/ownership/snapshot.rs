@@ -33,6 +33,23 @@ impl DirectoryLease {
         deadline: Instant,
         work: impl FnOnce(&mut Vec<C::Record>) -> Result<T, DirectoryLeaseError> + Send + 'static,
     ) -> Result<T, DirectoryLeaseError> {
+        self.transaction(deadline, move |directory, owner, control| {
+            let mut records = read::<C>(directory, owner)?;
+            control.check()?;
+            let original = records.clone();
+            let result = work(&mut records)?;
+            if records != original {
+                write::<C>(directory, owner, &records, control)?;
+            }
+            Ok(result)
+        })
+        .await
+    }
+    pub(super) async fn transaction<T: Send + 'static>(
+        &self,
+        deadline: Instant,
+        work: impl FnOnce(&File, Uuid, &Control) -> Result<T, DirectoryLeaseError> + Send + 'static,
+    ) -> Result<T, DirectoryLeaseError> {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
@@ -47,19 +64,15 @@ impl DirectoryLease {
         let lease = self.clone();
         run(&WORKERS, deadline, move |control| {
             let _transaction = permit;
-            let mut records = read::<C>(lease.namespace(), lease.owner_id())?;
-            control.check()?;
-            let original = records.clone();
-            let result = work(&mut records)?;
-            if records != original {
-                write::<C>(lease.namespace(), lease.owner_id(), &records, control)?;
-            }
-            Ok(result)
+            work(lease.namespace(), lease.owner_id(), control)
         })
         .await
     }
 }
-fn read<C: Codec>(directory: &File, owner: Uuid) -> Result<Vec<C::Record>, DirectoryLeaseError> {
+pub(super) fn read<C: Codec>(
+    directory: &File,
+    owner: Uuid,
+) -> Result<Vec<C::Record>, DirectoryLeaseError> {
     optional::<C>(directory, C::STAGING)?;
     let Some(mut file) = optional::<C>(directory, C::PUBLISHED)? else {
         directory.sync_all()?;
@@ -81,7 +94,7 @@ fn optional<C: Codec>(directory: &File, name: &str) -> Result<Option<File>, Dire
         Err(error) => Err(error),
     }
 }
-fn write<C: Codec>(
+pub(super) fn write<C: Codec>(
     directory: &File,
     owner: Uuid,
     records: &[C::Record],

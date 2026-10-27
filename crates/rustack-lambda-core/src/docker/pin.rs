@@ -22,6 +22,10 @@ pub struct ImagePinScope {
     lease: DirectoryLease,
 }
 impl ImagePinScope {
+    pub(super) fn directory(&self) -> &DirectoryLease {
+        &self.lease
+    }
+
     /// Retain a real directory lease for this namespace and its allocated pins.
     ///
     /// ```no_run
@@ -152,6 +156,7 @@ impl DockerPort {
             .raw
             .request(
                 RawRequest {
+                    binding: None,
                     mutation,
                     operation: Operation::TagPin,
                     method: Method::POST,

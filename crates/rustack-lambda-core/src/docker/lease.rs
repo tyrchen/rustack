@@ -338,8 +338,8 @@ impl ImageLeaseManager {
     /// Start under the current Tokio runtime with an explicit scoped Docker port.
     ///
     /// # Errors
-    /// Rejects absence of a Tokio runtime. Directory locking belongs to the
-    /// runtime coordinator; the scope is never taken from a function request.
+    /// Rejects absence of a Tokio runtime or a port not bound to this exact
+    /// directory lease. The scope is never taken from a function request.
     ///
     /// ```no_run
     /// # fn start(port:rustack_lambda_core::docker::DockerPort,scope:rustack_lambda_core::docker::ImagePinScope) -> Result<(),rustack_lambda_core::docker::DockerError> {
@@ -351,6 +351,7 @@ impl ImageLeaseManager {
         scope: ImagePinScope,
         config: ImageLeaseConfig,
     ) -> Result<Self, DockerError> {
+        docker.require_directory(scope.directory())?;
         let runtime = Handle::try_current().map_err(|_| DockerError::Worker)?;
         let (sender, requests) = mpsc::channel(32);
         let (stop, _) = watch::channel(false);

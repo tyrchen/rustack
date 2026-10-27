@@ -299,7 +299,7 @@ fn decode(bytes: &[u8], owner: Uuid) -> Result<Vec<ContainerRecord>, DirectoryLe
     }
     Ok(records)
 }
-struct ContainerCodec;
+pub(super) struct ContainerCodec;
 impl Codec for ContainerCodec {
     type Record = ContainerRecord;
     const PUBLISHED: &'static str = PUBLISHED;
