@@ -2,6 +2,8 @@
 #![cfg(all(unix, feature = "lambda", feature = "stepfunctions"))]
 #![forbid(unsafe_code)]
 
+#[path = "docker_startup/archive.rs"]
+mod archive;
 #[path = "docker_startup/custom.rs"]
 mod custom;
 #[path = "docker_startup/faults.rs"]
@@ -140,9 +142,15 @@ async fn boto(server: &Server) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires actual production Docker startup; run make test-lambda-startup-docker"]
-async fn test_should_reject_metadata_only_image_archive_before_retiring_previous_generation()
+async fn test_should_restore_real_image_archive_and_preserve_generations_after_rejection()
 -> Result<()> {
     let mut server = Server::spawn(Profile::Archive).await?;
+    server
+        .root
+        .as_mut()
+        .context("image archive evidence guard")?
+        .disable_cleanup(true);
+    eprintln!("image archive evidence: {}", server.path()?.display());
     let result = timeout(Duration::from_secs(360), async {
         server.ready().await?;
         sdk::exercise(
@@ -153,18 +161,35 @@ async fn test_should_reject_metadata_only_image_archive_before_retiring_previous
             true,
         )
         .await?;
+        let checkpoint = sdk::archive_checkpoint(&server.endpoint).await?;
         server.stop(true).await?;
         server.audit().await?;
+        let original = serde_json::to_value(archive::read(server.path()?).await?)?;
         let snapshots = server.path()?.join("snapshots");
         let current = snapshots.join("images");
         let previous = snapshots.join(".images.previous");
         copy_tree(&current, &previous).await?;
+        server.restart().await?;
+        server.ready().await?;
+        ensure!(
+            !fs::try_exists(&previous).await?,
+            "successful domain import did not retire previous generation"
+        );
+        sdk::verify_archive(&server.endpoint, &checkpoint).await?;
+        server.stop(true).await?;
+        server.audit().await?;
+        ensure!(
+            serde_json::to_value(archive::read(server.path()?).await?)? == original,
+            "restored Lambda metadata/resource/revision identity changed"
+        );
+        copy_tree(&current, &previous).await?;
+        archive::corrupt_size(server.path()?).await?;
         let before = fingerprint(&snapshots).await?;
         server.restart().await?;
         server.failure().await?;
         ensure!(
             fingerprint(&snapshots).await? == before,
-            "image rejection modified current/previous archive generations"
+            "rejected immutable image proof modified current/previous archive generations"
         );
         Ok::<(), anyhow::Error>(())
     })
@@ -178,7 +203,13 @@ async fn test_should_reject_metadata_only_image_archive_before_retiring_previous
     }
     cleanup?;
     audit?;
-    result
+    result?;
+    server
+        .root
+        .as_mut()
+        .context("image archive evidence guard")?
+        .disable_cleanup(false);
+    Ok(())
 }
 async fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     ensure!(

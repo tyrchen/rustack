@@ -812,3 +812,6 @@ async fn test_should_keep_cancelled_deployment_admission_after_outer_worker_join
     images.shutdown(deadline()).await.unwrap();
     fake.close().await;
 }
+
+#[path = "manager_tests/restore.rs"]
+mod restore;

@@ -298,6 +298,10 @@ fn bounded_cause(cause: &str) -> Result<String, BridgeError> {
 }
 pub(super) fn service(error: LambdaServiceError) -> Result<Mapped, BridgeError> {
     let name = match &error {
+        #[cfg(unix)]
+        LambdaServiceError::ImageRestore { .. } | LambdaServiceError::ImageRestoreWorker { .. } => {
+            "Lambda.ServiceException"
+        }
         LambdaServiceError::TooManyRequests => "Lambda.TooManyRequestsException",
         LambdaServiceError::FunctionNotFound { .. }
         | LambdaServiceError::VersionNotFound { .. }

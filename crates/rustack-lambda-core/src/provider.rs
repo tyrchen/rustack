@@ -5,7 +5,7 @@
 //! implemented; later phases (versions, aliases, permissions, tags, URLs)
 //! return appropriate errors until implemented.
 
-use std::{collections::HashMap, iter::once, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -122,6 +122,8 @@ fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
     }
 }
 
+mod snapshot;
+
 /// Outcome of an [`RustackLambda::invoke`] call, mapping cleanly to AWS
 /// `Invoke` response codes.
 #[derive(Debug, Clone)]
@@ -144,8 +146,8 @@ pub enum InvokeOutcome {
 #[derive(Debug)]
 pub struct RustackLambda {
     store: Arc<FunctionStore>,
-    layer_store: LayerStore,
-    esm_store: EventSourceMappingStore,
+    layer_store: Arc<LayerStore>,
+    esm_store: Arc<EventSourceMappingStore>,
     config: LambdaConfig,
     executor: Arc<dyn Executor>,
     code_fetcher: Arc<dyn S3CodeFetcher>,
@@ -263,8 +265,8 @@ impl RustackLambda {
         let executor = build_executor(&config);
         Self {
             store: Arc::new(store),
-            layer_store: LayerStore::new(),
-            esm_store: EventSourceMappingStore::new(),
+            layer_store: Arc::new(LayerStore::new()),
+            esm_store: Arc::new(EventSourceMappingStore::new()),
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
@@ -282,8 +284,8 @@ impl RustackLambda {
         let executor = build_executor(&config);
         Self {
             store: Arc::new(store),
-            layer_store: LayerStore::new(),
-            esm_store: EventSourceMappingStore::new(),
+            layer_store: Arc::new(LayerStore::new()),
+            esm_store: Arc::new(EventSourceMappingStore::new()),
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
@@ -303,8 +305,8 @@ impl RustackLambda {
     ) -> Self {
         Self {
             store: Arc::new(store),
-            layer_store: LayerStore::new(),
-            esm_store: EventSourceMappingStore::new(),
+            layer_store: Arc::new(LayerStore::new()),
+            esm_store: Arc::new(EventSourceMappingStore::new()),
             config,
             executor,
             code_fetcher: Arc::new(UnavailableS3CodeFetcher),
@@ -488,18 +490,33 @@ impl RustackLambda {
 
     /// Reject metadata-only image archives before opening ordinary Docker ingress.
     /// # Errors
-    /// Immutable live image lease restoration has not yet been installed; saved
-    /// metadata must never masquerade as executable availability or follow a tag.
+    /// Returns an error if usable saved images lack live immutable leases or the
+    /// qualified backend is unavailable. Failed creations remain inspectable.
     /// ```no_run
     /// # fn restore(provider:&rustack_lambda_core::provider::RustackLambda){let result=provider.validate_runtime_restore();}
     /// ```
     pub fn validate_runtime_restore(&self) -> Result<(), LambdaServiceError> {
         if self.config.executor == ExecutorBackend::Docker && self.store.has_unleased_images() {
             return Err(invalid_parameter(
-                "Docker archive requires immutable image lease restoration",
+                "Docker archive contains an unleased usable image",
             ));
         }
+        if self.config.executor == ExecutorBackend::Docker {
+            self.executor.image_available()?;
+        }
         Ok(())
+    }
+
+    /// Docker metadata archive bound, separate from Native ZIP archive payloads.
+    ///
+    /// ```no_run
+    /// # fn limit(provider: &rustack_lambda_core::provider::RustackLambda) {
+    /// let limit = provider.image_archive_payload_limit();
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn image_archive_payload_limit(&self) -> Option<usize> {
+        (self.config.executor == ExecutorBackend::Docker).then_some(snapshot::IMAGE_METADATA_BYTES)
     }
 
     /// Stop accepting invocation work and drain it before snapshot export.
@@ -549,6 +566,40 @@ impl RustackLambda {
         }
     }
 
+    /// Export archive metadata only when the installed profile can restore it.
+    ///
+    /// # Errors
+    /// Returns unavailable/unleased Image backend, excessive metadata, worker or
+    /// deadline failure. Native ZIP export keeps its existing representation.
+    ///
+    /// ```no_run
+    /// # async fn save(provider: &rustack_lambda_core::provider::RustackLambda) -> Result<(), rustack_lambda_core::error::LambdaServiceError> {
+    /// let saved = provider.export_snapshot_before(tokio::time::Instant::now() + std::time::Duration::from_secs(30)).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn export_snapshot_before(
+        &self,
+        deadline: Instant,
+    ) -> Result<LambdaSnapshot, LambdaServiceError> {
+        if self.config.executor == ExecutorBackend::Docker {
+            self.validate_runtime_restore()?;
+            self.store.check_snapshot_counts(
+                snapshot::MAX_IMAGE_FUNCTIONS,
+                snapshot::MAX_IMAGE_REVISIONS,
+            )?;
+            #[cfg(unix)]
+            {
+                let saved = snapshot::export_image(self, deadline).await?;
+                self.validate_runtime_restore()?;
+                self.image_deployments()?;
+                return Ok(saved);
+            }
+            #[cfg(not(unix))]
+            return Err(LambdaServiceError::DockerNotAvailable);
+        }
+        Ok(self.export_snapshot())
+    }
+
     /// Replace Lambda resources from a snapshot.
     ///
     /// # Errors
@@ -558,27 +609,55 @@ impl RustackLambda {
         &self,
         snapshot: LambdaSnapshot,
     ) -> Result<(), LambdaServiceError> {
-        if self.config.executor == ExecutorBackend::Docker
-            && snapshot.functions.functions.iter().any(|record| {
-                once(&record.latest)
-                    .chain(record.versions.values())
-                    .any(|version| version.package_type == "Zip")
-            })
-        {
-            return Err(invalid_parameter(
-                "Docker ZIP archive execution is unavailable",
-            ));
-        }
-        if self.config.executor == ExecutorBackend::Docker
-            && snapshot.functions.functions.iter().any(|record| {
-                once(&record.latest)
-                    .chain(record.versions.values())
-                    .any(|version| version.package_type == "Image")
-            })
-        {
-            return Err(invalid_parameter(
-                "Docker archive requires immutable image lease restoration",
-            ));
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(300))
+            .ok_or_else(|| invalid_parameter("Invalid Lambda restore deadline"))?;
+        self.import_snapshot_before(snapshot, deadline).await
+    }
+
+    /// Restore quiescent/startup resources before one captured commit deadline.
+    ///
+    /// Docker validates the complete candidate and reacquires exact saved content
+    /// before replacing any resource. There is no live import HTTP action.
+    ///
+    /// # Errors
+    /// Returns bounded validation, unavailable backend, immutable content, quota,
+    /// deadline or retained cleanup failure without publishing a failed candidate.
+    ///
+    /// ```no_run
+    /// # async fn restore(provider: &rustack_lambda_core::provider::RustackLambda, saved: rustack_lambda_core::provider::LambdaSnapshot) -> Result<(), rustack_lambda_core::error::LambdaServiceError> {
+    /// provider.import_snapshot_before(saved, tokio::time::Instant::now() + std::time::Duration::from_secs(30)).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn import_snapshot_before(
+        &self,
+        snapshot: LambdaSnapshot,
+        deadline: Instant,
+    ) -> Result<(), LambdaServiceError> {
+        if self.config.executor == ExecutorBackend::Docker {
+            #[cfg(unix)]
+            {
+                self.image_deployments()?;
+                let snapshot = snapshot::validate_image(
+                    snapshot,
+                    deadline,
+                    &self.config.default_region,
+                    &self.config.account_id,
+                )
+                .await?;
+                let manager = self.image_deployments()?;
+                let prepared = manager
+                    .prepare_restore(snapshot.functions, deadline)
+                    .await?;
+                self.image_deployments()?.restore_available()?;
+                prepared.commit_before(deadline)?;
+                self.layer_store.import_snapshot(snapshot.layers);
+                self.esm_store
+                    .import_snapshot(snapshot.event_source_mappings);
+                return Ok(());
+            }
+            #[cfg(not(unix))]
+            return Err(LambdaServiceError::DockerNotAvailable);
         }
         self.store.import_snapshot(snapshot.functions).await?;
         self.layer_store.import_snapshot(snapshot.layers);

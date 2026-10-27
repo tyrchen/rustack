@@ -75,7 +75,13 @@ async fn test_should_keep_transaction_and_named_lease_after_observer_expiry() ->
         })],
     };
     let lease = config.acquire_lease().await?;
-    let mut task = SnapshotTask::start(config.clone(), providers, lease, Some("test"));
+    let mut task = SnapshotTask::start(
+        config.clone(),
+        providers,
+        lease,
+        Some("test"),
+        Instant::now() + Duration::from_secs(30),
+    );
     timeout(Duration::from_secs(2), entered.notified()).await?;
     assert!(
         task.wait(Instant::now() + Duration::from_millis(5))
@@ -167,6 +173,68 @@ async fn test_should_drain_started_load_and_save_siblings_before_returning_first
             original_manifest
         );
         drop(ready);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_join_expired_domain_import_without_retiring_previous_generation() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let config = config(&directory)?;
+    let (_, ready) = watch::channel(true);
+    let source = RuntimeProviders {
+        services: vec![Arc::new(GateService {
+            name: "owned",
+            fail: false,
+            entered: Arc::new(Notify::new()),
+            release: ready,
+        })],
+    };
+    config.save(&source, "current").await?;
+    let previous = directory.path().join(".transaction.previous");
+    fs::create_dir_all(previous.join("services/owned")).await?;
+    let files = [MANIFEST_FILE, "services/owned/meta.ss.zst"];
+    let mut original = Vec::new();
+    for file in files {
+        let bytes = fs::read(config.snapshot_dir().join(file)).await?;
+        fs::write(previous.join(file), &bytes).await?;
+        original.push(bytes);
+    }
+    let entered = Arc::new(Notify::new());
+    let (release, wait) = watch::channel(false);
+    let target = RuntimeProviders {
+        services: vec![Arc::new(GateService {
+            name: "owned",
+            fail: false,
+            entered: entered.clone(),
+            release: wait,
+        })],
+    };
+    let lease = config.acquire_lease().await?;
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let mut task = SnapshotTask::start(config.clone(), target, lease, None, deadline);
+    timeout(Duration::from_secs(10), entered.notified()).await?;
+    // Advance only after positive import entry, then resume real IO observation.
+    tokio::time::pause();
+    advance(Duration::from_secs(3601)).await;
+    tokio::time::resume();
+    assert!(task.wait(Instant::now()).await.is_err());
+    assert!(task.join.is_some());
+    release.send_replace(true);
+    assert!(
+        task.wait(Instant::now() + Duration::from_secs(10))
+            .await
+            .is_err()
+    );
+    assert!(
+        task.join.is_none(),
+        "transaction must join rather than merely expire its observer"
+    );
+    assert!(task.failure.is_some());
+    for (file, bytes) in files.into_iter().zip(original) {
+        assert_eq!(fs::read(config.snapshot_dir().join(file)).await?, bytes);
+        assert_eq!(fs::read(previous.join(file)).await?, bytes);
     }
     Ok(())
 }

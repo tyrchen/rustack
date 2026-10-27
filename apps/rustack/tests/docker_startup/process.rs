@@ -58,7 +58,7 @@ impl Profile {
             }
             Self::Legacy => "Docker ownership predates journal provenance",
             Self::WrongEndpoint => "Docker startup endpoint qualification failed",
-            Self::Archive => "Docker archive requires immutable image lease restoration",
+            Self::Archive => "Restored image storage proof mismatch",
             _ => return false,
         };
         text.contains(expected)

@@ -67,6 +67,7 @@ impl SnapshotSession {
                 providers.clone(),
                 lease,
                 None,
+                deadline,
             )));
         }
         match &mut named.transaction {
@@ -99,6 +100,7 @@ impl SnapshotSession {
                 providers.clone(),
                 lease,
                 Some(version),
+                deadline,
             )));
         }
         match &mut named.transaction {

@@ -1320,6 +1320,6 @@ test-lambda-docker:
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --nocapture --test-threads=1
-	@echo 'Verified docker-image-functional resources; Node/archive/ZIP/handler-SDK/IaC/reference-platform/full-release acceptance remains required.'
+	@echo 'Verified docker-image-functional resources; Node/ZIP/handler-SDK/IaC/reference-platform/full-release acceptance remains required.'
 
 .PHONY: test-lambda-docker-manifest test-lambda-docker

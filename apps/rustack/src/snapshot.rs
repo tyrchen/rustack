@@ -52,7 +52,9 @@ use rustack_ssm_core::{provider::RustackSsm, storage::ParameterStoreSnapshot};
 ))]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::{fs, io::AsyncWriteExt as _, sync::Semaphore, task::JoinSet};
+use tokio::{
+    fs, io::AsyncWriteExt as _, sync::Semaphore, task::JoinSet, time::Instant as Deadline,
+};
 use tracing::{info, warn};
 
 mod archive;
@@ -220,6 +222,17 @@ trait SnapshotService: Send + Sync {
     async fn save_meta(&self, data_staging_dir: &Path) -> Result<Vec<u8>>;
 
     async fn load_meta(&self, state_cbor: Vec<u8>, data_staging_dir: &Path) -> Result<()>;
+
+    async fn load_meta_before(
+        &self,
+        state_cbor: Vec<u8>,
+        data_staging_dir: &Path,
+        deadline: Deadline,
+    ) -> Result<()> {
+        check_load_deadline(deadline)?;
+        self.load_meta(state_cbor, data_staging_dir).await?;
+        check_load_deadline(deadline)
+    }
 }
 
 #[cfg(feature = "s3")]
@@ -383,8 +396,31 @@ impl SnapshotService for LambdaSnapshotService {
         "lambda"
     }
 
+    fn payload_limit(&self) -> Option<usize> {
+        self.provider.image_archive_payload_limit()
+    }
+
+    async fn load_meta_before(
+        &self,
+        state_cbor: Vec<u8>,
+        _data_staging_dir: &Path,
+        deadline: Deadline,
+    ) -> Result<()> {
+        check_load_deadline(deadline)?;
+        let snapshot: LambdaSnapshot = decode_state(&state_cbor)?;
+        self.provider
+            .import_snapshot_before(snapshot, deadline)
+            .await?;
+        check_load_deadline(deadline)
+    }
+
     async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
-        encode_state(&self.provider.export_snapshot())
+        encode_state(
+            &self
+                .provider
+                .export_snapshot_before(Deadline::now() + Duration::from_secs(300))
+                .await?,
+        )
     }
 
     async fn load_meta(&self, state_cbor: Vec<u8>, _data_staging_dir: &Path) -> Result<()> {
@@ -518,7 +554,18 @@ impl SnapshotConfig {
     /// # Errors
     ///
     /// Returns an error if the snapshot exists but cannot be parsed or applied.
+    #[cfg(test)]
     pub(crate) async fn load(&self, providers: &RuntimeProviders) -> Result<()> {
+        self.load_before(providers, Deadline::now() + Duration::from_secs(3600))
+            .await
+    }
+
+    pub(crate) async fn load_before(
+        &self,
+        providers: &RuntimeProviders,
+        deadline: Deadline,
+    ) -> Result<()> {
+        check_load_deadline(deadline)?;
         let started = Instant::now();
         let dir = self.snapshot_dir();
         cleanup_stale_staging(&self.root, self.name.as_str()).await?;
@@ -575,7 +622,8 @@ impl SnapshotConfig {
                         .acquire_owned()
                         .await
                         .context("snapshot load semaphore closed")?;
-                    load_service_snapshot(service, snapshot_dir, staging_root, entry).await
+                    load_service_snapshot(service, snapshot_dir, staging_root, entry, deadline)
+                        .await
                 });
             }
         }
@@ -598,7 +646,7 @@ impl SnapshotConfig {
         let cleanup_result = remove_dir_if_exists(&load_staging).await;
         load_result?;
         cleanup_result?;
-        retire_previous(&self.root, self.name.as_str()).await?;
+        retire_previous_checked(&self.root, self.name.as_str(), Some(deadline)).await?;
 
         record_snapshot_timing("load_ms", started.elapsed()).await;
         info!(snapshot = %self.name.as_str(), path = %dir.display(), "loaded runtime snapshot");
@@ -835,7 +883,9 @@ async fn load_service_snapshot(
     snapshot_dir: PathBuf,
     staging_root: PathBuf,
     manifest: SnapshotServiceManifest,
+    deadline: Deadline,
 ) -> Result<()> {
+    check_load_deadline(deadline)?;
     let service_name = service.service_name();
     let started = Instant::now();
     let staging_dir = staging_root.join(service_name);
@@ -873,7 +923,7 @@ async fn load_service_snapshot(
                 .first()
                 .is_none_or(|section| section.kind != SECTION_STATE_CBOR || section.row_count != 1))
     {
-        bail!("invalid workflow metadata section layout");
+        bail!("invalid service metadata section layout");
     }
     let state_cbor = sections
         .into_iter()
@@ -881,7 +931,7 @@ async fn load_service_snapshot(
         .ok_or_else(|| anyhow::anyhow!("missing snapshot state section"))?
         .bytes;
     service
-        .load_meta(state_cbor, &staging_dir)
+        .load_meta_before(state_cbor, &staging_dir, deadline)
         .await
         .with_context(|| format!("failed to load snapshot metadata for {service_name}"))?;
 
@@ -1045,9 +1095,30 @@ async fn replace_directory(
 }
 
 /// Call only after successful domain import or fully validated/synced prepare.
+fn check_load_deadline(deadline: Deadline) -> Result<()> {
+    if Deadline::now() >= deadline {
+        bail!("snapshot import commit deadline exceeded");
+    }
+    Ok(())
+}
+
 async fn retire_previous(root: &Path, name: &str) -> Result<()> {
+    retire_previous_checked(root, name, None).await
+}
+
+async fn retire_previous_checked(
+    root: &Path,
+    name: &str,
+    deadline: Option<Deadline>,
+) -> Result<()> {
+    if let Some(deadline) = deadline {
+        check_load_deadline(deadline)?;
+    }
     let previous = root.join(format!(".{name}.previous"));
     if path_exists(&previous).await? {
+        if let Some(deadline) = deadline {
+            check_load_deadline(deadline)?;
+        }
         remove_dir_if_exists(&previous).await?;
         sync_directory(root).await?;
     }
@@ -1536,3 +1607,6 @@ mod tests {
 
 #[cfg(test)]
 mod policy_tests;
+
+#[cfg(all(test, feature = "lambda"))]
+mod image_tests;

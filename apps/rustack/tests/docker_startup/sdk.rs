@@ -313,3 +313,7 @@ pub(super) async fn custom_compute(endpoint: &str, image: &str, architecture: &s
     client.delete_function().function_name(&name).send().await?;
     Ok(())
 }
+
+#[path = "sdk/archive.rs"]
+mod archive;
+pub(super) use archive::{checkpoint as archive_checkpoint, verify as verify_archive};

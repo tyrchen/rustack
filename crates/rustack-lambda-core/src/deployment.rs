@@ -551,3 +551,5 @@ fn conflict(message: &str) -> LambdaServiceError {
 #[cfg(test)]
 #[path = "deployment_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::record as image_record_fixture;

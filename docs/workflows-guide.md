@@ -6,9 +6,10 @@ state types, retries/timeouts, Inline Map/Parallel, nested workflows and Lambda
 callbacks. Real Lambda execution is qualified through the explicit trusted-host
 Native backend and the ordinary Docker image startup path. Docker requires the
 configured ownership/recovery and real kernel/network/optional gateway probes
-below; it uses the actual shared provider for SDK and ASL calls. Docker ZIP,
-immutable image archive lease restoration, handler SDK networking, IaC and final
-platform/release qualification remain unfinished.
+below; it uses the actual shared provider for SDK and ASL calls. Image archives
+restore saved immutable local content through the same qualified owner. Docker
+ZIP, Node, handler SDK networking, IaC and final platform/release qualification
+remain unfinished.
 
 ## Run the pure example
 
@@ -169,12 +170,23 @@ error and does not publish a successful snapshot, even if container cleanup
 succeeds.
 
 Docker is currently image-only: ZIP creation/configured ZIP sources and ZIP
-archives reject explicitly. Image archives also reject before import/backup
-retirement until immutable live-lease restoration lands; a changed source tag
-cannot substitute for saved code. Named Native/pure workflow snapshots remain
-available within their documented profile. The remaining L01–L09 fault/admission matrix, image ZIP,
-immutable archive restoration, handler SDK networking, IaC/native reference and
-final platform/release gates remain open.
+archives reject explicitly. Named Image snapshots restore resources, published
+versions, aliases and terminal workflow history without replay. The archive stores
+image references and execution metadata, not image layers. Every usable revision
+requires the exact saved immutable content to remain in the local daemon; restore
+never pulls or follows a changed source tag. The provider account and region must
+match. Fresh platform/fingerprint/size proof precedes publication and ingress.
+Invalid metadata, missing content or an expired startup deadline preserves both
+current and previous archive generations.
+
+Docker Lambda metadata is capped at16MiB,256 functions and1024 total
+latest/published revisions, with bounded depth, members and scalar sizes. Saving
+over-profile metadata fails before generation publication. See the
+[Image archive contract](../specs/rustack-workflows-20-lambda-runtime-design.md#216-candidate-store-image-archive-restoration-d88)
+for exact limits. Named Native/pure workflow snapshots remain available within
+their documented profile. The L01–L09 Docker fault/admission matrix is functionally
+qualified on the retained lanes; Docker ZIP, Node, handler SDK networking,
+IaC/native reference and final platform/release gates remain open.
 
 The explicit `make test-lambda-startup-docker` gate builds its host executable in
 an isolated Cargo target directory and captures a fixture-owned executable copy,
@@ -385,6 +397,6 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance, production image startup/ZIP, handler SDK
+Required reference Linux performance, Docker ZIP/Node, handler SDK
 networking, Pulumi lifecycle and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).

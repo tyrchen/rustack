@@ -660,3 +660,16 @@ D86 oracle correction (W271): acknowledged Event work is not positive execution 
 ## D87 — Restore immutable local content through the existing pin owner
 
 Ordinary deployment and saved-image reacquisition have distinct typed sources. The latter uses only the saved parent ID, exact selected-platform fingerprint and fresh unpacked proof, with no source-tag/registry fallback or pull. Preserve informational source metadata after positive proof. Reuse existing durable pin mutation/retirement quotas and joins instead of fabricating a lease or adding another supervisor. This is the primitive for later atomic archive import; keep provider/main archive rejection and every M4 consumer gate until that publication boundary is qualified. See [runtime§2.15](./rustack-workflows-20-lambda-runtime-design.md#215-immutable-local-image-lease-reacquisition-d87).
+
+
+## D88 — Validate/reacquire an entire Image archive before startup publication
+
+Reuse existing FunctionStore preparation/validation with a private candidate, shared exact immutable pins and fresh saved-size checks; publish only after all fallible work and a final health/deadline fence. Initial failed creation is inspectable without a live image; every usable revision requires one. Bound Image metadata independently of Native ZIP archives and retain four side-effect-free CPU validators. Carry the original startup deadline through retained snapshot/service import and previous-generation retirement; observer expiry cannot extend commit authority. See [runtime§2.16](./rustack-workflows-20-lambda-runtime-design.md#216-candidate-store-image-archive-restoration-d88).
+
+
+D88 review refinements W275–W277: iterative destruction belongs to the owned dynamic policy lifetime, including unpolled API futures; infrastructure validator failures retain typed redacted provenance. Image restore preserves the installed provider account/region scope and rejects foreign saved ARNs before any pin. These are required fail-closed invariants, not relaxed archive semantics.
+
+
+W278 strengthens D88 export ownership: borrowed record projections use the same snapshot schema and are guarded while their existing map-entry read guards remain held. A bounded read-only job constructs the owned archive DTO from validated compact JSON, rather than cloning unbounded live metadata before validation. Shared store handles keep read ownership alive through observer loss; malformed export cannot replace the previous generation.
+
+W279–W280 close the bounded-work/evidence lifetime edges: share prospective ancillary traversal budgets instead of resetting them per condition/version, and retain the actual archive fixture namespace from server creation until successful joined shutdown/audit. Neither bounded serialization nor a normal-path cleanup handler alone proves those ownership contracts.

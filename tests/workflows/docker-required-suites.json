@@ -66,7 +66,7 @@
         "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_3_missing_relay",
         "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_4_legacy",
         "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_5_wrong_endpoint",
-        "test_should_reject_metadata_only_image_archive_before_retiring_previous_generation",
+        "test_should_restore_real_image_archive_and_preserve_generations_after_rejection",
         "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_01_allocating",
         "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_02_cleanup",
         "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_03_daemon_loss",

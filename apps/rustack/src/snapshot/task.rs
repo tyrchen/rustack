@@ -70,6 +70,7 @@ impl SnapshotTask {
         providers: RuntimeProviders,
         lease: Arc<SnapshotLease>,
         version: Option<&'static str>,
+        deadline: Instant,
     ) -> Self {
         let join = tokio::spawn(async move {
             let mut guard = Guard {
@@ -83,7 +84,7 @@ impl SnapshotTask {
                 .context("snapshot transaction providers missing")?;
             let result = match version {
                 Some(version) => config.save(providers, version).await,
-                None => config.load(providers).await,
+                None => config.load_before(providers, deadline).await,
             };
             guard.finished = true;
             result

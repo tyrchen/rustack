@@ -5,7 +5,7 @@
 //! SHA-256 hashes computed on ingestion.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fmt,
     io::{ErrorKind, Read},
     iter::once,
@@ -21,6 +21,7 @@ use rustack_lambda_model::types::{
     TracingConfig, VpcConfig,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use zip::{System, read::ZipFile};
@@ -31,6 +32,13 @@ use crate::{
     error::LambdaServiceError,
     identity::FunctionResourceId,
 };
+
+mod restore;
+mod snapshot_view;
+pub(crate) use restore::PreparedImport;
+#[cfg(unix)]
+pub(crate) use restore::{check_deadline as check_restore_deadline, image_error};
+pub(crate) use snapshot_view::{FunctionSnapshotRef, LayerSnapshotRef, MappingSnapshotRef};
 
 /// In-memory store for Lambda functions.
 #[derive(Debug)]
@@ -87,7 +95,8 @@ impl Drop for StagedArtifact<'_> {
 }
 
 /// Complete record for a Lambda function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FunctionRecord {
     /// Stable identity for this resource's lifetime, independent of its name.
     pub resource_id: FunctionResourceId,
@@ -138,7 +147,8 @@ pub struct EventInvokeConfigRecord {
 }
 
 /// A snapshot of function configuration at a specific version.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VersionRecord {
     /// Version string (`$LATEST` or a numeric string like `"1"`).
     pub version: String,
@@ -159,14 +169,18 @@ pub struct VersionRecord {
     /// Package type (`Zip` or `Image`).
     pub package_type: String,
     /// Path to extracted code on disk.
+    #[serde(skip_serializing)]
     pub code_path: Option<PathBuf>,
     /// Container image URI.
     pub image_uri: Option<String>,
     /// Unresolved, restored metadata, or shared live image availability.
+    #[serde(rename = "resolvedImage", serialize_with = "snapshot_view::image")]
     pub image: ImageArtifact,
     /// Raw zip bytes.
+    #[serde(rename = "zipBytesBase64", serialize_with = "snapshot_view::zip")]
     pub zip_bytes: Option<Bytes>,
     /// Authoritative readiness and update progress.
+    #[serde(flatten, serialize_with = "snapshot_view::deployment")]
     pub deployment: DeploymentState,
     /// ISO 8601 last-modified timestamp.
     pub last_modified: String,
@@ -236,6 +250,21 @@ pub struct PolicyStatement {
     pub resource: String,
     /// Condition map (serialized as JSON).
     pub condition: Option<serde_json::Value>,
+}
+
+impl Drop for PolicyStatement {
+    fn drop(&mut self) {
+        // A rejected or unpolled import still owns hostile dynamic conditions.
+        // Move children out before their containers drop; never recurse on depth.
+        let mut pending: Vec<_> = self.condition.take().into_iter().collect();
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Array(mut children) => pending.append(&mut children),
+                Value::Object(children) => pending.extend(children.into_values()),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Function URL configuration record.
@@ -887,7 +916,7 @@ impl FunctionStore {
     pub(crate) fn has_unleased_images(&self) -> bool {
         self.functions.iter().any(|record| {
             once(&record.latest).chain(record.versions.values())
-                .any(|version| version.package_type == "Image" && !matches!(&version.image, ImageArtifact::Pinned(image) if image.is_live()))
+                .any(|version| version.package_type == "Image" && version.deployment.state() == "Active" && !matches!(&version.image, ImageArtifact::Pinned(image) if image.is_live()))
         })
     }
     fn validate_record(&self, record: &FunctionRecord) -> Result<(), LambdaServiceError> {
@@ -1162,44 +1191,7 @@ impl FunctionStore {
         &self,
         snapshot: FunctionStoreSnapshot,
     ) -> Result<(), LambdaServiceError> {
-        self.validate_root().await?;
-        let mut staged = BTreeMap::new();
-        let mut identities = HashSet::new();
-        let mut artifacts = Vec::new();
-        for function in snapshot.functions {
-            if !identities.insert(function.resource_id) {
-                return Err(LambdaServiceError::InvalidParameter {
-                    message: "Duplicate snapshot function resource identity".into(),
-                });
-            }
-            crate::resolver::FunctionName::parse(&function.name)?;
-            let (name, qualifier) = crate::resolver::resolve_function_ref(&function.arn)?;
-            if name != function.name || qualifier.is_some() {
-                return Err(LambdaServiceError::InvalidParameter {
-                    message: "Snapshot function ARN mismatch".into(),
-                });
-            }
-            for (alias, record) in &function.aliases {
-                crate::resolver::Qualifier::parse(alias)?;
-                crate::resolver::Qualifier::parse(&record.function_version)?;
-            }
-            let (record, allocations) = function.into_record(self).await?;
-            artifacts.extend(allocations);
-            self.validate_record(&record)?;
-            if staged.insert(record.name.clone(), record).is_some() {
-                return Err(LambdaServiceError::InvalidParameter {
-                    message: "Duplicate snapshot function".into(),
-                });
-            }
-        }
-        self.functions.clear();
-        for (name, record) in staged {
-            self.functions.insert(name, record);
-        }
-        for artifact in artifacts {
-            artifact.commit();
-        }
-        self.changes.send_replace(());
+        self.prepare_snapshot(snapshot).await?.commit();
         Ok(())
     }
 

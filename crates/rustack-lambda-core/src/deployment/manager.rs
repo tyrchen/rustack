@@ -35,7 +35,7 @@ use crate::{
     error::LambdaServiceError,
     executor::ExecutorError,
     invocation::CleanupTask,
-    storage::{FunctionRecord, FunctionStore},
+    storage::{FunctionRecord, FunctionStore, FunctionStoreSnapshot, PreparedImport, image_error},
 };
 
 /// Validated accepted-deployment capacity and absolute preparation budget.
@@ -407,6 +407,27 @@ impl ImageDeploymentManager {
         }
         result
     }
+    pub(crate) async fn prepare_restore(
+        &self,
+        snapshot: FunctionStoreSnapshot,
+        deadline: Instant,
+    ) -> Result<PreparedImport<'_>, LambdaServiceError> {
+        self.restore_available()?;
+        self.store
+            .prepare_image_snapshot(snapshot, &self.preparation, deadline)
+            .await
+    }
+
+    pub(crate) fn restore_available(&self) -> Result<(), LambdaServiceError> {
+        let status = self.status();
+        if !status.accepting || status.failed || status.accepted != 0 {
+            return Err(invalid(
+                "Image restore requires an idle healthy deployment owner",
+            ));
+        }
+        self.preparation.available().map_err(image_error)
+    }
+
     /// Close admission and drain accepted workers without cancelling preparation.
     ///
     /// # Errors
