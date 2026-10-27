@@ -178,6 +178,7 @@ async fn test_should_refuse_changed_peer_before_mutation_issuance(
         .raw
         .request(
             RawRequest {
+                archive: None,
                 pull: None,
                 binding: None,
                 mutation: Some(guard),

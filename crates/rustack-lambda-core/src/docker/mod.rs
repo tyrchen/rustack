@@ -4,6 +4,7 @@
 //! retain preallocated identities and reservations through reconciliation.
 
 mod binding;
+mod code;
 mod config;
 mod connection;
 mod environment;
@@ -23,6 +24,7 @@ mod pull;
 mod recovery;
 mod startup;
 mod types;
+mod volumes;
 
 use std::{
     collections::BTreeMap,
@@ -37,6 +39,7 @@ use std::{
 /// Generated Docker model contracts, without the upstream network client.
 pub use bollard_stubs::models;
 use bytes::Bytes;
+pub use code::DockerCodeArchive;
 pub use config::{
     DockerGatewayEndpoint, DockerRuntimeSettings, RegistryAuthError, RegistryAuthFile,
 };
@@ -124,6 +127,11 @@ enum Operation {
     ListImages,
     Pull,
     Attach,
+    UploadCode,
+    CreateVolume,
+    InspectVolume,
+    ListVolumes,
+    RemoveVolume,
 }
 impl Operation {
     fn cleanup(self) -> bool {
@@ -136,11 +144,15 @@ impl Operation {
                 | Self::ListImages
                 | Self::InspectPin
                 | Self::RemovePin
+                | Self::InspectVolume
+                | Self::ListVolumes
+                | Self::RemoveVolume
         )
     }
 }
 
 struct RawRequest {
+    archive: Option<DockerCodeArchive>,
     pull: Option<pull::Transfer>,
     binding: Option<Arc<DaemonBinding>>,
     mutation: Option<mutation::MutationGuard>,
@@ -231,7 +243,19 @@ impl RawPort {
             return Err(DockerError::Stopped);
         }
         check_deadline(deadline)?;
-        if request.target.len() > 4096 || request.body.len() > MAX_BODY_BYTES {
+        let maximum = match (&request.archive, request.operation) {
+            (Some(archive), Operation::UploadCode)
+                if archive.bytes().as_ptr() == request.body.as_ptr()
+                    && archive.len() == request.body.len() =>
+            {
+                code::MAX_CODE_ARCHIVE_BYTES
+            }
+            (None, Operation::UploadCode) | (Some(_), _) => {
+                return Err(DockerError::Configuration);
+            }
+            (None, _) => MAX_BODY_BYTES,
+        };
+        if request.target.len() > 4096 || request.body.len() > maximum {
             return Err(DockerError::TooLarge);
         }
         let sender = if matches!(request.operation, Operation::Pull) {
@@ -333,6 +357,15 @@ impl OwnerFilter {
         self.query(Some(64))
     }
     fn query(self, limit: Option<usize>) -> Result<String, DockerError> {
+        let filters = self.encoded_labels()?;
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query.append_pair("all", "true");
+        if let Some(limit) = limit {
+            query.append_pair("limit", &limit.to_string());
+        }
+        Ok(query.append_pair("filters", &filters).finish())
+    }
+    fn encoded_labels(self) -> Result<String, DockerError> {
         let mut labels = vec![format!("rustack.lambda.ownerId={}", self.owner)];
         if let Some(run) = self.run {
             labels.push(format!("rustack.lambda.runId={run}"));
@@ -341,13 +374,7 @@ impl OwnerFilter {
             labels.push(format!("rustack.lambda.environmentId={environment}"));
         }
         let filters = BTreeMap::from([("label", labels)]);
-        let filters = serde_json::to_string(&filters).map_err(|_| DockerError::Schema)?;
-        let mut query = form_urlencoded::Serializer::new(String::new());
-        query.append_pair("all", "true");
-        if let Some(limit) = limit {
-            query.append_pair("limit", &limit.to_string());
-        }
-        Ok(query.append_pair("filters", &filters).finish())
+        serde_json::to_string(&filters).map_err(|_| DockerError::Schema)
     }
 }
 
@@ -507,6 +534,7 @@ impl DockerPort {
             self.raw
                 .request(
                     RawRequest {
+                        archive: None,
                         pull: None,
                         binding: None,
                         mutation,
@@ -673,6 +701,7 @@ impl DockerPort {
         self.raw
             .request(
                 RawRequest {
+                    archive: None,
                     pull: None,
                     binding: None,
                     mutation: None,
@@ -725,6 +754,7 @@ impl DockerWire {
             let response = raw
                 .request(
                     RawRequest {
+                        archive: None,
                         pull: None,
                         binding: None,
                         mutation: None,

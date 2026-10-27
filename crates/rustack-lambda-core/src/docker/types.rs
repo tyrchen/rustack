@@ -16,6 +16,9 @@ pub enum DockerError {
     /// Invalid local configuration or identifier.
     #[error("invalid Docker configuration")]
     Configuration,
+    /// ZIP bytes or the provided-runtime ELF bootstrap violate the code profile.
+    #[error("invalid Docker ZIP code")]
+    InvalidCode,
     /// The runtime port cannot prove the persisted daemon/directory association.
     #[error("Docker daemon binding failed")]
     DaemonBinding,

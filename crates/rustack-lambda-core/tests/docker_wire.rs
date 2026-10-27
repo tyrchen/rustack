@@ -3,6 +3,9 @@
 #![cfg(unix)]
 #![forbid(unsafe_code)]
 
+#[path = "docker_wire/code.rs"]
+mod code;
+
 use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};

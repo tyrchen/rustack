@@ -35,10 +35,12 @@ use crate::{
 
 mod restore;
 mod snapshot_view;
+mod zip_layout;
 pub(crate) use restore::PreparedImport;
 #[cfg(unix)]
 pub(crate) use restore::{check_deadline as check_restore_deadline, image_error};
 pub(crate) use snapshot_view::{FunctionSnapshotRef, LayerSnapshotRef, MappingSnapshotRef};
+pub(crate) use zip_layout::ZipLayout;
 
 /// In-memory store for Lambda functions.
 #[derive(Debug)]
@@ -1451,7 +1453,7 @@ pub(crate) fn stage_zip(
 
 /// Maximum extracted deployment package size (250 MB, mirroring the AWS
 /// unzipped-package limit). Bounds zip-bomb expansion during extraction.
-const MAX_EXTRACTED_SIZE: u64 = 250 * 1024 * 1024;
+pub(crate) const MAX_EXTRACTED_SIZE: u64 = 250 * 1024 * 1024;
 
 /// Extract a zip archive into `target`, preserving unix file modes.
 ///
@@ -1489,7 +1491,7 @@ fn extract_zip(
             message: "Too many ZIP entries".into(),
         });
     }
-    let mut paths = std::collections::HashSet::new();
+    let mut layout = ZipLayout::default();
     let mut extracted_total: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
@@ -1498,11 +1500,7 @@ fn extract_zip(
                 message: format!("zip entry {i}: {e}"),
             })?;
         let rel = validated_zip_path(&entry)?;
-        if !paths.insert(rel.clone()) {
-            return Err(LambdaServiceError::InvalidZipFile {
-                message: "Duplicate ZIP entry".into(),
-            });
-        }
+        layout.admit(&rel, entry.is_dir())?;
         let out_path = target.join(&rel);
         // Defense in depth: ensure the resolved path stays within target.
         if !out_path.starts_with(target) {
@@ -1511,6 +1509,7 @@ fn extract_zip(
             });
         }
         if entry.is_dir() {
+            validate_zip_directory(&mut entry)?;
             fs::create_dir_all(&out_path).map_err(|e| LambdaServiceError::Internal {
                 message: format!("create dir {}: {e}", out_path.display()),
             })?;
@@ -1566,8 +1565,21 @@ fn extract_zip(
     Ok(())
 }
 
+/// Require positive compressed-stream EOF for a metadata-validated directory.
+pub(crate) fn validate_zip_directory<R: Read + ?Sized>(
+    entry: &mut ZipFile<'_, R>,
+) -> Result<(), LambdaServiceError> {
+    let mut byte = [0];
+    match entry.read(&mut byte) {
+        Ok(0) => Ok(()),
+        _ => Err(LambdaServiceError::InvalidZipFile {
+            message: "Invalid ZIP directory stream".into(),
+        }),
+    }
+}
+
 /// Check original names and attributes before ZIP9 normalizes decoded metadata.
-fn validated_zip_path<R: Read + ?Sized>(
+pub(crate) fn validated_zip_path<R: Read + ?Sized>(
     entry: &ZipFile<'_, R>,
 ) -> Result<PathBuf, LambdaServiceError> {
     let invalid = || LambdaServiceError::InvalidZipFile {
@@ -1586,10 +1598,16 @@ fn validated_zip_path<R: Read + ?Sized>(
         entry.external_attributes() >> 16
     };
     if name.len() > 1024
+        || name.starts_with('/')
+        || name.as_bytes().get(1) == Some(&b':')
+        || name.contains('\0')
         || name.contains('\\')
         || name.split('/').any(|component| component == "..")
-        || mode & 0o170_000 == 0o120_000
+        || !matches!(mode & 0o170_000, 0 | 0o100_000 | 0o040_000)
+        || (mode & 0o170_000 == 0o040_000 && !entry.is_dir())
+        || (mode & 0o170_000 == 0o100_000 && entry.is_dir())
         || mode & 0o7000 != 0
+        || (entry.is_dir() && (entry.size() != 0 || entry.crc32() != 0))
     {
         return Err(invalid());
     }
@@ -2455,6 +2473,11 @@ mod tests {
     #[case::setuid(0o104_755)]
     #[case::setgid(0o102_755)]
     #[case::sticky(0o101_755)]
+    #[case::fifo(0o010_644)]
+    #[case::character_device(0o020_644)]
+    #[case::block_device(0o060_644)]
+    #[case::socket(0o140_644)]
+    #[case::directory_as_file(0o040_755)]
     #[tokio::test]
     async fn test_should_reject_hostile_zip_attributes_without_replacing_code(#[case] mode: u32) {
         use std::io::Cursor;

@@ -28,7 +28,7 @@ use tokio::{
 use tracing::instrument::WithSubscriber;
 
 use super::{
-    DockerError, MAX_BODY_BYTES, RawReply, RawRequest,
+    DockerError, MAX_BODY_BYTES, Operation, RawReply, RawRequest,
     binding::{DaemonBinding, DaemonIdentity},
     check_deadline,
     pull::progress::{MAX_TOTAL, Progress},
@@ -40,6 +40,9 @@ pub(super) async fn exchange(
     deadline: Instant,
     mut stop: watch::Receiver<bool>,
 ) -> Result<RawReply, DockerError> {
+    // Keep the typed buffer reservation through HTTP-driver settlement, even
+    // after prepare_request transfers its byte view to Hyper.
+    let _archive = request.archive.take();
     // The exchange retains directory exclusion through every driver-join outcome.
     let binding = request.binding.take();
     let mut pull_stop = request.pull.as_ref().map(|transfer| transfer.stop.clone());
@@ -152,7 +155,14 @@ fn prepare_request(
         builder = builder.header(UPGRADE, "tcp");
     }
     if !request.body.is_empty() {
-        builder = builder.header(CONTENT_TYPE, "application/json");
+        builder = builder.header(
+            CONTENT_TYPE,
+            if matches!(request.operation, Operation::UploadCode) {
+                "application/x-tar"
+            } else {
+                "application/json"
+            },
+        );
     }
     if let Some(auth) = request
         .pull

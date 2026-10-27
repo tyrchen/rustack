@@ -28,13 +28,13 @@ impl Write for LogWriter {
     }
 }
 
-fn deadline() -> Instant {
+pub(super) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
 
 pub(super) struct IncomingRequest {
     pub(super) head: String,
-    body: Vec<u8>,
+    pub(super) body: Vec<u8>,
     pub(super) stream: UnixStream,
 }
 impl IncomingRequest {
@@ -194,7 +194,12 @@ pub(super) async fn read_request(mut stream: UnixStream) -> io::Result<IncomingR
                     .map(|(_, value)| value.trim().parse::<usize>().unwrap())
             })
             .unwrap_or(0);
-        if length > MAX_BODY_BYTES {
+        let limit = if head.starts_with("PUT ") && head.contains("/archive?") {
+            4 * MAX_BODY_BYTES
+        } else {
+            MAX_BODY_BYTES
+        };
+        if length > limit {
             return Err(io::Error::other("fixture body exceeded cap"));
         }
         let mut body = input.get(boundary..).unwrap().to_vec();
@@ -355,6 +360,7 @@ async fn test_should_bound_request_serialization_and_redact_request_debug() {
         ..Default::default()
     };
     let request = RawRequest {
+        archive: None,
         pull: None,
         binding: None,
         mutation: None,
@@ -455,6 +461,7 @@ async fn test_should_keep_cleanup_capacity_while_business_calls_and_mailbox_are_
             .business
             .try_send(Envelope {
                 request: RawRequest {
+                    archive: None,
                     pull: None,
                     binding: None,
                     mutation: None,

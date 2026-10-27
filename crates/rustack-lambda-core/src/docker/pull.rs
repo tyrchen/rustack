@@ -344,6 +344,7 @@ impl DockerPort {
             .raw
             .request_owned(
                 RawRequest {
+                    archive: None,
                     pull: Some(transfer),
                     binding: None,
                     mutation: None,

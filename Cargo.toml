@@ -183,6 +183,7 @@ bytes = "1.12"
 rand = "0.10"
 tempfile = "3.27"
 zip = { version = "9.1.1", default-features = false, features = ["deflate"] }
+tar = { version = "0.4.46", default-features = false }
 percent-encoding = "2.3"
 mime = "0.3"
 futures = "0.3"

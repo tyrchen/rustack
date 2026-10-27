@@ -20,7 +20,7 @@ class DockerManifestControls(unittest.TestCase):
         required = parse_manifest(encoded(document()))
         self.assertEqual(verify(required, {key:listing(names) for key,names in required.items()}), 8)
         frozen = parse_manifest(read_regular(Path(__file__).with_name("docker-required-suites.json"), MANIFEST_LIMIT))
-        self.assertEqual(sum(map(len, frozen.values())), 53)
+        self.assertEqual(sum(map(len, frozen.values())), 54)
         self.assertEqual(len(frozen["ordinary-startup"]), 24)
         self.assertEqual(len(frozen["docker-core"]), 8)
         self.assertEqual(len(frozen["relay-runtime"]), 5)

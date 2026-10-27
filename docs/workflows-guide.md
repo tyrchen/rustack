@@ -169,6 +169,11 @@ existing grace period. An unfinished accepted-work drain still exits with an
 error and does not publish a successful snapshot, even if container cleanup
 succeeds.
 
+ZIP deployment staging bounds compressed code to50MiB, expanded content to250MiB,
+and explicit entries plus implicit parent directories to10,000 filesystem nodes.
+It rejects traversal/absolute/drive/NUL names, links, special file declarations,
+privileged modes and corrupt directory/file streams.
+
 Docker is currently image-only: ZIP creation/configured ZIP sources and ZIP
 archives reject explicitly. Named Image snapshots restore resources, published
 versions, aliases and terminal workflow history without replay. The archive stores
@@ -236,13 +241,20 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 53-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 54-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
 `docker-image-functional` profile, while final platform/release requirements
 remain open. `make test-lambda-docker-manifest` checks inventories without
 running Docker resources.
+
+The code-volume prerequisite also transfers an immutable ZIP through a never-started
+RW loader and executes its program from an actual RO volume, checking ownership,
+modes, kernel read-only enforcement and writable `/tmp`. This transport component
+does not enable ordinary Docker ZIP Lambda execution; durable volume ownership
+and the runtime/provider consumer remain required. See the
+[ZIP delivery contract](../specs/rustack-workflows-20-lambda-runtime-design.md#61-provided-runtime-zip-delivery-contract-d89).
 
 The management IO cases hold actual Create/Tag acknowledgments and owned DELETE
 requests. Deleting a Pending deployment cannot release its quota while critical

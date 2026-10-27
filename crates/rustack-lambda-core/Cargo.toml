@@ -42,6 +42,7 @@ yaml-rust2 = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }
+tar = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }

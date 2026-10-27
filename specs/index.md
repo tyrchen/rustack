@@ -22,6 +22,9 @@ D87 is implemented and independently reviewed: [immutable local lease reacquisit
 
 D88 is implemented and independently reviewed: [candidate Image archive restoration](./rustack-workflows-20-lambda-runtime-design.md#216-candidate-store-image-archive-restoration-d88) validates/reacquires all revisions before startup publication and preserves previous generations on failure/expiry. Both retained engines pass all53 functional resources, including real archive save/restart/latest/alias/workflow history and corrupted-proof refusal; complete host/Native/strict/security gates and exact zero-remnant/source-preservation postconditions pass. Docker ZIP/Node/handler SDK/IaC/reference/platform and full M4 remain open.
 
+D89/5.1a is implemented and independently reviewed: [provided-runtime ZIP delivery](./rustack-workflows-20-lambda-runtime-design.md#61-provided-runtime-zip-delivery-contract-d89) now has typed bounded conversion, shared strict ZIP staging and local-volume/archive transport. Both retained full54-resource gates and host/Native/strict/security checks pass, with exact zero-remnant/source-preservation postconditions. Durable volume ownership/recovery5.1b, ordinary execution5.1c and ZIP archives5.2c remain mandatory; the ordinary ZIP capability stays unavailable until its actual consumer is qualified.
+
+
 | Order | Specification | Type / purpose |
 |---|---|---|
 | 00 | [Workflows PRD](./rustack-workflows-00-prd.md) | Product goals, compatibility profile and complete M0–M4 scope |
