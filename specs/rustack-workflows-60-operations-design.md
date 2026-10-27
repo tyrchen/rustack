@@ -282,6 +282,44 @@ acceptance = source provenance + old-frame/kernel regressions
 
 Fresh cargo audit must have no vulnerabilities or unsound compression warnings, and all cargo deny checks must pass without new ignores. Historical B01/B06 evidence remains chronological; mark B06 closed only after inspecting the current resolved graph and gates. Workflow archive export/import, frozen-registry lifetime, cross-service consistency and final image/platform acceptance remain separate work.
 
+### 4.2 Bounded CBOR import boundary
+
+Before adding workflow DTO import, replace the generic snapshot CBOR helpers with one shared preflight/encode boundary, used by manifest, service metadata and data-directory readers. A compressed/envelope byte cap alone does not bound a forged container's declared allocation or a decoder's recursion. Keep the v2 archive envelope, existing service DTO shapes and compression unchanged. This is an installed archive boundary prerequisite; it does not advertise workflow persistence.
+
+The Rustack v2 CBOR profile permits unsigned/negative integers, definite byte/text strings, booleans/null/simple/floating values and definite or indefinite arrays/maps. Map keys are definite UTF-8 text or unsigned/negative integers; reject duplicate decoded keys even when their integer/length headers use different widths. Reject tags, indefinite byte/text strings, reserved header encodings, invalid UTF-8, misplaced breaks, odd indefinite maps, truncated values and any bytes following the single root value. These restrictions match the current serde-generated archive DTOs, including integer-keyed Lambda version maps, byte payloads and unknown-length serde collections; arbitrary RFC8949 data is not a Rustack archive schema. Preserve non-minimal integer/length encodings rather than require a new canonical encoder. Follow the [CBOR wire grammar](https://www.rfc-editor.org/rfc/rfc8949.html#section-3); the domain profile intentionally rejects unneeded general-purpose features.
+
+| Structural budget | Ceiling | Enforcement |
+|---|---:|---|
+| One CBOR section | 2GiB | Before traversal, capped fallible writer while encoding |
+| Container depth | 128 | Before descending; scalar root depth0, array/map root depth1 |
+| Aggregate values (root, keys, values and containers) | 8,000,000 | Before visiting each item; includes ignored schema fields |
+| One array / map | 1,000,000 elements / pairs | Before definite-container traversal; during indefinite traversal |
+| One definite byte/text scalar | 128MiB | Before reading/decoding declared contents; accommodates existing base64 Lambda ZIP metadata |
+| One text map key | 128MiB (same generic scalar ceiling) | Before UTF-8/key tracking; integer keys require no string allocation |
+
+The generic text-key ceiling intentionally equals the scalar ceiling: existing service maps can contain user data, including DynamoDB attribute names above4KiB, and this prerequisite must not silently impose workflow identifier limits on them. Per-workflow schema validation must choose narrower domain bounds. The preflight borrows the input, builds no dynamic value tree and copies no text. Only the active maps retain bounded duplicate-key sets. Use checked arithmetic/conversions for every external count/length and compare minimum remaining value bytes before loops. Run the existing Ciborium typed decoder only after the entire structure passes, with an explicit256 [Ciborium recursion limit](https://docs.rs/ciborium/0.2.2/ciborium/de/fn.from_reader_with_recursion_limit.html) and exact reader consumption. The typed limit includes headroom for Ciborium's additional enum recursion entries: a scalar unit enum also enters its recursion guard, so it must exceed the128-container wire depth. Structural and schema failures expose fixed redacted error classes, with no attacker-controlled Ciborium diagnostic/source in the error chain. Schema-specific quotas/references, unknown-field policy, compiled definition validation and aggregate live/history accounting remain the workflow importer's responsibility; these generic ceilings do not claim to enforce them or guarantee a small total process RSS.
+
+The writer must enforce the same byte/structural profile before returning an encoded section, so a successful save never produces a section the shared reader would reject. Allocation failure and oversize encoded output return errors; the existing atomic replacement protocol retains the previous completed snapshot. Do not change the existing cross-service import publication contract or perform blocking parser work in a newly detached task. Workflow preparation will own its bounded CPU/restore transaction separately.
+
+```text
+archive bytes → bounded zstd → v2 envelope / CRC → CBOR section
+                                                  │
+                           ┌──────────────────────▼─────────────────┐
+                           │ complete borrowed preflight            │
+                           │ bytes/depth/nodes/collections/scalars   │
+                           │ UTF-8 / key uniqueness / exact root    │
+                           └──────────────────────┬─────────────────┘
+                                                  ▼ only on success
+                                  typed Ciborium decoder (limit256)
+                                                  ▼
+                                  existing service import validation
+
+service DTO → capped fallible writer → same preflight → archive publish
+failure at either boundary → fixed redacted class; no new snapshot publication
+```
+
+Qualification must exercise real manifest/service/data-directory round trips, the original pre-upgrade frame, definite/indefinite collections, integer-keyed maps, actual DynamoDB export/decode/import with long attribute names, byte/float encodings and derived enum trees at the exact128-container boundary. Test every numeric header width, malformed/truncated inputs, invalid text, alternate-width duplicate keys, empty/root/trailing cases and every resource ceiling at/either side of its boundary using small test budgets. A Deserialize sentinel proves hostile structure is rejected before any typed visitor runs; an oversized serializer proves the writer stops while serializing. The actual SnapshotConfig save/load path must preserve and successfully reload its previously committed generation when an encoder rejects a duplicate-key section. Use bounded property cases for valid nested profile values and arbitrary hostile bytes; no panic, unchecked index or input-bearing diagnostics. Expose these tests through Makefile and retain standard/minimal-feature Rust gates. No dependency/version upgrade or Docker/VM work is required.
+
 ## 5. Cross-references
 
 - ← [runtime hardening](./rustack-runtime-hardening-design.md), [binary archives](./ruststack-snapshot-binary-archive-design.md)

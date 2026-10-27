@@ -201,6 +201,10 @@ directory before publishing the snapshot. On load, the manager unpacks `data.ss.
 directory before calling the service's import method. This keeps final snapshots compact while
 allowing service-native lazy data readers to land later without changing the outer format.
 
+### 6.4 Installed CBOR resource profile
+
+The shared CBOR encoder/decoder must follow [workflow operations§4.2](./rustack-workflows-60-operations-design.md#42-bounded-cbor-import-boundary): preflight the entire single value before typed allocation, reject ambiguous/duplicate keys and enforce byte/depth/value/collection/scalar/key ceilings. Encode through a capped fallible writer and apply the same preflight before publication. These are bounds on the existing v2 metadata/directory wire profile; service-specific schema/identity and restore transaction validation still apply.
+
 ## 7. Snapshot Trait
 
 The app-level trait becomes archive-oriented:

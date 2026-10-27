@@ -564,3 +564,7 @@ When the actual selected Lambda port exists, compose one scoped bounded callback
 ## D69 — Patch the complete compression graph before workflow archive import
 
 Upgrade direct snapshot zstd to the patched0.14.3 cohort and apply a provenance-checked, source-identical squib-loader0.2.0 path overlay whose only dependency change selects that cohort. Preserve upstream metadata/notice, all other Squib package identities and snapshot v2 wire semantics. Qualify old-frame compatibility, abandoned-context isolation, synthetic kernel decompression bounds and fresh audit/deny without new ignores. See [operations§4.1](./rustack-workflows-60-operations-design.md#41-patched-compression-cohort-before-workflow-persistence). No VM/Docker work or upstream publication is authorized by this dependency maintenance step.
+
+## D70 — Preflight the complete CBOR section before typed archive allocation
+
+Install one borrowed structural preflight and capped fallible encoder in the existing snapshot CBOR helpers before workflow import. Enforce the explicit v2 profile, decoded-key uniqueness, byte/depth/node/collection/scalar/key ceilings, exact single-root consumption and redacted failures. Keep existing envelope/DTO/codec semantics; workflow staging, compilation and live history quotas remain separate required work. See [operations§4.2](./rustack-workflows-60-operations-design.md#42-bounded-cbor-import-boundary).

@@ -231,6 +231,15 @@ test-workflows-compression: verify-workflows-compression
 
 .PHONY: verify-workflows-compression test-workflows-compression
 
+# D70: installed archive parser/encoder boundaries, including minimal binary builds.
+test-workflows-archive:
+	@cargo test --locked -p rustack-cli --bin rustack --features stepfunctions snapshot::
+	@cargo test --locked -p rustack-cli --bin rustack --no-default-features --features stepfunctions snapshot::
+	@cargo clippy --locked -p rustack-cli --bin rustack --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+	@cargo clippy --locked -p rustack-cli --bin rustack --no-default-features --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
+
+.PHONY: test-workflows-archive
+
 deny-codegen:
 	@cargo deny --manifest-path codegen/Cargo.toml check
 

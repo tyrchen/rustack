@@ -585,7 +585,7 @@ impl SnapshotConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if state export, JSON serialization, or atomic directory
+    /// Returns an error if state export, CBOR serialization, or atomic directory
     /// replacement fails.
     pub(crate) async fn save(&self, providers: &RuntimeProviders, version: &str) -> Result<()> {
         let started = Instant::now();
@@ -1118,7 +1118,125 @@ fn now_unix_millis() -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use ciborium::Value;
+    #[cfg(feature = "dynamodb")]
+    use rustack_dynamodb_core::config::DynamoDBConfig;
+    #[cfg(feature = "dynamodb")]
+    use serde_json::json;
+
     use super::*;
+
+    #[cfg(feature = "dynamodb")]
+    #[tokio::test]
+    async fn test_should_preserve_long_dynamodb_names_through_actual_archive_import() -> Result<()>
+    {
+        let source = Arc::new(RustackDynamoDB::new(DynamoDBConfig::default()));
+        source.handle_create_table(serde_json::from_value(json!({
+            "TableName": "ArchiveNames",
+            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+            "BillingMode": "PAY_PER_REQUEST"
+        }))?)?;
+        // Existing PutItem accepts these ordinary attribute names within400KiB.
+        // They are data keys, unrelated to a workflow identifier's allowance.
+        let names = ["a".repeat(4097), "b".repeat(65535), "c".repeat(300_000)];
+        for (index, name) in names.iter().enumerate() {
+            source.handle_put_item(serde_json::from_value(json!({
+                "TableName": "ArchiveNames",
+                "Item": {"pk": {"S": index.to_string()}, name: {"S": "preserved"}}
+            }))?)?;
+        }
+        let directory = tempfile::tempdir()?;
+        let service = DynamoDBSnapshotService { provider: source };
+        let cbor = service.save_meta(directory.path()).await?;
+        let archive = directory.path().join(META_FILE);
+        write_archive(
+            &archive,
+            ArchiveKind::ServiceMeta,
+            vec![ArchiveSection::new(SECTION_STATE_CBOR, cbor, 1)],
+        )
+        .await?;
+        let restored = Arc::new(RustackDynamoDB::new(DynamoDBConfig::default()));
+        let service = DynamoDBSnapshotService {
+            provider: restored.clone(),
+        };
+        let sections = read_archive(&archive, ArchiveKind::ServiceMeta).await?;
+        service
+            .load_meta(
+                get_required_section(&sections, SECTION_STATE_CBOR)?,
+                directory.path(),
+            )
+            .await?;
+        for (index, name) in names.iter().enumerate() {
+            let result = restored.handle_get_item(serde_json::from_value(json!({
+                "TableName": "ArchiveNames", "Key": {"pk": {"S": index.to_string()}}
+            }))?)?;
+            let item = serde_json::to_value(result)?;
+            assert_eq!(
+                item.get("Item")
+                    .and_then(|item| item.get(name))
+                    .and_then(|value| value.get("S")),
+                Some(&json!("preserved"))
+            );
+        }
+        Ok(())
+    }
+
+    struct CborService {
+        value: Value,
+    }
+
+    #[async_trait]
+    impl SnapshotService for CborService {
+        fn service_name(&self) -> &'static str {
+            "cbor-test"
+        }
+
+        async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
+            to_cbor(&self.value)
+        }
+
+        async fn load_meta(&self, state_cbor: &[u8], _data_staging_dir: &Path) -> Result<()> {
+            let value: Value = from_cbor(state_cbor)?;
+            if value != self.value {
+                bail!("unexpected test service state");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_preserve_committed_snapshot_when_cbor_profile_validation_fails()
+    -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = SnapshotConfig {
+            root: root.path().to_owned(),
+            name: SnapshotName::try_from("dev".to_owned())?,
+        };
+        let valid = RuntimeProviders {
+            services: vec![Arc::new(CborService { value: Value::Null })],
+        };
+        config.save(&valid, "committed").await?;
+        let invalid = RuntimeProviders {
+            services: vec![Arc::new(CborService {
+                value: Value::Map(vec![
+                    (Value::Text("private-key".into()), Value::Null),
+                    (Value::Text("private-key".into()), Value::Null),
+                ]),
+            })],
+        };
+        let result = config.save(&invalid, "rejected").await;
+        assert!(result.is_err());
+        if let Err(error) = result {
+            let message = format!("{error:#}");
+            assert!(message.contains("duplicate snapshot CBOR key"));
+            assert!(!message.contains("private-key"));
+        }
+        let manifest = read_manifest(&config.snapshot_dir().join(MANIFEST_FILE)).await?;
+        assert_eq!(manifest.rustack_version, "committed");
+        config.load(&valid).await?;
+        Ok(())
+    }
 
     #[test]
     fn test_should_accept_valid_snapshot_name() {

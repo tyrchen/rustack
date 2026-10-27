@@ -11,6 +11,8 @@ use crc32fast::Hasher;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::fs;
 
+mod cbor;
+
 const MAGIC: [u8; 8] = *b"RSSNAP\0\x02";
 const HEADER_LEN: usize = 36;
 const HEADER_LEN_U32: u32 = 36;
@@ -99,16 +101,14 @@ pub(super) fn to_cbor<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize,
 {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).context("failed to encode snapshot CBOR")?;
-    Ok(bytes)
+    Ok(cbor::encode(value)?)
 }
 
 pub(super) fn from_cbor<T>(bytes: &[u8]) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    ciborium::from_reader(bytes).context("failed to decode snapshot CBOR")
+    Ok(cbor::decode(bytes)?)
 }
 
 pub(super) async fn write_archive(
