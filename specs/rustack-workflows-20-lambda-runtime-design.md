@@ -313,6 +313,35 @@ The preparation worker retains the same accepted pull future across caller expir
 
 Required tests cover exact registry matching/default aliases/case/ports and reserved namespaces; every host/credential/aggregate/header bound and redaction/zeroization behavior; explicit tag/digest/platform/auth query/header shapes; strict progress frame/body/JSON/error boundaries; complete-stream versus interrupted/failed outcomes; queue/running caps with independent cleanup; cancellation/expired/dropped/root-failure ownership and joined driver lifetime; present-image nonpull, only-root404 trigger, denied host, post-pull invalid image, and real ImageLeaseManager publication/CAS consumption. Actual daemon qualification must execute the real pull endpoint against an explicitly allowed immutable public reference and retain scope/source safety, then consume successful preparation through existing owned execution gates. A cached endpoint exercise must be identified honestly; actual cache-miss qualification requires an initially absent fixture reference with fixture-owned cleanup only, never deleting a preexisting operator source. Ordinary CLI Docker readiness, YAML auth loading, endpoint/startup composition and final image/platform release remain separate gates.
 
+### 2.15 Immutable local image-lease reacquisition (D87)
+
+Task5.2 first needs an owned way to turn validated saved metadata into a new live pin. Add `ImageLeasePort::restore(saved: &ResolvedImage, overrides: Option<&ImageConfig>, deadline: Instant) -> Result<PinnedImage, DockerError>`. This is a local immutable-content operation, not ordinary deployment preparation: inspect only saved `image_id`, never `requested_reference` or `registry_manifest`, and never call the ifMissing/pull policy, even on404. Reuse the exact bound daemon/directory, qualified architecture, pin/preparation quotas, absolute positive≤3600s deadline, independent configured IO deadlines, durable intent/commit, critical mutation ownership and quarantine/retirement supervisor from§2.9/§2.13. No new actor, dependency or serialized live capability is needed.
+
+Represent ordinary-reference and saved-metadata sources as separate internal enum variants. Restore derives its architecture from the validated saved image; it must not admit an independent conflicting caller architecture. Before any pin journal write or Tag, require initial immutable lookup to return exactly the saved addressable parent ID, resolve its selected platform through the existing resolver, and compare the complete canonical execution fingerprint with the saved fingerprint. That fingerprint includes parent ID, selected manifest, architecture, inspected size and validated inherited argv/environment/workdir/user. The resolver additionally verifies Linux OS and effective ImageConfig. An alias unexpectedly returned for an ID, changed selected descriptor, supported-but-different defaults/size or incompatible platform rejects as invalid inspection before mutation. Preserve original requested-reference/registry metadata in the returned `ResolvedImage` only after this proof; changing an informational source tag cannot change code identity or CodeSha256. Recheck deadline/cancellation after read/validation and before effects.
+
+Then reuse ordinary intent-before-Tag/commit-before-live-lease ordering, exact private-alias verification and fresh positive unpacked-storage proof≤10GiB. A direct missing immutable ID remains resource404; identity-fence errors, selected-platform404/InvalidImage, transient IO, expiry and stopped/failed ownership retain existing distinct provenance. Do not hide failures by following a mutable tag or trying alternate saved identities. A rejected/canceled/dropped result retains every uncertain mutation, quota, directory lease and cleanup join until known physical retirement; successful leases share ordinary clone/revocation/release semantics.
+
+```text
+validated saved ResolvedImage ───────┐
+                                    ▼
+                     Restore source (no pull branch)
+                                    │ saved addressable ID only
+                     immutable lookup + selected platform
+                                    │ exact ID + execution fingerprint
+                  mismatch/404 ── reject before mutation
+                                    ▼
+                     durable pin intent → tracked Tag
+                                    │ commit + alias + unpacked proof
+                                    ▼
+                     shared live PinnedImage capability
+                                    │ last drop / revoke
+                     retained exact-alias retirement
+```
+
+Controlled wire consumers must prove successful reacquisition after source-tag retargeting, preserved saved metadata/hash, no source-name lookups; a missing saved ID despite a newer available source tag must404 with no Tag or pull. Mutate otherwise valid saved size/default/manifest fields and recompute their fingerprint to prove actual daemon comparison rather than deserialization alone; reject before Tag. Qualify the restore path through existing bounded pin admission and a held late critical mutation/shutdown observer, then positively join cleanup. Real `docker_wire` consumers must serialize/deserialize read-only inspected metadata, acquire the function/relay leases through restore and execute the existing actual RIC computation/override resources on both retained engines. Preserve all source images and zero-remnant postconditions.
+
+This is the capability primitive for atomic archive import, not its publication boundary. Provider/main image archive rejection remains until the consuming startup-only candidate store validates all records, reacquires every required lease without changing live resources, verifies saved code hash/unpacked size and commits atomically; failed candidate pins must retire under the same owner. Backup-generation retirement and image readiness must not change merely because this primitive exists. Docker ZIP, Node, handler SDK/callback/IaC and final platform/release requirements stay binding. Docker's [platform inspection history](https://docs.docker.com/reference/api/engine/version-history/) and the pinned [transport study](../docs/research/study-bollard-docker-transport-boundaries.md#platform-specific-image-identity-follow-up) define the independent parent/selected-manifest boundary.
+
 ## 3. Runtime API and relay transport
 
 Implement the four basic 2018-06-01 routes: GET invocation/next, POST invocation/{requestId}/response, POST invocation/{requestId}/error and POST init/error. Each environment processes one invocation at a time. Managed Instances concurrency, extensions, streaming and SnapStart restore are excluded.

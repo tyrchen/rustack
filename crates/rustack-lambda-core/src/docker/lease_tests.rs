@@ -53,6 +53,9 @@ fn manifests(parent: &str, zero: bool) -> Value {
 
 #[derive(Debug, Default)]
 pub(crate) struct Stats {
+    pub(crate) source_lookups: AtomicUsize,
+    pub(crate) immutable_lookups: AtomicUsize,
+    pub(crate) platform_lookups: AtomicUsize,
     pub(crate) tags: AtomicUsize,
     pub(crate) deletes: AtomicUsize,
     pub(crate) absent: AtomicUsize,
@@ -88,6 +91,7 @@ pub(crate) enum Mode {
     Late500,
     Never,
     Wrong,
+    WrongRoot,
     ZeroSize,
     LostDelete,
     HoldDelete,
@@ -240,6 +244,14 @@ impl Script {
         } else {
             assert_eq!(*method, "GET");
             let reference = image.strip_suffix("/json").unwrap();
+            if reference == "worker:v1" {
+                self.stats.source_lookups.fetch_add(1, Ordering::AcqRel);
+            } else if (reference == digest('a') || reference == digest('b')) && query.is_empty() {
+                self.stats.immutable_lookups.fetch_add(1, Ordering::AcqRel);
+            }
+            if !query.is_empty() && query != "manifests=true" {
+                self.stats.platform_lookups.fetch_add(1, Ordering::AcqRel);
+            }
             let parent = if reference == "worker:v1" {
                 Some(if self.retargeted {
                     digest('b')
@@ -260,6 +272,14 @@ impl Script {
                 None
             };
             if let Some(parent) = parent {
+                let parent = if matches!(self.mode, Mode::WrongRoot)
+                    && reference == digest('a')
+                    && query.is_empty()
+                {
+                    digest('b')
+                } else {
+                    parent
+                };
                 let value = if query == "manifests=true" {
                     manifests(&parent, matches!(self.mode, Mode::ZeroSize))
                 } else {
@@ -307,6 +327,17 @@ impl FakePins {
             task: Some(tokio::spawn(script.run())),
             stats,
         }
+    }
+    async fn saved(&self) -> ResolvedImage {
+        ImageResolver::new(self.wire.port())
+            .resolve_local(
+                &"worker:v1".parse().unwrap(),
+                Architecture::Arm64,
+                None,
+                deadline(),
+            )
+            .await
+            .unwrap()
     }
     pub(crate) fn owner(&self, pins: u16, jobs: u8) -> ImageLeaseManager {
         ImageLeaseManager::start(self.wire.port(), scope(), config(pins, jobs)).unwrap()
@@ -476,20 +507,30 @@ async fn test_should_reconcile_rejected_and_lost_preparation_outcomes(#[case] mo
     fake.close().await;
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
 #[tokio::test]
-async fn test_should_retain_uncertain_tag_through_cancelled_waiter_and_initial_absence() {
+async fn test_should_retain_uncertain_tag_through_cancelled_waiter_and_initial_absence(
+    #[case] restoring: bool,
+) {
     let fake = FakePins::new(Mode::Late).await;
+    let expected = fake.saved().await;
     let mut owner = fake.owner(1, 1);
     let port = owner.port();
     let call = port.clone();
     let caller = tokio::spawn(async move {
-        call.prepare(
-            &"worker:v1".parse().unwrap(),
-            Architecture::Arm64,
-            None,
-            deadline(),
-        )
-        .await
+        if restoring {
+            call.restore(&expected, None, deadline()).await
+        } else {
+            call.prepare(
+                &"worker:v1".parse().unwrap(),
+                Architecture::Arm64,
+                None,
+                deadline(),
+            )
+            .await
+        }
     });
     fake.stats
         .until(|| fake.stats.tags.load(Ordering::Acquire) == 1)
@@ -508,32 +549,37 @@ async fn test_should_retain_uncertain_tag_through_cancelled_waiter_and_initial_a
     fake.close().await;
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
 #[tokio::test]
-async fn test_should_bound_preparation_and_pin_admission_and_retain_shutdown_on_timeout() {
+async fn test_should_bound_preparation_and_pin_admission_and_retain_shutdown_on_timeout(
+    #[case] restoring: bool,
+) {
     let fake = FakePins::new(Mode::Never).await;
+    let saved = fake.saved().await;
+    let expected = saved.clone();
     let mut owner = fake.owner(1, 1);
     let port = owner.port();
     let call = port.clone();
     let caller = tokio::spawn(async move {
-        call.prepare(
-            &"worker:v1".parse().unwrap(),
-            Architecture::Arm64,
-            None,
-            deadline(),
-        )
-        .await
+        if restoring {
+            call.restore(&expected, None, deadline()).await
+        } else {
+            call.prepare(
+                &"worker:v1".parse().unwrap(),
+                Architecture::Arm64,
+                None,
+                deadline(),
+            )
+            .await
+        }
     });
     fake.stats
         .until(|| fake.stats.tags.load(Ordering::Acquire) == 1)
         .await;
     assert!(matches!(
-        port.prepare(
-            &"worker:v1".parse().unwrap(),
-            Architecture::Arm64,
-            None,
-            deadline()
-        )
-        .await,
+        port.restore(&saved, None, deadline()).await,
         Err(DockerError::Busy)
     ));
     assert!(matches!(
@@ -944,9 +990,23 @@ async fn test_should_reject_unqualified_platform_before_pin_or_wire_admission() 
             .await,
         Err(DockerError::Configuration)
     ));
+    assert!(matches!(
+        images
+            .port()
+            .restore(
+                &ResolvedImage::fixture(Architecture::X86_64),
+                None,
+                deadline()
+            )
+            .await,
+        Err(DockerError::Configuration)
+    ));
     assert_eq!(images.port().status().pins, 0);
     assert_eq!(images.port().status().preparing, 0);
     images.shutdown(deadline()).await.unwrap();
     wire.shutdown().await.unwrap();
     daemon.close().await;
 }
+
+#[path = "lease_tests/restore.rs"]
+mod restore;

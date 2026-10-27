@@ -18,6 +18,8 @@ D85 extends the Docker functional inventory to 48 resources with live-caller Cre
 
 D86 is implemented and independently reviewed: actual Runtime HTTP profile bounds and separately isolated global/default-per-function/memory/environment ceilings close the two M0 audit gaps. Both retained daemons pass the full53-resource functional gate; exact postconditions show zero owned remnants with selected sources preserved. P1/M0 is functionally qualified on the retained P0 lanes; native Linux/x86/reference performance, Desktop/rootless and the complete M4 platform matrix remain unqualified. See [runtime§4.16](./rustack-workflows-20-lambda-runtime-design.md#416-actual-runtime-http-bounds-and-independent-admission-ceilings-d86). Full M0–M4 release remains open.
 
+D87 is implemented and independently reviewed: [immutable local lease reacquisition](./rustack-workflows-20-lambda-runtime-design.md#215-immutable-local-image-lease-reacquisition-d87) supplies the saved-ID/no-pull capability required by atomic image archive restore. Both retained engines pass18 actual consuming resources and35 lease controls pass; full host/Native/strict/security gates are green. Provider/main archive rejection remains until its consuming transaction is implemented.
+
 | Order | Specification | Type / purpose |
 |---|---|---|
 | 00 | [Workflows PRD](./rustack-workflows-00-prd.md) | Product goals, compatibility profile and complete M0–M4 scope |

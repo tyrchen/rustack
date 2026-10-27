@@ -30,8 +30,8 @@ use super::{
 };
 use crate::{
     artifact::{
-        Architecture, ImageReference, PinnedImage, PreparationAdmission, PreparationReceipt,
-        ResolvedImage, Sha256Digest, UnpackedImageSize,
+        Architecture, ArtifactError, ImageReference, PinnedImage, PreparationAdmission,
+        PreparationReceipt, ResolvedImage, Sha256Digest, UnpackedImageSize,
     },
     executor::ExecutorError,
     function_config::validate_image_config,
@@ -168,10 +168,26 @@ impl Health {
     }
 }
 
+#[derive(Debug)]
+enum PreparationSource {
+    Reference {
+        reference: ImageReference,
+        architecture: Architecture,
+    },
+    Restore(Box<ResolvedImage>),
+}
+impl PreparationSource {
+    fn architecture(&self) -> Architecture {
+        match self {
+            Self::Reference { architecture, .. } => *architecture,
+            Self::Restore(saved) => saved.metadata().architecture,
+        }
+    }
+}
+
 #[derive(TypedBuilder)]
 struct Request {
-    reference: ImageReference,
-    architecture: Architecture,
+    source: PreparationSource,
     overrides: Option<ImageConfig>,
     deadline: Instant,
     cancelled: watch::Receiver<()>,
@@ -240,8 +256,48 @@ impl ImageLeasePort {
         overrides: Option<&ImageConfig>,
         deadline: Instant,
     ) -> Result<PinnedImage, DockerError> {
-        self.prepare_guarded(reference, architecture, overrides, deadline, None)
-            .await
+        self.prepare_guarded(
+            PreparationSource::Reference {
+                reference: reference.clone(),
+                architecture,
+            },
+            overrides,
+            deadline,
+            None,
+        )
+        .await
+    }
+
+    /// Reacquire local immutable content without following source tags or pulling.
+    ///
+    /// The saved ID, selected platform and execution fingerprint must match fresh
+    /// inspection before a new durable private pin can be created. Saved metadata
+    /// alone never grants availability. This does not publish an archive store.
+    ///
+    /// # Errors
+    /// Returns unavailable/exhausted admission, deadline, missing immutable content,
+    /// changed inspection metadata or retained mutation/cleanup failure. Cancellation
+    /// never discards an uncertain mutation or its ownership.
+    ///
+    /// ```no_run
+    /// # async fn restore(port: &rustack_lambda_core::docker::ImageLeasePort, saved: &rustack_lambda_core::artifact::ResolvedImage) -> Result<(), rustack_lambda_core::docker::DockerError> {
+    /// let image = port.restore(saved, None, tokio::time::Instant::now() + std::time::Duration::from_secs(30)).await?;
+    /// assert!(image.is_live());
+    /// # Ok(()) }
+    /// ```
+    pub async fn restore(
+        &self,
+        saved: &ResolvedImage,
+        overrides: Option<&ImageConfig>,
+        deadline: Instant,
+    ) -> Result<PinnedImage, DockerError> {
+        self.prepare_guarded(
+            PreparationSource::Restore(Box::new(saved.clone())),
+            overrides,
+            deadline,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn prepare_deployment(
@@ -253,8 +309,10 @@ impl ImageLeasePort {
         admission: Arc<OwnedSemaphorePermit>,
     ) -> Result<PinnedImage, DockerError> {
         self.prepare_guarded(
-            reference,
-            architecture,
+            PreparationSource::Reference {
+                reference: reference.clone(),
+                architecture,
+            },
             overrides,
             deadline,
             Some(admission),
@@ -264,8 +322,7 @@ impl ImageLeasePort {
 
     async fn prepare_guarded(
         &self,
-        reference: &ImageReference,
-        architecture: Architecture,
+        source: PreparationSource,
         overrides: Option<&ImageConfig>,
         deadline: Instant,
         retained_admission: Option<Arc<OwnedSemaphorePermit>>,
@@ -274,7 +331,7 @@ impl ImageLeasePort {
         self.available()?;
         if self
             .platform
-            .is_some_and(|platform| platform != architecture)
+            .is_some_and(|platform| platform != source.architecture())
         {
             return Err(DockerError::Configuration);
         }
@@ -292,8 +349,7 @@ impl ImageLeasePort {
         let (cancel, cancelled) = watch::channel(());
         let (reply, response) = oneshot::channel();
         let request = Request::builder()
-            .reference(reference.clone())
-            .architecture(architecture)
+            .source(source)
             .overrides(overrides.cloned())
             .deadline(deadline)
             .cancelled(cancelled)
@@ -892,8 +948,7 @@ impl Worker {
         admission: PreparationReceipt,
     ) -> Result<(), DockerError> {
         let Request {
-            reference,
-            architecture,
+            source,
             overrides,
             deadline,
             mut cancelled,
@@ -902,15 +957,9 @@ impl Worker {
             retained_admission: _,
         } = request;
         let staged = self
-            .stage(
-                &reference,
-                architecture,
-                overrides.as_ref(),
-                deadline,
-                &mut cancelled,
-            )
+            .stage(&source, overrides.as_ref(), deadline, &mut cancelled)
             .await;
-        drop(reference);
+        drop(source);
         drop(overrides);
         match staged {
             Ok((resolved, size)) => {
@@ -950,20 +999,29 @@ impl Worker {
         }
         Ok(())
     }
-    async fn stage(
-        &mut self,
-        reference: &ImageReference,
-        architecture: Architecture,
+    async fn resolve_source(
+        &self,
+        source: &PreparationSource,
         overrides: Option<&ImageConfig>,
         deadline: Instant,
         cancel: &mut watch::Receiver<()>,
-    ) -> Result<(ResolvedImage, UnpackedImageSize), DockerError> {
+    ) -> Result<ResolvedImage, DockerError> {
         self.check(deadline, cancel)?;
+        let architecture = source.architecture();
+        let (reference, lookup) = match source {
+            PreparationSource::Reference { reference, .. } => (reference, reference.clone()),
+            PreparationSource::Restore(saved) => (
+                &saved.metadata().requested_reference,
+                saved.metadata().image_id.as_str().parse()?,
+            ),
+        };
         let resolver = ImageResolver::new(self.docker.clone());
         let mut stop = self.control.subscribe();
-        let root = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(reference,deadline.min(self.config.deadline()))=>result,};
+        let root = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=self.docker.inspect_image(&lookup,deadline.min(self.config.deadline()))=>result,};
         let root = match root {
-            Err(DockerError::Status(StatusCode::NOT_FOUND)) => {
+            Err(DockerError::Status(StatusCode::NOT_FOUND))
+                if matches!(source, PreparationSource::Reference { .. }) =>
+            {
                 self.policy
                     .pull(
                         &self.docker,
@@ -978,7 +1036,36 @@ impl Worker {
             }
             result => result?,
         };
-        let image = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.resolve_captured(reference,architecture,overrides,root,deadline.min(self.config.deadline()))=>result?,};
+        if let PreparationSource::Restore(saved) = source {
+            if root.id.as_deref() != Some(saved.metadata().image_id.as_str()) {
+                return Err(ArtifactError::Inspection.into());
+            }
+        }
+        let actual = tokio::select! {biased;()=stopped(&mut stop)=>return Err(DockerError::Stopped),_ = cancel.changed()=>return Err(DockerError::Cancelled),result=resolver.resolve_captured(reference,architecture,overrides,root,deadline.min(self.config.deadline()))=>result?,};
+        self.check(deadline, cancel)?;
+        match source {
+            PreparationSource::Restore(saved) => {
+                if actual.metadata().inspection_hash != saved.metadata().inspection_hash {
+                    return Err(ArtifactError::Inspection.into());
+                }
+                Ok(saved.as_ref().clone())
+            }
+            PreparationSource::Reference { .. } => Ok(actual),
+        }
+    }
+
+    async fn stage(
+        &mut self,
+        source: &PreparationSource,
+        overrides: Option<&ImageConfig>,
+        deadline: Instant,
+        cancel: &mut watch::Receiver<()>,
+    ) -> Result<(ResolvedImage, UnpackedImageSize), DockerError> {
+        let image = self
+            .resolve_source(source, overrides, deadline, cancel)
+            .await?;
+        let resolver = ImageResolver::new(self.docker.clone());
+        let mut stop = self.control.subscribe();
         self.check(deadline, cancel)?;
         let expected = image.metadata().image_id.clone();
         self.progress

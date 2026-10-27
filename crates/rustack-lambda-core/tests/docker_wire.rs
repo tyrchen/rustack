@@ -11,11 +11,12 @@ use http::StatusCode;
 use rustack_lambda_core::{
     artifact::{
         Architecture as ImageArchitecture, DeploymentArtifact, ImageReference, PinnedImage,
+        ResolvedImage,
     },
     docker::{
         ContainerPolicy, DirectoryLease, DirectoryLeaseError, DockerError, DockerKey, DockerPort,
         DockerSocket, DockerWire, EnvironmentPlan, FunctionLogs, ImageLeaseConfig,
-        ImageLeaseManager, ImagePinScope, OutputChannel, OwnerFilter, RelayBudgets,
+        ImageLeaseManager, ImagePinScope, ImageResolver, OutputChannel, OwnerFilter, RelayBudgets,
     },
     executor::{ExecutionRevision, ExecutorBackend},
     identity::FunctionResourceId,
@@ -153,11 +154,15 @@ impl Environment {
             "amd64" => ImageArchitecture::X86_64,
             _ => bail!("unknown fixture architecture"),
         };
-        let image = self
-            .images
-            .port()
-            .prepare(&reference, architecture, None, deadline())
+        let resolved = ImageResolver::new(self.docker.clone())
+            .resolve_local(&reference, architecture, None, deadline())
             .await?;
+        let saved: ResolvedImage = serde_json::from_slice(&serde_json::to_vec(&resolved)?)?;
+        let image = self.images.port().restore(&saved, None, deadline()).await?;
+        ensure!(
+            image.resolved().code_sha256()? == saved.code_sha256()?,
+            "restored image hash changed"
+        );
         self.artifacts.push(image.clone());
         Ok(image)
     }
