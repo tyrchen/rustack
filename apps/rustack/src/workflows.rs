@@ -22,19 +22,23 @@ use rustack_stepfunctions_core::{
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use crate::snapshot::workflows::{ArchiveSupervisor, WorkflowArchive};
+
 /// Shared health reads never acquire business admission or unique controllers.
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowStatus {
     api: Arc<StepFunctionsApi>,
     registry: Registry,
     budgets: RuntimeBudgets,
+    archive: WorkflowArchive,
     callbacks: Option<CallbackRegistry>,
     #[cfg(feature = "lambda")]
     port: Option<Arc<StepFunctionsLambdaBridge>>,
 }
 impl WorkflowStatus {
     pub(crate) fn is_ready(&self) -> bool {
-        let ready = self.api.is_ready()
+        let ready = self.archive.is_ready()
+            && self.api.is_ready()
             && self.registry.status().ready
             && self
                 .callbacks
@@ -49,43 +53,45 @@ impl WorkflowStatus {
         let lambda = self.port.is_some();
         #[cfg(not(feature = "lambda"))]
         let lambda = false;
+        let limits = json!({
+            "apiAccepted": self.budgets.workflow_api_accepted,
+            "apiWorkers": self.budgets.workflow_api_workers,
+            "paginationBytes": self.budgets.workflow_pagination_bytes,
+            "paginationTokens": self.budgets.workflow_pagination_tokens,
+            "machines": self.budgets.workflow_registry_machines,
+            "versions": self.budgets.workflow_registry_versions,
+            "records": self.budgets.workflow_registry_records,
+            "commands": self.budgets.workflow_registry_commands,
+            "nameTombstones": self.budgets.workflow_name_tombstones,
+            "retentionSeconds": self.budgets.workflow_retention_seconds,
+            "openExecutions": self.budgets.workflow_open_executions,
+            "evaluations": self.budgets.workflow_evaluations,
+            "dispatches": self.budgets.workflow_dispatches,
+            "maxDurationSeconds": self.budgets.workflow_max_duration_seconds,
+            "transitions": self.budgets.workflow_transitions,
+            "frames": self.budgets.workflow_frames,
+            "framesPerExecution": self.budgets.workflow_frames_per_execution,
+            "resultBytes": self.budgets.workflow_result_bytes,
+            "resultBytesPerExecution": self.budgets.workflow_result_bytes_per_execution,
+            "historyEvents": 25000, "historyBytes": self.budgets.workflow_history_bytes,
+            "totalHistoryBytes": self.budgets.workflow_total_history_bytes,
+            "snapshotBytes": self.budgets.workflow_snapshot_bytes,
+            "lambdaAcceptedCalls": self.budgets.workflow_lambda_accepted_calls,
+            "lambdaCleanupSeconds": self.budgets.workflow_lambda_cleanup_seconds,
+            "drainSeconds": self.budgets.workflow_drain_seconds,
+            "callbackTokens": self.budgets.workflow_callback_tokens,
+            "callbackTombstones": self.budgets.workflow_callback_tombstones,
+            "callbackCommands": self.budgets.workflow_callback_commands,
+            "callbackWorkers": self.budgets.workflow_callback_workers,
+            "callbackRetentionSeconds": self.budgets.workflow_retention_seconds
+        });
         json!({
             "type": "STANDARD", "queryLanguage": "JSONPath",
             "stateTypes": ["Pass", "Choice", "Wait", "Task", "Succeed", "Fail", "Parallel", "Map"],
             "inlineMapMaxConcurrency": 40,
             "lambdaRequestResponse": lambda, "nestedSync": true, "callbacks": self.registry.callback_support(),
-            "snapshot": "unsupported", "dockerQualified": false,
-            "limits": {
-                "apiAccepted": self.budgets.workflow_api_accepted,
-                "apiWorkers": self.budgets.workflow_api_workers,
-                "paginationBytes": self.budgets.workflow_pagination_bytes,
-                "paginationTokens": self.budgets.workflow_pagination_tokens,
-                "machines": self.budgets.workflow_registry_machines,
-                "versions": self.budgets.workflow_registry_versions,
-                "records": self.budgets.workflow_registry_records,
-                "commands": self.budgets.workflow_registry_commands,
-                "nameTombstones": self.budgets.workflow_name_tombstones,
-                "retentionSeconds": self.budgets.workflow_retention_seconds,
-                "openExecutions": self.budgets.workflow_open_executions,
-                "evaluations": self.budgets.workflow_evaluations,
-                "dispatches": self.budgets.workflow_dispatches,
-                "maxDurationSeconds": self.budgets.workflow_max_duration_seconds,
-                "transitions": self.budgets.workflow_transitions,
-                "frames": self.budgets.workflow_frames,
-                "framesPerExecution": self.budgets.workflow_frames_per_execution,
-                "resultBytes": self.budgets.workflow_result_bytes,
-                "resultBytesPerExecution": self.budgets.workflow_result_bytes_per_execution,
-                "historyEvents": 25000, "historyBytes": self.budgets.workflow_history_bytes,
-                "totalHistoryBytes": self.budgets.workflow_total_history_bytes,
-                "lambdaAcceptedCalls": self.budgets.workflow_lambda_accepted_calls,
-                "lambdaCleanupSeconds": self.budgets.workflow_lambda_cleanup_seconds,
-                "drainSeconds": self.budgets.workflow_drain_seconds,
-                "callbackTokens": self.budgets.workflow_callback_tokens,
-                "callbackTombstones": self.budgets.workflow_callback_tombstones,
-                "callbackCommands": self.budgets.workflow_callback_commands,
-                "callbackWorkers": self.budgets.workflow_callback_workers,
-                "callbackRetentionSeconds": self.budgets.workflow_retention_seconds
-            }
+            "snapshot": "resources-and-history", "snapshotResume": false, "paginationEpoch": "fresh-on-restart", "dockerQualified": false,
+            "limits": limits
         })
     }
 }
@@ -104,6 +110,7 @@ enum Phase {
 #[derive(Debug)]
 pub(crate) struct WorkflowSupervisor {
     api: ApiSupervisor,
+    archive: ArchiveSupervisor,
     registry: RegistrySupervisor,
     status: WorkflowStatus,
     callbacks: Option<CallbackSupervisor>,
@@ -131,6 +138,7 @@ impl Error for WorkflowFailure {
 }
 pub(crate) struct WorkflowRuntime {
     pub(crate) api: Arc<StepFunctionsApi>,
+    pub(crate) archive: WorkflowArchive,
     pub(crate) status: WorkflowStatus,
     pub(crate) owner: WorkflowSupervisor,
 }
@@ -207,18 +215,14 @@ impl WorkflowRuntime {
             )?,
             StateSupport::Structured,
         )?;
-        let (api, api_owner) = StepFunctionsApi::new(
-            scope,
-            tasks,
+        let (api, api_owner) = api_runtime(scope, tasks, registry.clone(), &budgets)?;
+        let (archive, archive_owner) = WorkflowArchive::new(
             registry.clone(),
-            ApiLimits::new(
-                budgets.workflow_api_accepted,
-                budgets.workflow_api_workers,
-                budgets.workflow_pagination_tokens,
-                budgets.workflow_pagination_bytes,
-            )?,
+            budgets.workflow_snapshot_bytes,
+            Duration::from_secs(budgets.request_seconds),
         )?;
         let status = WorkflowStatus {
+            archive: archive.clone(),
             api: api.clone(),
             registry,
             budgets,
@@ -228,9 +232,11 @@ impl WorkflowRuntime {
         };
         Ok(Self {
             api,
+            archive,
             status: status.clone(),
             owner: WorkflowSupervisor {
                 api: api_owner,
+                archive: archive_owner,
                 registry: owner,
                 status,
                 callbacks: callback_owner,
@@ -241,6 +247,24 @@ impl WorkflowRuntime {
             },
         })
     }
+}
+fn api_runtime(
+    scope: TenantScope,
+    tasks: TaskSupport,
+    registry: Registry,
+    budgets: &RuntimeBudgets,
+) -> Result<(Arc<StepFunctionsApi>, ApiSupervisor)> {
+    Ok(StepFunctionsApi::new(
+        scope,
+        tasks,
+        registry,
+        ApiLimits::new(
+            budgets.workflow_api_accepted,
+            budgets.workflow_api_workers,
+            budgets.workflow_pagination_tokens,
+            budgets.workflow_pagination_bytes,
+        )?,
+    )?)
 }
 fn callback_runtime(
     scope: &TenantScope,
@@ -353,7 +377,10 @@ impl WorkflowSupervisor {
             Phase::Grace(_) => Phase::Registry,
             phase => phase,
         };
-        let result = self.quiesce(deadline).await;
+        let archive = self.archive.shutdown(deadline).await;
+        // A lost archive observer may still own preparation or an accepted commit.
+        // Attempt the remaining controllers even when its final join fails.
+        let result = self.quiesce(deadline).await.and(archive);
         if result.is_err() {
             // No successful consistency cut is claimed; cancel retained owners
             // before main attempts provider destruction under the same deadline.
@@ -376,4 +403,4 @@ impl WorkflowSupervisor {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

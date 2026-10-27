@@ -154,6 +154,9 @@ bytes = { workspace = true }
 crc32fast = { workspace = true }
 zstd = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }

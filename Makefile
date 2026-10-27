@@ -256,6 +256,17 @@ test-workflows-snapshot-restore:
 
 .PHONY: test-workflows-snapshot-restore
 
+# D73: actual service archives and signed Native binary restart without replay.
+test-workflows-persistence:
+	@cargo test --locked -p rustack-stepfunctions-core registry::snapshot::archive
+	@cargo test --locked -p rustack-cli --bin rustack --features stepfunctions snapshot::
+	@cargo test --locked -p rustack-cli --bin rustack --no-default-features --features stepfunctions snapshot::
+	@cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions persistence::
+	@cargo build --locked -p rustack-lambda-echo-bootstrap --bin bootstrap
+	@RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions persistence:: -- --ignored --test-threads=1 --nocapture
+
+.PHONY: test-workflows-persistence
+
 deny-codegen:
 	@cargo deny --manifest-path codegen/Cargo.toml check
 

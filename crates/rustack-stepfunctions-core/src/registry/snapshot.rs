@@ -16,7 +16,9 @@ use crate::{
     ClockSample, ExecutionFailure, ExecutionHistory, ExecutionOutcome, ExecutionView, TenantScope,
 };
 
+mod archive;
 mod decode;
+pub use archive::{RegistryHistories, RegistryMetadata};
 mod restore;
 
 pub(super) use restore::Admission as RestoreAdmission;

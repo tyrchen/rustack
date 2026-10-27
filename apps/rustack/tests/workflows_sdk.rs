@@ -2,6 +2,8 @@
 #![cfg(all(feature = "stepfunctions", feature = "lambda", unix))]
 #![forbid(unsafe_code)]
 
+#[path = "workflows_sdk/persistence.rs"]
+mod persistence;
 #[path = "workflows_sdk/process.rs"]
 mod process;
 #[path = "workflows_sdk/runner.rs"]

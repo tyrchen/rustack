@@ -3,6 +3,7 @@
 use std::{
     env,
     ffi::OsString,
+    os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -26,17 +27,25 @@ use super::runner::Runner;
 pub(super) const ACCESS: &str = "local-key";
 pub(super) const SECRET: &str = "local-secret";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Running,
+    Graceful,
+    Kill,
+}
+
 #[derive(Debug)]
 struct Resources {
     child: Child,
     directory: Option<TempDir>,
     markers: PathBuf,
     cleanup_proven: bool,
+    expect_startup_failure: bool,
 }
 #[derive(Debug)]
 struct Owner {
     state: Option<Resources>,
-    stop: watch::Receiver<bool>,
+    stop: watch::Receiver<Stop>,
 }
 #[derive(Debug)]
 pub(super) struct Server {
@@ -44,7 +53,7 @@ pub(super) struct Server {
     pub endpoint: String,
     pub markers: PathBuf,
     pub bootstrap: PathBuf,
-    stop: watch::Sender<bool>,
+    stop: watch::Sender<Stop>,
     root: Option<JoinHandle<Result<usize>>>,
     joined: Option<Result<usize, Arc<anyhow::Error>>>,
 }
@@ -69,6 +78,31 @@ impl Server {
         Self::start_with_dispatch(32).await
     }
     pub async fn start_with_dispatch(dispatch: usize) -> Result<Self> {
+        Self::start_options(dispatch, None, false).await
+    }
+    pub async fn start_named(root: &Path) -> Result<Self> {
+        Self::start_options(32, Some(root), false).await
+    }
+    pub async fn reject_named(root: &Path) -> Result<()> {
+        let mut server = Self::start_options(32, Some(root), true).await?;
+        server
+            .observe(Instant::now() + Duration::from_secs(40))
+            .await?;
+        let address = server
+            .endpoint
+            .strip_prefix("http://")
+            .context("owned endpoint")?;
+        ensure!(
+            TcpStream::connect(address).await.is_err(),
+            "rejected startup opened a listener"
+        );
+        Ok(())
+    }
+    async fn start_options(
+        dispatch: usize,
+        named: Option<&Path>,
+        expect_startup_failure: bool,
+    ) -> Result<Self> {
         ensure!(
             (1..=32).contains(&dispatch),
             "invalid fixture dispatch capacity"
@@ -82,11 +116,16 @@ impl Server {
             "invalid bootstrap size"
         );
         let directory = tempfile::tempdir()?;
-        let markers = directory.path().join("processes");
-        fs::create_dir(&markers).await?;
-        fs::create_dir(directory.path().join("gates")).await?;
-        fs::create_dir(directory.path().join("callbacks")).await?;
-        fs::create_dir(directory.path().join("callback-gates")).await?;
+        let fixture_root = named.unwrap_or_else(|| directory.path());
+        let markers = fixture_root.join("processes");
+        for path in [
+            &markers,
+            &fixture_root.join("gates"),
+            &fixture_root.join("callbacks"),
+            &fixture_root.join("callback-gates"),
+        ] {
+            fs::create_dir_all(path).await?;
+        }
         let config = directory.path().join("rustack.yaml");
         fs::write(
             &config,
@@ -102,8 +141,13 @@ impl Server {
         let reservation = TcpListener::bind("127.0.0.1:0").await?;
         let address = reservation.local_addr()?;
         drop(reservation);
-        let child = Command::new(env!("CARGO_BIN_EXE_rustack"))
-            .env_clear()
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rustack"));
+        command.env_clear();
+        if let Some(named) = named {
+            command.args(["--snapshot", "restart"]);
+            command.env("RUSTACK_SNAPSHOT_DIR", named.join("snapshots"));
+        }
+        let child = command
             .env("TMPDIR", directory.path())
             .env("RUSTACK_CONFIG", &config)
             .env("GATEWAY_LISTEN", address.to_string())
@@ -116,18 +160,23 @@ impl Server {
             .env("LOG_LEVEL", "error")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(if expect_startup_failure {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .kill_on_drop(true)
             .spawn()
             .context("spawn actual Rustack binary")?;
         let pid = child.id().context("owned server PID")?;
-        let (stop, receiver) = watch::channel(false);
+        let (stop, receiver) = watch::channel(Stop::Running);
         let owner = Owner {
             state: Some(Resources {
                 child,
                 directory: Some(directory),
                 markers: markers.clone(),
                 cleanup_proven: false,
+                expect_startup_failure,
             }),
             stop: receiver,
         };
@@ -140,6 +189,9 @@ impl Server {
             root: Some(tokio::spawn(owner.run())),
             joined: None,
         };
+        if expect_startup_failure {
+            return Ok(server);
+        }
         let ready = server.await_ready(&address.to_string()).await;
         if let Err(error) = ready {
             let cleanup = server
@@ -167,7 +219,16 @@ impl Server {
         .context("server startup deadline")?
     }
     pub async fn shutdown(&mut self, deadline: Instant) -> Result<usize> {
-        self.stop.send_replace(true);
+        if *self.stop.borrow() == Stop::Running {
+            self.stop.send_replace(Stop::Graceful);
+        }
+        self.observe(deadline).await
+    }
+    pub async fn crash(&mut self, deadline: Instant) -> Result<usize> {
+        self.stop.send_replace(Stop::Kill);
+        self.observe(deadline).await
+    }
+    async fn observe(&mut self, deadline: Instant) -> Result<usize> {
         if self.joined.is_none() {
             let root = self.root.as_mut().context("missing retained server root")?;
             let result = timeout_at(deadline, root)
@@ -188,7 +249,9 @@ impl Server {
 }
 impl Drop for Server {
     fn drop(&mut self) {
-        self.stop.send_replace(true);
+        if *self.stop.borrow() == Stop::Running {
+            self.stop.send_replace(Stop::Graceful);
+        }
         // Intentional independent root: an SDK/cleanup observer does not own it.
         // Its Drop guard preserves files if the Tokio runtime itself is lost.
         if let Some(root) = self.root.take() {
@@ -203,13 +266,15 @@ impl Owner {
         let status = tokio::select! {
             result = state.child.wait() => {
                 let status = result?;
-                ensure!(*self.stop.borrow(), "server exited without requested shutdown");
+                ensure!(*self.stop.borrow() != Stop::Running || state.expect_startup_failure, "server exited without requested shutdown");
                 status
             },
             _ = self.stop.changed() => {
-                if let Err(error)=release_fixture_gates(&state.markers).await {gate_failure=Some(error);}
+                if *self.stop.borrow() == Stop::Graceful {
+                    if let Err(error)=release_fixture_gates(&state.markers).await {gate_failure=Some(error);}
+                }
                 let pid = state.child.id().context("missing owned server PID")?;
-                let signal=Runner::spawn(Path::new("/bin/kill"), &[OsString::from("-TERM"), OsString::from(pid.to_string())])?
+                let signal=Runner::spawn(Path::new("/bin/kill"), &[OsString::from(if *self.stop.borrow() == Stop::Kill {"-KILL"} else {"-TERM"}), OsString::from(pid.to_string())])?
                     .wait(Instant::now()+Duration::from_secs(5)).await?;
                 ensure!(!signal.forced && signal.status.success(), "cannot signal owned server");
                 if let Ok(status) = timeout(Duration::from_secs(35), state.child.wait()).await { status? } else {
@@ -219,7 +284,35 @@ impl Owner {
                 }
             }
         };
-        ensure!(status.success(), "server coordinated shutdown failed");
+        if state.expect_startup_failure {
+            ensure!(
+                !status.success(),
+                "invalid archive startup unexpectedly succeeded"
+            );
+            let stderr = state
+                .child
+                .stderr
+                .take()
+                .context("missing startup rejection diagnostic")?;
+            let mut diagnostic = Vec::new();
+            timeout(
+                Duration::from_secs(2),
+                stderr.take(16_385).read_to_end(&mut diagnostic),
+            )
+            .await??;
+            ensure!(
+                diagnostic.len() <= 16_384
+                    && String::from_utf8_lossy(&diagnostic).contains("snapshot transaction failed"),
+                "startup did not reject the workflow snapshot"
+            );
+        } else if *self.stop.borrow() == Stop::Kill {
+            ensure!(
+                status.signal() == Some(9),
+                "SIGKILL did not interrupt the server"
+            );
+        } else {
+            ensure!(status.success(), "server coordinated shutdown failed");
+        }
         let observed = timeout(Duration::from_secs(10), verify_absent(&state.markers))
             .await
             .context("PID evidence deadline")??;

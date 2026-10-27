@@ -41,7 +41,9 @@ pub use child::{
 };
 pub use domain::{ExecutionArn, ExecutionName, RoleArn, StateMachineArn, StateMachineName, Tags};
 pub use error::RegistryError;
-pub use snapshot::{PreparedSnapshot, RegistrySnapshot, SnapshotLimits};
+pub use snapshot::{
+    PreparedSnapshot, RegistryHistories, RegistryMetadata, RegistrySnapshot, SnapshotLimits,
+};
 pub use types::{
     DefinitionRevision, ExecutionSnapshot, MachineSnapshot, MachineStatus, PreparedDefinition,
     RegistryCapacities, RegistryLimits, StopReason,

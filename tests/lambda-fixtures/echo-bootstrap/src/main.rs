@@ -7,6 +7,7 @@
 //! - `WORKFLOW_MODE=1` → checked computation; optional `WORKFLOW_FAIL_ONCE=1`
 //! - `PROCESS_MARKER_DIR=path` → per-PID process ownership evidence
 //! - `WORKFLOW_GATE_FILE=path` → bounded consumed-event gate for SDK revision tests
+//! - `WORKFLOW_TOKEN_PORT=port` → local in-memory test collector; no token files/logs
 //! - `WORKFLOW_INVOCATION_DIR=path` → atomic per-request consumed-event markers
 //! - `INVOCATION_FILE=path` → per-event PID/request-ID marker after body receipt
 //! - `SLEEP_SECS=N` → sleep N seconds before responding (for timeout tests)
@@ -18,19 +19,18 @@
 
 use std::{
     io::{Error as IoError, Read as _},
+    num::NonZeroU16,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use ureq::Agent;
+use ureq::{Agent, AgentBuilder};
 
 #[allow(clippy::disallowed_methods)] // This standalone bootstrap deliberately uses synchronous IO, not an async runtime.
 fn main() {
     let api = std::env::var("AWS_LAMBDA_RUNTIME_API")
         .expect("AWS_LAMBDA_RUNTIME_API must be set by the runtime");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_mins(2))
-        .build();
+    let agent = AgentBuilder::new().timeout(Duration::from_mins(2)).build();
     let fail_mode = std::env::var("FAIL_MODE").ok();
     let sleep_secs = sleep_seconds();
 
@@ -112,6 +112,9 @@ fn main() {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        if !collect_callback_token(&agent, &api, &request_id, &parsed) {
+            continue;
+        }
         let (kind, response) = invocation_response(
             &parsed,
             workflow_mode,
@@ -128,6 +131,42 @@ fn main() {
             &response.to_string(),
         );
     }
+}
+
+fn collect_callback_token(
+    agent: &Agent,
+    api: &str,
+    request_id: &str,
+    event: &serde_json::Value,
+) -> bool {
+    if forward_callback_token(event).is_ok() {
+        return true;
+    }
+    let _ = post_runtime(
+        agent,
+        api,
+        &format!("invocation/{request_id}/error"),
+        r#"{"errorType":"FixtureTokenCollection","errorMessage":"local collector failed"}"#,
+    );
+    false
+}
+
+fn forward_callback_token(event: &serde_json::Value) -> Result<(), &'static str> {
+    let Ok(port) = std::env::var("WORKFLOW_TOKEN_PORT") else {
+        return Ok(());
+    };
+    let port: NonZeroU16 = port.parse().map_err(|_| "invalid collector port")?;
+    let token = event
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|token| token.len() == 64)
+        .ok_or("missing token")?;
+    let collector = AgentBuilder::new().timeout(Duration::from_secs(2)).build();
+    collector
+        .post(&format!("http://127.0.0.1:{port}/token"))
+        .send_string(token)
+        .map_err(|_| "local token collector failed")?;
+    Ok(())
 }
 
 fn sleep_seconds() -> u64 {

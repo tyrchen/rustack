@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::*;
 
-fn runtime(budgets: RuntimeBudgets) -> Result<WorkflowRuntime> {
+pub(crate) fn runtime(budgets: RuntimeBudgets) -> Result<WorkflowRuntime> {
     WorkflowRuntime::new(
         TenantScope::default(),
         budgets,
@@ -17,7 +17,7 @@ fn runtime(budgets: RuntimeBudgets) -> Result<WorkflowRuntime> {
         None,
     )
 }
-async fn request(
+pub(crate) async fn request(
     api: Arc<StepFunctionsApi>,
     operation: &str,
     body: Value,
@@ -46,7 +46,7 @@ async fn request(
         },
     ))
 }
-async fn start(
+pub(crate) async fn start(
     runtime: &WorkflowRuntime,
     seconds: u32,
 ) -> Result<rustack_stepfunctions_core::ExecutionSnapshot> {
@@ -190,7 +190,7 @@ async fn test_should_report_pure_profile_and_reject_lambda_without_actual_port()
     let mut runtime = runtime(RuntimeBudgets::default())?;
     let capabilities = runtime.status.capabilities();
     assert_eq!(capabilities["lambdaRequestResponse"], false);
-    assert_eq!(capabilities["snapshot"], "unsupported");
+    assert_eq!(capabilities["snapshot"], "resources-and-history");
     assert_eq!(capabilities["dockerQualified"], false);
     assert_eq!(capabilities["limits"]["apiWorkers"], 8);
     assert_eq!(capabilities["nestedSync"], true);

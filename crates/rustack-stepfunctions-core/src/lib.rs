@@ -50,9 +50,10 @@ pub use registry::{
     CallbackTimeout, CallbackToken, ChildError, ChildExecution, ChildExecutionPort, ChildParent,
     ChildPattern, ChildStartParameters, ChildSubmission, DefinitionRevision, ExecutionArn,
     ExecutionName, ExecutionSnapshot, MachineSnapshot, MachineStatus, PreparedDefinition,
-    PreparedSnapshot, Registry, RegistryCapacities, RegistryCommand, RegistryError, RegistryLimits,
-    RegistryReceipt, RegistryResult, RegistrySnapshot, RegistryStatus, RegistrySupervisor, RoleArn,
-    SnapshotLimits, StateMachineArn, StateMachineName, StopReason, Tags,
+    PreparedSnapshot, Registry, RegistryCapacities, RegistryCommand, RegistryError,
+    RegistryHistories, RegistryLimits, RegistryMetadata, RegistryReceipt, RegistryResult,
+    RegistrySnapshot, RegistryStatus, RegistrySupervisor, RoleArn, SnapshotLimits, StateMachineArn,
+    StateMachineName, StopReason, Tags,
 };
 pub use task::{
     LambdaTaskCommand, LambdaTaskPort, QuarantinedTask, TaskCall, TaskChannelError, TaskEvent,

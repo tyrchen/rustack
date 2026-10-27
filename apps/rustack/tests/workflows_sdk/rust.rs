@@ -52,7 +52,7 @@ fn timeouts() -> TimeoutConfig {
         .operation_timeout(Duration::from_secs(15))
         .build()
 }
-fn sfn(server: &Server, secret: &str) -> Client {
+pub(super) fn sfn(server: &Server, secret: &str) -> Client {
     Client::from_conf(
         aws_sdk_sfn::Config::builder()
             .behavior_version(BehaviorVersion::latest())
@@ -70,7 +70,7 @@ fn sfn(server: &Server, secret: &str) -> Client {
             .build(),
     )
 }
-fn lambda(server: &Server) -> Lambda {
+pub(super) fn lambda(server: &Server) -> Lambda {
     Lambda::from_conf(
         aws_sdk_lambda::Config::builder()
             .behavior_version(BehaviorVersion::latest())
@@ -82,7 +82,7 @@ fn lambda(server: &Server) -> Lambda {
             .build(),
     )
 }
-fn archive(bytes: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn archive(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     writer.start_file(
         "bootstrap",
@@ -196,7 +196,7 @@ async fn check_lambda_compute(client: &Lambda) -> Result<()> {
     Ok(())
 }
 
-async fn create(client: &Client, name: &str, definition: &Value) -> Result<String> {
+pub(super) async fn create(client: &Client, name: &str, definition: &Value) -> Result<String> {
     let response = client
         .create_state_machine()
         .name(name)
@@ -217,7 +217,7 @@ async fn create(client: &Client, name: &str, definition: &Value) -> Result<Strin
     );
     Ok(response.state_machine_arn().to_owned())
 }
-async fn terminal(client: &Client, arn: &str) -> Result<DescribeExecutionOutput> {
+pub(super) async fn terminal(client: &Client, arn: &str) -> Result<DescribeExecutionOutput> {
     timeout(Duration::from_secs(20), async {
         loop {
             let value = client
@@ -234,7 +234,7 @@ async fn terminal(client: &Client, arn: &str) -> Result<DescribeExecutionOutput>
     .await
     .context("execution did not terminate")?
 }
-async fn history(
+pub(super) async fn history(
     client: &Client,
     arn: &str,
     reverse: bool,

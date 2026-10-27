@@ -142,6 +142,8 @@ pub struct RuntimeBudgets {
     pub workflow_transitions: u32,
     /// Retained history bytes per workflow execution.
     pub workflow_history_bytes: usize,
+    /// Conservative workflow snapshot copy and per-part encoded byte ceiling.
+    pub workflow_snapshot_bytes: usize,
     /// Global retained workflow history bytes.
     pub workflow_total_history_bytes: usize,
     /// Accepted and quarantined workflow Lambda bridge calls.
@@ -209,6 +211,7 @@ impl Default for RuntimeBudgets {
             workflow_max_duration_seconds: 3600,
             workflow_transitions: 100_000,
             workflow_history_bytes: 33_554_432,
+            workflow_snapshot_bytes: 536_870_912,
             workflow_total_history_bytes: 268_435_456,
             workflow_lambda_accepted_calls: 128,
             workflow_lambda_cleanup_seconds: 10,
@@ -486,6 +489,12 @@ impl RuntimeBudgets {
                 self.workflow_history_bytes as u64,
                 1_048_576,
                 268_435_456,
+            ),
+            (
+                "budgets.workflowSnapshotBytes",
+                self.workflow_snapshot_bytes as u64,
+                1_048_576,
+                1_073_741_824,
             ),
             (
                 "budgets.workflowTotalHistoryBytes",
@@ -1005,6 +1014,8 @@ mod tests {
             "workflowMaxDurationSeconds: 0",
             "workflowTransitions: 1000001",
             "workflowHistoryBytes: 1048575",
+            "workflowSnapshotBytes: 1048575",
+            "workflowSnapshotBytes: 1073741825",
             "workflowTotalHistoryBytes: 4294967297",
             "workflowLambdaAcceptedCalls: 0",
             "workflowLambdaCleanupSeconds: 61",

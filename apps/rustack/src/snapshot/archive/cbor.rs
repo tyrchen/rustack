@@ -269,6 +269,16 @@ impl CappedWriter {
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, Failure> {
     encode_with_limits(value, LIMITS)
 }
+#[cfg(feature = "stepfunctions")]
+pub(super) fn encode_bounded<T: Serialize>(value: &T, bytes: usize) -> Result<Vec<u8>, Failure> {
+    encode_with_limits(
+        value,
+        Limits {
+            bytes: bytes.min(LIMITS.bytes),
+            ..LIMITS
+        },
+    )
+}
 fn encode_with_limits<T: Serialize>(value: &T, limits: Limits) -> Result<Vec<u8>, Failure> {
     let mut writer = CappedWriter {
         bytes: Vec::new(),

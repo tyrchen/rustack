@@ -224,7 +224,7 @@ use crate::{
     gateway::GatewayService,
     runtime::RuntimeWorkers,
     service::ServiceRouter,
-    snapshot::{RuntimeProviders, SnapshotConfig},
+    snapshot::{RuntimeProviders, SnapshotConfig, SnapshotSession},
 };
 
 /// Server version reported in health check responses.
@@ -913,6 +913,22 @@ fn log_level() -> String {
     settings::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string())
 }
 
+fn enforce_startup_deadline(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        anyhow::bail!("runtime startup observation deadline exceeded");
+    }
+    Ok(())
+}
+
+async fn bind_before_deadline(address: SocketAddr, deadline: Instant) -> Result<TcpListener> {
+    enforce_startup_deadline(deadline)?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to bind to {address}"))?;
+    enforce_startup_deadline(deadline)?;
+    Ok(listener)
+}
+
 /// Built runtime services and provider handles.
 struct Runtime {
     services: Vec<Box<dyn ServiceRouter>>,
@@ -922,12 +938,30 @@ struct Runtime {
     workflows: Option<WorkflowSupervisor>,
 }
 
+impl Runtime {
+    /// Join constructed owners even when startup never opens the public listener.
+    async fn abort_startup(&mut self, deadline: Instant) -> Result<()> {
+        #[cfg(feature = "stepfunctions")]
+        let workflow = match &mut self.workflows {
+            Some(workflows) => workflows.shutdown(deadline).await,
+            None => Ok(()),
+        };
+        let workers = tokio::time::timeout_at(deadline, self.workers.shutdown())
+            .await
+            .context("startup provider cleanup observation expired")?;
+        #[cfg(feature = "stepfunctions")]
+        workflow?;
+        workers
+    }
+}
+
 /// Build all enabled service routers based on environment configuration.
 #[allow(clippy::too_many_lines)]
 fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
     let providers = RuntimeProviders::default();
     #[cfg(any(
+        feature = "stepfunctions",
         feature = "s3",
         feature = "dynamodb",
         feature = "dynamodbstreams",
@@ -1311,6 +1345,7 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
             #[cfg(feature = "lambda")]
             workers.lambda.clone(),
         )?;
+        providers.register_workflows(workflow.archive);
         workers.workflows = Some(workflow.status);
         let http = StepFunctionsHttpService::new(workflow.api, config);
         services.insert(0, Box::new(service::StepFunctionsServiceRouter::new(http)));
@@ -1449,7 +1484,7 @@ async fn run() -> Result<()> {
     }
     config.validate_credentials(&enabled)?;
     info!(settings = ?config, "validated runtime configuration");
-    let runtime = build_services(|name| enabled.iter().any(|s| s == name))?;
+    let mut runtime = build_services(|name| enabled.iter().any(|s| s == name))?;
 
     if runtime.services.is_empty() {
         anyhow::bail!(
@@ -1458,14 +1493,36 @@ async fn run() -> Result<()> {
         );
     }
 
-    let _snapshot_lease = match snapshot_config.as_ref() {
-        Some(config) => Some(config.acquire_lease().await?),
-        None => None,
+    let startup_deadline =
+        Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds);
+    let mut snapshot = SnapshotSession::new(snapshot_config);
+    let startup = tokio::time::timeout_at(startup_deadline, async {
+        snapshot.load(&runtime.providers, startup_deadline).await?;
+        let addr: SocketAddr = listen_addr
+            .parse()
+            .with_context(|| format!("invalid bind address: {listen_addr}"))?;
+        let listener = bind_before_deadline(addr, startup_deadline).await?;
+        Result::<_>::Ok((addr, listener))
+    })
+    .await
+    .context("runtime startup observation deadline exceeded")
+    .and_then(|result| result);
+    let (addr, listener) = match startup {
+        Ok(started) => started,
+        Err(error) => {
+            let cleanup_deadline =
+                Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds);
+            if let Err(cleanup) = snapshot.finish(cleanup_deadline).await {
+                tracing::error!(error = %cleanup, "startup snapshot cleanup incomplete");
+            }
+            let cleanup = runtime.abort_startup(cleanup_deadline).await;
+            snapshot.quarantine();
+            if let Err(cleanup) = cleanup {
+                tracing::error!(error = %cleanup, "startup cleanup incomplete");
+            }
+            return Err(error);
+        }
     };
-    if let Some(config) = snapshot_config.as_ref() {
-        info!(coverage = ?runtime.providers.coverage(), "snapshot includes only declared state; other services and SQS messages are not persisted");
-        config.load(&runtime.providers).await?;
-    }
 
     let Runtime {
         services,
@@ -1477,14 +1534,6 @@ async fn run() -> Result<()> {
     let workers = Arc::new(workers);
     let gateway = GatewayService::new(services).with_workers(Arc::clone(&workers));
     let service_names = gateway.service_names();
-
-    let addr: SocketAddr = listen_addr
-        .parse()
-        .with_context(|| format!("invalid bind address: {listen_addr}"))?;
-
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind to {addr}"))?;
 
     info!(
         %addr,
@@ -1509,15 +1558,12 @@ async fn run() -> Result<()> {
             workflows.quiesce(work_deadline).await?;
         }
         workers.quiesce_consumers(work_deadline).await?;
-        if let Some(config) = snapshot_config.as_ref() {
-            tokio::time::timeout_at(work_deadline, config.save(&providers, VERSION))
-                .await
-                .context("snapshot save deadline exceeded")??;
-        }
+        snapshot.save(&providers, VERSION, work_deadline).await?;
         Result::<()>::Ok(())
     }
     .await;
     let stop_result = async {
+        let snapshot_result = snapshot.finish(deadline).await;
         #[cfg(feature = "stepfunctions")]
         let workflow_result = match &mut workflows {
             Some(workflows) => workflows.shutdown(deadline).await,
@@ -1530,11 +1576,15 @@ async fn run() -> Result<()> {
                  (kill_on_drop reaps remaining children)"
             )),
         };
+        snapshot_result?;
         #[cfg(feature = "stepfunctions")]
         workflow_result?;
         worker_result
     }
     .await;
+    if save_result.is_err() || stop_result.is_err() {
+        snapshot.quarantine();
+    }
     save_result?;
     stop_result?;
     Ok(())
@@ -1542,6 +1592,18 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn test_should_refuse_expired_startup_before_opening_listener() -> Result<()> {
+        let reservation = TcpListener::bind("127.0.0.1:0").await?;
+        let address = reservation.local_addr()?;
+        drop(reservation);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(bind_before_deadline(address, deadline).await.is_err());
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        Ok(())
+    }
+
     #[cfg(feature = "stepfunctions")]
     use std::num::NonZeroU64;
 
@@ -1764,7 +1826,7 @@ mod tests {
                 "pure service advertised Lambda"
             );
             anyhow::ensure!(
-                capabilities["workflows"]["snapshot"] == "unsupported",
+                capabilities["workflows"]["snapshot"] == "resources-and-history",
                 "snapshot coverage was overstated"
             );
             Result::<()>::Ok(())
