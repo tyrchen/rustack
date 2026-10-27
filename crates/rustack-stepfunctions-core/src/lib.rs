@@ -32,12 +32,12 @@ pub use compiler::{
 };
 pub use dataflow::DataFlow;
 pub use engine::{
-    AttemptId, CleanupState, ClockSample, DriverStep, DriverUpdate, ExecutionDriver,
-    ExecutionError, ExecutionFailure, ExecutionHandle, ExecutionHistory, ExecutionLimits,
-    ExecutionOutcome, ExecutionSource, ExecutionSupervisor, ExecutionView, FanoutBranch,
-    FanoutFailure, FanoutPlan, FrameCallId, FrameCapacity, FrameError, FrameId, FrameLease,
-    FrameLimits, FrameParent, FrameScheduler, FrameTransition, FrameUpdate, HistoryLimits,
-    HistoryPage, PropagatedFailure, RuntimeLimits, TaskDispatch, TaskFailure,
+    AttemptId, CallbackDispatch, CleanupState, ClockSample, DriverStep, DriverUpdate,
+    ExecutionDriver, ExecutionError, ExecutionFailure, ExecutionHandle, ExecutionHistory,
+    ExecutionLimits, ExecutionOutcome, ExecutionSource, ExecutionSupervisor, ExecutionView,
+    FanoutBranch, FanoutFailure, FanoutPlan, FrameCallId, FrameCapacity, FrameError, FrameId,
+    FrameLease, FrameLimits, FrameParent, FrameScheduler, FrameTransition, FrameUpdate,
+    HistoryLimits, HistoryPage, PropagatedFailure, RuntimeLimits, TaskDispatch, TaskFailure,
 };
 pub use error::AslError;
 pub use expression::{Expression, SystemUuidSource, UuidSource};

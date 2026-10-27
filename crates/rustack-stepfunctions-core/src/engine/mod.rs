@@ -19,6 +19,7 @@ use crate::{
     AslError, CompiledMachine, EvaluationContext, Payload, StateId, StateView, Transition,
 };
 
+mod callback;
 mod fanout;
 mod history;
 mod recovery;
@@ -29,6 +30,7 @@ mod states;
 mod tests;
 mod types;
 
+pub use callback::CallbackDispatch;
 pub use fanout::{FanoutBranch, FanoutFailure, FanoutPlan, PropagatedFailure};
 pub use scheduler::{
     FrameCallId, FrameCapacity, FrameError, FrameId, FrameLease, FrameLimits, FrameParent,
@@ -119,7 +121,7 @@ impl ExecutionDriver {
         started: ClockSample,
         limits: ExecutionLimits,
     ) -> Result<Self, AslError> {
-        if machine.requires_structured_execution() {
+        if machine.requires_structured_execution() || machine.uses_callbacks() {
             return Err(AslError::StructuredExecutionRequired);
         }
         Self::for_structured_owner(machine, input, base, started, limits)

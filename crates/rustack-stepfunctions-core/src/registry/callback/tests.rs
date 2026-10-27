@@ -943,7 +943,7 @@ async fn test_should_validate_captured_parent_scope_heartbeat_and_task_deadline_
     for heartbeat in [
         Duration::ZERO,
         Duration::from_millis(500),
-        Duration::from_secs(31_536_001),
+        Duration::from_secs(100_000_000),
     ] {
         assert!(matches!(
             CallbackAttempt::new(&f.parent, f.calls[0], deadline(), Some(heartbeat)),

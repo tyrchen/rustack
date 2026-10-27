@@ -427,7 +427,9 @@ impl CompiledMachine {
         self.rows.iter().any(|row| match &row.node {
             Node::Task { resource, .. } => matches!(
                 resource,
-                Integration::DirectLambda(_) | Integration::LambdaInvoke
+                Integration::DirectLambda(_)
+                    | Integration::LambdaInvoke
+                    | Integration::LambdaCallback(_)
             ),
             Node::Parallel { branches, .. } => branches.iter().any(|branch| branch.uses_lambda()),
             Node::Map { processor, .. } => processor.uses_lambda(),
@@ -440,6 +442,17 @@ impl CompiledMachine {
             Node::Task { resource, .. } => matches!(resource, Integration::StartExecution(_)),
             Node::Parallel { branches, .. } => branches.iter().any(|branch| branch.uses_children()),
             Node::Map { processor, .. } => processor.uses_children(),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn uses_callbacks(&self) -> bool {
+        self.rows.iter().any(|row| match &row.node {
+            Node::Task { resource, .. } => matches!(resource, Integration::LambdaCallback(_)),
+            Node::Parallel { branches, .. } => {
+                branches.iter().any(|branch| branch.uses_callbacks())
+            }
+            Node::Map { processor, .. } => processor.uses_callbacks(),
             _ => false,
         })
     }

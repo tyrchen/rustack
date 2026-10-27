@@ -8,7 +8,7 @@ use tokio::{task::JoinError, time::Instant};
 use super::CallbackToken;
 use crate::{
     AslError, ExecutionSnapshot, FrameCallId, Payload, StopReason, TaskFailure, TenantScope,
-    registry::domain,
+    compiler::TASK_SECONDS_LIMIT, registry::domain,
 };
 
 /// Static, redacted callback lifecycle/admission errors with retained sources.
@@ -140,7 +140,7 @@ impl CallbackAttempt {
     ///
     /// # Errors
     /// Rejects closed parents, expired deadlines and nonpositive/nonintegral
-    /// heartbeat seconds or intervals exceeding365 days.
+    /// heartbeat seconds or intervals exceeding99,999,999 seconds.
     ///
     /// ```no_run
     /// # fn register(parent:&rustack_stepfunctions_core::ExecutionSnapshot,call:rustack_stepfunctions_core::FrameCallId,deadline:tokio::time::Instant){
@@ -154,7 +154,8 @@ impl CallbackAttempt {
         heartbeat: Option<Duration>,
     ) -> Result<Self, CallbackError> {
         if heartbeat.is_some_and(|value| {
-            value.subsec_nanos() != 0 || !(1..=31_536_000).contains(&value.as_secs())
+            value.subsec_nanos() != 0
+                || !(1..=u64::from(TASK_SECONDS_LIMIT)).contains(&value.as_secs())
         }) {
             return Err(CallbackError::Validation);
         }

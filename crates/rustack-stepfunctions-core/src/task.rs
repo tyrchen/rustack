@@ -54,7 +54,7 @@ impl LambdaTaskCommand {
             || !matches!(
                 machine.state(dispatch.state()),
                 Ok(StateView::Task {
-                    resource: Integration::LambdaInvoke,
+                    resource: Integration::LambdaInvoke | Integration::LambdaCallback(_),
                     ..
                 })
             )

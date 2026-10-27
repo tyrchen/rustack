@@ -49,7 +49,12 @@ impl CallPlan {
             Integration::DirectLambda(arn) => {
                 (arn.as_str().into(), None, call.parameters().clone(), false)
             }
-            Integration::LambdaInvoke => {
+            Integration::LambdaInvoke | Integration::LambdaCallback(_) => {
+                if matches!(resource, Integration::LambdaCallback(_))
+                    && !command.is_observed_callback()
+                {
+                    return Err(BridgeError::Parameters);
+                }
                 let object = call
                     .parameters()
                     .value()

@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
-use super::{Code, CompileError, Location};
+use super::{AslCompiler, Code, CompileError, Location, TaskTimeout};
 use crate::{AslError, ExecutionName, Payload, StateMachineArn};
 
 /// Adapter support supplied by trusted composition, never a request field.
@@ -156,6 +156,8 @@ pub enum Integration {
     DirectLambda(FunctionArn),
     /// Optimized request-response result envelope.
     LambdaInvoke,
+    /// Deferred optimized callback invocation with an optional heartbeat source.
+    LambdaCallback(TaskTimeout),
     /// Start or await an execution through the installed registry.
     StartExecution(ChildPattern),
 }
@@ -190,11 +192,11 @@ fn valid_qualifier(value: &str) -> bool {
 pub(super) fn compile(
     value: &str,
     parameters: Option<&Value>,
-    scope: &TenantScope,
-    support: TaskSupport,
-    children: bool,
+    compiler: &AslCompiler,
+    heartbeat: TaskTimeout,
     location: &Location,
 ) -> Result<Integration, CompileError> {
+    let scope = &compiler.scope;
     let prefix = format!("arn:{}:states:::", scope.partition());
     let integration = if value == format!("{prefix}lambda:invoke") {
         optimized(parameters, scope, &location.field("Parameters")?)?;
@@ -207,7 +209,7 @@ pub(super) fn compile(
     .into_iter()
     .find_map(|(suffix, pattern)| (value == format!("{prefix}{suffix}")).then_some(pattern))
     {
-        if !children {
+        if !compiler.children {
             return Err(location.field("Resource")?.error(
                 Code::ProfileUnavailable,
                 "child execution adapter is unavailable",
@@ -216,10 +218,14 @@ pub(super) fn compile(
         child_parameters(parameters, scope, &location.field("Parameters")?)?;
         return Ok(Integration::StartExecution(pattern));
     } else if value == format!("{prefix}lambda:invoke.waitForTaskToken") {
-        return Err(location.field("Resource")?.error(
-            Code::ProfileUnavailable,
-            "integration requires a later workflow profile",
-        ));
+        if !compiler.callbacks {
+            return Err(location.field("Resource")?.error(
+                Code::ProfileUnavailable,
+                "callback effect support is unavailable",
+            ));
+        }
+        optimized(parameters, scope, &location.field("Parameters")?)?;
+        Integration::LambdaCallback(heartbeat)
     } else {
         Integration::DirectLambda(FunctionArn::parse(
             value,
@@ -227,7 +233,7 @@ pub(super) fn compile(
             &location.field("Resource")?,
         )?)
     };
-    if support == TaskSupport::Disabled {
+    if compiler.tasks == TaskSupport::Disabled {
         return Err(location.field("Resource")?.error(
             Code::DependencyDisabled,
             "Lambda task adapter is unavailable",

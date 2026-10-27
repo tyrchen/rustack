@@ -37,6 +37,8 @@ use ir::{Failure, Node, Row};
 pub use recovery::{Catcher, Jitter, RecoveryPolicy, Retrier, RetryTiming};
 pub use task::{ChildPattern, FunctionArn, Integration, TaskSupport, TenantScope};
 
+pub(crate) const TASK_SECONDS_LIMIT: u32 = 99_999_999;
+
 /// Trusted state-instruction profile selected by an execution composition root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,6 +58,7 @@ pub struct AslCompiler {
     tasks: TaskSupport,
     states: StateSupport,
     children: bool,
+    callbacks: bool,
 }
 
 impl fmt::Debug for AslCompiler {
@@ -78,6 +81,7 @@ impl AslCompiler {
             tasks,
             states: StateSupport::Sequential,
             children: false,
+            callbacks: false,
         }
     }
 
@@ -103,6 +107,19 @@ impl AslCompiler {
     #[must_use]
     pub fn with_child_support(mut self, enabled: bool) -> Self {
         self.children = enabled;
+        self
+    }
+
+    /// Select callback IR only when the caller implements deferred token effects.
+    ///
+    /// This does not enable runtime, registry or service admission.
+    ///
+    /// ```
+    /// let compiler=rustack_stepfunctions_core::AslCompiler::default().with_callback_support(true);
+    /// ```
+    #[must_use]
+    pub fn with_callback_support(mut self, enabled: bool) -> Self {
+        self.callbacks = enabled;
         self
     }
 

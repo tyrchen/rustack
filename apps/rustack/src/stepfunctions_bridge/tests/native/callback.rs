@@ -1,37 +1,69 @@
 //! Real Native invocation composition; ASL callback activation is separately gated.
 
 use rustack_stepfunctions_core::{
-    CallbackAttempt, CallbackCommand, CallbackInvocation, CallbackInvocationMetadata,
-    CallbackLimits, CallbackOutcome, CallbackRegistry, CallbackTask, CompiledMachine, DriverStep,
-    FrameCallId, FrameCapacity, FrameLimits, FrameScheduler, FrameUpdate, LambdaTaskCommand,
-    SystemUuidSource, TaskCall, TaskDispatch, TaskEvent, TaskFailure, TaskSettlement,
+    CallbackAttempt, CallbackCommand, CallbackDispatch, CallbackInvocation,
+    CallbackInvocationMetadata, CallbackLimits, CallbackOutcome, CallbackRegistry, CallbackTask,
+    DriverStep, FrameCallId, FrameCapacity, FrameLimits, FrameScheduler, FrameUpdate,
+    LambdaTaskCommand, SystemUuidSource, TaskCall, TaskEvent, TaskFailure, TaskSettlement,
 };
 use uuid::Uuid;
 
 use super::*;
 use crate::stepfunctions_bridge::{mapping::Mapped, worker};
 
-fn observed_dispatch() -> Result<(Arc<CompiledMachine>, TaskDispatch, FrameCallId), Box<dyn Error>>
-{
+fn observed_dispatch() -> Result<(CallbackDispatch, FrameCallId), Box<dyn Error>> {
+    let mut definition = workflow(true);
+    definition["States"]["Call"]["Resource"] =
+        json!("arn:aws:states:::lambda:invoke.waitForTaskToken");
+    definition["States"]["Call"]["Parameters"]["Payload"]["token.$"] = json!("$$.Task.Token");
+    let machine = AslCompiler::new(TenantScope::default(), TaskSupport::Lambda)
+        .with_callback_support(true)
+        .compile(&serde_json::to_vec(&definition)?)?
+        .machine()
+        .clone();
+    let now = ClockSample::new(Instant::now().into_std(), SystemTime::now().into());
+    let input = Payload::from_value(&json!({"n":21}))?;
+    let driver = ExecutionDriver::for_structured_owner(
+        machine,
+        input.clone(),
+        EvaluationContext::from_value(&json!({}))?,
+        now,
+        ExecutionLimits::default(),
+    )?;
     let mut frames = FrameScheduler::new(
-        driver(&workflow(true), &json!({"n":21})),
+        driver,
         Arc::new(FrameCapacity::default()),
         FrameLimits::default(),
     )?;
-    let now = ClockSample::new(Instant::now().into_std(), SystemTime::now().into());
     for _ in 0..20 {
         if let FrameUpdate::Transition(t) = frames.advance(now, &mut SystemUuidSource::default()) {
-            if let DriverStep::Dispatch(dispatch) = t.step() {
-                return Ok((
-                    t.machine().clone(),
-                    dispatch.clone(),
-                    t.call().ok_or("call")?,
-                ));
+            if let DriverStep::Callback(effect) = t.step() {
+                return Ok((effect.clone(), t.call().ok_or("call")?));
             }
         }
     }
-    Err("missing dispatch".into())
+    Err("missing deferred callback".into())
 }
+
+fn command(
+    effect: &CallbackDispatch,
+    call: FrameCallId,
+    task: &mut CallbackTask,
+) -> Result<LambdaTaskCommand, Box<dyn Error>> {
+    let (dispatch, history) =
+        effect.prepare_with_source(task.token(), &mut SystemUuidSource::default())?;
+    let scheduled = effect.scheduled_event(&history, SystemTime::now().into())?;
+    if !history.redacted() || serde_json::to_string(&scheduled)?.contains(task.token().expose()) {
+        return Err("unsafe callback scheduling projection".into());
+    }
+    Ok(LambdaTaskCommand::observed_callback(
+        effect.machine().clone(),
+        dispatch,
+        call,
+        task.take_invocation_reporter()?,
+    )?)
+}
+
 async fn success(registry: &CallbackRegistry, task: &CallbackTask) -> Result<(), Box<dyn Error>> {
     registry
         .submit(
@@ -83,22 +115,17 @@ async fn run(
     else {
         return Err("parent".into());
     };
-    let (machine, dispatch, call_id) = observed_dispatch()?;
+    let (effect, call_id) = observed_dispatch()?;
     let mut mint = callbacks.register(CallbackAttempt::new(
         &parent,
         call_id,
-        Instant::now() + Duration::from_secs(300),
-        None,
+        Instant::from_std(effect.deadline()),
+        effect.heartbeat(),
     )?)?;
     mint.admitted(deadline()).await?;
     let mut task = mint.into_task()?;
     let secret = task.token().expose().to_owned();
-    let command = LambdaTaskCommand::observed_callback(
-        machine,
-        dispatch,
-        call_id,
-        task.take_invocation_reporter()?,
-    )?;
+    let command = command(&effect, call_id, &mut task)?;
     let mut call = fixture
         .port
         .start(command)
@@ -284,7 +311,7 @@ async fn test_should_publish_return_before_bridge_settlement_and_preserve_report
         else {
             return Err::<(), Box<dyn Error>>("parent".into());
         };
-        let (_, _, call_id) = observed_dispatch()?;
+        let (_, call_id) = observed_dispatch()?;
         let mut mint =
             callbacks.register(CallbackAttempt::new(&parent, call_id, deadline(), None)?)?;
         mint.admitted(deadline()).await?;

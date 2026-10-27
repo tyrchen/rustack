@@ -429,3 +429,54 @@ async fn test_should_reject_dispatch_generation_mismatch_even_with_the_right_rep
     ));
     f.close().await
 }
+
+#[tokio::test]
+async fn test_should_register_a_real_deferred_effect_heartbeat_above_one_year_and_clamp_its_timer()
+-> TestResult {
+    let mut f = Fixture::new(CallbackLimits::default()).await?;
+    let machine=AslCompiler::new(TenantScope::default(),TaskSupport::Lambda).with_callback_support(true).compile(br#"{"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke.waitForTaskToken","HeartbeatSeconds":99999998,"Parameters":{"FunctionName":"Worker","Payload":{"token.$":"$$.Task.Token"}},"End":true}}}"#)?.machine().clone();
+    let now = ClockSample::new(Instant::now().into_std(), Utc::now());
+    let driver = ExecutionDriver::for_structured_owner(
+        machine,
+        Payload::parse(b"{}")?,
+        EvaluationContext::from_value(&json!({}))?,
+        now,
+        ExecutionLimits::default(),
+    )?;
+    let mut frames = FrameScheduler::new(
+        driver,
+        Arc::new(FrameCapacity::default()),
+        FrameLimits::default(),
+    )?;
+    let (effect, call) = loop {
+        if let FrameUpdate::Transition(t) = frames.advance(now, &mut SystemUuidSource::default()) {
+            if let DriverStep::Callback(effect) = t.step() {
+                break (effect.clone(), t.call().ok_or("call")?);
+            }
+        }
+    };
+    let heartbeat = effect.heartbeat().ok_or("heartbeat")?;
+    assert!(heartbeat > Duration::from_hours(8760));
+    let mut mint = f.callbacks.register(CallbackAttempt::new(
+        &f.parent,
+        call,
+        Instant::from_std(effect.deadline()),
+        Some(heartbeat),
+    )?)?;
+    mint.admitted(deadline()).await?;
+    let mut task = mint.into_task()?;
+    let (actual, history) =
+        effect.prepare_with_source(task.token(), &mut SystemUuidSource::default())?;
+    assert_eq!(
+        actual.parameters().value()["Payload"]["token"],
+        task.token().expose()
+    );
+    assert!(history.payload().value()["Payload"]["token"].is_null());
+    task.invocation_complete(Ok(()))?;
+    activated(&mut task).await?;
+    assert!(
+        matches!(task.snapshot().as_ref(),CallbackOutcome::Waiting{heartbeat_deadline:Some(until)} if *until==task.deadline)
+    );
+    task.revoke();
+    f.close().await
+}

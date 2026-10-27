@@ -80,13 +80,10 @@ impl FrameTransition {
     /// ```
     #[must_use]
     pub fn call(&self) -> Option<FrameCallId> {
-        match &self.step {
-            DriverStep::Dispatch(call) => Some(FrameCallId {
-                frame: self.frame,
-                attempt: call.attempt(),
-            }),
-            _ => None,
-        }
+        self.step.task_attempt().map(|attempt| FrameCallId {
+            frame: self.frame,
+            attempt,
+        })
     }
 }
 

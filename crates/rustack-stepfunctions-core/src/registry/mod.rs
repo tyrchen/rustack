@@ -417,6 +417,7 @@ impl RegistryCommand {
     fn check(&self, scope: &TenantScope, states: StateSupport) -> Result<(), RegistryError> {
         let check_machine = |machine: &CompiledMachine| {
             if machine.is_root_definition()
+                && !machine.uses_callbacks()
                 && domain::same_scope(machine.scope(), scope)
                 && (states == StateSupport::Structured || !machine.requires_structured_execution())
             {

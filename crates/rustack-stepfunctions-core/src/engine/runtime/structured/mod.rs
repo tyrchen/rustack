@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     ChildPattern, ClockSample, CompiledMachine, DriverStep, ExecutionFailure, ExecutionOutcome,
-    FrameCallId, FrameError, FrameLease, FrameScheduler, FrameUpdate, Integration,
+    FrameCallId, FrameError, FrameLease, FrameScheduler, FrameTransition, FrameUpdate, Integration,
     LambdaTaskCommand, Payload, StateView, SystemUuidSource, TaskCall, TaskDispatch, TaskFailure,
     TaskTimeout,
     engine::{
@@ -410,6 +410,47 @@ impl Actor {
             }
         }
     }
+    fn schedule(&mut self, t: &FrameTransition, wall: DateTime<Utc>) -> Result<(), ExecutionError> {
+        if matches!(t.step(), DriverStep::Callback(_)) {
+            return Err(ExecutionError::Unavailable);
+        }
+        if let DriverStep::Dispatch(dispatch) = t.step() {
+            let id = t.call().ok_or(ExecutionError::Invalid)?;
+            let graph = self.graph.as_ref().ok_or(ExecutionError::Invalid)?;
+            let driver = graph.driver(id.frame()).ok_or(ExecutionError::Invalid)?;
+            let timeout = match driver.machine.state(driver.state)? {
+                StateView::Task { timeout, .. } => match timeout {
+                    TaskTimeout::Omitted => None,
+                    TaskTimeout::Seconds(value) => Some(i64::from(value.get())),
+                    TaskTimeout::Path(path) => path
+                        .lookup(&driver.input, &driver.context)
+                        .and_then(Value::as_i64),
+                },
+                _ => None,
+            };
+            self.history.event(
+                id.frame(),
+                events::scheduled(
+                    t.machine(),
+                    dispatch.state(),
+                    dispatch.parameters(),
+                    timeout,
+                    wall,
+                ),
+            )?;
+            let frame = graph.lease(id.frame()).ok_or(ExecutionError::Invalid)?;
+            self.pending.insert(
+                id,
+                Pending {
+                    expired: false,
+                    command: LambdaTaskCommand::new(t.machine().clone(), dispatch.clone()),
+                    frame,
+                },
+            );
+        }
+
+        Ok(())
+    }
     fn update(&mut self, update: FrameUpdate, wall: DateTime<Utc>) -> Result<(), ExecutionError> {
         match update {
             FrameUpdate::Transition(t) => {
@@ -418,40 +459,7 @@ impl Actor {
                 }
                 self.history.transition(&t, wall)?;
 
-                if let DriverStep::Dispatch(dispatch) = t.step() {
-                    let id = t.call().ok_or(ExecutionError::Invalid)?;
-                    let graph = self.graph.as_ref().ok_or(ExecutionError::Invalid)?;
-                    let driver = graph.driver(id.frame()).ok_or(ExecutionError::Invalid)?;
-                    let timeout = match driver.machine.state(driver.state)? {
-                        StateView::Task { timeout, .. } => match timeout {
-                            TaskTimeout::Omitted => None,
-                            TaskTimeout::Seconds(value) => Some(i64::from(value.get())),
-                            TaskTimeout::Path(path) => path
-                                .lookup(&driver.input, &driver.context)
-                                .and_then(Value::as_i64),
-                        },
-                        _ => None,
-                    };
-                    self.history.event(
-                        id.frame(),
-                        events::scheduled(
-                            t.machine(),
-                            dispatch.state(),
-                            dispatch.parameters(),
-                            timeout,
-                            wall,
-                        ),
-                    )?;
-                    let frame = graph.lease(id.frame()).ok_or(ExecutionError::Invalid)?;
-                    self.pending.insert(
-                        id,
-                        Pending {
-                            expired: false,
-                            command: LambdaTaskCommand::new(t.machine().clone(), dispatch.clone()),
-                            frame,
-                        },
-                    );
-                }
+                self.schedule(&t, wall)?;
                 self.park = None;
                 self.publish_running();
             }

@@ -223,6 +223,7 @@ impl ExecutionSupervisor {
         }
         self.reap_ready();
         if driver.started
+            || driver.machine().uses_callbacks()
             || (!structured && driver.machine().requires_structured_execution())
             || (driver.machine().uses_children() && (!structured || child_port.is_none()))
             || (self.shared.port.is_none() && driver.machine().uses_lambda())

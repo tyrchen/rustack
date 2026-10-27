@@ -254,13 +254,13 @@ impl FrameScheduler {
         }))
     }
     fn capture_effect(&mut self, id: FrameId, step: &DriverStep) -> bool {
-        if let DriverStep::Dispatch(dispatch) = step {
+        if let Some(attempt) = step.task_attempt() {
             if self.calls >= MAX_CALLS {
                 self.safety("Rustack.TaskOwnershipLimitExceeded");
                 return false;
             }
             if let Some(frame) = self.frames.get_mut(&id) {
-                frame.calls.insert(dispatch.attempt(), CallState::Active);
+                frame.calls.insert(attempt, CallState::Active);
                 self.calls += 1;
             }
         }

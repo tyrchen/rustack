@@ -8,7 +8,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::{AslError, FanoutPlan, Payload, StateId, SystemUuidSource, UuidSource};
+use crate::{
+    AslError, CallbackDispatch, FanoutPlan, Payload, StateId, SystemUuidSource, UuidSource,
+};
 
 /// One paired wall/monotonic observation supplied by the execution owner.
 #[derive(Debug, Clone, Copy)]
@@ -275,12 +277,24 @@ pub enum DriverStep {
     Continue,
     /// Start exactly once and retain the accepted call under supervisor ownership.
     Dispatch(TaskDispatch),
+    /// Register a token for this identity before materializing invocation/history.
+    Callback(CallbackDispatch),
     /// Admit indexed children lazily, then join this generation after cleanup.
     FanOut(FanoutPlan),
     /// Arm a monotonic wakeup (also returned while waiting for a Task result).
     Park(Instant),
     /// An immutable outcome; does not certify resource cleanup or history commit.
     Settled(Arc<ExecutionOutcome>),
+}
+
+impl DriverStep {
+    pub(crate) fn task_attempt(&self) -> Option<AttemptId> {
+        match self {
+            Self::Dispatch(dispatch) => Some(dispatch.attempt()),
+            Self::Callback(dispatch) => Some(dispatch.attempt()),
+            _ => None,
+        }
+    }
 }
 
 /// A transition and its independent cleanup obligation.

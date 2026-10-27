@@ -2,11 +2,17 @@
 
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
 use super::{
-    AttemptId, ClockSample, Continuation, DriverStep, ExecutionDriver, ExecutionFailure,
-    ExecutionOutcome, ExecutionSource, Phase, TaskDispatch,
+    AttemptId, CallbackDispatch, ClockSample, Continuation, DriverStep, ExecutionDriver,
+    ExecutionFailure, ExecutionOutcome, ExecutionSource, Phase, TaskDispatch,
+    callback::CallbackIdentity,
 };
-use crate::{AslError, FailureView, Payload, StateView, TaskTimeout, Transition};
+use crate::{
+    AslError, DataFlow, FailureView, Integration, Payload, StateView, TaskTimeout, Transition,
+    compiler::TASK_SECONDS_LIMIT,
+};
 
 impl ExecutionDriver {
     pub(super) fn execute<S: ExecutionSource + ?Sized>(
@@ -91,24 +97,66 @@ impl ExecutionDriver {
                 };
                 Ok(DriverStep::Park(until))
             }
-            StateView::Task { flow, timeout, .. } => {
-                // Timeout path is state input metadata, not the invocation event.
-                let deadline = self.task_deadline(timeout, now.monotonic)?;
-                let parameters = flow.prepare_with_source(&self.input, &self.context, source)?;
-                self.generation = self
-                    .generation
-                    .checked_add(1)
-                    .ok_or(AslError::InvalidExecution)?;
-                let attempt = AttemptId(self.generation);
-                self.phase = Phase::Calling { attempt, deadline };
-                Ok(DriverStep::Dispatch(TaskDispatch {
+            StateView::Task {
+                flow,
+                timeout,
+                resource,
+                ..
+            } => self.task(flow, timeout, resource, now, source),
+        }
+    }
+    fn task<S: ExecutionSource + ?Sized>(
+        &mut self,
+        flow: &DataFlow,
+        timeout: &TaskTimeout,
+        resource: &Integration,
+        now: ClockSample,
+        source: &mut S,
+    ) -> Result<DriverStep, AslError> {
+        let seconds = self.task_seconds(timeout)?;
+        let deadline = self.task_deadline(seconds, now.monotonic)?;
+        let heartbeat = if let Integration::LambdaCallback(heartbeat) = resource {
+            let heartbeat = self.task_seconds(heartbeat)?;
+            if heartbeat.is_some_and(|h| h >= seconds.unwrap_or(TASK_SECONDS_LIMIT)) {
+                return Err(AslError::WaitValue);
+            }
+            heartbeat.map(|s| Duration::from_secs(u64::from(s)))
+        } else {
+            None
+        };
+        // Callback templates require a real registered token. Ordinary
+        // Tasks retain their existing eager single-evaluation behavior.
+        let parameters = if matches!(resource, Integration::LambdaCallback(_)) {
+            None
+        } else {
+            Some(flow.prepare_with_source(&self.input, &self.context, source)?)
+        };
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(AslError::InvalidExecution)?;
+        let attempt = AttemptId(self.generation);
+        self.phase = Phase::Calling { attempt, deadline };
+        Ok(match parameters {
+            Some(parameters) => DriverStep::Dispatch(TaskDispatch {
+                attempt,
+                state: self.state,
+                parameters,
+                deadline,
+            }),
+            None => DriverStep::Callback(CallbackDispatch {
+                identity: CallbackIdentity {
                     attempt,
                     state: self.state,
-                    parameters,
                     deadline,
-                }))
-            }
-        }
+                    timeout: seconds,
+                    heartbeat,
+                },
+                machine: self.machine.clone(),
+                input: self.input.clone(),
+                context: self.context.clone(),
+            }),
+        })
     }
     fn failure_field<S: ExecutionSource + ?Sized>(
         &self,
@@ -129,19 +177,26 @@ impl ExecutionDriver {
         }
         Ok(Some(text.into()))
     }
-    fn task_deadline(&self, timeout: &TaskTimeout, now: Instant) -> Result<Instant, AslError> {
-        let seconds = match timeout {
-            TaskTimeout::Omitted => return Ok(self.deadline),
-            TaskTimeout::Seconds(seconds) => u64::from(seconds.get()),
-            TaskTimeout::Path(path) => path
-                .lookup(&self.input, &self.context)
-                .ok_or(AslError::Missing)?
-                .as_u64()
-                .filter(|s| (1..=99_999_999).contains(s))
-                .ok_or(AslError::WaitValue)?,
+    fn task_seconds(&self, timeout: &TaskTimeout) -> Result<Option<u32>, AslError> {
+        match timeout {
+            TaskTimeout::Omitted => Ok(None),
+            TaskTimeout::Seconds(seconds) => Ok(Some(seconds.get())),
+            TaskTimeout::Path(path) => {
+                let value = path
+                    .lookup(&self.input, &self.context)
+                    .and_then(Value::as_u64)
+                    .filter(|s| (1..=u64::from(TASK_SECONDS_LIMIT)).contains(s))
+                    .ok_or(AslError::WaitValue)?;
+                Ok(Some(u32::try_from(value).map_err(|_| AslError::WaitValue)?))
+            }
+        }
+    }
+    fn task_deadline(&self, seconds: Option<u32>, now: Instant) -> Result<Instant, AslError> {
+        let Some(seconds) = seconds else {
+            return Ok(self.deadline);
         };
         let remaining = self.deadline.saturating_duration_since(now);
-        now.checked_add(Duration::from_secs(seconds).min(remaining))
+        now.checked_add(Duration::from_secs(u64::from(seconds)).min(remaining))
             .ok_or(AslError::InvalidExecution)
     }
 }

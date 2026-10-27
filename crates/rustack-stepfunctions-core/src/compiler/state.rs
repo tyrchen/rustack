@@ -5,9 +5,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde_json::{Map, Value};
 
 use super::{
-    Code, CompileError, Failure, Location, Node, StateId, StateSupport, TaskTimeout, Transition,
-    fields, metadata, object_value, positive, recovery, required, scope::Context, structured,
-    target, task, text,
+    Code, CompileError, Failure, Location, Node, StateId, StateSupport, TASK_SECONDS_LIMIT,
+    TaskTimeout, Transition, fields, metadata, object_value, positive, recovery, required,
+    scope::Context, structured, target, task, text,
 };
 use crate::{DataFlow, Expression, Predicate, ReferencePath, WaitSource};
 
@@ -53,34 +53,7 @@ pub(super) fn compile(
                 next: transition(object, location, index)?,
             })
         }
-        "Task" => {
-            for key in ["HeartbeatSeconds", "HeartbeatSecondsPath"] {
-                if object.contains_key(key) {
-                    return Err(location.field(key)?.error(
-                        Code::ProfileUnavailable,
-                        "heartbeat requires callback task support",
-                    ));
-                }
-            }
-            let resource = text(
-                required(object, "Resource", location)?,
-                &location.field("Resource")?,
-            )?;
-            Ok(Node::Task {
-                flow: flow(object, location)?,
-                resource: task::compile(
-                    resource,
-                    object.get("Parameters"),
-                    &context.compiler.scope,
-                    context.compiler.tasks,
-                    context.compiler.children,
-                    location,
-                )?,
-                timeout: timeout(object, location)?,
-                recovery: recovery::compile(object, location, index)?,
-                next: transition(object, location, index)?,
-            })
-        }
+        "Task" => task_state(object, location, index, context),
         "Parallel" | "Map" => structured::compile(kind, object, location, index, context, depth),
         "Choice" => choice(object, location, index),
         "Wait" => {
@@ -282,16 +255,75 @@ pub(super) fn transition(
         )),
     }
 }
+fn task_state(
+    object: &Map<String, Value>,
+    location: &Location,
+    index: &BTreeMap<String, StateId>,
+    context: &Context<'_>,
+) -> Result<Node, CompileError> {
+    let resource = text(
+        required(object, "Resource", location)?,
+        &location.field("Resource")?,
+    )?;
+    let callback = resource
+        == format!(
+            "arn:{}:states:::lambda:invoke.waitForTaskToken",
+            context.compiler.scope.partition()
+        );
+    let heartbeat = if callback {
+        interval(object, "HeartbeatSeconds", "HeartbeatSecondsPath", location)?
+    } else {
+        for key in ["HeartbeatSeconds", "HeartbeatSecondsPath"] {
+            if object.contains_key(key) {
+                return Err(location.field(key)?.error(
+                    Code::ProfileUnavailable,
+                    "heartbeat requires callback task support",
+                ));
+            }
+        }
+        TaskTimeout::Omitted
+    };
+    let timeout = timeout(object, location)?;
+    if matches!((&heartbeat, &timeout), (TaskTimeout::Seconds(h), TaskTimeout::Seconds(t)) if h >= t)
+        || matches!((&heartbeat, &timeout), (TaskTimeout::Seconds(h), TaskTimeout::Omitted) if h.get() >= TASK_SECONDS_LIMIT)
+    {
+        return Err(location.field("HeartbeatSeconds")?.error(
+            Code::InvalidSchema,
+            "heartbeat must be smaller than Task timeout",
+        ));
+    }
+    Ok(Node::Task {
+        flow: flow(object, location)?,
+        resource: task::compile(
+            resource,
+            object.get("Parameters"),
+            context.compiler,
+            heartbeat,
+            location,
+        )?,
+        timeout,
+        recovery: recovery::compile(object, location, index)?,
+        next: transition(object, location, index)?,
+    })
+}
+
 fn timeout(object: &Map<String, Value>, location: &Location) -> Result<TaskTimeout, CompileError> {
-    let pos = location.field("TimeoutSeconds")?;
-    match (
-        object.get("TimeoutSeconds"),
-        object.get("TimeoutSecondsPath"),
-    ) {
+    interval(object, "TimeoutSeconds", "TimeoutSecondsPath", location)
+}
+fn interval(
+    object: &Map<String, Value>,
+    literal: &str,
+    path: &str,
+    location: &Location,
+) -> Result<TaskTimeout, CompileError> {
+    let pos = location.field(literal)?;
+    match (object.get(literal), object.get(path)) {
         (None, None) => Ok(TaskTimeout::Omitted),
-        (Some(value), None) => positive(value, 99_999_999, &pos).map(TaskTimeout::Seconds),
+        (Some(value), None) => {
+            positive(value, u64::from(TASK_SECONDS_LIMIT), &pos).map(TaskTimeout::Seconds)
+        }
         (None, Some(value)) => {
-            let pos = location.field("TimeoutSecondsPath")?;
+            let pos = location.field(path)?;
             text(value, &pos)?
                 .parse::<ReferencePath>()
                 .map(TaskTimeout::Path)
@@ -299,10 +331,11 @@ fn timeout(object: &Map<String, Value>, location: &Location) -> Result<TaskTimeo
         }
         _ => Err(pos.error(
             Code::InvalidSchema,
-            "timeout literal and path are mutually exclusive",
+            "interval literal and path are mutually exclusive",
         )),
     }
 }
+
 fn failure(
     object: &Map<String, Value>,
     literal: &str,

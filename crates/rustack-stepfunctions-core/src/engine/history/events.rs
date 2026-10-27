@@ -15,8 +15,8 @@ use rustack_stepfunctions_model::types::{
 };
 
 use crate::{
-    AslError, CompiledMachine, ExecutionOutcome, Integration, Payload, StateId, StateView,
-    TaskFailure,
+    AslError, CallbackHistory, CompiledMachine, ExecutionOutcome, Integration, Payload, StateId,
+    StateView, TaskFailure,
 };
 
 pub(crate) fn event(kind: HistoryEventType, wall: DateTime<Utc>) -> HistoryEvent {
@@ -101,6 +101,7 @@ fn resource(machine: &CompiledMachine, state: StateId) -> Result<&Integration, A
 fn metadata(resource: &Integration) -> (&'static str, &'static str) {
     match resource {
         Integration::StartExecution(pattern) => (pattern.action(), "states"),
+        Integration::LambdaCallback(_) => ("invoke.waitForTaskToken", "lambda"),
         Integration::LambdaInvoke | Integration::DirectLambda(_) => ("invoke", "lambda"),
     }
 }
@@ -111,7 +112,9 @@ pub(crate) fn task_submitted(
     wall: DateTime<Utc>,
 ) -> Result<HistoryEvent, AslError> {
     let integration = resource(machine, state)?;
-    if !matches!(integration, Integration::StartExecution(pattern) if pattern.owned()) {
+    if !matches!(integration, Integration::StartExecution(pattern) if pattern.owned())
+        && !matches!(integration, Integration::LambdaCallback(_))
+    {
         return Err(AslError::InvalidStateId);
     }
     let mut e = event(HistoryEventType::TaskSubmitted, wall);
@@ -119,7 +122,9 @@ pub(crate) fn task_submitted(
     d.resource = metadata(integration).0.into();
     d.resource_type = metadata(integration).1.into();
     d.output = Some(text(output)?);
-    d.output_details = Some(details());
+    let mut output_details = details();
+    output_details.truncated = Some(matches!(integration, Integration::LambdaCallback(_)));
+    d.output_details = Some(output_details);
     e.task_submitted_event_details = Some(d);
     Ok(e)
 }
@@ -142,19 +147,52 @@ pub(crate) fn scheduled(
             Ok(e)
         }
         integration @ (Integration::LambdaInvoke | Integration::StartExecution(_)) => {
-            let mut e = event(HistoryEventType::TaskScheduled, wall);
-            e.task_scheduled_event_details = Some(
-                TaskScheduledEventDetails::builder()
-                    .parameters(text(input)?)
-                    .region(machine.scope().region().into())
-                    .resource(metadata(integration).0.into())
-                    .resource_type(metadata(integration).1.into())
-                    .timeout_in_seconds(timeout)
-                    .build(),
-            );
-            Ok(e)
+            task_scheduled(machine, integration, input, timeout, None, wall)
         }
+        Integration::LambdaCallback(_) => Err(AslError::InvalidExecution),
     }
+}
+pub(crate) fn scheduled_callback(
+    machine: &CompiledMachine,
+    state: StateId,
+    history: &CallbackHistory,
+    timeout: Option<i64>,
+    heartbeat: Option<i64>,
+    wall: DateTime<Utc>,
+) -> Result<HistoryEvent, AslError> {
+    let integration = resource(machine, state)?;
+    if !matches!(integration, Integration::LambdaCallback(_)) {
+        return Err(AslError::InvalidStateId);
+    }
+    task_scheduled(
+        machine,
+        integration,
+        history.payload(),
+        timeout,
+        heartbeat,
+        wall,
+    )
+}
+fn task_scheduled(
+    machine: &CompiledMachine,
+    integration: &Integration,
+    input: &Payload,
+    timeout: Option<i64>,
+    heartbeat: Option<i64>,
+    wall: DateTime<Utc>,
+) -> Result<HistoryEvent, AslError> {
+    let mut e = event(HistoryEventType::TaskScheduled, wall);
+    e.task_scheduled_event_details = Some(
+        TaskScheduledEventDetails::builder()
+            .parameters(text(input)?)
+            .region(machine.scope().region().into())
+            .resource(metadata(integration).0.into())
+            .resource_type(metadata(integration).1.into())
+            .timeout_in_seconds(timeout)
+            .heartbeat_in_seconds(heartbeat)
+            .build(),
+    );
+    Ok(e)
 }
 pub(crate) fn task_started(
     machine: &CompiledMachine,
@@ -163,7 +201,9 @@ pub(crate) fn task_started(
 ) -> Result<HistoryEvent, AslError> {
     match resource(machine, state)? {
         Integration::DirectLambda(_) => Ok(event(HistoryEventType::LambdaFunctionStarted, wall)),
-        integration @ (Integration::LambdaInvoke | Integration::StartExecution(_)) => {
+        integration @ (Integration::LambdaInvoke
+        | Integration::LambdaCallback(_)
+        | Integration::StartExecution(_)) => {
             let mut e = event(HistoryEventType::TaskStarted, wall);
             let mut d = TaskStartedEventDetails::default();
             d.resource = metadata(integration).0.into();
@@ -188,7 +228,9 @@ pub(crate) fn task_success(
             e.lambda_function_succeeded_event_details = Some(d);
             Ok(e)
         }
-        integration @ (Integration::LambdaInvoke | Integration::StartExecution(_)) => {
+        integration @ (Integration::LambdaInvoke
+        | Integration::LambdaCallback(_)
+        | Integration::StartExecution(_)) => {
             let mut e = event(HistoryEventType::TaskSucceeded, wall);
             let mut d = TaskSucceededEventDetails::default();
             d.output = Some(text(output)?);
@@ -248,14 +290,26 @@ pub(crate) fn task_failure(
             lambda_function_schedule_failed_event_details,
             LambdaFunctionScheduleFailedEventDetails
         ),
-        (Integration::LambdaInvoke | Integration::StartExecution(_), TaskFailureKind::Failed) => {
+        (
+            Integration::LambdaInvoke
+            | Integration::LambdaCallback(_)
+            | Integration::StartExecution(_),
+            TaskFailureKind::Failed,
+        ) => {
             failure!(optimized TaskFailed,task_failed_event_details,TaskFailedEventDetails)
         }
-        (Integration::LambdaInvoke | Integration::StartExecution(_), TaskFailureKind::TimedOut) => {
+        (
+            Integration::LambdaInvoke
+            | Integration::LambdaCallback(_)
+            | Integration::StartExecution(_),
+            TaskFailureKind::TimedOut,
+        ) => {
             failure!(optimized TaskTimedOut,task_timed_out_event_details,TaskTimedOutEventDetails)
         }
         (
-            Integration::LambdaInvoke | Integration::StartExecution(_),
+            Integration::LambdaInvoke
+            | Integration::LambdaCallback(_)
+            | Integration::StartExecution(_),
             TaskFailureKind::Admission,
         ) => {
             failure!(optimized TaskStartFailed,task_start_failed_event_details,TaskStartFailedEventDetails)
