@@ -13,8 +13,9 @@ import time
 import unittest
 import urllib.parse
 import uuid
+from unittest.mock import patch
 
-from docker_io_proxy import ProtocolError, Proxy, body, exact, head, line
+from docker_io_proxy import Progress, ProtocolError, Proxy, body, exact, head, interrupted_pull, line
 from lambda_fault_support import UnixHTTP
 
 
@@ -68,6 +69,106 @@ def request(stream):
 
 
 class ProxyControls(unittest.TestCase):
+    def test_should_reject_late_ready_io_instead_of_publishing_completion(self):
+        writer, reader = socket.socketpair()
+        try:
+            writer.sendall(b"ready")
+            with patch("docker_io_proxy.time.monotonic", side_effect=[0.0, 2.0]):
+                with self.assertRaises(ProtocolError):
+                    exact(reader, 5, 1.0)
+        finally:
+            writer.close()
+            reader.close()
+
+    def test_should_hold_delete_ack_after_the_effect_without_releasing_early(self):
+        owner, key, effected = str(uuid.uuid4()), "c"*64, threading.Event()
+        def backend(stream):
+            request(stream)
+            effected.set()
+            stream.sendall(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+        with daemon(backend) as proxy:
+            proxy.records[key] = {"owner":owner, "role":"function"}
+            proxy.arm("delete_ack", owner)
+            def client():
+                connection = UnixHTTP(proxy.path)
+                try:
+                    connection.request("DELETE", "/v1.53/containers/" + key)
+                    reply = connection.getresponse()
+                    reply.read()
+                    return reply.status
+                finally:
+                    connection.close()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(client)
+                self.assertEqual(proxy.wait(1, time.monotonic() + 2)[0]["id"], key)
+                self.assertTrue(effected.is_set())
+                self.assertFalse(result.done())
+                proxy.release()
+                self.assertEqual(result.result(2), 204)
+
+    def test_should_truncate_only_pull_front_body_and_positively_drain_backend(self):
+        reference = "public.ecr.aws:443/lambda/nodejs@sha256:" + "a"*64
+        finish = threading.Event()
+        def backend(stream):
+            request(stream)
+            first, second = b'{"status":"Downloading"}\n', b'{"status":"Complete"}\n'
+            stream.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                           format(len(first), "x").encode() + b"\r\n" + first + b"\r\n")
+            assert finish.wait(2), "backend drain barrier was abandoned"
+            stream.sendall(format(len(second), "x").encode() + b"\r\n" + second + b"\r\n0\r\n\r\n")
+        with daemon(backend) as proxy:
+            proxy.interrupt_pull(reference)
+            connection = UnixHTTP(proxy.path)
+            try:
+                connection.request("POST", "/v1.53/images/create?" + urllib.parse.urlencode({
+                    "fromImage":reference.split("@")[0], "tag":reference.split("@")[1]}))
+                reply = connection.getresponse()
+                with self.assertRaises(http.client.IncompleteRead):
+                    reply.read()
+                connection.close()
+                self.assertTrue(proxy.pull_cut)
+                self.assertFalse(proxy.pull_done)
+                finish.set()
+                self.assertEqual(proxy.wait_pull(time.monotonic() + 2), 2)
+            finally:
+                finish.set()
+                connection.close()
+
+    def test_should_refuse_pull_error_duplicate_incomplete_and_oversized_progress(self):
+        for value in (b'{"error":"denied","status":"failed"}\n', b'{"errorDetail":{"code":1},"status":"failed"}\n',
+                      b'{"error":"","status":"ok"}\n', b'{"error":null,"status":"ok"}\n', b'{"errorDetail":{},"status":"ok"}\n',
+                      b'{"status":"ok","detail":NaN}\n', b'{"status":"ok","detail":Infinity}\n',
+                      b'{"status":"a","status":"b"}\n', b'{"status":"missing newline"}',
+                      b'{}\n', b'{"status":"' + b'x'*65536 + b'"}\n', b''):
+            with self.subTest(value=value[:60]), self.assertRaises((ProtocolError, ValueError, AssertionError)):
+                progress = Progress()
+                progress.feed(value)
+                progress.finish()
+        progress = Progress()
+        progress.feed(b'{"sta')
+        progress.feed(b'tus":"ok"}\n')
+        progress.finish()
+        self.assertEqual(progress.count, 1)
+        progress = Progress()
+        progress.feed(b'{"status":"ok"}\n' * 65536)
+        progress.finish()
+        with self.assertRaises(ProtocolError):
+            progress.feed(b'{"status":"excess"}\n')
+
+    def test_should_refuse_positive_pull_completion_on_truncated_backend_framing(self):
+        for value in (b'10\r\n{"status":"ok"}\n', b'10\r\n{"status":"ok"}\n\r\n', b'0\r\n\r\n', b'1000001\r\n'):
+            backend, writer = socket.socketpair()
+            client, observer = socket.socketpair()
+            try:
+                writer.sendall(value)
+                writer.shutdown(socket.SHUT_WR)
+                with self.assertRaises((EOFError, ProtocolError)):
+                    interrupted_pull(backend, client, {b"transfer-encoding":b"chunked"},
+                                     time.monotonic() + 2, lambda: None)
+            finally:
+                for stream in (backend, writer, client, observer):
+                    stream.close()
+
     def test_should_not_emit_process_handshakes_when_importing_fault_helpers(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

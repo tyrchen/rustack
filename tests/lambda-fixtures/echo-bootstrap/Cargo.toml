@@ -20,6 +20,10 @@ name = "image-bootstrap"
 path = "src/image.rs"
 
 [[bin]]
+name = "no-runtime-bootstrap"
+path = "src/no_runtime.rs"
+
+[[bin]]
 name = "callback-bootstrap"
 path = "src/callback/main.rs"
 required-features = ["sdk-callback"]

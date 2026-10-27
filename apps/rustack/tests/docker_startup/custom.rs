@@ -1,12 +1,19 @@
 //! Custom-RIC contracts and a separately owned movable operator-side source alias.
 
-use std::{env, ffi::OsString, future::pending, path::PathBuf, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    future::pending,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use rustack_lambda_core::{
     artifact::ImageReference,
     docker::{DockerError, DockerWire},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{fs, io::AsyncReadExt, runtime::Handle, task::JoinHandle, time::Instant};
 use uuid::Uuid;
@@ -17,7 +24,7 @@ use super::{
 };
 
 #[derive(Debug)]
-struct Alias {
+pub(super) struct Alias {
     name: String,
     ids: [String; 2],
     pending: Option<String>,
@@ -43,6 +50,38 @@ impl Drop for Alias {
     }
 }
 impl Alias {
+    pub(super) async fn for_pull(server: &Server, name: String, id: String) -> Result<Self> {
+        ensure!(
+            name.starts_with("public.ecr.aws:443/lambda/nodejs@sha256:") && name.len() == 104,
+            "unexpected pull fixture reference"
+        );
+        let executable =
+            PathBuf::from(env::var_os("RUSTACK_DOCKER_BIN").context("explicit Docker CLI")?);
+        ensure!(executable.is_absolute(), "Docker CLI must be absolute");
+        let owner = Self {
+            name,
+            ids: [id.clone(), id.clone()],
+            pending: Some(id),
+            executable,
+            record: server.path()?.join("source-pull-intent.json"),
+            command: None,
+            runtime: Handle::current(),
+        };
+        ensure!(
+            owner.inspect().await?.is_none(),
+            "pull fixture reference already exists; preserved"
+        );
+        owner.save().await?;
+        Ok(owner)
+    }
+    pub(super) async fn cleanup_after_pull(&mut self, root: &Path) -> Result<()> {
+        let file = fs::File::open(root.join("pull-complete.json")).await?;
+        let mut bytes = Vec::new();
+        file.take(2049).read_to_end(&mut bytes).await?;
+        ensure!(bytes.len() <= 2048, "pull receipt byte cap");
+        confirm_pull_receipt(&bytes, &self.name, &self.ids)?;
+        self.cleanup().await
+    }
     async fn new(server: &Server, ids: [String; 2]) -> Result<Self> {
         let executable =
             PathBuf::from(env::var_os("RUSTACK_DOCKER_BIN").context("explicit Docker CLI")?);
@@ -156,6 +195,69 @@ impl Alias {
         );
         self.save().await
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PullReceipt {
+    reference: String,
+    expected_id: String,
+    complete: bool,
+    records: u32,
+}
+
+fn confirm_pull_receipt(bytes: &[u8], name: &str, ids: &[String; 2]) -> Result<()> {
+    ensure!(bytes.len() <= 2048, "pull receipt byte cap");
+    let receipt: PullReceipt = serde_json::from_slice(bytes)?;
+    ensure!(
+        receipt.reference == name
+            && ids.contains(&receipt.expected_id)
+            && receipt.complete
+            && (1..=65536).contains(&receipt.records),
+        "pull completion unproven; source intent retained"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_should_validate_pull_completion_before_granting_cache_cleanup() -> Result<()> {
+    let name = format!("public.ecr.aws:443/lambda/nodejs@sha256:{}", "a".repeat(64));
+    let ids = [
+        format!("sha256:{}", "b".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+    ];
+    let valid = json!({"reference":name,"expectedId":ids.first(),"complete":true,"records":2});
+    confirm_pull_receipt(&serde_json::to_vec(&valid)?, &name, &ids)?;
+    for (field, value) in [
+        ("reference", json!("foreign")),
+        ("expectedId", json!("foreign")),
+        ("complete", json!(false)),
+        ("records", json!(0)),
+        ("records", json!(65537)),
+        ("records", json!(true)),
+        ("unknown", json!(1)),
+    ] {
+        let mut invalid = valid.clone();
+        invalid
+            .as_object_mut()
+            .context("receipt object")?
+            .insert(field.to_owned(), value);
+        ensure!(
+            confirm_pull_receipt(&serde_json::to_vec(&invalid)?, &name, &ids).is_err(),
+            "invalid pull receipt accepted"
+        );
+    }
+    for raw in [
+        b"{".as_slice(),
+        b"{\"complete\":true,\"complete\":true}",
+        &[b' '; 2049],
+    ] {
+        ensure!(
+            confirm_pull_receipt(raw, &name, &ids).is_err(),
+            "unbounded or malformed pull receipt accepted"
+        );
+    }
+    Ok(())
 }
 
 async fn python(server: &Server, image: &str, phase: &str, name: &str, tag: &str) -> Result<Value> {

@@ -13,6 +13,7 @@ use tempfile::Builder;
 use tokio::{fs, time::Instant};
 
 use super::{
+    custom::Alias,
     faults::check_logs,
     process::{Profile, Server, architecture},
     runner::{Runner, interpreter},
@@ -24,6 +25,10 @@ pub(super) enum Case {
     Delete,
     Loss,
     Saturation,
+    CreateTimeout,
+    DeleteTimeout,
+    Pull,
+    Negative,
 }
 impl Case {
     fn phase(self) -> &'static str {
@@ -32,6 +37,10 @@ impl Case {
             Self::Delete => "delete",
             Self::Loss => "loss",
             Self::Saturation => "saturation",
+            Self::CreateTimeout => "create_timeout",
+            Self::DeleteTimeout => "delete_timeout",
+            Self::Pull => "pull",
+            Self::Negative => "negative",
         }
     }
     fn expected(self) -> Value {
@@ -57,6 +66,26 @@ impl Case {
                 "deleted-preparation-retains-capacity",
                 "deleted-job-never-resurrects",
                 "capacity-recovery-computation"
+            ]),
+            Self::CreateTimeout | Self::DeleteTimeout => json!([
+                format!("{}-held-after-effect", self.phase()),
+                "live-caller-production-io-expiration",
+                "physical-retirement-before-release",
+                "typed-primary-error",
+                "cold-computed-recovery"
+            ]),
+            Self::Pull => json!([
+                "actual-ifMissing-pull",
+                "truncated-progress-rejected",
+                "failed-update-preserves-active-A",
+                "backend-pull-positively-drained",
+                "recovered-B-computation"
+            ]),
+            Self::Negative => json!([
+                "real-wrong-os-rejected",
+                "real-wrong-architecture-rejected",
+                "protocol-free-bootstrap-timeout",
+                "cold-computed-recovery"
             ]),
         }
     }
@@ -90,20 +119,35 @@ pub(super) async fn exercise(case: Case) -> Result<()> {
     ];
     let mut child = Runner::spawn(&interpreter()?, &arguments)?;
     let mut server = None;
-    let semantic = handoff(&mut server, &mut child, root.path(), &sources).await;
+    let mut pull = None;
+    let semantic = handoff(
+        &mut server,
+        &mut pull,
+        &mut child,
+        root.path(),
+        &sources,
+        case,
+    )
+    .await;
     // Keep the proxy transparent and alive through server shutdown on every result.
     let restored = fs::write(root.path().join("restore"), b"restore").await;
-    let (stopped, audited, logs) = match &mut server {
-        Some(ordinary) => (
+    let stopped = match &mut server {
+        Some(ordinary) => {
             if case == Case::Loss {
                 ordinary.stop_after_transport_loss().await
             } else {
                 ordinary.stop(true).await
-            },
-            ordinary.audit().await,
-            check_logs(ordinary).await,
-        ),
-        None => (Ok(()), Ok(()), Ok(())),
+            }
+        }
+        None => Ok(()),
+    };
+    let cache_cleanup = match &mut pull {
+        Some(owner) => owner.cleanup_after_pull(root.path()).await,
+        None => Ok(()),
+    };
+    let (audited, logs) = match &server {
+        Some(ordinary) => (ordinary.audit().await, check_logs(ordinary).await),
+        None => (Ok(()), Ok(())),
     };
     let stop = fs::write(root.path().join("stop"), b"stop").await;
     let joined = child.wait(Instant::now() + Duration::from_secs(15)).await;
@@ -118,6 +162,7 @@ pub(super) async fn exercise(case: Case) -> Result<()> {
             "IO SDK failed: {diagnostic}"
         );
         stopped?;
+        cache_cleanup?;
         audited?;
         logs?;
         let observed: Value = serde_json::from_slice(&report.stdout)?;
@@ -146,17 +191,24 @@ pub(super) async fn exercise(case: Case) -> Result<()> {
 
 async fn handoff(
     server: &mut Option<Server>,
+    pull: &mut Option<Alias>,
     child: &mut Runner,
     root: &Path,
     sources: &[String; 2],
+    case: Case,
 ) -> Result<()> {
     let pid = child.await_pid().await?;
     ensure!(
         child.await_pid().await? == pid,
         "proxy readiness PID changed"
     );
-    let mut ordinary =
-        Server::spawn_with_socket(Profile::Controlled, Some(&root.join("engine.sock"))).await?;
+    let profile = match case {
+        Case::CreateTimeout | Case::DeleteTimeout => Profile::Deadline,
+        Case::Pull => Profile::Pull,
+        Case::Negative => Profile::Negative,
+        _ => Profile::Controlled,
+    };
+    let mut ordinary = Server::spawn_with_socket(profile, Some(&root.join("engine.sock"))).await?;
     ordinary
         .root
         .as_mut()
@@ -167,10 +219,59 @@ async fn handoff(
     for source in sources {
         ordinary.track_image(source).await?;
     }
+    let mut fixtures = Vec::new();
+    if case == Case::Negative {
+        let selected = architecture()?;
+        let opposite = if selected == "arm64" {
+            "amd64"
+        } else {
+            "arm64"
+        };
+        let mut identities = Vec::new();
+        for (name, os, arch) in [
+            ("invalid-os", "windows", "amd64"),
+            ("invalid-architecture", "linux", opposite),
+            ("no-runtime", "linux", selected.as_str()),
+        ] {
+            let reference = format!("rustack-{name}:{selected}");
+            let id = ordinary.track_platform_image(&reference, os, arch).await?;
+            ensure!(
+                !identities.contains(&id),
+                "negative fixtures share content identity"
+            );
+            identities.push(id.clone());
+            let proof = json!({"reference":reference,"id":id,"os":os,"architecture":arch});
+            fs::write(
+                root.join(format!("{name}-platform.json")),
+                serde_json::to_vec(&proof)?,
+            )
+            .await?;
+            fixtures.push(reference);
+        }
+    }
+    if case == Case::Pull {
+        let source =
+            env::var("RUSTACK_PULL_IMAGE").context("explicit immutable public pull fixture")?;
+        let suffix = source
+            .strip_prefix("public.ecr.aws/lambda/nodejs@sha256:")
+            .context("public Node digest fixture required")?;
+        ensure!(
+            suffix.len() == 64
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "canonical source digest required"
+        );
+        let id = ordinary.track_image(&source).await?;
+        let alternate = format!("public.ecr.aws:443/lambda/nodejs@sha256:{suffix}");
+        *pull = Some(Alias::for_pull(ordinary, alternate.clone(), id.clone()).await?);
+        fixtures.extend([source, alternate, id]);
+    }
     ordinary.ready().await?;
     let (owner, engine) = ordinary.observation_identity().await?;
-    let bytes =
-        serde_json::to_vec(&json!({"endpoint":ordinary.endpoint,"owner":owner,"engine":engine}))?;
+    let bytes = serde_json::to_vec(
+        &json!({"endpoint":ordinary.endpoint,"owner":owner,"engine":engine,"fixtures":fixtures}),
+    )?;
     ensure!(bytes.len() <= 2048, "proxy handoff byte cap");
     fs::write(root.join("config.pending"), bytes).await?;
     fs::rename(root.join("config.pending"), root.join("config.json")).await?;

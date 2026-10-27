@@ -973,6 +973,39 @@ accepted deployment permit (shared ownership)
 
 The proxy is test infrastructure, not a new supported runtime transport. Preserve production limits and ordinary bootstrap/init/handler deadlines. Tests prove retained pending work and timely post-release cleanup, not impossible settlement while an unacknowledged effect remains held. See [D84 verification](./rustack-workflows-70-verification-plan.md#management-io-faults-and-exact-docker-resource-inventory-d84).
 
+## 4.15 Real IO expiration, interrupted pulls and incompatible artifacts (D85)
+
+Consume the existing production deadline/ownership and image validation contracts through four more ordinary-service resources. These tests must leave caller sockets and acknowledgment barriers live while the configured IO deadline expires; a caller cancellation, manually released barrier or natural bootstrap/handler expiry cannot qualify as IO expiration. Removal confirmation may settle an exact owned container after a lost DELETE acknowledgment, preserving the original function failure. An interrupted chunked pull never publishes a prepared artifact, even when complete JSON progress records preceded the truncated HTTP body.
+
+A platform-qualified lookup of an already captured immutable image ID is a distinct boundary from the first reference lookup. A direct404 from that selected-platform operation means the captured artifact cannot supply the requested platform; classify it as invalid image metadata and expose `InvalidImage`. Preserve a first-reference404 as `ImageDeleted`; retain identity-check, transport and all other status failures without reclassification. Never inspect or match daemon error-message text. Actual incompatible images and controlled root/selected/identity404 cases must exercise this distinction.
+
+```text
+first reference lookup ── direct404 ─────────────→ ImageDeleted
+          │ captured immutable ID
+          ▼
+platform-qualified lookup ── direct404 ──────────→ InvalidImage
+          ├─ identity-check failure ─────────────→ original typed identity failure
+          └─ other status/transport/deadline ────→ original failure
+```
+
+Negative fixtures are real daemon-loaded content-addressed images, not fabricated inspection replies: an explicitly non-Linux image, an image with the opposite Linux architecture, and a separate compiled Linux process that never implements Runtime API. OS/architecture failures occur during preparation before function container allocation; a valid protocol-free process instead reaches bootstrap timeout. Each failed deployment/execution must recover to a real computed result through a subsequent supported image revision.
+
+For pull interruption, retain the actual daemon stream above the deliberately truncated runtime-facing stream. Observe valid non-error progress, cut the runtime HTTP body before its chunked terminator, and independently drain the real backend to positive terminal completion. A bounded fixture-only receipt, exact immutable expected source ID and source-cache checks govern cleanup of the separately owned cache reference. Never fabricate progress, silently accept a registry failure as interruption, delete an operator's preexisting reference or release uncertain ownership on absence alone.
+
+```text
+ordinary update → ifMissing preparation → exact approved real image pull
+                              │
+                 test proxy ──┼─ real non-error progress prefix → runtime
+                              │                    └─ truncate before HTTP terminator
+                              │                         → Failed candidate / old revision stays
+                              └─ retain backend stream → positive EOF + expected immutable ID
+                                                    └─ bounded ownership receipt
+                                                         → remove only fixture cache reference
+                                                         → preserve original cache/source IDs
+```
+
+Make explicitly provisions and preserves the baseline public immutable source with the selected platform before ordinary startup resources run; a fresh daemon must not depend on cache left by a prior core-suite execution. The pull resource explicitly uses the existing public immutable provisioning fixture via its HTTPS port443 spelling to obtain a genuine cache miss without removing existing sources. It requires anonymous public-registry connectivity, like the existing explicit pull resource; ordinary non-resource Rust CI remains offline. Record absence and intended immutable ID before the daemon pull, refuse preexisting/conflicting spellings, and positively join/drain before ID-checked reference removal. This test-side reference owner is separate from runtime-private pins. See [D85 verification](./rustack-workflows-70-verification-plan.md#io-expiration-interrupted-pulls-and-negative-images-d85). Full platform/performance and remaining image archive/ZIP/handler/IaC acceptance stay required. The artifact contract follows the [Lambda container requirements](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html); negative metadata fixtures are explicit [Docker image-load archives](https://docs.docker.com/reference/cli/docker/image/load/), not a new runtime archive format.
+
 ## 5. Isolation and resource limits
 
 - Initial Docker transport is a local Unix socket only. Disable implicit TCP/SSH fallback. Explicit docker configuration requires a startup daemon/version/relay-image/resource-limit probe; failure aborts startup. Default remains disabled. Auto does not acquire a new Docker fallback; Image on native/squib/auto fails explicitly.

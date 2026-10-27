@@ -18,6 +18,10 @@ class ProtocolError(ValueError):
     """Static fixture framing failure, without request or daemon bytes."""
 
 
+def reject_constant(_value):
+    raise ProtocolError("non-JSON pull number")
+
+
 def exact(stream, count, deadline):
     output = bytearray()
     while len(output) < count:
@@ -25,9 +29,14 @@ def exact(stream, count, deadline):
         if remaining <= 0:
             raise ProtocolError("proxy IO deadline")
         stream.settimeout(min(3, remaining))
-        part = stream.recv(min(16384, count - len(output)))
+        try:
+            part = stream.recv(min(16384, count - len(output)))
+        except socket.timeout:
+            continue
         if not part:
             raise EOFError("proxy stream ended")
+        if time.monotonic() >= deadline:
+            raise ProtocolError("proxy late IO completion")
         output.extend(part)
     return bytes(output)
 
@@ -135,6 +144,83 @@ def duplex(left, right, stopped, deadline):
                         target.shutdown(socket.SHUT_WR)
 
 
+class Progress:
+    """Validate a bounded real NDJSON stream without retaining daemon messages."""
+    def __init__(self):
+        self.pending, self.count = bytearray(), 0
+
+    def feed(self, value):
+        for part in value.splitlines(keepends=True):
+            if len(self.pending) + len(part) > 65536:
+                raise ProtocolError("pull progress line cap")
+            self.pending.extend(part)
+            if self.pending.endswith(b"\n"):
+                row = json.loads(self.pending, object_pairs_hook=unique_object, parse_constant=reject_constant)
+                if not isinstance(row, dict) or "error" in row or "errorDetail" in row:
+                    raise ProtocolError("real pull error record")
+                if not isinstance(row.get("status"), str) or not row["status"]:
+                    raise ProtocolError("pull missing progress status")
+                self.count += 1
+                if self.count > 65536:
+                    raise ProtocolError("pull progress count cap")
+                self.pending.clear()
+
+    def finish(self):
+        if self.pending or not self.count:
+            raise ProtocolError("pull missing complete progress")
+
+
+def interrupted_pull(backend, client, headers, deadline, cut):
+    """Cut only the front stream; positively drain the retained backend framing."""
+    framing(headers)
+    if headers.get(b"transfer-encoding", b"").lower() != b"chunked":
+        raise ProtocolError("real pull must be chunked")
+    progress, decoded, encoded, severed = Progress(), 0, 0, False
+    maximum = 16 * 1024 * 1024
+    while True:
+        chunk = line(backend, deadline)
+        if re.fullmatch(rb"[0-9A-Fa-f]{1,8}\r\n", chunk) is None:
+            raise ProtocolError("pull chunk size")
+        size = int(chunk[:-2], 16)
+        encoded += len(chunk) + (size + 2 if size else 0)
+        decoded += size
+        if decoded > maximum or encoded > maximum + 65536:
+            raise ProtocolError("pull stream cap")
+        if not size:
+            trailer_bytes = 0
+            for _ in range(65):
+                trailer = line(backend, deadline)
+                trailer_bytes += len(trailer)
+                if trailer_bytes > 16384 or encoded + trailer_bytes > maximum + 65536:
+                    raise ProtocolError("pull trailer cap")
+                if trailer == b"\r\n":
+                    progress.finish()
+                    if not severed:
+                        raise ProtocolError("pull never interrupted")
+                    if time.monotonic() >= deadline:
+                        raise ProtocolError("pull late terminal completion")
+                    return progress.count
+            raise ProtocolError("pull trailer count")
+        if not severed:
+            client.sendall(chunk)
+        remaining = size
+        while remaining:
+            value = exact(backend, min(16384, remaining), deadline)
+            progress.feed(value)
+            if not severed:
+                client.sendall(value)
+                if progress.count:
+                    client.shutdown(socket.SHUT_WR)
+                    severed = True
+                    cut()
+            remaining -= len(value)
+        ending = exact(backend, 2, deadline)
+        if ending != b"\r\n":
+            raise ProtocolError("pull truncated backend chunk")
+        if not severed:
+            client.sendall(ending)
+
+
 class Proxy:
     def __init__(self, path, daemon, restore=None):
         assert path.startswith("/") and daemon.startswith("/")
@@ -146,6 +232,7 @@ class Proxy:
         self.sockets, self.workers, self.records, self.starts, self.errors = set(), [], {}, set(), []
         self.rule, self.observed, self.released, self.unavailable = None, [], False, False
         self.failed_image = None
+        self.pull_reference, self.pull_cut, self.pull_done, self.pull_count = None, False, False, 0
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(path)
         self.listener.listen(64)
@@ -154,7 +241,7 @@ class Proxy:
         self.worker.start()
 
     def arm(self, kind, owner, count=1):
-        assert kind in ("create", "delete", "tag") and count in (1, 2)
+        assert kind in ("create", "delete", "delete_ack", "tag") and count in (1, 2)
         identity(owner)
         with self.condition:
             assert self.rule is None and not self.unavailable
@@ -213,6 +300,43 @@ class Proxy:
             for stream in tuple(self.sockets):
                 with contextlib.suppress(OSError):
                     stream.shutdown(socket.SHUT_RDWR)
+
+    def interrupt_pull(self, reference):
+        assert re.fullmatch(r"public\.ecr\.aws:443/lambda/nodejs@sha256:[0-9a-f]{64}", reference)
+        with self.condition:
+            assert self.pull_reference is None
+            self.pull_reference = reference
+
+    def wait_pull(self, deadline):
+        with self.condition:
+            while not self.pull_done and not self.errors:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, "actual backend pull did not settle"
+                self.condition.wait(remaining)
+            assert self.pull_done and self.pull_cut and self.pull_count > 0 and not self.errors
+            assert time.monotonic() < deadline
+            return self.pull_count
+
+    def pull(self, backend, client):
+        deadline = min(self.deadline, time.monotonic() + 120)
+        try:
+            first, fields, raw = head(backend, deadline)
+            if first.split(b" ", 2)[1] != b"200":
+                raise ProtocolError("real pull HTTP failure")
+            client.sendall(raw)
+            def cut():
+                with self.condition:
+                    self.pull_cut = True
+                    self.condition.notify_all()
+            count = interrupted_pull(backend, client, fields, deadline, cut)
+            with self.condition:
+                if time.monotonic() >= deadline:
+                    raise ProtocolError("pull late completion publication")
+                self.pull_done, self.pull_count = True, count
+                self.condition.notify_all()
+        except BaseException as error:
+            # A truncated/error backend is never a qualifying front-stream cut.
+            self.failure(error)
 
     def serve(self):
         try:
@@ -274,22 +398,34 @@ class Proxy:
                     labels = value["Labels"]
                     record = {"owner":identity(labels["rustack.lambda.ownerId"]),
                               "role":labels["rustack.lambda.role"]}
+                deletion = None
                 if method == b"DELETE" and path.startswith("/containers/"):
                     key = path[len("/containers/"):]
                     with self.condition:
                         known = self.records.get(key)
                     if known is not None:
+                        deletion = dict(known, id=key)
                         self.gate("delete", dict(known, id=key))
                 if method == b"POST" and path.startswith("/containers/") and path.endswith("/start"):
                     with self.condition:
                         assert len(self.starts) < 128
                         self.starts.add(path[len("/containers/"):-len("/start")])
                 backend.sendall(raw + payload)
+                if method == b"POST" and path == "/images/create":
+                    query = urllib.parse.parse_qs(urllib.parse.urlsplit(target.decode("ascii")).query, strict_parsing=True)
+                    with self.condition:
+                        expected = self.pull_reference
+                    actual = query.get("fromImage", [""])[0]
+                    if query.get("tag"):
+                        actual += "@" + query["tag"][0]
+                    if expected is not None and actual == expected:
+                        self.pull(backend, client)
+                        return
                 with self.condition:
                     failed_image = self.failed_image
                 if failed_image is not None and method == b"GET" and path == "/images/" + failed_image + "/json":
                     return
-                if path == "/info" or create or tag:
+                if path == "/info" or create or tag or deletion is not None:
                     first, headers, raw = head(backend, time.monotonic() + 60)
                     status = int(first.split(b" ", 2)[1])
                     encoded, decoded = body(backend, headers, (1 if create else 2) * 1024 * 1024,
@@ -308,6 +444,8 @@ class Proxy:
                         assert match and re.fullmatch(r"[0-9a-f]{32}", query["tag"][0])
                         self.gate("tag", {"owner":str(uuid.UUID(hex=match[1])),
                                           "alias":repository + ":" + query["tag"][0]})
+                    if deletion is not None and status == 204:
+                        self.gate("delete_ack", deletion)
                     client.sendall(raw + encoded)
                     if path == "/info" and position == 0 and fields.get(b"connection", b"").lower() != b"close":
                         continue

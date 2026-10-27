@@ -9,7 +9,7 @@ use tokio::{
 
 use super::policy;
 use crate::{
-    artifact::Architecture,
+    artifact::{Architecture, ArtifactError},
     docker::{
         DirectoryLease, DockerError, ImageLeaseConfig, ImageLeaseManager, ImagePinScope,
         lease::tests::{FakePins, Mode},
@@ -223,8 +223,9 @@ async fn test_should_not_treat_platform_metadata_missing_as_initial_root_missing
     );
     assert!(matches!(
         result,
-        Err(DockerError::Status(StatusCode::NOT_FOUND))
+        Err(DockerError::Image(ArtifactError::Inspection))
     ));
+    assert!(daemon.requests.try_recv().is_err());
     owner.shutdown(deadline()).await.unwrap();
     assert_eq!(directory.image_records(deadline()).await.unwrap(), []);
     wire.shutdown().await.unwrap();

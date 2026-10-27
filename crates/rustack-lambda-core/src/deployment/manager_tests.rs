@@ -16,6 +16,7 @@ use tokio::time::timeout;
 
 use super::*;
 use crate::{
+    artifact::ArtifactError,
     config::LambdaConfig,
     deployment::{DeploymentState, tests::record},
     docker::{
@@ -400,7 +401,11 @@ fn test_should_validate_deployment_budgets_and_map_bounded_failure_classes() {
         map_failure(&DockerError::Protocol),
         ImageDeploymentFailure::InvalidImage
     );
-    for error in [DockerError::PullDenied, DockerError::PullFailed] {
+    for error in [
+        DockerError::PullDenied,
+        DockerError::PullFailed,
+        DockerError::Image(ArtifactError::Inspection),
+    ] {
         assert_eq!(map_failure(&error), ImageDeploymentFailure::InvalidImage);
     }
     assert_eq!(

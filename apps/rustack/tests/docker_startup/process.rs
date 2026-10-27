@@ -2,6 +2,8 @@
 
 use std::{
     env,
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     time::Duration,
@@ -32,6 +34,9 @@ pub(super) enum Profile {
     Disconnected,
     Connected,
     Controlled,
+    Deadline,
+    Pull,
+    Negative,
     MissingRelay,
     Legacy,
     WrongEndpoint,
@@ -59,7 +64,12 @@ impl Profile {
     fn network(self) -> bool {
         matches!(
             self,
-            Self::Connected | Self::Controlled | Self::WrongEndpoint
+            Self::Connected
+                | Self::Controlled
+                | Self::Deadline
+                | Self::Pull
+                | Self::Negative
+                | Self::WrongEndpoint
         )
     }
 }
@@ -113,10 +123,21 @@ impl Server {
                         lambdaDockerCleanupSeconds: 60\n  lambdaDockerEnvironments: 2\n  \
                         lambdaDockerImagePins: 16\n  lambdaDockerDeploymentJobs: 2\n"
             .to_owned();
-        if profile == Profile::Controlled {
+        if profile == Profile::Deadline {
+            text = text.replace("lambdaDockerIoSeconds: 60", "lambdaDockerIoSeconds: 5");
+        }
+        if matches!(
+            profile,
+            Profile::Controlled | Profile::Deadline | Profile::Pull | Profile::Negative
+        ) {
             text.push_str("  lambdaDockerMemoryBytes: 402653184\n");
         }
         fs::write(&config, text).await?;
+        if profile == Profile::Pull {
+            let auth = root.path().join("registry.yaml");
+            fs::write(&auth, b"{}\n").await?;
+            fs::set_permissions(&auth, Permissions::from_mode(0o600)).await?;
+        }
         if profile == Profile::Legacy {
             let lease = DirectoryLease::acquire(root.path().join("data"), deadline()).await?;
             drop(lease);
@@ -180,6 +201,28 @@ impl Server {
             "invalid source content identity"
         );
         self.sources.push((reference, id.clone()));
+        Ok(id)
+    }
+    pub async fn track_platform_image(
+        &mut self,
+        source: &str,
+        os: &str,
+        architecture: &str,
+    ) -> Result<String> {
+        let id = self.track_image(source).await?;
+        let reference: ImageReference = id.parse()?;
+        let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+        let observed = wire.port().inspect_image(&reference, deadline()).await;
+        let stopped = wire.shutdown().await;
+        stopped?;
+        let observed = observed?;
+        ensure!(
+            observed.id.as_ref() == Some(&id)
+                && observed.os.as_deref() == Some(os)
+                && observed.architecture.as_deref() == Some(architecture)
+                && observed.size.is_some_and(|size| size > 0),
+            "negative fixture platform/identity precondition differs"
+        );
         Ok(id)
     }
     pub async fn observation_identity(&self) -> Result<(String, String)> {
@@ -444,7 +487,10 @@ async fn launch(
         )
         .env(
             "LAMBDA_INIT_TIMEOUT_SECS",
-            if profile == Profile::Controlled {
+            if matches!(
+                profile,
+                Profile::Controlled | Profile::Deadline | Profile::Pull
+            ) {
                 "20"
             } else {
                 "5"
@@ -459,6 +505,15 @@ async fn launch(
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .kill_on_drop(true);
+    if profile == Profile::Pull {
+        command
+            .env("LAMBDA_DOCKER_PULL_POLICY", "ifMissing")
+            .env("LAMBDA_DOCKER_REGISTRIES", "public.ecr.aws:443")
+            .env(
+                "LAMBDA_DOCKER_REGISTRY_AUTH_FILE",
+                fs::canonicalize(root.join("registry.yaml")).await?,
+            );
+    }
     if profile.network() {
         command.env(
             "LAMBDA_DOCKER_NETWORK",

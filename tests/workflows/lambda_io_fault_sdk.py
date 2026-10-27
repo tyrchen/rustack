@@ -147,11 +147,128 @@ class IoCases(Faults):
                 "published-A-preserved", "recovered-B-computation", "missing-source-never-active",
                 "full-loss-revokes-readiness"]
 
+    def deadline_io(self, phase):
+        name = self.create(Timeout=900)
+        self.client.put_function_concurrency(FunctionName=name, ReservedConcurrentExecutions=1)
+        create = phase == "create_timeout"
+        self.proxy.arm("create" if create else "delete_ack", self.metadata.owner)
+        connection = self.raw_invoke(name, {} if create else {"mode":"exit"})
+        try:
+            record = self.proxy.wait(1, time.monotonic() + 15)[0]
+            cutoff = time.monotonic() + 15
+            rows = self.metadata.rows()
+            if create:
+                assert len(rows) == 2 and record["id"] in {row["Id"] for row in rows}
+                function = self.metadata.get("/containers/" + record["id"] + "/json")
+                assert function["State"]["Running"] is False and function["State"]["Status"] == "created"
+            else:
+                assert record["id"] not in {row["Id"] for row in rows}, "DELETE ack gate preceded effect"
+                assert len(rows) == 1, "DELETE ack did not retain relay cleanup"
+                self.expect_error(lambda: self.invoke(name), "TooManyRequestsException")
+            self.metadata.wait_ids(set(), cutoff)
+            assert not self.proxy.released, "fixture released IO before deadline settlement"
+            response = connection.getresponse()
+            payload = response.read(65537)
+            assert response.status == 500 and len(payload) <= 65536
+            assert response.getheader("x-amzn-errortype") == "ServiceException"
+            error = json.loads(payload)
+            text = error.get("message", error.get("Message", ""))
+            expected = "deadline" if create else "function exited with status 42; oom=false"
+            assert expected in text, "incorrect IO deadline/primary failure: " + text
+            assert time.monotonic() < cutoff and not self.proxy.released
+            if create:
+                assert record["id"] not in self.proxy.starts, "timed-out allocation started user code"
+            self.proxy.release()
+            self.ready()
+            self.cold(name)
+            self.delete(name)
+        finally:
+            connection.close()
+            self.proxy.restore()
+        return [phase + "-held-after-effect", "live-caller-production-io-expiration",
+                "physical-retirement-before-release", "typed-primary-error", "cold-computed-recovery"]
+
     def pending(self, name, image):
         self.client.create_function(FunctionName=name, Role="arn:aws:iam::000000000000:role/Docker",
                                     PackageType="Image", Architectures=[self.architecture],
                                     MemorySize=128, Code={"ImageUri":image})
         self.functions.append(name)
+
+    def negative_images(self, images):
+        assert len(images) == 3
+        assert not self.metadata.ids()
+        for image in images[:2]:
+            name = "InvalidImage" + uuid.uuid4().hex
+            self.pending(name, image)
+            failed = self.state(name, lambda row: row["State"] == "Failed")
+            assert failed["StateReasonCode"] == "InvalidImage"
+            assert not self.metadata.ids(), "incompatible artifact allocated an environment"
+            self.expect_error(lambda: self.invoke(name), "ResourceNotReadyException")
+            self.client.update_function_code(FunctionName=name, ImageUri=self.image)
+            self.settled(name, updating=True)
+            output, _ = self.invoke(name, {"value":8})
+            assert output["computed"] == 15 and output["counter"] == 1
+            self.expect_error(lambda: self.invoke(name, {"mode":"exit"}), "ServiceException",
+                              "function exited with status 42; oom=false")
+            self.delete(name)
+            self.metadata.wait_ids(set(), time.monotonic() + 10)
+        name = "NoRuntime" + uuid.uuid4().hex
+        self.pending(name, images[2])
+        self.settled(name)
+        connection = self.raw_invoke(name, {})
+        try:
+            cutoff = time.monotonic() + 4
+            while True:
+                assert time.monotonic() < cutoff, "protocol-free process never observed running"
+                functions = [row for row in self.metadata.rows() if row["Labels"]["rustack.lambda.role"] == "function"]
+                if len(functions) == 1:
+                    live = self.metadata.get("/containers/" + functions[0]["Id"] + "/json")
+                    if live["State"]["Running"]:
+                        assert time.monotonic() < cutoff
+                        break
+                time.sleep(0.025)
+            connection.sock.settimeout(10)
+            response = connection.getresponse()
+            raw = response.read(65537)
+            assert response.status == 500 and len(raw) <= 65536
+            assert response.getheader("x-amzn-errortype") == "ServiceException"
+            error = json.loads(raw)
+            assert "function bootstrap initialization deadline exceeded" in error.get("message", error.get("Message", ""))
+        finally:
+            connection.close()
+        assert not self.metadata.ids()
+        self.ready()
+        self.client.update_function_code(FunctionName=name, ImageUri=self.image)
+        self.settled(name, updating=True)
+        output, _ = self.invoke(name, {"value":8})
+        assert output["computed"] == 15 and output["counter"] == 1
+        self.delete(name)
+        return ["real-wrong-os-rejected", "real-wrong-architecture-rejected",
+                "protocol-free-bootstrap-timeout", "cold-computed-recovery"]
+
+    def interrupted_update(self, fixtures):
+        assert len(fixtures) == 3
+        name = self.create()
+        output, _ = self.invoke(name, {"value":8})
+        assert output["computed"] == 15 and output["imageRevision"] == "A"
+        version = self.client.publish_version(FunctionName=name)["Version"]
+        before = self.client.get_function_configuration(FunctionName=name)
+        self.proxy.interrupt_pull(fixtures[1])
+        self.client.update_function_code(FunctionName=name, ImageUri=fixtures[1])
+        failed = self.state(name, lambda row: row.get("LastUpdateStatus") == "Failed")
+        assert self.proxy.pull_cut, "failure preceded actual progress interruption"
+        assert failed["State"] == "Active" and failed["CodeSha256"] == before["CodeSha256"]
+        assert failed["RevisionId"] == before["RevisionId"]
+        output, _ = self.invoke(name, {"value":8}, qualifier=version)
+        assert output["computed"] == 15 and output["imageRevision"] == "A"
+        self.proxy.wait_pull(time.monotonic() + 120)
+        self.client.update_function_code(FunctionName=name, ImageUri=self.other)
+        self.settled(name, updating=True)
+        output, _ = self.invoke(name, {"value":8})
+        assert output["computed"] == 15 and output["imageRevision"] == "B"
+        self.delete(name)
+        return ["actual-ifMissing-pull", "truncated-progress-rejected", "failed-update-preserves-active-A",
+                "backend-pull-positively-drained", "recovered-B-computation"]
 
     def saturation(self):
         names = ["Deploy" + uuid.uuid4().hex for _ in range(3)]
@@ -196,13 +313,19 @@ def main():
     failed, cases, matrix = False, [], None
     try:
         config = json.loads(wait_file(root / "config.json", time.monotonic() + 200, abort=root / "stop"))
-        assert set(config) == {"endpoint", "owner", "engine"}
+        assert set(config) == {"endpoint", "owner", "engine", "fixtures"}
         matrix = IoCases(config["endpoint"], image, other, architecture,
                          Metadata(daemon, config["owner"], config["engine"]), proxy)
         if phase in ("create", "delete"):
             cases = matrix.cancel_io(host, phase)
+        elif phase in ("create_timeout", "delete_timeout"):
+            cases = matrix.deadline_io(phase)
         elif phase == "loss":
             cases = matrix.loss_update()
+        elif phase == "negative":
+            cases = matrix.negative_images(config["fixtures"])
+        elif phase == "pull":
+            cases = matrix.interrupted_update(config["fixtures"])
         else:
             assert phase == "saturation"
             cases = matrix.saturation()
@@ -211,6 +334,17 @@ def main():
         traceback.print_exc(file=sys.stderr)
     finally:
         proxy.restore()
+        if proxy.pull_reference is not None:
+            try:
+                count = proxy.wait_pull(time.monotonic() + 120)
+                receipt = {"reference":config["fixtures"][1], "expectedId":config["fixtures"][2],
+                           "complete":True, "records":count}
+                temporary = root / "pull-complete.pending"
+                temporary.write_bytes(json.dumps(receipt).encode())
+                temporary.replace(root / "pull-complete.json")
+            except BaseException:
+                failed = True
+                traceback.print_exc(file=sys.stderr)
         if matrix is not None:
             try:
                 if not matrix.server_lost:

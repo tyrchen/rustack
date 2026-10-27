@@ -94,19 +94,24 @@ impl ImageResolver {
                 .append_pair("platform", platform)
                 .finish();
             let path = format!("/images/{}/json?{query}", escaped(launch_id.as_str()));
-            decode(
-                self.port
-                    .call(
-                        Operation::Image,
-                        Method::GET,
-                        path,
-                        Bytes::new(),
-                        StatusCode::OK,
-                        deadline,
-                    )
-                    .await?,
-                deadline,
-            )?
+            let selected = self
+                .port
+                .call(
+                    Operation::Image,
+                    Method::GET,
+                    path,
+                    Bytes::new(),
+                    StatusCode::OK,
+                    deadline,
+                )
+                .await
+                .map_err(|error| match error {
+                    // The reference already resolved to this captured ID. This
+                    // operation asks whether it supplies the requested platform.
+                    DockerError::Status(StatusCode::NOT_FOUND) => invalid(),
+                    other => other,
+                })?;
+            decode(selected, deadline)?
         } else {
             root
         };

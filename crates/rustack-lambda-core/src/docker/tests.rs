@@ -10,6 +10,7 @@ use tokio::{
 };
 
 use super::*;
+use crate::artifact::{Architecture, ArtifactError};
 
 #[derive(Debug, Clone)]
 pub(super) struct LogWriter(pub(super) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -883,6 +884,70 @@ async fn test_should_resolve_preloaded_images_with_versioned_platform_selection(
         [""]
     );
     wire.shutdown().await.unwrap();
+    daemon.close().await;
+}
+
+#[rstest::rstest]
+#[case::missing_reference(false, false, 404)]
+#[case::missing_selected_platform(true, false, 404)]
+#[case::other_selected_failure(true, false, 500)]
+#[case::identity_not_found(true, true, 404)]
+#[tokio::test]
+async fn test_should_distinguish_selected_platform_absence_from_reference_and_identity_failures(
+    #[case] captured: bool,
+    #[case] identity_failure: bool,
+    #[case] status: u16,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let directory = DirectoryLease::acquire(root.path().into(), deadline())
+        .await
+        .unwrap();
+    let mut daemon = Daemon::new();
+    let mut wire = daemon.wire().await;
+    let port = wire
+        .port()
+        .bind_directory(&directory, deadline())
+        .await
+        .unwrap();
+    let resolver = ImageResolver::new(port);
+    let reference = "worker:v1".parse().unwrap();
+    let (result, ()) = tokio::join!(
+        resolver.resolve_local(&reference, Architecture::Arm64, None, deadline()),
+        async {
+            let request = daemon.next().await;
+            assert!(request.head.contains("/images/worker%3Av1/json "));
+            if !captured {
+                request.reply(status, b"{}").await;
+                return;
+            }
+            if identity_failure {
+                daemon.identity_status.send_replace(status);
+            }
+            let body = serde_json::json!({"Id":format!("sha256:{}", "a".repeat(64))});
+            request
+                .reply(200, &serde_json::to_vec(&body).unwrap())
+                .await;
+            if !identity_failure {
+                let selected = daemon.next().await;
+                assert!(selected.head.contains("/json?platform="));
+                selected.reply(status, b"{}").await;
+            }
+        }
+    );
+    if identity_failure {
+        assert!(matches!(result, Err(DockerError::IdentityCheck(source))
+            if matches!(source.as_ref(), DockerError::Status(StatusCode::NOT_FOUND))));
+    } else if captured && status == 404 {
+        assert!(matches!(
+            result,
+            Err(DockerError::Image(ArtifactError::Inspection))
+        ));
+    } else {
+        assert!(matches!(result, Err(DockerError::Status(code)) if code.as_u16() == status));
+    }
+    assert!(daemon.requests.try_recv().is_err());
+    wire.shutdown().await.unwrap();
+    drop(directory);
     daemon.close().await;
 }
 

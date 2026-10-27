@@ -224,7 +224,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 44-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 48-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -241,6 +241,20 @@ restoring the test transport does not revive a failed owner. The test keeps that
 transport alive through joined server cleanup, preserving any specific shutdown
 failure. `make test-lambda-io-faults` runs the proxy's framing/lifecycle controls;
 `test-lambda-io-faults-docker` runs the full ordinary startup/fault suite.
+
+Additional cases keep the signed caller connected through actual Create/DELETE
+acknowledgment expiration. Cleanup preserves the original handler exit failure.
+The gate explicitly provisions the preserved immutable public Node baseline before
+ordinary resources; `make lambda-pull-fixture-image` runs this bounded prerequisite
+separately. An interrupted `ifMissing` pull preserves the old active revision while the fixture
+retains and positively drains the real daemon stream. This explicitly connected
+resource uses the pinned public Node source through its HTTPS port443 reference;
+it refuses a preexisting extra cache reference and removes only its own verified
+reference, preserving the original cache. `make lambda-negative-images` provisions
+two genuinely incompatible platform artifacts and a separate Linux process that
+never speaks Runtime API. They qualify preparation rejection and bootstrap timeout,
+respectively. `make test-lambda-deadline-fixture` runs the bounded protocol, archive
+and cleanup-receipt controls without executing Docker resources.
 
 ## Enable trusted-host Lambda tasks
 

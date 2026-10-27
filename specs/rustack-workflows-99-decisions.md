@@ -641,3 +641,10 @@ Use a fixture-owned transparent Unix proxy to hold actual Create/private-Tag ack
 
 
 D84's consuming tests also require admission to cross the ownership boundary: an image actor record keeps the accepted deployment permit above worker/root failure, and a shared artifact receipt acknowledges only validated consumption or successful image CAS. A queued result is not consumption. Canceled/failed retirement and live-pin storage use their respective retained quotas. Diagnose full transport loss through readiness/business rejection; retain diagnostics and physical cleanup without adding implicit owner revival or a new health-triggered listener shutdown policy.
+
+
+## D85 — Expire actual IO and interrupt a real retained pull stream
+
+Keep caller/barrier lifetimes beyond the production IO deadline and prove physical/journal settlement. Isolate pull interruption from registry failure: truncate only the runtime-facing chunked response, retain/drain the actual daemon response and require positive completion before separately owned cache-reference cleanup. Build genuine negative image metadata/process artifacts rather than replacing daemon observations. The exact Docker functional inventory grows explicitly; it still cannot certify full release/platform acceptance. See [D85 verification](./rustack-workflows-70-verification-plan.md#io-expiration-interrupted-pulls-and-negative-images-d85).
+
+D85 execution correction: Engine1.53 returns404 for a captured image whose selected platform is absent. Translate only this direct platform-qualified operation404 to invalid image metadata; preserve initial lookup404 and typed identity/transport/other-status errors. Do not parse daemon message text. This corrects public failure provenance rather than weakening the negative artifact assertion.
