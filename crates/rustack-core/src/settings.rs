@@ -204,6 +204,8 @@ pub struct RuntimeBudgets {
     pub lambda_invoke_seconds: u64,
     /// Total graceful shutdown deadline in seconds.
     pub shutdown_seconds: u64,
+    /// Absolute process startup budget, including Docker qualification and snapshots.
+    pub startup_seconds: u64,
     /// Maximum aggregate control-plane body bytes.
     pub control_body_bytes: u64,
     /// Maximum Lambda ZIP JSON envelope bytes.
@@ -268,6 +270,7 @@ impl Default for RuntimeBudgets {
             request_seconds: 30,
             lambda_invoke_seconds: 930,
             shutdown_seconds: 30,
+            startup_seconds: 600,
             control_body_bytes: 16 * 1024 * 1024,
             lambda_code_body_bytes: 96 * 1024 * 1024,
             upstream_body_bytes: 64 * 1024 * 1024,
@@ -313,6 +316,7 @@ impl RuntimeBudgets {
                 3600,
             ),
             ("budgets.shutdownSeconds", self.shutdown_seconds, 3600),
+            ("budgets.startupSeconds", self.startup_seconds, 3600),
             (
                 "budgets.controlBodyBytes",
                 self.control_body_bytes,
@@ -1340,5 +1344,34 @@ mod docker_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use std::collections::BTreeMap;
+
+    use super::{RuntimeBudgets, ValidatedSettings};
+    #[test]
+    fn test_should_bound_one_process_startup_budget_independently_of_shutdown() {
+        assert_eq!(RuntimeBudgets::default().startup_seconds, 600);
+        for seconds in [0, 3601] {
+            assert!(
+                ValidatedSettings::parse(
+                    &format!("budgets:\n  startupSeconds: {seconds}\n"),
+                    &BTreeMap::new()
+                )
+                .is_err()
+            );
+        }
+        for seconds in [1, 3600] {
+            let settings = ValidatedSettings::parse(
+                &format!("budgets:\n  startupSeconds: {seconds}\n  shutdownSeconds: 10\n"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(settings.budgets().startup_seconds, seconds);
+            assert_eq!(settings.budgets().shutdown_seconds, 10);
+        }
     }
 }

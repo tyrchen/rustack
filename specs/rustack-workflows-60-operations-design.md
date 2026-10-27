@@ -6,11 +6,13 @@ Status: implementation contract · Depends on: [API](./rustack-workflows-10-api-
 
 Use `RUSTACK_CONFIG` and the existing YAML `environment`, `budgets`, `advertisedEndpoint` schema. Do not add a parallel configuration loader or mutate process environment. Add keys to the validated settings allowlist and add typed, camelCase budget fields. Process environment overrides YAML; defaults apply last. Reject unknown keys, malformed scalars, zero/excessive budgets and conflicting executor settings before listening. Configuration structs use typed-builder and validated newtypes.
 
-The following is a **proposed configuration after implementation**, not a statement that the current binary supports these keys:
+The following selects the implemented image-only Docker startup profile. Choose the explicit trusted listener/network/origin and an absolute private DATA_DIR for the host topology; full release/platform qualification remains separate:
 
 ```yaml
 environment:
   SERVICES: "lambda,stepfunctions"
+  DATA_DIR: "/absolute/private/rustack-data"
+  GATEWAY_LISTEN: "0.0.0.0:4566"
   LAMBDA_EXECUTOR: "docker"
   LAMBDA_DOCKER_SOCKET: "unix:///var/run/docker.sock"
   LAMBDA_DOCKER_RELAY_IMAGE: "rustack/lambda-runtime:integration"
@@ -34,6 +36,7 @@ Start with `RUSTACK_CONFIG=./rustack.yaml rustack`; the current CLI does not hav
 
 | Key | Default and validation |
 |---|---|
+| DATA_DIR | Existing core default `/var/lib/localstack`; absolute private operator directory; durable Docker ownership is separate from named snapshot directory swaps |
 | LAMBDA_DOCKER_SOCKET | `unix:///var/run/docker.sock`; operator may select Desktop/rootless socket; absolute local socket path≤4,096 bytes; no TCP/SSH fallback |
 | LAMBDA_DOCKER_RELAY_IMAGE | Required when Docker enabled; bounded image reference, resolved and pinned at startup; no implicit pull |
 | LAMBDA_DOCKER_NETWORK | Operator-owned user bridge name/ID, or a per-owner private bridge created by Rustack;≤128 ASCII bytes; explicit none opts into disconnected pure handlers with SDK callbacks unavailable; never host/default-bridge/arbitrary-container sharing |
@@ -87,7 +90,8 @@ All budgets are validated once; limits below are local defaults and safe configu
 | lambdaDockerDeploymentSeconds |300|1..3,600; absolute queue plus preparation deadline |
 | lambdaDockerImagePins |1024|1..8,192; preparations, live revisions/captures and quarantined aliases |
 | lambdaDockerIoSeconds |5|1..60; independent bounded management/mutation and partial-control IO budget |
-| lambdaDockerStartSeconds |15|1..60 |
+| startupSeconds |600|1..3,600; one process startup deadline before entropy/provider/listener/snapshot work |
+| lambdaDockerStartSeconds |15|1..60; total environment start/probe cap |
 | lambdaDockerCleanupSeconds |10|1..60; bounded by global shutdown remaining time |
 | workflowDrainSeconds |5|0..60; bounded by global shutdown remaining time |
 
@@ -519,4 +523,17 @@ The configured function-visible endpoint is independently validated and remains 
 
 The instance ID is public diagnostic correlation, not authentication. HTTP assumes operator-controlled local networking; HTTPS uses normal server-name/certificate validation with explicit AWS-LC and embedded Mozilla roots. There is no ambient proxy/root lookup, redirect/retry or production private-CA loading; rebuild the pinned runtime to update roots. Expected identity is private probe input and is never sent in its GET. Endpoint errors expose fixed classes; verbose TLS diagnostics are suppressed because peers may embed names in them. Deadline/cancel owns and drops local IO; successful response processing joins the same HTTP driver. The receipt also requires physical probe environment retirement and a final live-input/clock fence. It cannot activate Docker alone.
 
-The ordinary startup path still rejects Docker selection. Remaining task1.4 work must compose durable namespace/provenance, pull configuration, relay pins, network/resource/endpoint receipts, listener/provider lifetime, shutdown and capability publication, with real main-service acceptance. Current actual endpoint cases use a controlled diagnostic protocol peer plus separate real GatewayService socket tests; they do not establish ordinary Docker CLI or handler SDK networking acceptance.
+D80 alone did not activate Docker. The production consumer in§1.10 now composes these receipts in the ordinary binary. D80 controlled-peer tests remain component evidence; D81 separately exercises the actual listener/provider/SDK path. Handler-originated SDK networking to S3/DDB remains its own L10 gate.
+
+
+### 1.10 Ordinary production Docker image composition
+
+[Runtime§4.12](./rustack-workflows-20-lambda-runtime-design.md#412-production-startup-provenance-and-retained-owner-composition)/D81 installs the actual owner and qualified provider in main. Explicit Docker settings parse before the diagnostic listener; no ordinary business admission occurs until directory provenance, exact daemon binding/recovery, selected-platform relay pin, full-ID network, actual resource and optional same-instance endpoint receipts pass, providers construct, snapshots validate and final live/deadline fences succeed. The same bound listener and instance are reused after all diagnostic connection owners join. A saved error path covers bind, qualification and late installation; later provider/workflow/snapshot failures also await retained runtime cleanup. Default execution remains disabled.
+
+Use startupSeconds(default600,1..3600) independently of shutdownSeconds. Root startup phases, snapshot load and listener use one captured absolute startup deadline; each IO/probe has its own existing smaller ceiling. Each pending filesystem acquisition/wire construction is retained above observer cancellation. The new RSDKOWN2 owner magic attests the journal-generation producer and blocks downgrade; RSDKOWN1 remains readable for controlled recovery but cannot activate this coordinator. Do not delete/reset an owner, lock, journal or daemon binding to bypass refusal. Preserve legacy evidence and choose a fresh controlled DATA_DIR if needed; that does not reclaim old resources. Unknown owner-missing namespace entries reject before identity publication.
+
+The qualified platform is the Linux daemon architecture. Cross-architecture false requires the host architecture to match; true permits the actual independently probed selected target, including the emulated daemon fixture. Other function architectures fail preparation before allocation/IO and never become Active. Lambda init_timeout bounds the function BootstrapReady wait independently of total environment start, with a typed initialization timeout; earlier caller/global deadlines remain authoritative. Configured memory/CPU/log/environment/IO/idle/warm/deployment budgets feed the real owners. workers.docker reports ready, selected platform, sdkGateway and zip=false. sdkGateway means the configured origin passed the reachability receipt, not completed handler S3/DDB/callback acceptance or authentication. No endpoint deliberately leaves it false. Normal function failures do not poison worker health.
+
+This coordinator rejects a configured ZIP runtime source, Docker ZIP creation and ZIP archive import. Until immutable image-lease restoration is installed, image archives reject before store import or previous-generation retirement; source tags are never followed to replace saved code. Snapshot scope remains the installed profile, not Docker image-resume support. Provider quiescence additionally checks backend health before permitting save. Main uses fallible shutdown_before and retains the first fault while performing dependency-safe physical cleanup: executor/pool, environments, image pins, current namespace audit, wire and final handle release. Timed-out observers keep the same cleanup operation, exact lease and bounded admission. Physical retirement can still return an earlier owner fault; unresolved resources retain exclusion. Inactive provider/installation/status handles may continue retaining the directory until dropped, consistent with DirectoryLease clone lifetime.
+
+The actual ordinary-binary gate covers signed Rust SDK/boto3 computed warm Image execution, FunctionError, published alias capture, wrong-architecture failure, no-RIC initialization timeout, real ASL Image task, same-owner/fresh-instance restart, missing relay/legacy/wrong-endpoint refusal and byte-identical current/previous image-archive rejection. It uses no injected readiness. Full custom-RIC/L01–L09 matrix closure, Docker ZIP, immutable archive lease restore, handler SDK networking/callback images, IaC/reference/platform and complete M0–M4 release remain required.

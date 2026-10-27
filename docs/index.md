@@ -1,6 +1,6 @@
 # Documentation
 
-- [Step Functions and Lambda workflows](./workflows-guide.md) - Source feature selection, strict-auth pure example, explicit Native execution, supported ASL/integrations, snapshots and exact native qualification.
+- [Step Functions and Lambda workflows](./workflows-guide.md) - Source feature selection, strict-auth pure example, explicit Native and qualified Docker Image execution, supported ASL/integrations, snapshots and exact native qualification.
 
 - [Local smoke tests](./smoke-tests.md) - Functional SDK/HTTP checks, recent-change regressions, and Pulumi smoke coverage.
 - [Pulumi](./pulumi.md) - Use Rustack as a Pulumi AWS provider deployment target.
@@ -10,7 +10,7 @@
 
 - [Native-host Workflows Performance Review](./research/workflows-native-performance-review.md) - Actual signed SDK50-state latency, live-loop health/history exhaustion and100 single-slot Stop cycles; raw host measurements, process cleanup and source/binary fingerprints, with Linux reference qualification still pending.
 
-- [Bollard Docker Transport Boundaries](./research/study-bollard-docker-transport-boundaries.md) - Pinned response collection, attach framing/EOF and diagnostic behavior; generated-type reuse, bounded production wire implementation, platform identity/default merge validation, owned image pin/quota/cleanup preparation, persisted installation identity with same-connection fences, complete bounded observed namespace inventories, controlled pull/auth/progress ownership, private registry YAML/descriptor-loading boundaries, container-origin endpoint/TLS preflight and actual RIC/diagnostic qualification; Bollard and historical Moby sources are pinned.
+- [Bollard Docker Transport Boundaries](./research/study-bollard-docker-transport-boundaries.md) - Pinned response collection, attach framing/EOF and diagnostic behavior; generated-type reuse, bounded production wire implementation, platform identity/default merge validation, owned image pin/quota/cleanup preparation, persisted installation identity with same-connection fences, complete bounded observed namespace inventories, controlled pull/auth/progress ownership, private registry YAML/descriptor-loading boundaries, container-origin endpoint/TLS and production provenance/retained-startup preflight, plus actual RIC/diagnostic qualification; Bollard and historical Moby sources are pinned.
 - [Container Lambda Relay Spike](./research/spike-lambda-container-relay.md) - Actual binary attach/shared-netns/official-RIC execution on arm64 and emulated amd64, with reproducible probes and explicit qualification limits.
 - [Step Functions Semantic Oracle Spike](./research/spike-stepfunctions-semantic-oracle.md) - Pinned Smithy/SDK/fixture evidence, independently reproduced numeric timestamp gap, callback errors, AWS-validated nested result shapes and historical intrinsic rounding/split boundaries.
 - [Step Functions and Container Lambda Survey](./research/survey-stepfunctions-lambda-container-runtime.md) - Official ASL/integration/image/runtime contracts, inspected Rustack gaps, current dependency APIs and the experiments required before implementation.

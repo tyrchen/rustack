@@ -75,6 +75,10 @@ fn test_should_validate_environment_budgets_and_reserve_count_and_memory_transac
             .idle(Duration::from_millis(1500))
             .build(),
         EnvironmentSettings::builder().log_ring_bytes(4095).build(),
+        EnvironmentSettings::builder().init(Duration::ZERO).build(),
+        EnvironmentSettings::builder()
+            .init(Duration::from_secs(901))
+            .build(),
     ] {
         assert!(EnvironmentConfig::try_from(settings).is_err());
     }

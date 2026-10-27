@@ -38,6 +38,8 @@ pub(crate) struct RuntimeWorkers {
     pub(crate) sns: Option<Arc<rustack_sns_core::provider::RustackSns>>,
     #[cfg(feature = "lambda")]
     pub(crate) lambda: Option<Arc<rustack_lambda_core::provider::RustackLambda>>,
+    #[cfg(all(feature = "lambda", unix))]
+    pub(crate) docker: Option<rustack_lambda_core::docker::DockerRuntimeStatus>,
     #[cfg(feature = "sqs")]
     pub(crate) sqs: Option<Arc<rustack_sqs_core::provider::RustackSqs>>,
 }
@@ -62,6 +64,9 @@ pub(crate) struct DeliverySummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkerDiagnostics {
+    #[cfg(all(feature = "lambda", unix))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) docker: Option<rustack_lambda_core::docker::DockerCapabilities>,
     pub(crate) ready: bool,
     pub(crate) services: BTreeMap<&'static str, &'static str>,
     delivery: BTreeMap<&'static str, DeliverySummary>,
@@ -71,6 +76,10 @@ impl RuntimeWorkers {
     /// Report live supervisor state, independently of historical delivery failures.
     pub(crate) fn diagnostics(&self) -> WorkerDiagnostics {
         let readiness: &[Option<(&'static str, bool)>] = &[
+            #[cfg(feature = "lambda")]
+            self.lambda
+                .as_ref()
+                .map(|provider| ("lambda", provider.is_ready())),
             #[cfg(feature = "stepfunctions")]
             self.workflows
                 .as_ref()
@@ -121,6 +130,11 @@ impl RuntimeWorkers {
             }),
         ];
         WorkerDiagnostics {
+            #[cfg(all(feature = "lambda", unix))]
+            docker: self
+                .docker
+                .as_ref()
+                .map(rustack_lambda_core::docker::DockerRuntimeStatus::capabilities),
             ready: readiness.iter().flatten().all(|(_, ready)| *ready),
             services: readiness
                 .iter()
@@ -194,10 +208,10 @@ impl RuntimeWorkers {
     }
 
     /// Final resource destruction. Call only after the snapshot decision.
-    pub(crate) async fn shutdown(&self) -> Result<()> {
+    pub(crate) async fn shutdown(&self, deadline: tokio::time::Instant) -> Result<()> {
         // After the snapshot decision, stop independent resource owners together:
         // a failed queue worker must not delay killing Lambda child processes.
-        let (events_result, (), (), ()) = tokio::join!(
+        let (events_result, (), lambda_result, ()) = tokio::join!(
             async {
                 #[cfg(feature = "events")]
                 if let Some(events) = &self.events {
@@ -214,8 +228,9 @@ impl RuntimeWorkers {
             async {
                 #[cfg(feature = "lambda")]
                 if let Some(lambda) = &self.lambda {
-                    lambda.shutdown().await;
+                    lambda.shutdown_before(deadline).await?;
                 }
+                Result::<()>::Ok(())
             },
             async {
                 #[cfg(feature = "sqs")]
@@ -224,7 +239,9 @@ impl RuntimeWorkers {
                 }
             },
         );
-        events_result
+        events_result?;
+        lambda_result?;
+        check_deadline(deadline)
     }
 }
 

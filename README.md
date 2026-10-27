@@ -2,7 +2,7 @@
 
 A local AWS service emulator written in Rust, with **18 service adapters**. Routed operation counts describe API surface—not full AWS semantics, authorization enforcement, execution support, or persistence. See the [capability and safety guide](docs/runtime-hardening.md) before choosing a test workload.
 
-An opt-in source build also provides [Step Functions workflows](docs/workflows-guide.md), including real Native Lambda integration and named workflow snapshots. Production Docker image startup and final platform qualification remain in progress.
+An opt-in source build also provides [Step Functions workflows](docs/workflows-guide.md), including real Native and Docker Image Lambda integration and named Native/pure workflow snapshots. Docker requires explicit qualified startup; image archive restoration, ZIP and final platform/release qualification remain in progress.
 
 ## Install
 
@@ -291,7 +291,7 @@ Set `RUSTACK_CONFIG` to a YAML file; environment values override the correspondi
 | `GATEWAY_LISTEN` | `127.0.0.1:4566` | Bind address and port; container image explicitly binds `0.0.0.0` |
 | `RUSTACK_CONFIG` | *(unset)* | YAML configuration file |
 | `RUSTACK_ADVERTISED_ENDPOINT` | *(derived from bind address)* | Public local HTTP(S) authority for generated URLs |
-| `LAMBDA_EXECUTOR` | `disabled` | Explicit `native`/`squib` selection required for execution; Docker unsupported |
+| `LAMBDA_EXECUTOR` | `disabled` | Explicit backend selection required; Docker Image needs configured and qualified ownership, daemon, relay, network and kernel startup |
 | `SERVICES` | *(empty = all)* | Comma-separated list of services to enable |
 | `LOG_LEVEL` | `info` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `RUST_LOG` | | Fine-grained tracing filter (overrides `LOG_LEVEL`) |

@@ -120,6 +120,9 @@ pub struct ContainerPolicy {
     relay: RelayBudgets,
 }
 impl ContainerPolicy {
+    pub(super) fn idle(&self) -> Duration {
+        self.relay.idle
+    }
     /// Validate nonzero signed32-bit UID/GID and0.1..16 CPU allocation.
     ///
     /// # Errors

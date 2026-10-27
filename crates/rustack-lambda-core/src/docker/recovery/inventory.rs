@@ -33,7 +33,7 @@ fn tags<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Er
     Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-pub(super) async fn containers(
+pub(in crate::docker) async fn containers(
     directory: &DirectoryLease,
     docker: &DockerPort,
     deadline: Instant,
@@ -62,7 +62,7 @@ pub(super) async fn containers(
     check_deadline(deadline)
 }
 
-pub(super) async fn images(
+pub(in crate::docker) async fn images(
     directory: &DirectoryLease,
     docker: &DockerPort,
     deadline: Instant,

@@ -3,10 +3,12 @@
 Rustack runs STANDARD workflows through its own ASL engine. The opt-in
 `stepfunctions` source feature supports a bounded JSONPath profile, all eight
 state types, retries/timeouts, Inline Map/Parallel, nested workflows and Lambda
-callbacks. Real Lambda execution is currently qualified through the explicit
-trusted-host Native backend. Production Docker image startup, image ZIP execution,
-IaC and final platform qualification remain unfinished; selecting the ordinary
-CLI Docker backend still fails before listening.
+callbacks. Real Lambda execution is qualified through the explicit trusted-host
+Native backend and the ordinary Docker image startup path. Docker requires the
+configured ownership/recovery and real kernel/network/optional gateway probes
+below; it uses the actual shared provider for SDK and ASL calls. Docker ZIP,
+immutable image archive lease restoration, handler SDK networking, IaC and final
+platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -80,6 +82,97 @@ make smoke-workflows
 This smoke needs Cargo and Python 3 for inventory validation. It does not need a
 running server, Native bootstrap, `uv`, boto3 or Docker. Other SDK acceptance
 targets deliberately provision their own additional fixtures.
+
+## Run Docker image Lambda tasks
+
+Build with `--features lambda,stepfunctions` (the default source feature set also
+contains Lambda). Explicit `LAMBDA_EXECUTOR=docker` selects the real image runtime;
+execution otherwise stays disabled. Supply an operator-selected relay artifact,
+existing user bridge or explicit `none`, local Unix daemon socket and a private
+absolute `DATA_DIR`. The existing data-directory default is `/var/lib/localstack`;
+choose a writable private directory for local development. Example YAML:
+
+```yaml
+environment:
+  SERVICES: "lambda,stepfunctions"
+  GATEWAY_LISTEN: "127.0.0.1:4566"
+  DATA_DIR: "/absolute/private/rustack-data"
+  LAMBDA_EXECUTOR: "docker"
+  LAMBDA_DOCKER_SOCKET: "unix:///var/run/docker.sock"
+  LAMBDA_DOCKER_RELAY_IMAGE: "rustack/lambda-runtime:integration-arm64"
+  LAMBDA_DOCKER_NETWORK: "none"
+  LAMBDA_SKIP_SIGNATURE_VALIDATION: false
+  STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION: false
+  ACCESS_KEY: "local-key"
+  SECRET_KEY: "local-secret"
+budgets:
+  startupSeconds: 600
+  shutdownSeconds: 30
+```
+
+The relay tag is an explicit locally built operator source, not a runtime catalog.
+Build it for the selected daemon architecture with
+`make lambda-runtime-image WORKFLOWS_ARCH=arm64 WORKFLOWS_DOCKER_SOCKET=<socket-path>`;
+choose the installed Docker buildx command through `WORKFLOWS_IMAGE_BUILDER` if
+needed. The actual image reference defaults to the architecture-suffixed integration
+tag shown above. Image sources must already exist unless you explicitly configure
+the exact registry allowlist and `ifMissing` pull policy in the
+[operator specification](../specs/rustack-workflows-60-operations-design.md#11-docker-configuration).
+No ambient registry credential helper is executed. A private credential file has
+its own bounded quoted YAML schema, ownership/mode checks and operator-controlled
+ACL precondition.
+
+The daemon must be Linux and expose the required enforced resource/isolation
+controls. Startup resolves its selected arm64/amd64 platform and pins the relay
+by captured immutable identity. With cross-architecture false, the host and daemon
+architectures must match. Explicit true permits the separately probed selected
+target, including a remote emulated daemon; other function architectures are
+rejected during preparation. Pass `Architectures=["arm64"]` or `["x86_64"]` when
+creating an Image function to match the qualified platform. Use the same ordinary
+Lambda and Step Functions clients/ASL integrations described in this guide.
+
+`none` deliberately permits disconnected functions with `workers.docker.sdkGateway=false`.
+For function-originated service access, select an existing user bridge and set
+`LAMBDA_DOCKER_GATEWAY_ENDPOINT` to the independently chosen function-visible origin.
+Choose a gateway listener reachable from that network; default host loopback is
+not generally sufficient. Startup runs the trusted pinned function in that exact
+network and requires a response from this listener instance. No endpoint is
+inferred from Host or the advertised URL. HTTP is operator-trusted local networking;
+HTTPS uses normal name/certificate verification with embedded public roots, without
+production private-CA loading. This reachability receipt does not establish the
+pending handler S3/DDB/callback acceptance gate. Set user function SDK endpoint and
+explicit local test credentials deliberately; host AWS secrets are never inherited.
+
+Before readiness, the actual listener serves bounded diagnostics only. The fixed
+`/_rustack/runtime-probe` identity is public correlation, not authentication.
+Ordinary ingress opens only after recorded previous-run cleanup, complete bounded
+namespace inventories, live pins, actual kernel/optional endpoint receipts, provider
+construction and snapshot validation. `workers.docker` reports ready, platform,
+sdkGateway and zip=false. Backend/deployment owner faults affect readiness;
+normal FunctionError does not. One startupSeconds deadline includes all startup
+work, independently of shutdownSeconds.
+
+New ownership identities carry the journal-generation magic. Legacy identities
+are preserved and refused for production; an empty scan cannot upgrade them.
+Retain old evidence and choose a fresh controlled DATA_DIR when appropriate; this
+does not reclaim old resources. Never delete/reset owner, lock, daemon binding or
+journals to bypass refusal. Shutdown retains exact cleanup ownership and removes
+only recorded private resources, preserving operator source images/cache.
+
+Docker is currently image-only: ZIP creation/configured ZIP sources and ZIP
+archives reject explicitly. Image archives also reject before import/backup
+retirement until immutable live-lease restoration lands; a changed source tag
+cannot substitute for saved code. Named Native/pure workflow snapshots remain
+available within their documented profile. Full L01–L09/custom-RIC, image ZIP,
+immutable archive restoration, handler SDK networking, IaC/native reference and
+final platform/release gates remain open.
+
+The explicit `make test-lambda-startup-docker` gate builds its host executable in
+an isolated Cargo target directory and captures a fixture-owned executable copy,
+so concurrent plain/minimal builds cannot replace it. It requires the explicit
+socket, architecture, fixture images and (for connected cases) an owned user bridge
+and function-visible host. Missing prerequisites fail; it uses actual startup
+receipts and ordinary signed SDKs, without injected readiness.
 
 ## Enable trusted-host Lambda tasks
 

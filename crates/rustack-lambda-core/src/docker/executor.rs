@@ -41,6 +41,9 @@ use crate::{
 #[derive(Clone, Error)]
 #[non_exhaustive]
 pub enum DockerExecutorError {
+    /// Startup/shutdown owner preserves its first diagnostic after physical retirement.
+    #[error("Docker runtime owner failed")]
+    Owner(#[source] Arc<super::DockerStartupError>),
     /// Invalid trusted settings, runtime scope or captured invocation metadata.
     #[error("invalid Docker executor configuration")]
     Configuration,
@@ -160,6 +163,10 @@ pub struct DockerExecutor {
     pool: PoolOwner,
 }
 impl DockerExecutor {
+    pub(super) fn physically_settled(&self) -> bool {
+        self.pool.stopping.load(Ordering::Acquire) && self.pool.cleanup.is_finished()
+    }
+
     /// Construct dispatch over matching live runtime inputs without daemon IO.
     ///
     /// This does not qualify production startup. Retain the environment/image

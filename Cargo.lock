@@ -3285,6 +3285,7 @@ dependencies = [
  "rustack-sts-http",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

@@ -507,6 +507,20 @@ impl CleanupTask {
         true
     }
 
+    pub(crate) fn is_finished(&self) -> bool {
+        let state = self.state.lock().clone();
+        let Some(state) = state else {
+            return true;
+        };
+        match state.try_lock() {
+            Ok(state) => match &*state {
+                CleanupState::Complete(_) => true,
+                CleanupState::Running(task) => task.is_finished(),
+            },
+            Err(_) => false,
+        }
+    }
+
     pub(crate) async fn wait(&self) -> Result<(), ExecutorError> {
         let state = self.state.lock().clone();
         let Some(state) = state else {

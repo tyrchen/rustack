@@ -8,9 +8,11 @@ use std::{
     ffi::OsString,
     fmt,
     fs::{File, Metadata, TryLockError, canonicalize, symlink_metadata},
+    future::Future,
     io::{self, Read, Write},
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -19,6 +21,7 @@ use std::{
 };
 
 use nix::{
+    dir::Dir,
     errno::Errno,
     fcntl::{OFlag, open, openat, renameat},
     sys::stat::{Mode, mkdirat},
@@ -27,7 +30,7 @@ use nix::{
 use sha2::{Digest, Sha256};
 use tokio::{
     runtime::Handle,
-    sync::{Semaphore, SemaphorePermit},
+    sync::{AcquireError, Semaphore, SemaphorePermit},
     task::{JoinHandle, spawn_blocking},
     time::{Instant, timeout_at},
 };
@@ -44,7 +47,8 @@ const NAMESPACE: &str = ".rustack-lambda-docker";
 const LOCK: &str = "lease.lock";
 const OWNER: &str = "owner.v1";
 const PENDING: &str = "owner.pending";
-const MAGIC: &[u8; 8] = b"RSDKOWN1";
+const MAGIC: &[u8; 8] = b"RSDKOWN2";
+const LEGACY_MAGIC: &[u8; 8] = b"RSDKOWN1";
 const OWNER_BYTES: usize = 56;
 static WORKERS: Semaphore = Semaphore::const_new(4);
 
@@ -58,6 +62,9 @@ pub enum DirectoryLeaseError {
     /// Another descriptor/process owns this data directory.
     #[error("Docker data directory is already owned")]
     InUse,
+    /// This immutable identity predates journal-before-effect provenance.
+    #[error("Docker ownership predates journal provenance; choose a new controlled data directory")]
+    Legacy,
     /// Unsafe file kind/permissions/links or damaged authoritative identity.
     #[error("invalid Docker ownership state")]
     InvalidState,
@@ -97,10 +104,17 @@ impl From<Errno> for DirectoryLeaseError {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct DirectoryLease(Arc<Lease>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    Legacy,
+    Journaled,
+}
+
 struct Lease {
     owner: Uuid,
     run: Uuid,
     transaction: Arc<Semaphore>,
+    provenance: Provenance,
     guard: LeaseGuard,
 }
 enum LeaseGuard {
@@ -120,6 +134,13 @@ impl fmt::Debug for DirectoryLease {
     }
 }
 impl DirectoryLease {
+    pub(super) fn require_journaled(&self) -> Result<(), DirectoryLeaseError> {
+        match self.0.provenance {
+            Provenance::Journaled => Ok(()),
+            Provenance::Legacy => Err(DirectoryLeaseError::Legacy),
+        }
+    }
+
     pub(super) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -188,6 +209,7 @@ impl DirectoryLease {
             owner,
             run,
             transaction: Arc::new(Semaphore::new(1)),
+            provenance: Provenance::Journaled,
             guard: {
                 let root = tempfile::tempdir().unwrap();
                 let directory = File::open(root.path()).unwrap();
@@ -200,7 +222,7 @@ impl DirectoryLease {
     }
 }
 
-struct DataDirectory(PathBuf);
+pub(super) struct DataDirectory(PathBuf);
 impl TryFrom<PathBuf> for DataDirectory {
     type Error = DirectoryLeaseError;
 
@@ -272,23 +294,26 @@ async fn run<T: Send + 'static>(
     let (value, _permit) = timeout_at(deadline, task)
         .await
         .map_err(|_| DirectoryLeaseError::Deadline)?
-        .map_err(|_| DirectoryLeaseError::Worker)??;
+        .map_err(|_| DirectoryLeaseError::Worker)?;
     if Instant::now() >= deadline {
         return Err(DirectoryLeaseError::Deadline);
     }
-    Ok(value)
+    value
 }
 
 fn spawn_work<T: Send + 'static>(
     permit: SemaphorePermit<'static>,
     control: Control,
     work: impl FnOnce(&Control) -> Result<T, DirectoryLeaseError> + Send + 'static,
-) -> JoinHandle<Result<(T, SemaphorePermit<'static>), DirectoryLeaseError>> {
+) -> JoinHandle<(Result<T, DirectoryLeaseError>, SemaphorePermit<'static>)> {
     spawn_blocking(move || {
-        control.check()?;
-        let value = work(&control)?;
-        control.check()?;
-        Ok((value, permit))
+        let result = (|| {
+            control.check()?;
+            let value = work(&control)?;
+            control.check()?;
+            Ok(value)
+        })();
+        (result, permit)
     })
 }
 
@@ -320,9 +345,11 @@ fn acquire(
         Err(TryLockError::Error(error)) => return Err(error.into()),
     }
     control.check()?;
-    let owner = match read_owner(&namespace)? {
-        Some(owner) => owner,
-        None => publish_owner(&namespace, control)?,
+    let (owner, provenance) = if let Some(owner) = read_owner(&namespace)? {
+        owner
+    } else {
+        pristine_namespace(&namespace, control)?;
+        (publish_owner(&namespace, control)?, Provenance::Journaled)
     };
     namespace.sync_all()?;
     root.sync_all()?;
@@ -331,6 +358,7 @@ fn acquire(
         owner,
         run: Uuid::new_v4(),
         transaction: Arc::new(Semaphore::new(1)),
+        provenance,
         guard: LeaseGuard::Held {
             directory: namespace,
             _lock: lock,
@@ -496,7 +524,7 @@ fn managed_file(
     Ok(file)
 }
 
-fn read_owner(directory: &File) -> Result<Option<Uuid>, DirectoryLeaseError> {
+fn read_owner(directory: &File) -> Result<Option<(Uuid, Provenance)>, DirectoryLeaseError> {
     let mut file = match managed_file(directory, OWNER, OFlag::O_RDONLY, OWNER_BYTES as u64) {
         Ok(file) => file,
         Err(DirectoryLeaseError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -512,7 +540,10 @@ fn read_owner(directory: &File) -> Result<Option<Uuid>, DirectoryLeaseError> {
     let payload = bytes.get(..24).ok_or(DirectoryLeaseError::InvalidState)?;
     let checksum = Sha256::digest(payload);
     let expected: &[u8] = checksum.as_ref();
-    if bytes.get(..8) != Some(MAGIC.as_slice()) || bytes.get(24..) != Some(expected) {
+    let journaled = bytes.get(..8) == Some(MAGIC.as_slice());
+    if (!journaled && bytes.get(..8) != Some(LEGACY_MAGIC.as_slice()))
+        || bytes.get(24..) != Some(expected)
+    {
         return Err(DirectoryLeaseError::InvalidState);
     }
     let owner = Uuid::from_slice(bytes.get(8..24).ok_or(DirectoryLeaseError::InvalidState)?)
@@ -520,7 +551,34 @@ fn read_owner(directory: &File) -> Result<Option<Uuid>, DirectoryLeaseError> {
     if owner.is_nil() {
         return Err(DirectoryLeaseError::InvalidState);
     }
-    Ok(Some(owner))
+    Ok(Some((
+        owner,
+        if journaled {
+            Provenance::Journaled
+        } else {
+            Provenance::Legacy
+        },
+    )))
+}
+
+fn pristine_namespace(directory: &File, control: &Control) -> Result<(), DirectoryLeaseError> {
+    let descriptor = openat(directory, ".", directory_flags(), Mode::empty())?;
+    let mut entries = Dir::from_fd(descriptor)?;
+    for (count, entry) in entries.iter().enumerate() {
+        control.check()?;
+        if count >= 4 {
+            return Err(DirectoryLeaseError::InvalidState);
+        }
+        let entry = entry?;
+        match entry.file_name().to_bytes() {
+            b"." | b".." | b"lease.lock" => {}
+            b"owner.pending" => {
+                managed_file(directory, PENDING, OFlag::O_RDONLY, OWNER_BYTES as u64)?;
+            }
+            _ => return Err(DirectoryLeaseError::InvalidState),
+        }
+    }
+    Ok(())
 }
 
 fn publish_owner(directory: &File, control: &Control) -> Result<Uuid, DirectoryLeaseError> {
@@ -559,3 +617,97 @@ fn publish_owner(directory: &File, control: &Control) -> Result<Uuid, DirectoryL
 #[cfg(test)]
 #[path = "ownership_tests.rs"]
 mod tests;
+
+/// Exact acquisition job retained by production startup through observer loss.
+pub(super) struct DirectoryAcquisition {
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+    state: AcquisitionState,
+}
+enum AcquisitionState {
+    Queued {
+        directory: DataDirectory,
+        permit:
+            Pin<Box<dyn Future<Output = Result<SemaphorePermit<'static>, AcquireError>> + Send>>,
+    },
+    Running(
+        JoinHandle<(
+            Result<DirectoryLease, DirectoryLeaseError>,
+            SemaphorePermit<'static>,
+        )>,
+    ),
+    Consumed,
+}
+impl fmt::Debug for DirectoryAcquisition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DirectoryAcquisition(<retained>)")
+    }
+}
+impl DirectoryAcquisition {
+    pub(super) fn begin(
+        directory: PathBuf,
+        deadline: Instant,
+    ) -> Result<Self, DirectoryLeaseError> {
+        let directory = DataDirectory::try_from(directory)?;
+        Handle::try_current().map_err(|_| DirectoryLeaseError::Worker)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(DirectoryLeaseError::Deadline)?;
+        if remaining.is_zero() || remaining > Duration::from_secs(60) {
+            return Err(DirectoryLeaseError::Configuration);
+        }
+        Ok(Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline,
+            state: AcquisitionState::Queued {
+                directory,
+                permit: Box::pin(WORKERS.acquire()),
+            },
+        })
+    }
+    pub(super) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+    pub(super) async fn wait(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Result<DirectoryLease, DirectoryLeaseError>, DirectoryLeaseError> {
+        if matches!(self.state, AcquisitionState::Queued { .. })
+            && self.cancelled.load(Ordering::Acquire)
+        {
+            self.state = AcquisitionState::Consumed;
+            return Ok(Err(DirectoryLeaseError::Cancelled));
+        }
+        if let AcquisitionState::Queued { directory, permit } = &mut self.state {
+            let permit = timeout_at(deadline.min(self.deadline), permit)
+                .await
+                .map_err(|_| DirectoryLeaseError::Deadline)?
+                .map_err(|_| DirectoryLeaseError::Worker)?;
+            let directory = DataDirectory(directory.0.clone());
+            let control = Control {
+                deadline: self.deadline,
+                cancelled: self.cancelled.clone(),
+            };
+            self.state = AcquisitionState::Running(spawn_work(permit, control, move |control| {
+                acquire(&directory, control)
+            }));
+        }
+        let result = match &mut self.state {
+            AcquisitionState::Running(task) => timeout_at(deadline, task)
+                .await
+                .map_err(|_| DirectoryLeaseError::Deadline)?,
+            _ => return Ok(Err(DirectoryLeaseError::Worker)),
+        };
+        // The exact blocking task is terminal, even on JoinError. Never poll it twice.
+        self.state = AcquisitionState::Consumed;
+        Ok(match result {
+            Ok((result, _permit)) => result,
+            Err(_) => Err(DirectoryLeaseError::Worker),
+        })
+    }
+}
+impl Drop for DirectoryAcquisition {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}

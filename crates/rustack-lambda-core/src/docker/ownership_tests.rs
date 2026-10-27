@@ -565,3 +565,177 @@ async fn assert_child(root: &TempDir, mode: &str, owner: Uuid, run: Uuid) {
     };
     assert!(status.success());
 }
+
+#[tokio::test]
+async fn test_should_retain_legacy_provenance_without_rewriting_or_production_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let first = lease(&root).await;
+    let owner = first.owner_id();
+    first.require_journaled().unwrap();
+    drop(first);
+    let mut bytes = tokio::fs::read(managed(&root, OWNER)).await.unwrap();
+    bytes.get_mut(..8).unwrap().copy_from_slice(LEGACY_MAGIC);
+    let checksum = Sha256::digest(bytes.get(..24).unwrap());
+    bytes.get_mut(24..).unwrap().copy_from_slice(&checksum);
+    tokio::fs::write(managed(&root, OWNER), &bytes)
+        .await
+        .unwrap();
+    let legacy = lease(&root).await;
+    assert_eq!(legacy.owner_id(), owner);
+    assert!(legacy.require_journaled().is_err());
+    assert_eq!(tokio::fs::read(managed(&root, OWNER)).await.unwrap(), bytes);
+    drop(legacy);
+    let again = lease(&root).await;
+    assert_eq!(again.owner_id(), owner);
+    assert!(again.require_journaled().is_err());
+}
+
+#[rstest::rstest]
+#[case("daemon.v1")]
+#[case("daemon.pending")]
+#[case("containers.v1")]
+#[case("containers.pending")]
+#[case("pins.v1")]
+#[case("pins.pending")]
+#[case("unknown-state")]
+#[tokio::test]
+async fn test_should_refuse_new_identity_over_unexplained_owner_missing_state(#[case] name: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let first = lease(&root).await;
+    drop(first);
+    tokio::fs::remove_file(managed(&root, OWNER)).await.unwrap();
+    tokio::fs::write(managed(&root, name), b"retained-evidence")
+        .await
+        .unwrap();
+    assert!(matches!(
+        DirectoryLease::acquire(root.path().into(), deadline()).await,
+        Err(DirectoryLeaseError::InvalidState)
+    ));
+    assert!(!tokio::fs::try_exists(managed(&root, OWNER)).await.unwrap());
+    assert_eq!(
+        tokio::fs::read(managed(&root, name)).await.unwrap(),
+        b"retained-evidence"
+    );
+}
+
+#[tokio::test]
+async fn test_should_publish_journal_generation_before_effect_and_keep_downgrade_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = lease(&root).await;
+    owner.require_journaled().unwrap();
+    let bytes = tokio::fs::read(managed(&root, OWNER)).await.unwrap();
+    assert_eq!(bytes.get(..8), Some(MAGIC.as_slice()));
+    assert_ne!(bytes.get(..8), Some(LEGACY_MAGIC.as_slice()));
+    let id = owner.owner_id();
+    drop(owner);
+    let again = lease(&root).await;
+    again.require_journaled().unwrap();
+    assert_eq!(again.owner_id(), id);
+}
+
+#[tokio::test]
+async fn test_should_retain_exact_blocking_acquisition_through_deadline_and_abandoned_observers() {
+    static POOL: Semaphore = Semaphore::const_new(1);
+    let root = tempfile::tempdir().unwrap();
+    let data = DataDirectory::try_from(root.path().join("unpublished")).unwrap();
+    let at = deadline();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (release, held) = mpsc::sync_channel(1);
+    let (entered, saw) = oneshot::channel();
+    let task = spawn_work(
+        POOL.acquire().await.unwrap(),
+        Control {
+            deadline: at,
+            cancelled: cancelled.clone(),
+        },
+        move |control| {
+            entered.send(()).unwrap();
+            held.recv().unwrap();
+            acquire(&data, control)
+        },
+    );
+    let mut pending = DirectoryAcquisition {
+        cancelled,
+        deadline: at,
+        state: AcquisitionState::Running(task),
+    };
+    saw.await.unwrap();
+    assert!(matches!(
+        pending
+            .wait(Instant::now() + Duration::from_millis(10))
+            .await,
+        Err(DirectoryLeaseError::Deadline)
+    ));
+    pending.cancel();
+    assert_eq!(POOL.available_permits(), 0);
+    assert!(matches!(
+        pending
+            .wait(Instant::now() + Duration::from_millis(10))
+            .await,
+        Err(DirectoryLeaseError::Deadline)
+    ));
+    release.send(()).unwrap();
+    assert!(matches!(
+        pending.wait(deadline()).await,
+        Ok(Err(DirectoryLeaseError::Cancelled))
+    ));
+    assert!(matches!(
+        pending.wait(deadline()).await,
+        Ok(Err(DirectoryLeaseError::Worker))
+    ));
+    assert_eq!(POOL.available_permits(), 1);
+    assert!(!root.path().join("unpublished").exists());
+}
+#[tokio::test]
+async fn test_should_cache_panicked_acquisition_completion_without_repolling_its_handle() {
+    static POOL: Semaphore = Semaphore::const_new(1);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task = spawn_work(
+        POOL.acquire().await.unwrap(),
+        Control {
+            deadline: deadline(),
+            cancelled: cancelled.clone(),
+        },
+        |_| -> Result<DirectoryLease, DirectoryLeaseError> {
+            panic!("injected filesystem worker panic")
+        },
+    );
+    let mut pending = DirectoryAcquisition {
+        cancelled,
+        deadline: deadline(),
+        state: AcquisitionState::Running(task),
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            pending.wait(deadline()).await,
+            Ok(Err(DirectoryLeaseError::Worker))
+        ));
+    }
+    assert_eq!(POOL.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn test_should_keep_failed_ready_filesystem_result_charged_until_disposal() {
+    static POOL: Semaphore = Semaphore::const_new(1);
+    let task = spawn_work(
+        POOL.acquire().await.unwrap(),
+        Control {
+            deadline: deadline(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        },
+        |_| -> Result<(), DirectoryLeaseError> { Err(DirectoryLeaseError::InvalidState) },
+    );
+    timeout(Duration::from_secs(2), async {
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(POOL.available_permits(), 0);
+    let (result, permit) = task.await.unwrap();
+    assert!(matches!(result, Err(DirectoryLeaseError::InvalidState)));
+    assert_eq!(POOL.available_permits(), 0);
+    drop(permit);
+    assert_eq!(POOL.available_permits(), 1);
+}

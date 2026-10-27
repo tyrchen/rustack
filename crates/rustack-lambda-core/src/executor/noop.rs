@@ -7,7 +7,7 @@ use crate::invocation::InvocationContext;
 /// Explicit unavailable backend for metadata-only operation.
 #[derive(Debug, Default, Clone)]
 pub struct NoopExecutor {
-    unsupported_docker: bool,
+    unqualified_docker: bool,
 }
 impl NoopExecutor {
     /// Construct a disabled executor.
@@ -15,14 +15,14 @@ impl NoopExecutor {
     pub fn new() -> Self {
         Self::default()
     }
-    pub(crate) fn docker_unavailable() -> Self {
+    pub(crate) fn without_docker_runtime() -> Self {
         Self {
-            unsupported_docker: true,
+            unqualified_docker: true,
         }
     }
     fn error(&self) -> ExecutorError {
-        if self.unsupported_docker {
-            ExecutorError::Unsupported("Docker execution is not implemented in this build".into())
+        if self.unqualified_docker {
+            ExecutorError::Unsupported("qualified Docker startup has not been installed".into())
         } else {
             ExecutorError::Disabled
         }

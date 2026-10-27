@@ -195,6 +195,8 @@ struct Envelope {
 #[derive(Debug, Clone, TypedBuilder)]
 #[non_exhaustive]
 pub struct ImageLeasePort {
+    #[builder(default)]
+    platform: Option<Architecture>,
     sender: mpsc::Sender<Envelope>,
     slots: Arc<Semaphore>,
     pins: Arc<PinBudget>,
@@ -236,6 +238,12 @@ impl ImageLeasePort {
         deadline: Instant,
     ) -> Result<PinnedImage, DockerError> {
         self.available()?;
+        if self
+            .platform
+            .is_some_and(|platform| platform != architecture)
+        {
+            return Err(DockerError::Configuration);
+        }
         check_preparation_deadline(deadline)?;
         if let Some(config) = overrides {
             validate_image_config(config).map_err(|_| DockerError::Configuration)?;
@@ -336,6 +344,14 @@ pub struct ImageLeaseManager {
     emergency: Arc<CleanupTask>,
 }
 impl ImageLeaseManager {
+    pub(super) fn physically_settled(&self) -> bool {
+        self.primary.is_some()
+            && self.task.is_none()
+            && self.emergency.is_finished()
+            && self.port.status().pins == 0
+            && self.port.status().preparing == 0
+    }
+
     /// Start under the current Tokio runtime with an explicit scoped Docker port.
     ///
     /// # Errors
@@ -373,6 +389,24 @@ impl ImageLeaseManager {
         config: ImageLeaseConfig,
         policy: ImagePullPolicy,
     ) -> Result<Self, DockerError> {
+        Self::start_platform(docker, scope, config, policy, None)
+    }
+    pub(super) fn start_qualified(
+        docker: DockerPort,
+        scope: ImagePinScope,
+        config: ImageLeaseConfig,
+        policy: ImagePullPolicy,
+        platform: Architecture,
+    ) -> Result<Self, DockerError> {
+        Self::start_platform(docker, scope, config, policy, Some(platform))
+    }
+    fn start_platform(
+        docker: DockerPort,
+        scope: ImagePinScope,
+        config: ImageLeaseConfig,
+        policy: ImagePullPolicy,
+        platform: Option<Architecture>,
+    ) -> Result<Self, DockerError> {
         docker.require_directory(scope.directory())?;
         let runtime = Handle::try_current().map_err(|_| DockerError::Worker)?;
         let (sender, requests) = mpsc::channel(32);
@@ -380,6 +414,7 @@ impl ImageLeaseManager {
         let health = Arc::new(Health::default());
         let emergency = Arc::new(CleanupTask::default());
         let port = ImageLeasePort::builder()
+            .platform(platform)
             .sender(sender)
             .slots(Arc::new(Semaphore::new(usize::from(config.jobs))))
             .pins(Arc::new(PinBudget::new(config.pins)))

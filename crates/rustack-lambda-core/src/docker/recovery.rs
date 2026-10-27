@@ -13,7 +13,7 @@ use super::{
 };
 
 mod images;
-mod inventory;
+pub(super) mod inventory;
 mod namespace;
 
 /// Container-only recovery accounting, not a complete backend readiness proof.

@@ -1191,3 +1191,18 @@ test-lambda-log-windows:
 test-lambda-log-windows-docker: test-lambda-environments-docker
 
 .PHONY: test-lambda-log-windows test-lambda-log-windows-docker
+
+
+# Ordinary production startup consumes actual receipts; no fixture readiness injection.
+# Isolate the executable from concurrent plain/minimal workspace builds.
+WORKFLOWS_DOCKER_TARGET_DIR ?= $(shell cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-docker
+test-lambda-startup:
+	@cargo test --locked -p rustack-core --lib startup_tests
+	@cargo test --locked -p rustack-lambda-core --lib docker::startup
+	@cargo test --locked -p rustack-lambda-core --lib docker::ownership::tests
+	@cargo test --locked -p rustack-cli --bin rustack --features stepfunctions lambda_docker
+
+test-lambda-startup-docker: lambda-runtime-image lambda-runtime-fixture-image workflows-sdk-python
+	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" RUSTACK_RUNTIME_NETWORK="$(WORKFLOWS_NETWORK)" RUSTACK_RUNTIME_GATEWAY_HOST="$(WORKFLOWS_GATEWAY_HOST)" RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions -- --ignored --nocapture --test-threads=1
+
+.PHONY: test-lambda-startup test-lambda-startup-docker

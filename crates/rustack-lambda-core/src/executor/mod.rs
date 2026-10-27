@@ -2,7 +2,7 @@
 //!
 //! Routes execution through an object-safe backend with explicit availability.
 //!
-//! - [`NoopExecutor`] rejects execution in Disabled/unsupported Docker modes.
+//! - [`NoopExecutor`] rejects execution in Disabled/unqualified Docker modes.
 //! - [`AutoExecutor`] explicitly opts into Squib on macOS Zip functions, native otherwise.
 //! - [`NativeExecutor`] runs trusted host-matching bootstraps without isolation.
 //! - [`SquibExecutor`] runs arm64 Zip functions through a microVM guest agent.

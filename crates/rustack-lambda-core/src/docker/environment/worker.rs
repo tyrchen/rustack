@@ -208,7 +208,18 @@ impl Worker {
         self.docker
             .start_container(&function, self.config.deadline())
             .await?;
-        match self.next(io, deadline, Some(&self.cleaner()), None).await? {
+        let bootstrap_deadline = deadline.min(Instant::now() + self.config.0.init);
+        let ready = self
+            .next(io, bootstrap_deadline, Some(&self.cleaner()), None)
+            .await
+            .map_err(|error| {
+                if matches!(error, EnvironmentError::Deadline) && bootstrap_deadline < deadline {
+                    EnvironmentError::InitializationTimeout
+                } else {
+                    error
+                }
+            })?;
+        match ready {
             ClientEvent::BootstrapReady => Ok(()),
             event => Err(Self::event_failure(event)),
         }

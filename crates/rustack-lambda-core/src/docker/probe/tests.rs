@@ -158,3 +158,17 @@ async fn test_should_settle_rejected_probe_creation_and_retain_abandoned_waiter_
     wire.shutdown().await.unwrap();
     daemon.close().await;
 }
+
+// Synthetic receipt for private binding/revocation unit regressions only. Actual
+// runtime qualification remains covered by the explicit real-daemon suites.
+pub(in crate::docker) fn synthetic_resource(
+    config: &EnvironmentProbeConfig,
+) -> super::EnvironmentProbe {
+    super::EnvironmentProbe {
+        report: report(AttemptId::default()),
+        directory: config.directory.clone(),
+        relay: config.relay.clone(),
+        policy: config.network.apply(&config.policy).unwrap(),
+        environments: config.environments.clone(),
+    }
+}

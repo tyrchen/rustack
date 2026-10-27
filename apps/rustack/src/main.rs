@@ -36,6 +36,8 @@ mod events_bridge;
 mod gateway;
 #[cfg(feature = "s3")]
 mod handler;
+#[cfg(all(feature = "lambda", unix))]
+mod lambda_docker;
 #[cfg(all(feature = "lambda", feature = "s3"))]
 mod lambda_s3_bridge;
 mod runtime;
@@ -144,6 +146,12 @@ use rustack_lambda_core::docker::GatewayInstanceId;
 use rustack_lambda_core::handler::RustackLambdaHandler;
 #[cfg(feature = "lambda")]
 use rustack_lambda_core::provider::RustackLambda;
+#[cfg(all(feature = "lambda", unix))]
+use rustack_lambda_core::{
+    docker::{DockerInstallation, DockerRuntime, DockerRuntimeSettings, DockerStartupConfig},
+    executor::ExecutorBackend,
+    storage::FunctionStore,
+};
 #[cfg(feature = "lambda")]
 use rustack_lambda_http::service::{LambdaHttpConfig, LambdaHttpService};
 #[cfg(feature = "logs")]
@@ -654,7 +662,10 @@ fn build_credential_provider() -> Option<Arc<dyn rustack_auth::CredentialProvide
 }
 
 /// Accept bounded connections, then return the shared shutdown deadline and drain result.
-async fn serve(listener: TcpListener, service: GatewayService) -> Result<(Instant, Result<()>)> {
+async fn serve(
+    listener: Arc<TcpListener>,
+    service: GatewayService,
+) -> Result<(Instant, Result<()>)> {
     let budgets = settings::budgets();
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     let mut http = HttpConnBuilder::new(TokioExecutor::new());
@@ -948,7 +959,7 @@ impl Runtime {
             Some(workflows) => workflows.shutdown(deadline).await,
             None => Ok(()),
         };
-        let workers = tokio::time::timeout_at(deadline, self.workers.shutdown())
+        let workers = tokio::time::timeout_at(deadline, self.workers.shutdown(deadline))
             .await
             .context("startup provider cleanup observation expired")?;
         #[cfg(feature = "stepfunctions")]
@@ -957,9 +968,21 @@ impl Runtime {
     }
 }
 
+#[cfg(all(test, feature = "stepfunctions"))]
+fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
+    build_services_with_runtime(
+        is_enabled,
+        #[cfg(all(feature = "lambda", unix))]
+        None,
+    )
+}
+
 /// Build all enabled service routers based on environment configuration.
 #[allow(clippy::too_many_lines)]
-fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
+fn build_services_with_runtime(
+    is_enabled: impl Fn(&str) -> bool,
+    #[cfg(all(feature = "lambda", unix))] installation: Option<DockerInstallation>,
+) -> Result<Runtime> {
     let mut services: Vec<Box<dyn ServiceRouter>> = Vec::new();
     let providers = RuntimeProviders::default();
     #[cfg(any(
@@ -1318,8 +1341,16 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
         };
         #[cfg(not(feature = "s3"))]
         let code_fetcher: Arc<dyn S3CodeFetcher> = Arc::new(UnavailableS3CodeFetcher);
-        let lambda_provider =
-            Arc::new(RustackLambda::new(lambda_config.clone()).with_code_fetcher(code_fetcher));
+        #[cfg(all(feature = "lambda", unix))]
+        let lambda_provider = match installation {
+            Some(installation) => installation.provider(FunctionStore::new(
+                lambda_data_directory().join("lambda-code"),
+            ))?,
+            None => RustackLambda::new(lambda_config.clone()),
+        };
+        #[cfg(not(unix))]
+        let lambda_provider = RustackLambda::new(lambda_config.clone());
+        let lambda_provider = Arc::new(lambda_provider.with_code_fetcher(code_fetcher));
         providers.register_lambda(Arc::clone(&lambda_provider));
         workers.lambda = Some(Arc::clone(&lambda_provider));
         let lambda_handler = RustackLambdaHandler::new(Arc::clone(&lambda_provider));
@@ -1409,6 +1440,14 @@ fn build_services(is_enabled: impl Fn(&str) -> bool) -> Result<Runtime> {
     })
 }
 
+#[cfg(all(feature = "lambda", unix))]
+fn lambda_data_directory() -> std::path::PathBuf {
+    settings::var("DATA_DIR").map_or_else(
+        |_| rustack_core::RustackConfig::default().data_dir.into(),
+        Into::into,
+    )
+}
+
 fn shutdown_cleanup_reserve() -> Duration {
     (Duration::from_secs(settings::budgets().shutdown_seconds) / 10).min(Duration::from_secs(1))
 }
@@ -1487,7 +1526,7 @@ async fn run() -> Result<()> {
     config.validate_credentials(&enabled)?;
     info!(settings = ?config, "validated runtime configuration");
     let startup_deadline =
-        Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds);
+        Instant::now() + Duration::from_secs(settings::budgets().startup_seconds);
     #[cfg(feature = "lambda")]
     let gateway_instance = if enabled.iter().any(|name| name == "lambda") {
         Some(
@@ -1500,7 +1539,81 @@ async fn run() -> Result<()> {
     } else {
         None
     };
-    let mut runtime = build_services(|name| enabled.iter().any(|s| s == name))?;
+    #[cfg(all(feature = "lambda", unix))]
+    let mut docker: Option<DockerRuntime> = None;
+    #[cfg(all(feature = "lambda", unix))]
+    let mut startup_listener = None;
+    #[cfg(all(feature = "lambda", unix))]
+    let installation = if enabled.iter().any(|name| name == "lambda") {
+        let lambda = LambdaConfig::from_env()?;
+        if lambda.executor == ExecutorBackend::Docker {
+            let settings = DockerRuntimeSettings::from_lookup(
+                |key| settings::var(key).ok(),
+                &settings::budgets(),
+                lambda.idle_timeout,
+            )?;
+            let instance = gateway_instance.context("Lambda gateway identity absent")?;
+            let startup =
+                DockerStartupConfig::new(settings, lambda_data_directory(), instance, lambda)?;
+            let mut owner = DockerRuntime::new(startup)?;
+            let qualification = async {
+                let addr: SocketAddr = listen_addr.parse().context("invalid bind address")?;
+                let listener = Arc::new(bind_before_deadline(addr, startup_deadline).await?);
+                lambda_docker::qualify(listener.clone(), &mut owner, instance, startup_deadline)
+                    .await?;
+                let installed = owner.installation()?;
+                Result::<_>::Ok((listener, installed))
+            }
+            .await;
+            let (listener, installed) = match qualification {
+                Ok(qualified) => qualified,
+                Err(error) => {
+                    let cleanup = owner
+                        .shutdown(
+                            Instant::now()
+                                + Duration::from_secs(settings::budgets().shutdown_seconds),
+                        )
+                        .await;
+                    if cleanup.is_err() {
+                        tracing::error!("startup Docker cleanup remains owned");
+                    }
+                    return Err(error);
+                }
+            };
+            startup_listener = Some(listener);
+            docker = Some(owner);
+            Some(installed)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let construction = build_services_with_runtime(
+        |name| enabled.iter().any(|s| s == name),
+        #[cfg(all(feature = "lambda", unix))]
+        installation,
+    );
+    let mut runtime = match construction {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            #[cfg(all(feature = "lambda", unix))]
+            if lambda_docker::shutdown(
+                &mut docker,
+                Instant::now() + Duration::from_secs(settings::budgets().shutdown_seconds),
+            )
+            .await
+            .is_err()
+            {
+                tracing::error!("startup Docker cleanup remains owned");
+            }
+            return Err(error);
+        }
+    };
+    #[cfg(all(feature = "lambda", unix))]
+    if let Some(owner) = &docker {
+        runtime.workers.docker = Some(owner.status());
+    }
 
     if runtime.services.is_empty() {
         anyhow::bail!(
@@ -1510,17 +1623,62 @@ async fn run() -> Result<()> {
     }
 
     let mut snapshot = SnapshotSession::new(snapshot_config);
-    let startup = tokio::time::timeout_at(startup_deadline, async {
-        snapshot.load(&runtime.providers, startup_deadline).await?;
+    #[cfg(all(feature = "lambda", unix))]
+    let diagnostic_startup = startup_listener.is_some();
+    let startup_work = async {
+        let work = async {
+            snapshot.load(&runtime.providers, startup_deadline).await?;
+            #[cfg(feature = "lambda")]
+            if let Some(lambda) = &runtime.workers.lambda {
+                lambda.validate_runtime_restore()?;
+            }
+            #[cfg(all(feature = "lambda", unix))]
+            if let Some(owner) = &docker {
+                owner.installation()?;
+            }
+            Result::<()>::Ok(())
+        };
+        #[cfg(all(feature = "lambda", unix))]
+        match startup_listener.as_ref() {
+            Some(listener) => {
+                lambda_docker::observe(
+                    listener.clone(),
+                    gateway_instance.context("Lambda gateway identity absent")?,
+                    work,
+                    startup_deadline,
+                )
+                .await?;
+            }
+            None => work.await?,
+        }
+        #[cfg(not(all(feature = "lambda", unix)))]
+        work.await?;
         let addr: SocketAddr = listen_addr
             .parse()
             .with_context(|| format!("invalid bind address: {listen_addr}"))?;
-        let listener = bind_before_deadline(addr, startup_deadline).await?;
+        #[cfg(all(feature = "lambda", unix))]
+        let listener = match startup_listener.take() {
+            Some(listener) => listener,
+            None => Arc::new(bind_before_deadline(addr, startup_deadline).await?),
+        };
+        #[cfg(not(all(feature = "lambda", unix)))]
+        let listener = Arc::new(bind_before_deadline(addr, startup_deadline).await?);
         Result::<_>::Ok((addr, listener))
-    })
-    .await
-    .context("runtime startup observation deadline exceeded")
-    .and_then(|result| result);
+    };
+    #[cfg(all(feature = "lambda", unix))]
+    let startup = if diagnostic_startup {
+        startup_work.await
+    } else {
+        tokio::time::timeout_at(startup_deadline, startup_work)
+            .await
+            .context("runtime startup observation deadline exceeded")
+            .and_then(|result| result)
+    };
+    #[cfg(not(all(feature = "lambda", unix)))]
+    let startup = tokio::time::timeout_at(startup_deadline, startup_work)
+        .await
+        .context("runtime startup observation deadline exceeded")
+        .and_then(|result| result);
     let (addr, listener) = match startup {
         Ok(started) => started,
         Err(error) => {
@@ -1530,6 +1688,13 @@ async fn run() -> Result<()> {
                 tracing::error!(error = %cleanup, "startup snapshot cleanup incomplete");
             }
             let cleanup = runtime.abort_startup(cleanup_deadline).await;
+            #[cfg(all(feature = "lambda", unix))]
+            if lambda_docker::shutdown(&mut docker, cleanup_deadline)
+                .await
+                .is_err()
+            {
+                tracing::error!("startup Docker cleanup remains owned");
+            }
             snapshot.quarantine();
             if let Err(cleanup) = cleanup {
                 tracing::error!(error = %cleanup, "startup cleanup incomplete");
@@ -1588,17 +1753,23 @@ async fn run() -> Result<()> {
             Some(workflows) => workflows.shutdown(deadline).await,
             None => Ok(()),
         };
-        let worker_result = match tokio::time::timeout_at(deadline, workers.shutdown()).await {
-            Ok(result) => result.context("runtime shutdown failed"),
-            Err(_) => Err(anyhow::anyhow!(
-                "resource cleanup incomplete: shutdown deadline exceeded; dropping providers now \
-                 (kill_on_drop reaps remaining children)"
-            )),
-        };
+        let worker_result =
+            match tokio::time::timeout_at(deadline, workers.shutdown(deadline)).await {
+                Ok(result) => result.context("runtime shutdown failed"),
+                Err(_) => Err(anyhow::anyhow!(
+                    "resource cleanup incomplete: shutdown deadline exceeded; dropping providers \
+                     now (kill_on_drop reaps remaining children)"
+                )),
+            };
+        #[cfg(all(feature = "lambda", unix))]
+        let docker_result = lambda_docker::shutdown(&mut docker, deadline).await;
         snapshot_result?;
         #[cfg(feature = "stepfunctions")]
         workflow_result?;
-        worker_result
+        worker_result?;
+        #[cfg(all(feature = "lambda", unix))]
+        docker_result?;
+        Result::<()>::Ok(())
     }
     .await;
     if save_result.is_err() || stop_result.is_err() {
@@ -1745,7 +1916,9 @@ mod tests {
             .context("workflow owner")?
             .shutdown(Instant::now() + Duration::from_secs(5))
             .await?;
-        workers.shutdown().await?;
+        workers
+            .shutdown(Instant::now() + Duration::from_secs(30))
+            .await?;
         result
     }
 

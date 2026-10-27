@@ -897,3 +897,34 @@ async fn test_should_retain_cleanup_capacity_and_shutdown_join_until_delete_reco
 
 #[path = "lease_tests/durable.rs"]
 mod durable;
+
+#[tokio::test]
+async fn test_should_reject_unqualified_platform_before_pin_or_wire_admission() {
+    let daemon = Daemon::new();
+    let mut wire = daemon.wire().await;
+    let mut images = ImageLeaseManager::start_qualified(
+        wire.port(),
+        scope(),
+        config(2, 1),
+        ImagePullPolicy::default(),
+        Architecture::Arm64,
+    )
+    .unwrap();
+    assert!(matches!(
+        images
+            .port()
+            .prepare(
+                &"worker:v1".parse().unwrap(),
+                Architecture::X86_64,
+                None,
+                deadline()
+            )
+            .await,
+        Err(DockerError::Configuration)
+    ));
+    assert_eq!(images.port().status().pins, 0);
+    assert_eq!(images.port().status().preparing, 0);
+    images.shutdown(deadline()).await.unwrap();
+    wire.shutdown().await.unwrap();
+    daemon.close().await;
+}

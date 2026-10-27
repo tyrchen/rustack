@@ -138,13 +138,14 @@ impl Daemon {
             identity_status,
         }
     }
-    fn socket(&self) -> DockerSocket {
+    pub(super) fn socket_uri(&self) -> String {
         format!(
             "unix://{}",
             self.directory.path().join("docker.sock").display()
         )
-        .parse()
-        .unwrap()
+    }
+    pub(super) fn socket(&self) -> DockerSocket {
+        self.socket_uri().parse().unwrap()
     }
     pub(super) async fn wire(&self) -> DockerWire {
         match DockerWire::connect(self.socket(), deadline()).await {

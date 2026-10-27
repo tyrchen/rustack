@@ -77,9 +77,9 @@ advertisedEndpoint: "http://localhost:4566"
 
 ### 3.1 Lambda
 
-默认 `disabled`；Docker **不支持并显式报错**。`native`/`auto`（squib 需要可用虚拟化）是**可信主机执行**，不是沙箱。执行准入：全局 32、每函数默认 8，保留并发为 0 时拒绝；异步事件预算 128（采用当前 AWS 异步载荷上限 1 MiB，同步 6 MiB）。ZIP 上传不可变、按内部 UUID 落地，`latest` 与已发布版本不再共享同一可覆盖路径；坏 ZIP/CRC/路径/大小/IO 在发布前被拒绝且保留先前版本与 warm 指纹。
+默认 `disabled`；显式 Docker Image 模式需要配置目录归属、daemon、relay、网络并通过实际启动探针，ZIP 与镜像快照恢复仍未开放。`native`/`auto`（squib 需要可用虚拟化）是**可信主机执行**，不是沙箱。执行准入：全局 32、每函数默认 8，保留并发为 0 时拒绝；异步事件预算 128（采用当前 AWS 异步载荷上限 1 MiB，同步 6 MiB）。ZIP 上传不可变、按内部 UUID 落地，`latest` 与已发布版本不再共享同一可覆盖路径；坏 ZIP/CRC/路径/大小/IO 在发布前被拒绝且保留先前版本与 warm 指纹。
 
-启用源代码 `stepfunctions` feature 后可运行纯 ASL 和显式 Native Lambda 工作流，支持 Parallel/Inline Map、嵌套 .sync、回调与终态快照。构建/配置/范围和已验证示例见 [English workflow guide](./workflows-guide.md)。纯服务不分配 Lambda/回调执行口，Docker 生产启动仍未开放。
+启用源代码 `stepfunctions` feature 后可运行纯 ASL 和显式 Native Lambda 工作流，支持 Parallel/Inline Map、嵌套 .sync、回调与终态快照。构建/配置/范围和已验证示例见 [English workflow guide](./workflows-guide.md)。纯服务不分配 Lambda/回调执行口；Docker Image 已接入实际启动与 SDK/ASL 路径，完整平台和发布验收仍未完成。
 
 ### 3.2 快照（`--snapshot <name>`）
 

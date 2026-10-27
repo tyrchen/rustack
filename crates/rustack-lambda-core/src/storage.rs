@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     io::{ErrorKind, Read},
+    iter::once,
     path::{Path, PathBuf},
     str::from_utf8,
 };
@@ -882,6 +883,13 @@ impl VersionRecordSnapshot {
 }
 
 impl FunctionStore {
+    /// Inspect image availability without cloning stored metadata or following tags.
+    pub(crate) fn has_unleased_images(&self) -> bool {
+        self.functions.iter().any(|record| {
+            once(&record.latest).chain(record.versions.values())
+                .any(|version| version.package_type == "Image" && !matches!(&version.image, ImageArtifact::Pinned(image) if image.is_live()))
+        })
+    }
     fn validate_record(&self, record: &FunctionRecord) -> Result<(), LambdaServiceError> {
         let invalid = |message: &str| LambdaServiceError::InvalidParameter {
             message: message.into(),
@@ -927,7 +935,7 @@ impl FunctionStore {
                 return Err(invalid("Event qualifier mismatch"));
             }
         }
-        for version in std::iter::once(&record.latest).chain(record.versions.values()) {
+        for version in once(&record.latest).chain(record.versions.values()) {
             crate::resolver::Qualifier::parse(&version.version)?;
             crate::function_config::validate_execution_settings(version)?;
             if let Some(path) = &version.code_path {

@@ -618,3 +618,8 @@ Reuse shared settings/budgets and existing domain types; keep config parsing pur
 ## D80 — Prove the configured gateway from the actual function network
 
 Add a pinned one-shot endpoint probe with independently observed gateway instance identity and a reserved fixed diagnostic response. A host connection, caller echo, cached public status or boolean does not prove function reachability. Require matching actual resource evidence, exact retained inputs and joined retirement before a private EndpointProbe receipt. Own HTTP/TLS futures under one absolute deadline and explicit aws-lc/webpki trust; do not install ambient proxies/roots or authentication bypasses. This component remains a production startup prerequisite, not ordinary Docker activation. See [runtime§4.11](./rustack-workflows-20-lambda-runtime-design.md#411-container-origin-gateway-reachability-evidence).
+
+
+## D81 — Consume startup receipts in one retained production owner
+
+Use a new immutable owner magic as a journal-before-effect provenance/downgrade barrier, never upgrade legacy uncertainty from empty inventories. Qualify the exact bound runtime graph behind a diagnostic-only same-listener phase, install private live receipts, and retain one ordered resumable cleanup owner through failure/cancellation. Main consumes fallible Lambda shutdown and advertises only actual selected-platform/image/endpoint capabilities. See [runtime§4.12](./rustack-workflows-20-lambda-runtime-design.md#412-production-startup-provenance-and-retained-owner-composition). Immutable restored-image lease reacquisition and the full platform/release gates remain mandatory consuming work.

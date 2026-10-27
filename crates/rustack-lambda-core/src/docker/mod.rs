@@ -21,6 +21,7 @@ mod pool;
 mod probe;
 mod pull;
 mod recovery;
+mod startup;
 mod types;
 
 use std::{
@@ -79,6 +80,10 @@ use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 pub use rustack_lambda_runtime::probe::{GatewayInstanceId, GatewayReply};
 use serde::{Serialize, de::DeserializeOwned};
+pub use startup::{
+    DockerCapabilities, DockerInstallation, DockerRuntime, DockerRuntimeStatus,
+    DockerStartupConfig, DockerStartupError,
+};
 use tokio::{
     io::{ReadHalf, WriteHalf, split},
     runtime::Handle,
@@ -692,6 +697,12 @@ pub struct DockerWire {
 }
 
 impl DockerWire {
+    pub(super) fn physically_settled(&self) -> bool {
+        self.owner.primary.is_some()
+            && self.owner.task.is_none()
+            && self.owner.emergency.is_finished()
+    }
+
     /// Verify the explicit socket and negotiate a bounded API response.
     ///
     /// # Errors

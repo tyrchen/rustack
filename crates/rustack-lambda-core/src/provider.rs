@@ -5,7 +5,7 @@
 //! implemented; later phases (versions, aliases, permissions, tags, URLs)
 //! return appropriate errors until implemented.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, iter::once, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -100,12 +100,12 @@ pub enum InvokeKind {
 
 /// Build the executor backend for the given configuration.
 ///
-/// `Disabled` and unsupported Docker selections fail execution explicitly.
+/// `Disabled` and unqualified Docker constructors fail execution explicitly.
 /// `Auto` is an explicit operator opt-in and chooses the concrete backend per invocation.
 fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
     match config.executor {
         ExecutorBackend::Disabled => Arc::new(NoopExecutor::new()),
-        ExecutorBackend::Docker => Arc::new(NoopExecutor::docker_unavailable()),
+        ExecutorBackend::Docker => Arc::new(NoopExecutor::without_docker_runtime()),
         ExecutorBackend::Auto => Arc::new(AutoExecutor::new(
             config.max_warm_instances,
             config.idle_timeout,
@@ -398,27 +398,90 @@ impl RustackLambda {
     /// Stop all warm executor instances. Wired into the rustack server's
     /// graceful shutdown path.
     pub async fn shutdown(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        #[cfg(unix)]
-        if let Some(owner) = &self.deployments {
-            if owner.shutdown(deadline).await.is_err() {
-                tracing::error!("Lambda deployment shutdown did not settle");
-            }
-        }
-        self.work.cancel_all();
         if let Err(error) = self
-            .work
-            .quiesce(deadline.saturating_duration_since(Instant::now()))
+            .shutdown_before(Instant::now() + Duration::from_secs(10))
             .await
         {
-            tracing::error!(%error, "Lambda shutdown cancelled unfinished work");
+            tracing::error!(%error, "Lambda shutdown did not confirm cleanup");
         }
-        if !matches!(
-            timeout_at(deadline, self.executor.shutdown()).await,
-            Ok(Ok(()))
-        ) {
-            tracing::error!("Lambda executor shutdown did not confirm cleanup");
+    }
+
+    /// Stop deployment, invocation and executor owners under one absolute deadline.
+    /// # Errors
+    /// Returns retained deployment/work/executor failures or deadline expiry.
+    /// Repeating a timed-out observation resumes the same lower owners.
+    /// ```no_run
+    /// # async fn stop(provider:&rustack_lambda_core::provider::RustackLambda){
+    /// let result=provider.shutdown_before(tokio::time::Instant::now()+std::time::Duration::from_secs(30)).await;
+    /// # }
+    /// ```
+    pub async fn shutdown_before(&self, deadline: Instant) -> Result<(), LambdaServiceError> {
+        #[cfg(unix)]
+        let deployment = match &self.deployments {
+            Some(owner) => owner.shutdown(deadline).await,
+            None => Ok(()),
+        };
+        self.work.cancel_all();
+        let work = self
+            .work
+            .quiesce(deadline.saturating_duration_since(Instant::now()))
+            .await;
+        let executor = timeout_at(deadline, self.executor.shutdown())
+            .await
+            .map_err(|_| {
+                ExecutorError::CleanupFailed("Lambda executor cleanup observation expired".into())
+            })
+            .and_then(|result| result);
+        #[cfg(unix)]
+        deployment?;
+        work?;
+        executor?;
+        if Instant::now() >= deadline {
+            return Err(ExecutorError::DeadlineExceeded.into());
         }
+        Ok(())
+    }
+
+    /// Check selected backend/deployment health without invoking a function.
+    /// Ordinary handler failures do not poison this observation.
+    /// ```no_run
+    /// # fn ready(provider:&rustack_lambda_core::provider::RustackLambda){let ready=provider.is_ready();}
+    /// ```
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        if self.config.executor != ExecutorBackend::Docker {
+            return true;
+        }
+        if self.executor.image_available().is_err() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            self.deployments.as_ref().is_some_and(|owner| {
+                let status = owner.status();
+                status.accepting && !status.failed
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Reject metadata-only image archives before opening ordinary Docker ingress.
+    /// # Errors
+    /// Immutable live image lease restoration has not yet been installed; saved
+    /// metadata must never masquerade as executable availability or follow a tag.
+    /// ```no_run
+    /// # fn restore(provider:&rustack_lambda_core::provider::RustackLambda){let result=provider.validate_runtime_restore();}
+    /// ```
+    pub fn validate_runtime_restore(&self) -> Result<(), LambdaServiceError> {
+        if self.config.executor == ExecutorBackend::Docker && self.store.has_unleased_images() {
+            return Err(invalid_parameter(
+                "Docker archive requires immutable image lease restoration",
+            ));
+        }
+        Ok(())
     }
 
     /// Stop accepting invocation work and drain it before snapshot export.
@@ -451,7 +514,11 @@ impl RustackLambda {
         {
             tracing::error!("Lambda executor cancellation deadline exceeded");
         }
-        result
+        result?;
+        if self.config.executor == ExecutorBackend::Docker {
+            self.executor.image_available()?;
+        }
+        Ok(())
     }
 
     /// Export a point-in-time snapshot of Lambda resources.
@@ -473,6 +540,28 @@ impl RustackLambda {
         &self,
         snapshot: LambdaSnapshot,
     ) -> Result<(), LambdaServiceError> {
+        if self.config.executor == ExecutorBackend::Docker
+            && snapshot.functions.functions.iter().any(|record| {
+                once(&record.latest)
+                    .chain(record.versions.values())
+                    .any(|version| version.package_type == "Zip")
+            })
+        {
+            return Err(invalid_parameter(
+                "Docker ZIP archive execution is unavailable",
+            ));
+        }
+        if self.config.executor == ExecutorBackend::Docker
+            && snapshot.functions.functions.iter().any(|record| {
+                once(&record.latest)
+                    .chain(record.versions.values())
+                    .any(|version| version.package_type == "Image")
+            })
+        {
+            return Err(invalid_parameter(
+                "Docker archive requires immutable image lease restoration",
+            ));
+        }
         self.store.import_snapshot(snapshot.functions).await?;
         self.layer_store.import_snapshot(snapshot.layers);
         self.esm_store
@@ -638,6 +727,9 @@ impl RustackLambda {
             });
         }
 
+        if package_type == "Zip" && self.config.executor == ExecutorBackend::Docker {
+            return Err(invalid_parameter("Docker ZIP execution is unavailable"));
+        }
         // Validate runtime/handler for Zip packages.
         if package_type == "Zip" {
             if input.runtime.is_none() {

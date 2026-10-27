@@ -45,6 +45,9 @@ pub struct EnvironmentSettings {
     /// Cold startup budget,1..60s, also bounded by caller admission deadline.
     #[builder(default = Duration::from_secs(15))]
     pub start: Duration,
+    /// Independent function `BootstrapReady` wait,1..900s, also bounded by total start.
+    #[builder(default = Duration::from_secs(60))]
+    pub init: Duration,
     /// Idle lifetime,1..86400s.
     #[builder(default = Duration::from_secs(600))]
     pub idle: Duration,
@@ -74,6 +77,7 @@ impl TryFrom<EnvironmentSettings> for EnvironmentConfig {
         for (duration, maximum) in [
             (settings.io, 60),
             (settings.start, 60),
+            (settings.init, 900),
             (settings.idle, 86400),
         ] {
             if duration.subsec_nanos() != 0 || !(1..=maximum).contains(&duration.as_secs()) {
@@ -105,6 +109,9 @@ pub enum EnvironmentError {
     /// Startup, call or waiting deadline expired.
     #[error("environment deadline exceeded")]
     Deadline,
+    /// Function bootstrap did not poll before its independent initialization window.
+    #[error("function bootstrap initialization deadline exceeded")]
+    InitializationTimeout,
     /// The captured function timeout expired after Runtime API delivery.
     #[error("function timed out after {0:?}")]
     Timeout(Duration),
@@ -538,6 +545,20 @@ impl fmt::Debug for EnvironmentManager {
     }
 }
 impl EnvironmentManager {
+    #[cfg(test)]
+    pub(super) fn abort_test_worker(&self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+
+    pub(super) fn physically_settled(&self) -> bool {
+        self.primary.is_some()
+            && self.task.is_none()
+            && self.emergency.is_finished()
+            && self.port.status().allocated == 0
+    }
+
     /// Start ownership on the current runtime under a real directory capability.
     ///
     /// # Errors
