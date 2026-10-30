@@ -78,16 +78,32 @@ class TestInvalidParameters:
 
 
 class TestFifoErrors:
-    def test_should_reject_group_id_on_standard_queue(self, sqs, test_queue):
-        """MessageGroupId should not be accepted on standard queues."""
-        with pytest.raises(botocore.exceptions.ClientError) as exc:
-            sqs.send_message(
-                QueueUrl=test_queue,
-                MessageBody="test",
-                MessageGroupId="group",
-            )
-        err = exc.value.response["Error"]["Code"]
-        assert err in ("InvalidParameterValue", "InvalidAddress")
+    def test_should_accept_group_id_on_standard_queue(self, sqs, test_queue):
+        """Standard (fair) queues accept MessageGroupId and return it on receive."""
+        sqs.send_message(
+            QueueUrl=test_queue,
+            MessageBody="test",
+            MessageGroupId="group",
+        )
+        resp = sqs.receive_message(
+            QueueUrl=test_queue,
+            MessageSystemAttributeNames=["MessageGroupId"],
+            WaitTimeSeconds=1,
+        )
+        messages = resp.get("Messages", [])
+        assert len(messages) == 1
+        assert messages[0]["Attributes"]["MessageGroupId"] == "group"
+
+    def test_should_reject_invalid_group_id_on_standard_queue(self, sqs, test_queue):
+        """MessageGroupId takes 1 to 128 letters, digits and punctuation."""
+        for group_id in ("has space", "x" * 129):
+            with pytest.raises(botocore.exceptions.ClientError) as exc:
+                sqs.send_message(
+                    QueueUrl=test_queue,
+                    MessageBody="test",
+                    MessageGroupId=group_id,
+                )
+            assert exc.value.response["Error"]["Code"] == "InvalidParameterValue"
 
     def test_should_reject_dedup_id_on_standard_queue(self, sqs, test_queue):
         """MessageDeduplicationId should not be accepted on standard queues."""

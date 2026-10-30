@@ -82,6 +82,36 @@ async fn test_should_deliver_standard_and_fifo_dead_letters_to_real_target() {
 }
 
 #[tokio::test]
+async fn test_should_deliver_standard_dead_letter_with_message_group_id() {
+    let provider = RustackSqs::new(SqsConfig::default());
+    let target = create(&provider, "fair-dead", None).await;
+    let source = create(&provider, "fair-source", Some("fair-dead")).await;
+    provider
+        .send_message(SendMessageInput {
+            queue_url: source.clone(),
+            message_body: "grouped".into(),
+            message_group_id: Some("tenant-a".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(receive(&provider, &source).await.len(), 1);
+    assert!(receive(&provider, &source).await.is_empty());
+    provider.quiesce().await.unwrap();
+    let messages = receive(&provider, &target).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0]
+            .attributes
+            .get("MessageGroupId")
+            .map(String::as_str),
+        Some("tenant-a")
+    );
+    assert!(receive(&provider, &source).await.is_empty());
+    provider.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn test_should_retain_dead_letters_until_missing_target_becomes_available() {
     for suffix in ["", ".fifo"] {
         let provider = RustackSqs::new(SqsConfig::default());
