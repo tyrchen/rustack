@@ -32,6 +32,7 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub(super) struct Health {
+    pub(super) physical: AtomicBool,
     pub(super) failed: AtomicBool,
     pub(super) quarantined: AtomicUsize,
     #[cfg(test)]

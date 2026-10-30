@@ -12,7 +12,7 @@ use super::{
     DirectoryLease, DirectoryLeaseError, Provenance, managed_file,
     snapshot::{Codec, read},
 };
-use crate::docker::mutation::MutationReceipt;
+use crate::docker::{DockerError, DockerKey, mutation::MutationReceipt};
 
 mod identity;
 
@@ -58,6 +58,10 @@ impl std::fmt::Debug for CodeRecord {
         f.write_str("CodeRecord(<redacted>)")
     }
 }
+pub(in crate::docker) fn volume_key(environment: Uuid) -> Result<DockerKey, DockerError> {
+    format!("rustack-code-{environment}").parse()
+}
+
 impl CodeRecord {
     fn valid(&self) -> bool {
         ![self.run, self.environment, self.resource, self.revision]

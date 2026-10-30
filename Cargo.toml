@@ -4,6 +4,7 @@ members = [
   "apps/*",
   "tests/integration",
   "tests/lambda-fixtures/echo-bootstrap",
+  "tests/lambda-fixtures/runtime-verifier",
 ]
 exclude = ["codegen", "tools/lambda-squib-agent", "patches/squib-loader"]
 resolver = "3"

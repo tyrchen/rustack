@@ -17,6 +17,9 @@
 
 #![allow(missing_docs)]
 
+#[cfg(all(unix, feature = "provided-qualification"))]
+mod provided_qualification;
+
 use std::{
     io::{Error as IoError, Read as _},
     num::NonZeroU16,
@@ -28,9 +31,16 @@ use ureq::{Agent, AgentBuilder};
 
 #[allow(clippy::disallowed_methods)] // This standalone bootstrap deliberately uses synchronous IO, not an async runtime.
 fn main() {
-    let api = std::env::var("AWS_LAMBDA_RUNTIME_API")
-        .expect("AWS_LAMBDA_RUNTIME_API must be set by the runtime");
+    let api = runtime_api();
     let agent = AgentBuilder::new().timeout(Duration::from_mins(2)).build();
+    #[cfg(all(unix, feature = "provided-qualification"))]
+    let mut provided = match provided_qualification::Probe::selected() {
+        Ok(provided) => provided,
+        Err(error) => {
+            eprintln!("Provided fixture setup: {error}");
+            return;
+        }
+    };
     let fail_mode = std::env::var("FAIL_MODE").ok();
     let sleep_secs = sleep_seconds();
 
@@ -62,6 +72,12 @@ fn main() {
     if !initialize(&agent, &api) {
         return;
     }
+    let behavior = Behavior {
+        workflow: workflow_mode,
+        fail_once: workflow_fail_once,
+        code_marker: code_marker.as_deref(),
+        config_marker: config_marker.as_deref(),
+    };
     loop {
         let (request_id, body) = match next_invocation(&agent, &api) {
             Ok(invocation) => invocation,
@@ -101,36 +117,95 @@ fn main() {
         }
 
         if matches!(fail_mode.as_deref(), Some("panic")) {
-            let _ = post_runtime(
-                &agent,
-                &api,
-                &format!("invocation/{request_id}/error"),
-                r#"{"errorMessage":"boom","errorType":"TestError"}"#,
-            );
+            known_error(&agent, &api, &request_id);
             continue;
         }
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-        if !collect_callback_token(&agent, &api, &request_id, &parsed) {
-            continue;
-        }
-        let (kind, response) = invocation_response(
-            &parsed,
-            workflow_mode,
-            workflow_fail_once,
-            &request_id,
-            code_marker.as_deref(),
-            config_marker.as_deref(),
-            &api,
-        );
-        let _ = post_runtime(
+        if !complete_invocation(
             &agent,
             &api,
-            &format!("invocation/{request_id}/{kind}"),
-            &response.to_string(),
-        );
+            &request_id,
+            &body,
+            &behavior,
+            #[cfg(all(unix, feature = "provided-qualification"))]
+            provided.as_mut(),
+        ) {
+            return;
+        }
     }
+}
+
+fn runtime_api() -> String {
+    let Ok(api) = std::env::var("AWS_LAMBDA_RUNTIME_API") else {
+        eprintln!("bootstrap: Runtime API endpoint missing");
+        std::process::exit(78);
+    };
+    api
+}
+
+fn known_error(agent: &Agent, api: &str, request_id: &str) {
+    let _ = post_runtime(
+        agent,
+        api,
+        &format!("invocation/{request_id}/error"),
+        r#"{"errorMessage":"boom","errorType":"TestError"}"#,
+    );
+}
+
+#[derive(Debug)]
+struct Behavior<'a> {
+    workflow: bool,
+    fail_once: bool,
+    code_marker: Option<&'a str>,
+    config_marker: Option<&'a str>,
+}
+fn complete_invocation(
+    agent: &Agent,
+    api: &str,
+    request_id: &str,
+    body: &str,
+    behavior: &Behavior<'_>,
+    #[cfg(all(unix, feature = "provided-qualification"))] provided: Option<
+        &mut provided_qualification::Probe,
+    >,
+) -> bool {
+    let parsed = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    if !collect_callback_token(agent, api, request_id, &parsed) {
+        return true;
+    }
+    let (kind, response) = invocation_response(
+        &parsed,
+        behavior.workflow,
+        behavior.fail_once,
+        request_id,
+        behavior.code_marker,
+        behavior.config_marker,
+        api,
+    );
+    #[cfg(all(unix, feature = "provided-qualification"))]
+    let mut response = response;
+    #[cfg(all(unix, feature = "provided-qualification"))]
+    if let Some(provided) = provided {
+        if let Err(error) = provided.augment(&parsed, &mut response, request_id) {
+            eprintln!("Provided fixture observation: {error}");
+            let failure =
+                serde_json::json!({"errorType":"ProvidedQualificationError","errorMessage":error});
+            let _ = post_runtime(
+                agent,
+                api,
+                &format!("invocation/{request_id}/error"),
+                &failure.to_string(),
+            );
+            return false;
+        }
+    }
+    let _ = post_runtime(
+        agent,
+        api,
+        &format!("invocation/{request_id}/{kind}"),
+        &response.to_string(),
+    );
+    true
 }
 
 fn collect_callback_token(

@@ -12,6 +12,8 @@ mod faults;
 mod io_faults;
 #[path = "docker_startup/process.rs"]
 mod process;
+#[path = "docker_startup/provided.rs"]
+mod provided;
 #[path = "workflows_sdk/runner.rs"]
 mod runner;
 #[path = "docker_startup/sdk.rs"]
@@ -372,10 +374,25 @@ async fn test_should_settle_real_image_faults_and_public_cancellation_admission(
 #[case::default_function_limit(io_faults::Case::DefaultLimit)]
 #[case::independent_memory_limit(io_faults::Case::MemoryLimit)]
 #[case::independent_environment_limit(io_faults::Case::EnvironmentLimit)]
+#[case::zip_allocating(io_faults::Case::ZipCreate)]
+#[case::zip_cleanup(io_faults::Case::ZipDelete)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires explicit real-daemon IO proxy fixtures; run make test-lambda-io-faults-docker"]
 async fn test_should_retain_actual_management_io_through_cancellation_and_deployment_faults(
     #[case] case: io_faults::Case,
 ) -> Result<()> {
     io_faults::exercise(case).await
+}
+
+#[rstest]
+#[case::deployments("deployments")]
+#[case::faults("faults")]
+#[case::initializing("initializing")]
+#[case::busy("busy")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires actual provided runtime and original ZIP files; run make test-lambda-docker"]
+async fn test_should_execute_ordinary_provided_zip_and_join_owned_retirement(
+    #[case] phase: &str,
+) -> Result<()> {
+    provided::exercise(phase).await
 }

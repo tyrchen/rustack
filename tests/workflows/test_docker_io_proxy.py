@@ -217,7 +217,8 @@ class ProxyControls(unittest.TestCase):
     def test_should_not_emit_process_handshakes_when_importing_fault_helpers(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            importlib.import_module("lambda_fault_sdk")
+            for module in ("lambda_fault_sdk", "provided_zip_sdk", "provided_zip_io"):
+                importlib.import_module(module)
         self.assertEqual(output.getvalue(), "")
 
     def test_should_preserve_chunked_identity_and_operation_on_one_backend_connection(self):
@@ -438,6 +439,46 @@ class ProxyControls(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 proxy.gate("create", {"owner":owner, "role":"function", "id":"a"*64})
             self.assertFalse(proxy.observed)
+
+    def test_should_scope_large_archive_bodies_to_recorded_loader_and_fixed_destination(self):
+        with daemon(lambda stream: None) as proxy:
+            key = "a" * 64
+            path = "/containers/" + key + "/archive"
+            target = ("/v1.53" + path + "?path=%2Fvar%2Ftask&noOverwriteDirNonDir=true&copyUIDGID=false").encode()
+            fields = {b"content-type":b"application/x-tar"}
+            for role in (None, "function", "relay"):
+                proxy.records = {} if role is None else {key:{"role":role}}
+                with self.subTest(role=role), self.assertRaises(ProtocolError):
+                    proxy.request_limit(b"PUT", target, path, fields)
+            proxy.records = {key:{"role":"code-loader"}}
+            self.assertEqual(proxy.request_limit(b"PUT", target, path, fields), 282 * 1024 * 1024)
+            for changed, destination, headers in ((target.replace(b"var%2Ftask", b"tmp"), path, fields),
+                    (target + b"&copyUIDGID=true", path, fields), (target.replace(b"noOverwriteDirNonDir=true", b"noOverwriteDirNonDir=false"), path, fields), (target, path, {}),
+                    (target, "/containers/short/archive", fields)):
+                with self.subTest(target=changed), self.assertRaises(ProtocolError):
+                    proxy.request_limit(b"PUT", changed, destination, headers)
+            self.assertEqual(proxy.request_limit(b"POST", target, path, fields), 1024 * 1024)
+
+    def test_should_forward_recorded_archive_larger_than_json_without_rewriting_bytes(self):
+        payload = b"x" * (1024 * 1024 + 1024)
+        key = "b" * 64
+        def backend(stream):
+            first, fields, _ = head(stream, time.monotonic() + 3)
+            self.assertTrue(first.startswith(("PUT /v1.53/containers/" + key + "/archive?").encode()))
+            _, decoded = body(stream, fields, len(payload), time.monotonic() + 3)
+            self.assertEqual(decoded, payload)
+            stream.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        with daemon(backend) as proxy:
+            proxy.records[key] = {"role":"code-loader", "owner":str(uuid.uuid4())}
+            connection = UnixHTTP(proxy.path)
+            try:
+                connection.request("PUT", "/v1.53/containers/" + key + "/archive?path=%2Fvar%2Ftask&noOverwriteDirNonDir=true&copyUIDGID=false",
+                    payload, {"Content-Type":"application/x-tar"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"")
+            finally:
+                connection.close()
 
     def test_should_join_quiet_and_partial_header_connections_on_abort(self):
         def backend(stream):

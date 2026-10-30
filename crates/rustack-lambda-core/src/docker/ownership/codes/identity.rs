@@ -12,7 +12,7 @@ use crate::docker::{
 
 impl CodeRecord {
     pub(in crate::docker) fn volume_key(&self) -> Result<DockerKey, DockerError> {
-        format!("rustack-code-{}", self.environment).parse()
+        super::volume_key(self.environment)
     }
     pub(in crate::docker) fn loader_key(&self) -> Result<DockerKey, DockerError> {
         match self.loader {

@@ -190,7 +190,13 @@ impl DockerRuntimeSettings {
             .relay(relay)
             .zip(
                 lookup("LAMBDA_DOCKER_ZIP_IMAGE")
-                    .map(|raw| raw.parse())
+                    .map(|raw| {
+                        let reference: ImageReference = raw.parse()?;
+                        if reference.digest().is_none() {
+                            return Err(DockerError::Configuration);
+                        }
+                        Ok(reference)
+                    })
                     .transpose()?,
             )
             .endpoint(

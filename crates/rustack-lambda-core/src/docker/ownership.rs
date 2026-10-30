@@ -730,6 +730,7 @@ mod tests;
 
 /// Exact acquisition job retained by production startup through observer loss.
 pub(super) struct DirectoryAcquisition {
+    code: bool,
     cancelled: Arc<AtomicBool>,
     deadline: Instant,
     state: AcquisitionState,
@@ -758,6 +759,19 @@ impl DirectoryAcquisition {
         directory: PathBuf,
         deadline: Instant,
     ) -> Result<Self, DirectoryLeaseError> {
+        Self::begin_profile(directory, deadline, false)
+    }
+    pub(super) fn begin_code(
+        directory: PathBuf,
+        deadline: Instant,
+    ) -> Result<Self, DirectoryLeaseError> {
+        Self::begin_profile(directory, deadline, true)
+    }
+    fn begin_profile(
+        directory: PathBuf,
+        deadline: Instant,
+        code: bool,
+    ) -> Result<Self, DirectoryLeaseError> {
         let directory = DataDirectory::try_from(directory)?;
         Handle::try_current().map_err(|_| DirectoryLeaseError::Worker)?;
         let remaining = deadline
@@ -767,6 +781,7 @@ impl DirectoryAcquisition {
             return Err(DirectoryLeaseError::Configuration);
         }
         Ok(Self {
+            code,
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline,
             state: AcquisitionState::Queued {
@@ -798,8 +813,13 @@ impl DirectoryAcquisition {
                 deadline: self.deadline,
                 cancelled: self.cancelled.clone(),
             };
+            let code = self.code;
             self.state = AcquisitionState::Running(spawn_work(permit, control, move |control| {
-                acquire(&directory, control)
+                if code {
+                    acquire_profile(&directory, control, Provenance::CodeJournaled)
+                } else {
+                    acquire(&directory, control)
+                }
             }));
         }
         let result = match &mut self.state {

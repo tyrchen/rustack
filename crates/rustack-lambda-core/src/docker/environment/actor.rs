@@ -26,7 +26,7 @@ use super::{
     worker::Worker,
 };
 use crate::{
-    docker::{DockerPort, EnvironmentPlan},
+    docker::{DockerPort, EnvironmentPlan, zip::AllocationClaim},
     executor::ExecutorError,
     invocation::CleanupTask,
 };
@@ -148,6 +148,8 @@ impl Signals {
 }
 #[derive(TypedBuilder)]
 pub(super) struct Envelope {
+    #[builder(default)]
+    pub(super) code_claim: Option<AllocationClaim>,
     pub(super) plan: Arc<EnvironmentPlan>,
     pub(super) mailbox: mpsc::Receiver<Call>,
     pub(super) signals: Signals,
@@ -276,7 +278,7 @@ impl Actor {
             Ok(())
         }
     }
-    fn start(&mut self, envelope: Envelope) {
+    fn start(&mut self, mut envelope: Envelope) {
         if *self.control.borrow()
             || *envelope.signals.stop.borrow()
             || Instant::now() >= envelope.deadline
@@ -293,6 +295,12 @@ impl Actor {
             envelope
                 .done
                 .send_replace(Some(Err(EnvironmentError::Worker)));
+            return;
+        }
+        if let Err(error) = envelope.plan.commit_code_claim(&mut envelope.code_claim) {
+            envelope.signals.error(error.into());
+            envelope.signals.phase(EnvironmentPhase::Removed);
+            envelope.done.send_replace(Some(Ok(())));
             return;
         }
         let progress = Arc::new(Progress::new());
@@ -338,7 +346,7 @@ impl Actor {
         let clean = self
             .records
             .get(&id)
-            .is_some_and(|record| record.progress.clean());
+            .is_some_and(|record| record.progress.clean() && record.plan.code_clean());
         if matches!(&result,Ok((_,(returned,Ok(())))) if *returned==id) && clean {
             if let Some(record) = self.records.remove(&id) {
                 let failed = recovering || self.health.failed.load(Ordering::Acquire);
@@ -442,7 +450,7 @@ async fn recover_all(
         if matches!(result,Ok((_,returned)) if returned==id)
             && records
                 .get(&id)
-                .is_some_and(|record| record.progress.clean())
+                .is_some_and(|record| record.progress.clean() && record.plan.code_clean())
         {
             records.remove(&id);
             continue;

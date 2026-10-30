@@ -17,6 +17,7 @@ from custom_ric_sdk import collecting
 from docker_io_proxy import Proxy
 from lambda_fault_sdk import Faults
 from lambda_fault_support import Hold, Metadata
+from provided_zip_io import ProvidedIo
 from lambda_admission_sdk import execution_pressure, resource_pressure, runtime_bounds
 from required_suites import read_regular
 
@@ -315,9 +316,15 @@ def main():
     try:
         config = json.loads(wait_file(root / "config.json", time.monotonic() + 200, abort=root / "stop"))
         assert set(config) == {"endpoint", "owner", "engine", "fixtures"}
-        matrix = IoCases(config["endpoint"], image, other, architecture,
-                         Metadata(daemon, config["owner"], config["engine"]), proxy)
-        if phase in ("create", "delete"):
+        metadata = Metadata(daemon, config["owner"], config["engine"])
+        if phase in ("zip_create", "zip_delete"):
+            codes = [read_regular(Path(path), 50 * 1024 * 1024) for path in (image, other)]
+            matrix = ProvidedIo(config["endpoint"], codes, architecture, metadata, proxy)
+        else:
+            matrix = IoCases(config["endpoint"], image, other, architecture, metadata, proxy)
+        if phase in ("zip_create", "zip_delete"):
+            cases = matrix.cancel_io(host, phase.removeprefix("zip_"))
+        elif phase in ("create", "delete"):
             cases = matrix.cancel_io(host, phase)
         elif phase in ("create_timeout", "delete_timeout"):
             cases = matrix.deadline_io(phase)

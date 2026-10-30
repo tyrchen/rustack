@@ -466,25 +466,52 @@ async fn test_should_refuse_late_installation_after_dependency_revocation_and_jo
     daemon.close().await;
 }
 #[test]
-fn test_should_reject_an_explicit_zip_source_without_silently_ignoring_it() {
+fn test_should_reject_mutable_zip_selection_before_startup() {
+    assert!(
+        DockerRuntimeSettings::from_lookup(
+            |key| match key {
+                "LAMBDA_DOCKER_RELAY_IMAGE" => Some("relay:v1".into()),
+                "LAMBDA_DOCKER_NETWORK" => Some("none".into()),
+                "LAMBDA_DOCKER_ZIP_IMAGE" => Some("zip:v1".into()),
+                _ => None,
+            },
+            &RuntimeBudgets::default(),
+            Duration::from_secs(600),
+        )
+        .is_err()
+    );
+}
+
+#[rstest]
+#[case::insufficient_pins(1, false)]
+#[case::separate_source_and_relay(2, true)]
+#[test]
+fn test_should_accept_pinned_zip_only_with_separate_source_pin_capacity(
+    #[case] pins: usize,
+    #[case] accepted: bool,
+) {
+    let mut budgets = RuntimeBudgets::default();
+    budgets.lambda_docker_image_pins = pins;
+    budgets.lambda_docker_deployment_jobs = 1;
     let settings = DockerRuntimeSettings::from_lookup(
         |key| match key {
             "LAMBDA_DOCKER_RELAY_IMAGE" => Some("relay:v1".into()),
             "LAMBDA_DOCKER_NETWORK" => Some("none".into()),
-            "LAMBDA_DOCKER_ZIP_IMAGE" => Some("zip:v1".into()),
+            "LAMBDA_DOCKER_ZIP_IMAGE" => Some(format!("base@sha256:{}", "a".repeat(64))),
             _ => None,
         },
-        &RuntimeBudgets::default(),
+        &budgets,
         Duration::from_secs(600),
     )
     .unwrap();
-    assert!(matches!(
+    assert_eq!(
         DockerStartupConfig::new(
             settings,
             "/private/data".into(),
             GatewayInstanceId::generate().unwrap(),
             lambda()
-        ),
-        Err(DockerStartupError::ZipUnavailable)
-    ));
+        )
+        .is_ok(),
+        accepted
+    );
 }

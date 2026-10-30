@@ -86,6 +86,7 @@ struct Fixture {
     manager: Option<CodeVolumeManager>,
     ready: Option<PinnedCode>,
     retirement: Option<CodeRetirement>,
+    native_zip_sha256: Option<String>,
 }
 
 impl Fixture {
@@ -128,6 +129,7 @@ impl Fixture {
             manager: None,
             ready: None,
             retirement: None,
+            native_zip_sha256: None,
         })
     }
 
@@ -140,7 +142,7 @@ impl Fixture {
             .path();
         let record = serde_json::to_vec(&json!({"schemaVersion":1,"volume":self.volume.as_str(),
             "loader":self.loader.as_str(),"function":self.function.as_str(),"labels":self.labels,
-            "image":self.image,"zipSha256":self.hash,"volumeState":self.volume_phase.name(),
+            "image":self.image,"zipSha256":self.hash,"nativeZipSha256":self.native_zip_sha256,"volumeState":self.volume_phase.name(),
             "loaderState":self.loader_phase.record(),"functionState":self.function_phase.record()}))?;
         timeout_at(deadline(), async {
             let pending = root.join("code-intent.pending");
@@ -189,14 +191,27 @@ impl Fixture {
             host_config: Some(HostConfig {
                 network_mode: Some("none".into()),
                 readonly_rootfs: Some(true),
-                memory: Some(128 * 1024 * 1024),
+                memory: Some(
+                    if self.native_zip_sha256.is_some() {
+                        512
+                    } else {
+                        128
+                    } * 1024
+                        * 1024,
+                ),
                 nano_cpus: Some(1_000_000_000),
                 pids_limit: Some(64),
                 cap_drop: Some(vec!["ALL".into()]),
                 security_opt: Some(vec!["no-new-privileges:true".into()]),
                 tmpfs: Some(HashMap::from([(
                     "/tmp".into(),
-                    "rw,nosuid,nodev,size=536870912".into(),
+                    if self.native_zip_sha256.is_some() {
+                        // The separately owned Linux verifier executes Native children here.
+                        "rw,exec,nosuid,nodev,size=536870912"
+                    } else {
+                        "rw,nosuid,nodev,size=536870912"
+                    }
+                    .into(),
                 )])),
                 mounts: Some(vec![Mount {
                     typ: Some(MountType::VOLUME),
@@ -323,6 +338,64 @@ impl Fixture {
         Ok((code, architecture))
     }
 
+    async fn prepare_native_code(&mut self) -> Result<(DockerCodeArchive, Architecture)> {
+        let arch = env::var("RUSTACK_RUNTIME_ARCH")?;
+        let image = self
+            .environment
+            .image(&env::var("RUSTACK_ZIP_BASE_IMAGE")?, &arch)
+            .await?;
+        image
+            .resolved()
+            .metadata()
+            .image_id
+            .as_str()
+            .clone_into(&mut self.image);
+        let architecture = image.resolved().metadata().architecture;
+        let zip = bounded_file(&env::var("RUSTACK_PROVIDED_ZIP_A")?, 50 * 1024 * 1024).await?;
+        let original_hash = rustack_lambda_core::storage::compute_sha256(&zip);
+        eprintln!("Native original ZIP digest: {original_hash}");
+        self.native_zip_sha256 = Some(original_hash.clone());
+        let bootstrap =
+            bounded_file(&env::var("RUSTACK_ZIP_NATIVE_VERIFIER")?, 50 * 1024 * 1024).await?;
+        let manifest = serde_json::to_vec(
+            &json!({"architecture": if arch == "arm64" { "arm64" } else { "x86_64" },
+            "zipSha256":original_hash,"codeMarker":"A"}),
+        )?;
+        let packaged = timeout_at(
+            deadline(),
+            spawn_blocking(move || {
+                let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+                for (name, data, mode) in [
+                    ("bootstrap", bootstrap, 0o755),
+                    ("input.zip", zip, 0o644),
+                    ("manifest.json", manifest, 0o644),
+                ] {
+                    writer.start_file(name, SimpleFileOptions::default().unix_permissions(mode))?;
+                    writer.write_all(&data)?;
+                }
+                Ok::<_, anyhow::Error>(writer.finish()?.into_inner())
+            }),
+        )
+        .await???;
+        let root = self
+            .environment
+            .directory
+            .as_ref()
+            .context("Native artifact evidence")?
+            .path()
+            .join("artifacts");
+        let store = FunctionStore::new(root);
+        let (path, hash, _) = store
+            .store_zip_code("native-verifier", "$LATEST", &Bytes::from(packaged))
+            .await?;
+        self.hash = hash;
+        let artifact = store.capture_artifact(&path).await?;
+        Ok((
+            DockerCodeArchive::prepare(artifact, architecture, deadline()).await?,
+            architecture,
+        ))
+    }
+
     async fn exercise(&mut self) -> Result<()> {
         let (code, architecture) = self.prepare_code().await?;
         self.volume_phase = VolumePhase::Uncertain;
@@ -364,7 +437,11 @@ impl Fixture {
     }
 
     async fn exercise_managed(&mut self) -> Result<()> {
-        let (code, architecture) = self.prepare_code().await?;
+        let (code, architecture) = if self.native_zip_sha256.is_some() {
+            self.prepare_native_code().await?
+        } else {
+            self.prepare_code().await?
+        };
         let base = self
             .environment
             .artifacts
@@ -459,6 +536,9 @@ impl Fixture {
             "code probe exited unsuccessfully"
         );
         let output: Value = serde_json::from_slice(&tail)?;
+        if let Some(hash) = &self.native_zip_sha256 {
+            return verify_native(&output, hash);
+        }
         ensure!(
             output
                 == json!({"computed":42,"readOnly":true,"tmpWritable":true,"metadata":[
@@ -671,6 +751,80 @@ async fn test_should_upload_zip_code_to_a_private_volume_and_consume_it_read_onl
         .directory
         .as_mut()
         .context("code evidence root")?
+        .disable_cleanup(false);
+    Ok(())
+}
+
+async fn bounded_file(path: &str, maximum: u64) -> Result<Vec<u8>> {
+    timeout_at(deadline(), async {
+        let metadata = fs::symlink_metadata(path).await?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= maximum,
+            "bounded regular source file"
+        );
+        let file = fs::File::open(path).await?;
+        let mut bytes = Vec::new();
+        file.take(maximum.checked_add(1).context("source cap overflow")?)
+            .read_to_end(&mut bytes)
+            .await?;
+        ensure!(u64::try_from(bytes.len())? <= maximum, "source byte cap");
+        Ok(bytes)
+    })
+    .await?
+}
+
+fn verify_native(output: &Value, hash: &str) -> Result<()> {
+    ensure!(
+        output["schemaVersion"] == 1
+            && output["kind"] == "native-same-zip"
+            && output["joined"] == true
+            && output["zipSha256"] == hash,
+        "Native original ZIP identity/join proof"
+    );
+    let observed = output["observed"]
+        .as_array()
+        .context("Native computed observations")?;
+    ensure!(observed.len() == 2, "Native cold/warm inventory");
+    for (index, n) in [42, 46].into_iter().enumerate() {
+        let result = observed.get(index).context("Native observation")?;
+        ensure!(
+            result["computed"] == n
+                && result["codeMarker"] == "A"
+                && result["providedCounter"].as_u64() == Some(u64::try_from(index)? + 1),
+            "actual Native computation/reuse"
+        );
+    }
+    let cold = observed.first().context("Native cold observation")?;
+    let warm = observed.get(1).context("Native warm observation")?;
+    ensure!(
+        cold["pid"].as_u64().is_some_and(|pid| pid > 1) && warm["pid"] == cold["pid"],
+        "actual reused Native child identity"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires actual Linux Native verifier and exact provided ZIP; run make \
+            test-lambda-docker"]
+async fn test_should_execute_the_same_provided_zip_bytes_through_real_linux_native_and_join_children()
+-> Result<()> {
+    let mut fixture = Fixture::new_with_manager(true).await?;
+    fixture.native_zip_sha256 = Some(String::new());
+    let result = timeout_at(
+        deadline() + Duration::from_secs(180),
+        fixture.exercise_managed(),
+    )
+    .await
+    .context("Native same ZIP resource observer expired")
+    .and_then(|result| result);
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup?;
+    fixture
+        .environment
+        .directory
+        .as_mut()
+        .context("Native evidence root")?
         .disable_cleanup(false);
     Ok(())
 }

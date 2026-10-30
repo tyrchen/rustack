@@ -22,11 +22,11 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    DirectoryLease, DirectoryLeaseError, DockerError, DockerExecutor, DockerExecutorError,
-    DockerPort, DockerReadiness, DockerRuntimeSettings, DockerWire, EndpointProbe,
-    EndpointProbeConfig, EnvironmentCapacity, EnvironmentError, EnvironmentManager,
-    EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError, GatewayInstanceId,
-    ImageLeaseManager, ImageLeasePort, RegistryAuthError,
+    CodeVolumeManager, DirectoryLease, DirectoryLeaseError, DockerError, DockerExecutor,
+    DockerExecutorError, DockerPort, DockerReadiness, DockerRuntimeSettings, DockerWire,
+    DockerZipRuntime, EndpointProbe, EndpointProbeConfig, EnvironmentCapacity, EnvironmentError,
+    EnvironmentManager, EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError,
+    GatewayInstanceId, ImageLeaseManager, ImageLeasePort, RegistryAuthError,
     ownership::{DataDirectory, DirectoryAcquisition},
 };
 use crate::{
@@ -49,9 +49,6 @@ pub enum DockerStartupError {
     /// Invalid or mismatching operator inputs.
     #[error("invalid Docker startup configuration")]
     Configuration,
-    /// A ZIP runtime source cannot be installed by this image-only coordinator.
-    #[error("Docker ZIP runtime selection is unavailable")]
-    ZipUnavailable,
     /// This attempt was already begun, failed, abandoned or stopped.
     #[error("Docker startup attempt is unavailable")]
     Unavailable,
@@ -131,8 +128,8 @@ impl DockerStartupConfig {
         lambda: LambdaConfig,
     ) -> Result<Self, DockerStartupError> {
         DataDirectory::try_from(directory.clone())?;
-        if settings.zip_image().is_some() {
-            return Err(DockerStartupError::ZipUnavailable);
+        if settings.zip_image().is_some() && settings.budgets().lambda_docker_image_pins < 2 {
+            return Err(DockerStartupError::Configuration);
         }
 
         if lambda.executor != ExecutorBackend::Docker
@@ -171,9 +168,12 @@ struct Evidence {
     images: ImageLeasePort,
     docker: DockerPort,
     architecture: Architecture,
+    #[builder(default)]
+    zip: Option<DockerZipRuntime>,
 }
 #[derive(Debug, Default)]
 struct Qualification {
+    installed: AtomicBool,
     revoked: AtomicBool,
     evidence: OnceLock<Evidence>,
 }
@@ -194,6 +194,10 @@ impl DockerReadiness for Qualification {
                 .is_err()
             || *evidence.docker.raw.stop.borrow()
             || evidence.images.available().is_err()
+            || evidence
+                .zip
+                .as_ref()
+                .is_some_and(|zip| zip.available().is_err())
             || !environment.accepting
             || environment.worker_failed
             || !evidence.resource.matches(&evidence.base)
@@ -226,7 +230,7 @@ pub struct DockerCapabilities {
     pub platform: Option<&'static str>,
     /// Whether a configured gateway passed the actual endpoint proof.
     pub sdk_gateway: bool,
-    /// This image runtime does not yet execute ZIP artifacts.
+    /// Qualified provided.al2023 execution through the installed code owner.
     pub zip: bool,
 }
 impl DockerRuntimeStatus {
@@ -239,13 +243,15 @@ impl DockerRuntimeStatus {
         let evidence = self.0.evidence.get();
         DockerCapabilities {
             capacity: evidence.map(|evidence| evidence.base.environments.status()),
-            ready: self.0.check().is_ok(),
+            ready: self.0.installed.load(Ordering::Acquire) && self.0.check().is_ok(),
             platform: evidence.map(|e| match e.architecture {
                 Architecture::Arm64 => "linux/arm64",
                 Architecture::X86_64 => "linux/amd64",
             }),
             sdk_gateway: evidence.is_some_and(|e| e.endpoint.is_some()),
-            zip: false,
+            zip: self.0.installed.load(Ordering::Acquire)
+                && self.0.check().is_ok()
+                && evidence.is_some_and(|e| e.zip.is_some()),
         }
     }
 }
@@ -303,6 +309,10 @@ struct State {
     producing: bool,
     #[builder(default)]
     images: Option<ImageLeaseManager>,
+    #[builder(default)]
+    code: Option<CodeVolumeManager>,
+    #[builder(default)]
+    zip: Option<DockerZipRuntime>,
     #[builder(default)]
     environments: Option<EnvironmentManager>,
     #[builder(default)]
@@ -365,6 +375,7 @@ impl DockerRuntime {
         let state = self.state.as_mut().ok_or(DockerStartupError::Unavailable)?;
         let result = Box::pin(state.qualify(&self.qualification, deadline)).await;
         self.phase = if result.is_ok() {
+            self.qualification.installed.store(true, Ordering::Release);
             Phase::Ready
         } else {
             self.qualification.revoked.store(true, Ordering::Release);

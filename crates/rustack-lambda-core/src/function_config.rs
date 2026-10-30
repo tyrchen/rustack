@@ -95,6 +95,26 @@ impl Settings<'_> {
     }
 }
 
+pub(crate) fn validate_provided_settings(
+    runtime: Option<&str>,
+    handler: Option<&str>,
+) -> Result<(), LambdaServiceError> {
+    if runtime != Some("provided.al2023")
+        || handler.is_none_or(|value| {
+            value.is_empty()
+                || value.len() > 128
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+        })
+    {
+        return Err(invalid(
+            "Docker ZIP requires provided.al2023 and a supported handler",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_create_settings(
     input: &CreateFunctionInput,
 ) -> Result<Architecture, LambdaServiceError> {

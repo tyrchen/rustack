@@ -16,12 +16,12 @@ def document():
 
 
 class DockerManifestControls(unittest.TestCase):
-    def test_should_require_every_exact_suite_and_load_frozen_fifty_six_resources(self):
+    def test_should_require_every_exact_suite_and_load_frozen_sixty_three_resources(self):
         required = parse_manifest(encoded(document()))
         self.assertEqual(verify(required, {key:listing(names) for key,names in required.items()}), 8)
         frozen = parse_manifest(read_regular(Path(__file__).with_name("docker-required-suites.json"), MANIFEST_LIMIT))
-        self.assertEqual(sum(map(len, frozen.values())), 56)
-        self.assertEqual(len(frozen["ordinary-startup"]), 24)
+        self.assertEqual(sum(map(len, frozen.values())), 63)
+        self.assertEqual(len(frozen["ordinary-startup"]), 30)
         self.assertEqual(len(frozen["docker-core"]), 9)
         self.assertEqual(len(frozen["relay-runtime"]), 5)
 

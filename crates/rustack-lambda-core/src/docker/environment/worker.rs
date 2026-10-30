@@ -23,10 +23,14 @@ use super::{
     io::IoGuard,
 };
 use crate::{
-    artifact::Architecture,
+    artifact::{Architecture, DeploymentArtifact},
     docker::{
-        DockerError, DockerKey, DockerPort, EnvironmentPlan, connection::stopped as wait_for_stop,
-        mutation::MutationGuard, ownership::ContainerRecord, plan::ContainerRole,
+        DockerError, DockerKey, DockerPort, EnvironmentPlan,
+        connection::stopped as wait_for_stop,
+        mutation::MutationGuard,
+        ownership::ContainerRecord,
+        plan::ContainerRole,
+        zip::{CodeStageError, StageInput},
     },
     invocation::CleanupTask,
 };
@@ -181,6 +185,31 @@ impl Worker {
         io: &mut IoGuard,
         deadline: Instant,
     ) -> Result<(), EnvironmentError> {
+        if let Some(zip) = &self.plan.zip {
+            let DeploymentArtifact::Zip(artifact) = &self.plan.revision().artifact else {
+                return Err(EnvironmentError::Configuration);
+            };
+            zip.start(
+                StageInput::builder()
+                    .artifact(artifact.clone())
+                    .deadline(deadline)
+                    .global(self.global.subscribe())
+                    .stop(self.signals.stop.subscribe())
+                    .build(),
+                &self.runtime,
+            )?;
+            if let Err(error) = zip.wait_ready(deadline).await {
+                return Err(match error {
+                    CodeStageError::AdmissionBusy => EnvironmentError::Busy,
+                    CodeStageError::Docker(DockerError::Worker) => {
+                        self.health.fail();
+                        EnvironmentError::Worker
+                    }
+                    CodeStageError::Docker(other) => other.into(),
+                });
+            }
+            self.check(deadline)?;
+        }
         let relay = self.create(ContainerRole::Relay, deadline).await?;
         self.signals.phase(EnvironmentPhase::Initializing);
         let attached = self.docker.attach(&relay, self.config.deadline()).await?;

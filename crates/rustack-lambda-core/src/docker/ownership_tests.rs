@@ -8,6 +8,7 @@ use std::{
 use nix::unistd::mkfifo;
 use tempfile::TempDir;
 use tokio::{
+    fs,
     process::Command,
     sync::oneshot,
     time::{sleep, timeout},
@@ -655,6 +656,7 @@ async fn test_should_retain_exact_blocking_acquisition_through_deadline_and_aban
         },
     );
     let mut pending = DirectoryAcquisition {
+        code: false,
         cancelled,
         deadline: at,
         state: AcquisitionState::Running(task),
@@ -701,6 +703,7 @@ async fn test_should_cache_panicked_acquisition_completion_without_repolling_its
         },
     );
     let mut pending = DirectoryAcquisition {
+        code: false,
         cancelled,
         deadline: deadline(),
         state: AcquisitionState::Running(task),
@@ -738,4 +741,28 @@ async fn test_should_keep_failed_ready_filesystem_result_charged_until_disposal(
     assert_eq!(POOL.available_permits(), 0);
     drop(permit);
     assert_eq!(POOL.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn test_should_acquire_code_profile_with_retained_job_and_refuse_older_profile_without_rewrite()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let at = Instant::now() + Duration::from_secs(5);
+    let mut job = DirectoryAcquisition::begin_code(root.path().into(), at).unwrap();
+    let lease = job.wait(at).await.unwrap().unwrap();
+    assert!(lease.code_journaled());
+    drop(lease);
+    let old = tempfile::tempdir().unwrap();
+    let lease = DirectoryLease::acquire(old.path().into(), at)
+        .await
+        .unwrap();
+    drop(lease);
+    let owner = old.path().join(".rustack-lambda-docker/owner.v1");
+    let before = fs::read(&owner).await.unwrap();
+    let mut job = DirectoryAcquisition::begin_code(old.path().into(), at).unwrap();
+    assert!(matches!(
+        job.wait(at).await.unwrap(),
+        Err(DirectoryLeaseError::InvalidState)
+    ));
+    assert_eq!(fs::read(owner).await.unwrap(), before);
 }

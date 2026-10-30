@@ -69,6 +69,9 @@ use crate::{
         AutoExecutor, ExecutionRevision, Executor, ExecutorBackend, ExecutorError, InvokeRequest,
         NativeExecutor, NoopExecutor, SquibExecutor,
     },
+    function_config::{
+        validate_create_settings, validate_execution_settings, validate_provided_settings,
+    },
     identity::FunctionResourceId,
     invocation::{InvocationHandle, InvocationSubmission},
     resolver::{
@@ -85,7 +88,7 @@ use crate::{
 #[cfg(unix)]
 use crate::{
     deployment::{ImageDeploymentConfig, ImageDeploymentManager},
-    docker::ImageLeasePort,
+    docker::{DockerCodeArchive, DockerError, ImageLeasePort},
 };
 
 /// Selects the AWS `Invoke` invocation type.
@@ -824,9 +827,6 @@ impl RustackLambda {
             });
         }
 
-        if package_type == "Zip" && self.config.executor == ExecutorBackend::Docker {
-            return Err(invalid_parameter("Docker ZIP execution is unavailable"));
-        }
         // Validate runtime/handler for Zip packages.
         if package_type == "Zip" {
             if input.runtime.is_none() {
@@ -842,8 +842,17 @@ impl RustackLambda {
         }
 
         validate_image_publication(&package_type, input.publish.unwrap_or(false))?;
-        crate::function_config::validate_create_settings(&input)?;
+        let architecture = validate_create_settings(&input)?;
+        if package_type == "Zip" {
+            self.validate_docker_zip_settings(
+                input.runtime.as_deref(),
+                input.handler.as_deref(),
+                architecture,
+            )?;
+        }
         let processed = self.process_code(name, "$LATEST", code_source).await?;
+        self.validate_docker_zip_candidate(&processed, architecture)
+            .await?;
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) = processed.parts();
 
         let timeout = input.timeout.unwrap_or(3);
@@ -911,6 +920,11 @@ impl RustackLambda {
             return Ok(self.build_function_configuration(&accepted, &accepted.latest));
         }
         let should_publish = input.publish.unwrap_or(false);
+        self.validate_docker_zip_settings(
+            record.latest.runtime.as_deref(),
+            record.latest.handler.as_deref(),
+            architecture,
+        )?;
         self.store.insert(record)?;
         processed.commit();
 
@@ -1089,13 +1103,27 @@ impl RustackLambda {
                 input.revision_id.as_deref(),
             );
         }
+        if before.latest.package_type == "Zip" {
+            self.validate_docker_zip_settings(
+                before.latest.runtime.as_deref(),
+                before.latest.handler.as_deref(),
+                architecture,
+            )?;
+        }
         let processed = self.process_code(&name, "$LATEST", code_source).await?;
+        self.validate_docker_zip_candidate(&processed, architecture)
+            .await?;
         let (code_sha256, code_size, zip_bytes, code_path, image_uri) = processed.parts();
 
         let config = self.store.try_update_if_revision(&name, None, |record| {
             check_revision(input.revision_id.as_deref(), &record.latest.revision_id)?;
             check_staged_revision(record, &before)?;
             record.latest.deployment.ensure_mutable()?;
+            self.validate_docker_zip_settings(
+                record.latest.runtime.as_deref(),
+                record.latest.handler.as_deref(),
+                architecture,
+            )?;
             let now = now_iso8601();
             record.latest.code_sha256 = code_sha256;
             record.latest.code_size = code_size;
@@ -1212,6 +1240,16 @@ impl RustackLambda {
                     .map_err(|_| {
                         invalid_parameter("Invalid effective image entry configuration")
                     })?;
+            }
+            if record.latest.package_type == "Zip"
+                && self.config.executor == ExecutorBackend::Docker
+            {
+                let architecture = validate_execution_settings(&record.latest)?;
+                self.validate_docker_zip_settings(
+                    record.latest.runtime.as_deref(),
+                    record.latest.handler.as_deref(),
+                    architecture,
+                )?;
             }
             Ok(self.build_function_configuration(record, &record.latest))
         })?;
@@ -1570,7 +1608,7 @@ impl RustackLambda {
         invoked_qualifier: Option<&str>,
         payload: &[u8],
     ) -> Result<InvokeRequest, LambdaServiceError> {
-        let architecture = crate::function_config::validate_execution_settings(version)?;
+        let architecture = validate_execution_settings(version)?;
         if version.deployment.state() != "Active" {
             return Err(LambdaServiceError::ResourceNotReady {
                 message: "Function revision is not Active".into(),
@@ -3514,6 +3552,66 @@ impl RustackLambda {
     /// S3 packages are downloaded through the configured [`S3CodeFetcher`] and
     /// stored via the same path as inline `ZipFile`, so downstream validation,
     /// checksum computation, and executor behavior are identical.
+    fn validate_docker_zip_settings(
+        &self,
+        runtime: Option<&str>,
+        handler: Option<&str>,
+        architecture: Architecture,
+    ) -> Result<(), LambdaServiceError> {
+        if self.config.executor != ExecutorBackend::Docker {
+            return Ok(());
+        }
+        validate_provided_settings(runtime, handler)?;
+        self.executor
+            .zip_available(architecture)
+            .map_err(|error| match error {
+                ExecutorError::Unsupported(_) => {
+                    invalid_parameter("Docker ZIP source or architecture is unavailable")
+                }
+                other => other.into(),
+            })
+    }
+
+    async fn validate_docker_zip_candidate(
+        &self,
+        code: &ProcessedCode<'_>,
+        architecture: Architecture,
+    ) -> Result<(), LambdaServiceError> {
+        if self.config.executor != ExecutorBackend::Docker {
+            return Ok(());
+        }
+        let ProcessedCode::Zip(staged) = code else {
+            return Ok(());
+        };
+        #[cfg(unix)]
+        {
+            DockerCodeArchive::prepare(
+                staged.artifact().clone(),
+                architecture,
+                Instant::now() + CODE_FETCH_TIMEOUT,
+            )
+            .await
+            .map(drop)
+            .map_err(|error| match error {
+                DockerError::InvalidCode | DockerError::TooLarge | DockerError::Image(_) => {
+                    LambdaServiceError::InvalidZipFile {
+                        message: "Unsupported provided.al2023 ZIP artifact".into(),
+                    }
+                }
+                DockerError::Busy => LambdaServiceError::TooManyRequests,
+                DockerError::Deadline => LambdaServiceError::ResourceNotReady {
+                    message: "Docker ZIP validation deadline exceeded".into(),
+                },
+                _ => LambdaServiceError::DockerNotAvailable,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (staged, architecture);
+            Err(LambdaServiceError::DockerNotAvailable)
+        }
+    }
+
     async fn process_code<'a>(
         &'a self,
         function_name: &str,
@@ -3726,7 +3824,7 @@ fn validate_code_update(
         Some(value) => value
             .parse()
             .map_err(|_| invalid_parameter("Invalid architecture")),
-        None => crate::function_config::validate_execution_settings(&before.latest),
+        None => validate_execution_settings(&before.latest),
     }
 }
 
@@ -5730,3 +5828,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "provider/zip_tests.rs"]
+mod provided_zip_tests;

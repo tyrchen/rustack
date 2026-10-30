@@ -35,6 +35,7 @@ required-features = ["sdk-callback"]
 
 [features]
 zip-code = ["dep:tokio", "tokio/io-std"]
+provided-qualification = ["dep:tokio"]
 sdk-callback = ["dep:anyhow", "dep:aws-sdk-sfn", "dep:aws-credential-types", "dep:secrecy", "dep:serde", "dep:tokio", "dep:typed-builder", "dep:url", "dep:uuid"]
 
 [dependencies]

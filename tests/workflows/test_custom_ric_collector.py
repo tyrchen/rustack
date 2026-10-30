@@ -29,7 +29,11 @@ class CollectorTests(unittest.TestCase):
                     peer.close()
                     raise
             with peer:
-                self.assertEqual(peer.recv(1), b"")
+                try:
+                    self.assertEqual(peer.recv(1), b"")
+                except ConnectionResetError:
+                    # Closing an unread partial request may retire TCP with RST.
+                    pass
             self.assertLess(time.monotonic() - started, 3)
             self.assertFalse(collector.connections)
 

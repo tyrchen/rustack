@@ -26,6 +26,7 @@ mod recovery;
 mod startup;
 mod types;
 mod volumes;
+mod zip;
 
 use std::{
     collections::BTreeMap,
@@ -103,6 +104,7 @@ use tracing::instrument::WithSubscriber;
 use typed_builder::TypedBuilder;
 pub use types::{ApiVersion, DockerError, DockerKey, DockerSocket};
 use uuid::Uuid;
+pub use zip::DockerZipRuntime;
 
 use self::binding::DaemonBinding;
 use crate::{

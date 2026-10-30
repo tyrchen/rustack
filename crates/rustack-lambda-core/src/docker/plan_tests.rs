@@ -571,3 +571,7 @@ async fn test_should_retain_both_live_image_leases_through_allocation_plan_lifet
     assert!(relay_released.has_changed().is_err());
     assert!(function_released.has_changed().is_err());
 }
+
+pub(in crate::docker) fn function_body(plan: &EnvironmentPlan) -> &ContainerCreateBody {
+    &plan.bodies.function
+}

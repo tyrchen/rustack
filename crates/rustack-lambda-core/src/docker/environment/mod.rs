@@ -467,6 +467,7 @@ impl EnvironmentPort {
             return Err(DockerError::Quarantined.into());
         }
         let reservation = self.budget.reserve(plan.memory_bytes())?;
+        let code_claim = plan.claim_code()?;
         let (calls, mailbox) = mpsc::channel(4);
         let signals = Signals::new();
         let (done, settlement) = watch::channel(None);
@@ -478,6 +479,7 @@ impl EnvironmentPort {
         };
         self.sender
             .try_send(Envelope {
+                code_claim,
                 plan,
                 mailbox,
                 signals,

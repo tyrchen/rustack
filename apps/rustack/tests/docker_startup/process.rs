@@ -43,6 +43,8 @@ pub(super) enum Profile {
     Legacy,
     WrongEndpoint,
     Archive,
+    Zip,
+    ZipControlled,
 }
 impl Profile {
     pub fn rejects(self) -> bool {
@@ -63,10 +65,30 @@ impl Profile {
         };
         text.contains(expected)
     }
+    fn init_seconds(self) -> &'static str {
+        if matches!(
+            self,
+            Self::ZipControlled
+                | Self::Controlled
+                | Self::Deadline
+                | Self::Pull
+                | Self::MemoryPressure
+                | Self::EnvironmentPressure
+        ) {
+            "20"
+        } else {
+            "5"
+        }
+    }
+    fn zip(self) -> bool {
+        matches!(self, Self::Zip | Self::ZipControlled)
+    }
     fn network(self) -> bool {
         matches!(
             self,
-            Self::Connected
+            Self::Zip
+                | Self::ZipControlled
+                | Self::Connected
                 | Self::Controlled
                 | Self::Deadline
                 | Self::Pull
@@ -132,7 +154,8 @@ impl Server {
         }
         if matches!(
             profile,
-            Profile::Controlled
+            Profile::ZipControlled
+                | Profile::Controlled
                 | Profile::Deadline
                 | Profile::Pull
                 | Profile::Negative
@@ -241,7 +264,12 @@ impl Server {
     }
     pub async fn observation_identity(&self) -> Result<(String, String)> {
         let base = self.path()?.join("data/.rustack-lambda-docker");
-        let owner = observation_record(base.join("owner.v1"), 56, b"RSDKOWN2").await?;
+        let magic = if self.profile.zip() {
+            b"RSDKOWN3"
+        } else {
+            b"RSDKOWN2"
+        };
+        let owner = observation_record(base.join("owner.v1"), 56, magic).await?;
         let id = uuid::Uuid::from_slice(owner.get(8..24).context("owner UUID")?)?;
         ensure!(!id.is_nil(), "nil owner identity");
         let daemon = observation_record(base.join("daemon.v1"), 72, b"RSDKDMD1").await?;
@@ -279,7 +307,7 @@ impl Server {
                         "wrong endpoint capability"
                     );
                     ensure!(
-                        value["workers"]["docker"]["zip"] == false,
+                        value["workers"]["docker"]["zip"] == self.profile.zip(),
                         "false ZIP capability"
                     );
                     return Ok(value);
@@ -373,7 +401,11 @@ impl Server {
     pub async fn audit(&self) -> Result<()> {
         ensure!(self.child.id().is_none(), "audit before child reap");
         let path = self.path()?;
-        let lease = DirectoryLease::acquire(path.join("data"), deadline()).await?;
+        let lease = if self.profile.zip() {
+            DirectoryLease::acquire_code(path.join("data"), deadline()).await?
+        } else {
+            DirectoryLease::acquire(path.join("data"), deadline()).await?
+        };
         let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
         let result = async {
             if self.profile == Profile::Legacy {
@@ -397,7 +429,9 @@ impl Server {
                     recovery.containers.settled == 0
                         && recovery.containers.remaining == 0
                         && recovery.pins.settled == 0
-                        && recovery.pins.remaining == 0,
+                        && recovery.pins.remaining == 0
+                        && recovery.code.settled == 0
+                        && recovery.code.remaining == 0,
                     "ordinary shutdown required post-exit recovery"
                 );
             }
@@ -499,21 +533,7 @@ async fn launch(
                 "false"
             },
         )
-        .env(
-            "LAMBDA_INIT_TIMEOUT_SECS",
-            if matches!(
-                profile,
-                Profile::Controlled
-                    | Profile::Deadline
-                    | Profile::Pull
-                    | Profile::MemoryPressure
-                    | Profile::EnvironmentPressure
-            ) {
-                "20"
-            } else {
-                "5"
-            },
-        )
+        .env("LAMBDA_INIT_TIMEOUT_SECS", profile.init_seconds())
         .env("LAMBDA_SKIP_SIGNATURE_VALIDATION", "false")
         .env("STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION", "false")
         .env("ACCESS_KEY", "local-key")
@@ -523,6 +543,12 @@ async fn launch(
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .kill_on_drop(true);
+    if profile.zip() {
+        command.env(
+            "LAMBDA_DOCKER_ZIP_IMAGE",
+            env::var("RUSTACK_ZIP_BASE_IMAGE")?,
+        );
+    }
     if profile == Profile::Pull {
         command
             .env("LAMBDA_DOCKER_PULL_POLICY", "ifMissing")

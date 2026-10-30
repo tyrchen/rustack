@@ -1,25 +1,20 @@
 //! Independent bounded custom Rust Runtime Interface Client for real Image tests.
 #![forbid(unsafe_code)]
 
+mod fixture_collector;
 #[path = "image_framing.rs"]
 mod framing;
-
 use std::{
     env, hint::black_box, io::Read, net::SocketAddr, path::Path, process, thread, time::Duration,
 };
 
+use fixture_collector::{barrier, variable};
 use serde_json::{Value, json};
 use ureq::{Agent, AgentBuilder, Error};
 
 const EVENT_BYTES: u64 = 65_536;
 type Result<T> = std::result::Result<T, &'static str>;
 
-fn variable(name: &str) -> Result<String> {
-    env::var(name)
-        .ok()
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .ok_or("missing or oversized fixture environment")
-}
 fn request_id(value: &str) -> Result<&str> {
     if value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| {
@@ -93,36 +88,6 @@ fn forged(agent: &Agent, root: &str, event: &Value, previous: Option<&str>) -> R
         statuses.push(status);
     }
     Ok(statuses)
-}
-fn barrier(agent: &Agent, phase: &str, body: &Value) -> Result<Value> {
-    let address: SocketAddr = variable("IMAGE_FIXTURE_COLLECTOR")?
-        .parse()
-        .map_err(|_| "invalid fixture collector")?;
-    if !(address.ip().is_loopback()
-        || matches!(address.ip(), std::net::IpAddr::V4(ip) if ip.is_private()))
-        || address.port() == 0
-    {
-        return Err("fixture collector is not an explicit local address");
-    }
-    let token = variable("IMAGE_FIXTURE_TOKEN")?;
-    if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid fixture collector token");
-    }
-    let response = agent
-        .post(&format!("http://{address}/{phase}"))
-        .set("x-fixture-token", &token)
-        .send_string(&body.to_string())
-        .map_err(|_| "fixture collector exchange failed")?;
-    let mut raw = Vec::new();
-    response
-        .into_reader()
-        .take(2049)
-        .read_to_end(&mut raw)
-        .map_err(|_| "fixture collector response failed")?;
-    if raw.len() > 2048 {
-        return Err("fixture collector response exceeds limit");
-    }
-    serde_json::from_slice(&raw).map_err(|_| "fixture collector response is not JSON")
 }
 fn hold(stage: &str, id: Option<&str>) -> Result<()> {
     let agent = http_agent(Duration::from_secs(240));

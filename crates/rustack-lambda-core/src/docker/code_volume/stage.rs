@@ -5,15 +5,12 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::time::Instant;
 
 use super::entry::{Context, Entry};
-use crate::{
-    artifact::Architecture,
-    docker::{
-        DockerError,
-        models::{ContainerCreateBody, HostConfig, Mount, MountType, MountVolumeOptions},
-        mutation::MutationGuard,
-        ownership::codes::{CodeRecord, LoaderState, VolumeState},
-        recovery::code::retire_loader,
-    },
+use crate::docker::{
+    DockerError,
+    models::{ContainerCreateBody, HostConfig, Mount, MountType, MountVolumeOptions},
+    mutation::MutationGuard,
+    ownership::codes::{CodeRecord, LoaderState, VolumeState},
+    recovery::code::retire_loader,
 };
 
 pub(super) fn start(entry: &Arc<Entry>, context: Arc<Context>) {
@@ -32,7 +29,7 @@ fn io(entry: &Entry, context: &Context) -> Instant {
 #[tracing::instrument(skip_all)]
 async fn prepare(entry: &Entry, context: &Context) -> Result<(), DockerError> {
     entry.check(context)?;
-    validate_base(entry, context).await?;
+    super::validate_base(&entry.plan.base, &context.docker, io(entry, context)).await?;
     entry.check(context)?;
     let mut record = prepare_volume(entry, context).await?;
     let mutation = MutationGuard::new();
@@ -153,44 +150,7 @@ async fn save(
     *record = next;
     Ok(())
 }
-async fn validate_base(entry: &Entry, context: &Context) -> Result<(), DockerError> {
-    let metadata = entry.plan.base.resolved().metadata();
-    let reference = metadata.image_id.as_str().parse()?;
-    let inspected = context
-        .docker
-        .inspect_image(&reference, io(entry, context))
-        .await?;
-    let config = inspected.config.as_ref().ok_or(DockerError::Protocol)?;
-    let labels = config.labels.as_ref();
-    if inspected.id.as_deref() != Some(metadata.image_id.as_str())
-        || inspected.os.as_deref() != Some("linux")
-        || inspected.architecture.as_deref()
-            != Some(match metadata.architecture {
-                Architecture::Arm64 => "arm64",
-                Architecture::X86_64 => "amd64",
-            })
-        || config
-            .volumes
-            .as_ref()
-            .is_some_and(|volumes| !volumes.is_empty())
-        || labels.is_some_and(|labels| {
-            labels.len() > 56
-                || labels.iter().any(|(key, value)| {
-                    key.is_empty()
-                        || key.len() > 128
-                        || value.len() > 256
-                        || key.starts_with("rustack.lambda.")
-                        || !key
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-                        || value.chars().any(char::is_control)
-                })
-        })
-    {
-        return Err(DockerError::Quarantined);
-    }
-    Ok(())
-}
+
 fn loader_body(
     entry: &Entry,
     record: &CodeRecord,

@@ -39,7 +39,7 @@ pub use crate::docker::{
     DockerExecutor, DockerExecutorConfig, DockerExecutorError, DockerExecutorSettings,
     DockerReadiness,
 };
-use crate::invocation::InvocationContext;
+use crate::{artifact::Architecture, invocation::InvocationContext};
 
 /// Backend that turns an [`InvokeRequest`] into an [`InvokeResponse`].
 #[async_trait]
@@ -59,6 +59,22 @@ pub trait Executor: std::fmt::Debug + Send + Sync + 'static {
     fn image_available(&self) -> Result<(), ExecutorError> {
         Err(ExecutorError::Unsupported(
             "Image execution is unavailable".into(),
+        ))
+    }
+
+    /// Check optional provided-runtime ZIP support for a captured architecture.
+    ///
+    /// # Errors
+    /// The default rejects capability which this backend has not installed.
+    ///
+    /// ```
+    /// # fn check(executor:&dyn rustack_lambda_core::executor::Executor) {
+    /// let available=executor.zip_available(rustack_lambda_core::artifact::Architecture::Arm64).is_ok();
+    /// # }
+    /// ```
+    fn zip_available(&self, _architecture: Architecture) -> Result<(), ExecutorError> {
+        Err(ExecutorError::Unsupported(
+            "ZIP execution is unavailable".into(),
         ))
     }
 

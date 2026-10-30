@@ -3978,6 +3978,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustack-lambda-runtime-verifier"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "rustack-lambda-core",
+ "rustack-lambda-model",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rustack-logs-core"
 version = "0.11.0"
 dependencies = [

@@ -187,12 +187,29 @@ impl Cleaner {
                 }
             }
             let joined = if function { io.wait().await } else { Ok(()) };
-            let relay = if function {
+            let code = if let Some(zip) = &self.plan.zip {
+                if function && joined.is_ok() {
+                    match zip.retire(self.config.deadline()).await {
+                        Ok(failed) => {
+                            if failed {
+                                self.health.fail();
+                            }
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            let relay = if function && code {
                 self.container(ContainerRole::Relay).await
             } else {
                 false
             };
-            if function && relay && joined.is_ok() {
+            if function && relay && code && joined.is_ok() {
                 return;
             }
             if joined.is_err() {
@@ -207,6 +224,7 @@ impl Cleaner {
         }
     }
     pub(super) async fn inspect_health(&self) -> Result<(), EnvironmentError> {
+        self.plan.live()?;
         let phase = self.progress.function.borrow().clone();
         let Phase::Known(id) = phase else {
             return Err(EnvironmentError::Stopped);

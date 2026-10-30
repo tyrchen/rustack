@@ -34,10 +34,28 @@ pub(super) enum Case {
     DefaultLimit,
     MemoryLimit,
     EnvironmentLimit,
+    ZipCreate,
+    ZipDelete,
 }
 impl Case {
+    fn zip(self) -> bool {
+        matches!(self, Self::ZipCreate | Self::ZipDelete)
+    }
+    fn sources(self) -> Result<[String; 2]> {
+        let [first, second] = if self.zip() {
+            ["RUSTACK_PROVIDED_ZIP_A", "RUSTACK_PROVIDED_ZIP_B"]
+        } else {
+            ["RUSTACK_CUSTOM_IMAGE_A", "RUSTACK_CUSTOM_IMAGE_B"]
+        };
+        Ok([
+            env::var(first).context("explicit IO source A")?,
+            env::var(second).context("explicit IO source B")?,
+        ])
+    }
     fn phase(self) -> &'static str {
         match self {
+            Self::ZipCreate => "zip_create",
+            Self::ZipDelete => "zip_delete",
             Self::Create => "create",
             Self::Delete => "delete",
             Self::Loss => "loss",
@@ -55,7 +73,7 @@ impl Case {
     }
     fn expected(self) -> Value {
         match self {
-            Self::Create | Self::Delete => json!([
+            Self::ZipCreate | Self::ZipDelete | Self::Create | Self::Delete => json!([
                 format!("{}-held-real-io", self.phase()),
                 "retained-reserved-slot",
                 "caller-disconnected",
@@ -124,10 +142,7 @@ pub(super) async fn exercise(case: Case) -> Result<()> {
     root.disable_cleanup(true);
     eprintln!("management IO evidence: {}", root.path().display());
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let sources = [
-        env::var("RUSTACK_CUSTOM_IMAGE_A").context("explicit IO image A")?,
-        env::var("RUSTACK_CUSTOM_IMAGE_B").context("explicit IO image B")?,
-    ];
+    let sources = case.sources()?;
     let architecture = if architecture()? == "arm64" {
         "arm64"
     } else {
@@ -231,6 +246,7 @@ async fn handoff(
         "proxy readiness PID changed"
     );
     let profile = match case {
+        Case::ZipCreate | Case::ZipDelete => Profile::ZipControlled,
         Case::CreateTimeout | Case::DeleteTimeout => Profile::Deadline,
         Case::Pull => Profile::Pull,
         Case::Negative => Profile::Negative,
@@ -246,8 +262,14 @@ async fn handoff(
         .disable_cleanup(true);
     *server = Some(ordinary);
     let ordinary = server.as_mut().context("ordinary server owner")?;
-    for source in sources {
-        ordinary.track_image(source).await?;
+    if case.zip() {
+        ordinary
+            .track_image(&env::var("RUSTACK_ZIP_BASE_IMAGE")?)
+            .await?;
+    } else {
+        for source in sources {
+            ordinary.track_image(source).await?;
+        }
     }
     let mut fixtures = Vec::new();
     if case == Case::Negative {

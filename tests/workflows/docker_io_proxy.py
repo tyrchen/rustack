@@ -387,6 +387,23 @@ class Proxy:
                 self.errors.append(type(error).__name__ + " at " + frame.name + ":" + str(frame.lineno))
             self.condition.notify_all()
 
+    def request_limit(self, method, target, path, fields):
+        if method != b"PUT":
+            return 1024 * 1024
+        match = re.fullmatch(r"/containers/([0-9a-f]{64})/archive", path)
+        if not match:
+            raise ProtocolError("proxy only supports scoped archive PUT")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(target.decode("ascii")).query, strict_parsing=True)
+        if query != {"path":["/var/task"], "noOverwriteDirNonDir":["true"], "copyUIDGID":["false"]}:
+            raise ProtocolError("proxy archive destination")
+        if fields.get(b"content-type") != b"application/x-tar":
+            raise ProtocolError("proxy archive media type")
+        with self.condition:
+            known = self.records.get(match[1])
+        if known is None or known["role"] != "code-loader":
+            raise ProtocolError("unknown archive loader")
+        return 282 * 1024 * 1024
+
     def connection(self, client):
         backend = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -397,12 +414,13 @@ class Proxy:
             for position in range(2):
                 first, fields, raw = head(client, time.monotonic() + 5)
                 method, target, version = first[:-2].split(b" ")
-                assert method in (b"GET", b"POST", b"DELETE") and version == b"HTTP/1.1"
+                assert method in (b"GET", b"POST", b"PUT", b"DELETE") and version == b"HTTP/1.1"
                 assert len(target) <= 2048 and re.fullmatch(rb"/[!-~]*", target)
                 assert b"transfer-encoding" not in fields
-                payload, _ = body(client, fields, 1024 * 1024, time.monotonic() + 5)
                 path = urllib.parse.unquote(urllib.parse.urlsplit(target.decode("ascii")).path)
                 path = re.sub(r"^/v1\.[0-9]{2}(?=/)", "", path)
+                maximum = self.request_limit(method, target, path, fields)
+                payload, _ = body(client, fields, maximum, time.monotonic() + (60 if method == b"PUT" else 5))
                 create = method == b"POST" and path == "/containers/create"
                 tag = method == b"POST" and path.startswith("/images/") and path.endswith("/tag")
                 record = None

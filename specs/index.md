@@ -65,6 +65,8 @@ D90 is implemented and independently reviewed: [durable code namespace recovery]
 
 D91 is implemented and independently reviewed: [retained producing code-volume management](./rustack-workflows-20-lambda-runtime-design.md#67-retained-producing-code-volume-manager-d91) consumes D90 recovery and D89 typed code transfer. Both retained full56-resource gates and standard/strict/Native/security checks pass, with zero remnants and eight actual provisioned sources preserved per engine. Ordinary ZIP startup/provider/invocation and archives are next; complete M4 remains active.
 
+D92 is implemented and independently reviewed: [ordinary provided-runtime ZIP consumption](./rustack-workflows-20-lambda-runtime-design.md#68-ordinary-provided-runtime-installation-and-environment-consumption-d92) installs the actual startup/provider/environment path over D91, with retained cleanup and identical-artifact Linux Native qualification. Both final full63-resource gates and host/strict/Native/security checks pass; exact postconditions show zero remnants, nine actual source IDs preserved per engine and both owned bridges retired. Task5.1 is complete. ZIP archives5.2c, Node/handler SDK/IaC/reference/platform and full M4 remain active.
+
 ## 推荐阅读顺序
 
 1. [系统审查与改进 spec](./rustack-system-review.md)：安全、正确性、架构及开发者体验；按 R01–R18 定位问题，按 M0–M4 安排修复。

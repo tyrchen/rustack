@@ -129,6 +129,8 @@ pub struct RuntimeBudgets {
     pub lambda_docker_image_pins: usize,
     /// Independent Docker management and control IO deadline.
     pub lambda_docker_io_seconds: u64,
+    /// Code archive upload IO budget, independently bounded by cold startup.
+    pub lambda_docker_code_upload_seconds: u64,
     /// Docker startup and probe observation deadline.
     pub lambda_docker_start_seconds: u64,
     /// Independent Docker cleanup observation deadline.
@@ -232,6 +234,7 @@ impl Default for RuntimeBudgets {
             lambda_docker_deployment_seconds: 300,
             lambda_docker_image_pins: 1024,
             lambda_docker_io_seconds: 5,
+            lambda_docker_code_upload_seconds: 60,
             lambda_docker_start_seconds: 15,
             lambda_docker_cleanup_seconds: 10,
 
@@ -402,6 +405,12 @@ impl RuntimeBudgets {
                 self.lambda_docker_io_seconds,
                 1,
                 60,
+            ),
+            (
+                "lambdaDockerCodeUploadSeconds",
+                self.lambda_docker_code_upload_seconds,
+                1,
+                600,
             ),
             (
                 "lambdaDockerStartSeconds",
@@ -1313,6 +1322,7 @@ mod docker_tests {
             ("lambdaDockerDeploymentSeconds", 1, 3600),
             ("lambdaDockerImagePins", 1, 8192),
             ("lambdaDockerIoSeconds", 1, 60),
+            ("lambdaDockerCodeUploadSeconds", 1, 600),
             ("lambdaDockerStartSeconds", 1, 60),
             ("lambdaDockerCleanupSeconds", 1, 60),
         ] {

@@ -8,10 +8,12 @@ use super::{DockerStartupError, Evidence, Qualification, State};
 use crate::{
     artifact::{Architecture, PinnedImage},
     docker::{
-        DirectoryLease, DockerError, DockerExecutor, DockerExecutorConfig, DockerExecutorError,
-        DockerExecutorSettings, DockerPort, DockerReadiness, DockerWire, EndpointProbeConfig,
-        EnvironmentManager, EnvironmentProbeConfig, EnvironmentSettings, ImageLeaseConfig,
-        ImageLeaseManager, ImageLeasePort, ImagePinScope, PoolSettings, ProbeSettings,
+        CodeVolumeConfig, CodeVolumeManager, DirectoryLease, DockerError, DockerExecutor,
+        DockerExecutorConfig, DockerExecutorError, DockerExecutorSettings, DockerPort,
+        DockerReadiness, DockerWire, DockerZipRuntime, EndpointProbeConfig, EnvironmentManager,
+        EnvironmentProbeConfig, EnvironmentSettings, ImageLeaseConfig, ImageLeaseManager,
+        ImageLeasePort, ImagePinScope, PoolSettings, ProbeSettings,
+        code_volume::validate_base,
         ownership::DirectoryAcquisition,
         probe_endpoint, probe_environment, reconcile_namespace,
         recovery::inventory::{containers, images, volumes},
@@ -49,10 +51,11 @@ impl State {
         &mut self,
         at: Instant,
     ) -> Result<DirectoryLease, DockerStartupError> {
-        self.acquiring = Some(DirectoryAcquisition::begin(
-            self.config.directory.clone(),
-            step(at, 60),
-        )?);
+        self.acquiring = Some(if self.config.settings.zip_image().is_some() {
+            DirectoryAcquisition::begin_code(self.config.directory.clone(), step(at, 60))?
+        } else {
+            DirectoryAcquisition::begin(self.config.directory.clone(), step(at, 60))?
+        });
         let acquired = self
             .acquiring
             .as_mut()
@@ -158,6 +161,54 @@ impl State {
             relay,
         })
     }
+    async fn prepare_zip(
+        &mut self,
+        prepared: &PreparedImages,
+        at: Instant,
+    ) -> Result<(), DockerStartupError> {
+        let settings = self.config.settings.clone();
+        let budgets = settings.budgets();
+        if let Some(reference) = settings.zip_image() {
+            let base = prepared
+                .images
+                .prepare(
+                    reference,
+                    prepared.architecture,
+                    None,
+                    step(at, budgets.lambda_docker_deployment_seconds),
+                )
+                .await?;
+            validate_base(
+                &base,
+                &prepared.docker,
+                step(at, budgets.lambda_docker_io_seconds),
+            )
+            .await?;
+            let volumes: u8 = budgets
+                .lambda_docker_environments
+                .try_into()
+                .map_err(|_| DockerStartupError::Configuration)?;
+            self.code = Some(CodeVolumeManager::start(
+                prepared.docker.clone(),
+                prepared.directory.clone(),
+                CodeVolumeConfig::new(
+                    volumes,
+                    volumes.min(2),
+                    Duration::from_secs(budgets.lambda_docker_io_seconds),
+                    Duration::from_secs(budgets.lambda_docker_code_upload_seconds),
+                )?,
+            )?);
+            self.zip = Some(DockerZipRuntime::new(
+                &prepared.directory,
+                base,
+                self.code
+                    .as_ref()
+                    .ok_or(DockerStartupError::Unavailable)?
+                    .port(),
+            )?);
+        }
+        Ok(())
+    }
     async fn prepare_probe(
         &mut self,
         prepared: &PreparedImages,
@@ -217,6 +268,7 @@ impl State {
         at: Instant,
     ) -> Result<(), DockerStartupError> {
         let prepared = self.prepare_images(at).await?;
+        self.prepare_zip(&prepared, at).await?;
         let base = self.prepare_probe(&prepared, at).await?;
         let settings = self.config.settings.clone();
         let budgets = settings.budgets();
@@ -244,6 +296,7 @@ impl State {
             .images(prepared.images)
             .docker(prepared.docker)
             .architecture(prepared.architecture)
+            .zip(self.zip.clone())
             .build();
         qualification
             .evidence
@@ -261,6 +314,7 @@ impl State {
                 .policy(base.policy)
                 .environments(base.environments)
                 .readiness(qualification.clone())
+                .zip(self.zip.clone())
                 .settings(DockerExecutorSettings::new(
                     PoolSettings::builder()
                         .warm(
@@ -346,6 +400,18 @@ impl State {
                 .shutdown(Instant::now() + Duration::from_secs(60))
                 .await;
             let settled = environments.physically_settled();
+            if let Err(error) = result {
+                self.retain_fault(error.into());
+            }
+            if !settled {
+                return Err(DockerStartupError::Unavailable);
+            }
+        }
+        if let Some(code) = &mut self.code {
+            let result = code
+                .shutdown(Instant::now() + Duration::from_secs(60))
+                .await;
+            let settled = code.physically_settled();
             if let Err(error) = result {
                 self.retain_fault(error.into());
             }

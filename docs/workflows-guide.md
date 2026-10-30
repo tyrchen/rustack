@@ -241,7 +241,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 56-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 63-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -249,21 +249,47 @@ selected architecture with the other daemon supplied. This qualifies the
 remain open. `make test-lambda-docker-manifest` checks inventories without
 running Docker resources.
 
-The code-volume prerequisite also transfers an immutable ZIP through a never-started
-RW loader and executes its program from an actual RO volume, checking ownership,
-modes, kernel read-only enforcement and writable `/tmp`. This transport component
-does not enable ordinary Docker ZIP Lambda execution; the runtime/provider
-consumer remains required. See the
-[ZIP delivery contract](../specs/rustack-workflows-20-lambda-runtime-design.md#61-provided-runtime-zip-delivery-contract-d89).
+Docker ZIP execution is an explicit provided-runtime installation. Set
+`LAMBDA_DOCKER_ZIP_IMAGE` to a locally available immutable `repository@sha256:...`
+OS image for `provided.al2023`, alongside the relay image. There is no implicit
+base catalog or fallback runtime. Deploy a ZIP with a root executable Linux ELF
+`bootstrap`, `Runtime=provided.al2023`, an ASCII handler of1..128 bytes using
+letters, digits or `_./:-`, and one architecture matching that installed image.
+The handler is passed as `_HANDLER`; Rustack always starts `/var/task/bootstrap`.
+Original ZIP SHA256/size remain the public code identity. Validation failures do
+not replace the latest revision, publications or aliases.
 
-The library's explicit code namespace uses a fresh `RSDKOWN3` ownership root;
-existing Image roots are never automatically upgraded. Startup can reopen that
-root to retire recorded loaders/volumes before image pins, with complete volume
-audits. Unknown creation followed by404 remains quarantined. The retained
-producing manager is now available as a library component: capture its preparation
-retirement receipt, retain code leases through consumer cleanup, and join code
-ownership before image ownership. Ordinary ZIP invocation remains required. See the
-[code recovery contract](../specs/rustack-workflows-20-lambda-runtime-design.md#66-code-namespace-provenance-and-recovery-boundary-d90).
+Use a fresh data directory for this installation: its `RSDKOWN3` namespace
+journals code-volume ownership. Existing Image ownership roots are refused rather
+than upgraded. Startup recovers recorded code effects before image pins and
+qualifies the exact base/producer before advertising `workers.docker.zip=true`.
+An image-only installation advertises false and rejects ZIP before fetching or
+staging it. A failed/revoked installed source revokes backend readiness.
+
+Each cold environment receives a unique daemon-local code volume. A never-started
+RW loader transfers the original archive; the actual function receives only a
+read-only `/var/task` mount, normalized root-owned code, and its own writable
+noexec `/tmp`. Code preparation shares the environment's original start/invocation
+deadline. Cancellation joins the original upload and physical consumer retirement
+before releasing code-volume and environment reservations. Configure
+`budgets.lambdaDockerCodeUploadSeconds` in YAML when tuning upload IO (default60,
+range1..600 seconds); the cold deadline still caps it. Shutdown joins functions
+and IO, then code volumes, image pins and the Docker wire.
+
+`make test-lambda-provided-docker` selects the ordinary signed SDK/ASL/revision/
+fault/cancellation cases and the exact-same-ZIP Linux Native verifier after the
+compiled inventory check. It consumes the explicit fixture variables set by the
+full gate; run `make test-lambda-docker` to provision and verify all63 resources.
+Keep fixture files unchanged throughout a run. The verifier executes the same
+original A ZIP bytes through the real Native provider and joins its child; it
+uses an executable temporary mount only inside that separately owned verifier.
+This does not change production Lambda's noexec policy.
+
+ZIP snapshot export/import remains unavailable pending its own archive phase;
+Image archives retain their existing behavior. Node runtimes, handler SDK/IaC,
+reference/native-x86/platform and complete release acceptance remain separate.
+See the [ordinary ZIP contract](../specs/rustack-workflows-20-lambda-runtime-design.md#68-ordinary-provided-runtime-installation-and-environment-consumption-d92)
+and [verification status](../specs/rustack-workflows-93-review.md#d92-development-qualification-evidence-in-progress).
 
 The management IO cases hold actual Create/Tag acknowledgments and owned DELETE
 requests. Deleting a Pending deployment cannot release its quota while critical

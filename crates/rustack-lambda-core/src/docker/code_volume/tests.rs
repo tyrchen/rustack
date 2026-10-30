@@ -22,13 +22,13 @@ use crate::{
     },
 };
 
-fn deadline() -> Instant {
+pub(in crate::docker) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
 fn config() -> CodeVolumeConfig {
     CodeVolumeConfig::new(2, 2, Duration::from_secs(1), Duration::from_secs(2)).unwrap()
 }
-async fn fixture() -> (
+pub(in crate::docker) async fn fixture() -> (
     TempDir,
     DirectoryLease,
     Daemon,
@@ -48,7 +48,9 @@ async fn fixture() -> (
         .unwrap();
     (root, directory, daemon, wire, port)
 }
-fn base(directory: &DirectoryLease) -> (PinnedImage, watch::Sender<bool>, watch::Receiver<()>) {
+pub(in crate::docker) fn base(
+    directory: &DirectoryLease,
+) -> (PinnedImage, watch::Sender<bool>, watch::Receiver<()>) {
     let (release, released) = watch::channel(());
     let (stop, stopping) = watch::channel(false);
     let base = PinnedImage::with_context(
@@ -64,11 +66,11 @@ fn base(directory: &DirectoryLease) -> (PinnedImage, watch::Sender<bool>, watch:
     );
     (base, stop, released)
 }
-async fn code() -> (TempDir, crate::docker::DockerCodeArchive) {
+pub(in crate::docker) async fn code() -> (TempDir, crate::docker::DockerCodeArchive) {
     let (root, artifact) = source(zip(&[("bootstrap", &elf(Architecture::Arm64), 0o755)])).await;
     (root, prepare(artifact).await)
 }
-fn target(request: &IncomingRequest) -> String {
+pub(in crate::docker) fn target(request: &IncomingRequest) -> String {
     request
         .head
         .lines()
@@ -79,13 +81,16 @@ fn target(request: &IncomingRequest) -> String {
         .unwrap()
         .into()
 }
-async fn reply(request: IncomingRequest, value: &Value) {
+pub(in crate::docker) async fn reply(request: IncomingRequest, value: &Value) {
     request.reply(200, &to_vec(value).unwrap()).await;
 }
 fn image() -> Value {
     json!({"Id":format!("sha256:{}","a".repeat(64)),"Os":"linux","Architecture":"arm64","Size":1024,"Config":{"Labels":{"com.amazonaws.lambda.platform.kernel":"k510ga"}}})
 }
-async fn begin_volume(daemon: &mut Daemon, directory: &DirectoryLease) -> (IncomingRequest, Value) {
+pub(in crate::docker) async fn begin_volume(
+    daemon: &mut Daemon,
+    directory: &DirectoryLease,
+) -> (IncomingRequest, Value) {
     let request = daemon.next().await;
     assert!(target(&request).contains("/images/sha256%3A"));
     reply(request, &image()).await;
@@ -140,7 +145,10 @@ async fn begin_loader(
     let inspected = json!({"Id":"c".repeat(64),"Name":format!("/{name}"),"Image":body["Image"],"Config":{"Image":body["Image"],"Labels":body["Labels"]},"State":{"Status":"created","Running":false,"StartedAt":"0001-01-01T00:00:00Z"},"Mounts":[{"Type":"volume","Name":volume["Name"],"Driver":"local","Destination":"/var/task","RW":true}]});
     (request, inspected)
 }
-async fn allocated(daemon: &mut Daemon, directory: &DirectoryLease) -> (Value, Value) {
+pub(in crate::docker) async fn allocated(
+    daemon: &mut Daemon,
+    directory: &DirectoryLease,
+) -> (Value, Value) {
     let (request, volume) = begin_volume(daemon, directory).await;
     request.reply(201, &to_vec(&volume).unwrap()).await;
     let (request, inspected) = begin_loader(daemon, directory, &volume).await;
@@ -153,7 +161,7 @@ async fn allocated(daemon: &mut Daemon, directory: &DirectoryLease) -> (Value, V
     reply(daemon.next().await, &inspected).await;
     (volume, inspected)
 }
-async fn finish_loader(daemon: &mut Daemon, inspected: &Value) {
+pub(in crate::docker) async fn finish_loader(daemon: &mut Daemon, inspected: &Value) {
     reply(daemon.next().await, inspected).await;
     reply(daemon.next().await, inspected).await;
     let request = daemon.next().await;
@@ -162,7 +170,7 @@ async fn finish_loader(daemon: &mut Daemon, inspected: &Value) {
     request.reply(204, b"").await;
     daemon.next().await.reply(404, b"{}").await;
 }
-async fn stage(daemon: &mut Daemon, directory: &DirectoryLease) -> Value {
+pub(in crate::docker) async fn stage(daemon: &mut Daemon, directory: &DirectoryLease) -> Value {
     let (volume, inspected) = allocated(daemon, directory).await;
     let request = daemon.next().await;
     assert!(request.head.starts_with("PUT "));
@@ -177,7 +185,7 @@ async fn stage(daemon: &mut Daemon, directory: &DirectoryLease) -> Value {
     finish_loader(daemon, &inspected).await;
     volume
 }
-async fn retire(daemon: &mut Daemon, volume: &Value) {
+pub(in crate::docker) async fn retire(daemon: &mut Daemon, volume: &Value) {
     let request = daemon.next().await;
     assert!(target(&request).contains("/volumes/"));
     reply(request, volume).await;
@@ -187,7 +195,7 @@ async fn retire(daemon: &mut Daemon, volume: &Value) {
     request.reply(204, b"").await;
     daemon.next().await.reply(404, b"{}").await;
 }
-async fn empty(port: &CodeVolumePort) {
+pub(in crate::docker) async fn empty(port: &CodeVolumePort) {
     timeout(Duration::from_secs(5), async {
         while port.status().volumes != 0 {
             tokio::task::yield_now().await;
@@ -553,6 +561,7 @@ async fn test_should_join_original_accepted_upload_before_cleanup_after_expired_
         assert!(waiting.await.unwrap_err().is_cancelled());
         owner.shutdown(deadline()).await.unwrap();
     }
+    assert!(owner.physically_settled());
     assert_eq!(directory.code_records(deadline()).await.unwrap(), []);
     wire.shutdown().await.unwrap();
     daemon.close().await;
@@ -1141,6 +1150,7 @@ fn test_should_poison_same_acquisition_after_runtime_loss_with_an_issued_uncerta
             owner.shutdown(deadline()).await,
             Err(DockerError::Worker)
         ));
+        assert!(!owner.physically_settled());
         assert!(old_wire.shutdown().await.is_err());
         assert!(
             timeout(Duration::from_millis(20), daemon.next())

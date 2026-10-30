@@ -28,11 +28,11 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    ContainerPolicy, DirectoryLease, DockerError, EnvironmentError, EnvironmentPlan,
-    EnvironmentPool, EnvironmentPort, EnvironmentResponse, PoolConfig, PoolPort,
+    ContainerPolicy, DirectoryLease, DockerError, DockerZipRuntime, EnvironmentError,
+    EnvironmentPlan, EnvironmentPool, EnvironmentPort, EnvironmentResponse, PoolConfig, PoolPort,
 };
 use crate::{
-    artifact::PinnedImage,
+    artifact::{Architecture, DeploymentArtifact, PinnedImage},
     executor::{Executor, ExecutorError, InvokeRequest, InvokeResponse},
     invocation::{CleanupTask, InvocationContext},
 };
@@ -144,6 +144,9 @@ pub struct DockerExecutorConfig {
     /// Validated dispatch/cleanup budgets.
     #[builder(default)]
     pub settings: DockerExecutorSettings,
+    /// Optional affiliated provided.al2023 source, qualified by production startup.
+    #[builder(default)]
+    pub zip: Option<DockerZipRuntime>,
 }
 
 #[derive(Debug)]
@@ -186,6 +189,15 @@ impl DockerExecutor {
         if !config.environments.same_scope(&config.directory) || !config.relay.is_live() {
             return Err(DockerExecutorError::Configuration);
         }
+        if let Some(zip) = &config.zip {
+            if !zip.same_scope(&config.directory)
+                || zip.base.resolved().metadata().architecture
+                    != config.relay.resolved().metadata().architecture
+            {
+                return Err(DockerExecutorError::Configuration);
+            }
+            zip.available().map_err(EnvironmentError::from)?;
+        }
         let runtime = Handle::try_current().map_err(|_| DockerExecutorError::Unavailable)?;
         let root = EnvironmentPool::start(config.environments.clone(), config.settings.pool)?;
         let port = root.port();
@@ -209,12 +221,24 @@ impl DockerExecutor {
         }
     }
     fn plan(&self, request: &InvokeRequest) -> Result<EnvironmentPlan, DockerExecutorError> {
-        let plan = EnvironmentPlan::new(
-            self.config.directory.clone(),
-            self.config.relay.clone(),
-            request.revision.clone(),
-            self.config.policy.clone(),
-        )
+        let plan = match &request.revision.artifact {
+            DeploymentArtifact::Image(_) => EnvironmentPlan::new(
+                self.config.directory.clone(),
+                self.config.relay.clone(),
+                request.revision.clone(),
+                self.config.policy.clone(),
+            ),
+            DeploymentArtifact::Zip(_) => EnvironmentPlan::new_zip(
+                self.config.directory.clone(),
+                self.config.relay.clone(),
+                request.revision.clone(),
+                self.config.policy.clone(),
+                self.config
+                    .zip
+                    .clone()
+                    .ok_or(DockerExecutorError::Unavailable)?,
+            ),
+        }
         .map_err(EnvironmentError::from)?;
         let _: FunctionArn = request.function_arn.parse()?;
         let (_, function) = request
@@ -292,6 +316,22 @@ impl Executor for DockerExecutor {
             || !pool.accepting
         {
             return Err(DockerExecutorError::Unavailable.into());
+        }
+        Ok(())
+    }
+    fn zip_available(&self, architecture: Architecture) -> Result<(), ExecutorError> {
+        self.image_available()?;
+        let source = self.config.zip.as_ref().ok_or_else(|| {
+            ExecutorError::Unsupported("Docker ZIP runtime is not configured".into())
+        })?;
+        source
+            .available()
+            .map_err(EnvironmentError::from)
+            .map_err(DockerExecutorError::from)?;
+        if source.base.resolved().metadata().architecture != architecture {
+            return Err(ExecutorError::Unsupported(
+                "Docker ZIP architecture does not match the selected base".into(),
+            ));
         }
         Ok(())
     }

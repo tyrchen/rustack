@@ -149,6 +149,27 @@ impl CodeVolumePort {
         base: PinnedImage,
         deadline: Instant,
     ) -> Result<CodePreparation, DockerError> {
+        self.start_with_receipt(identity, archive, base, deadline, |_| {})
+    }
+    pub(in crate::docker) fn same_scope(&self, directory: &DirectoryLease) -> bool {
+        self.directory.same_instance(directory)
+    }
+    pub(in crate::docker) fn live(&self) -> bool {
+        !*self.stop.borrow()
+            && !self.health.failed.load(Ordering::Acquire)
+            && !self.sender.is_closed()
+    }
+    pub(in crate::docker) fn start_with_receipt<F>(
+        &self,
+        identity: CodeVolumeIdentity,
+        archive: DockerCodeArchive,
+        base: PinnedImage,
+        deadline: Instant,
+        publish: F,
+    ) -> Result<CodePreparation, DockerError>
+    where
+        F: FnOnce(CodeRetirement),
+    {
         self.health.check()?;
         if *self.stop.borrow() {
             return Err(DockerError::Stopped);
@@ -182,28 +203,28 @@ impl CodeVolumePort {
         let (cancel, cancelled) = watch::channel(());
         let (reply, response) = oneshot::channel();
         let (retirement, settled) = watch::channel(false);
-        self.sender
-            .try_send(
-                Envelope::builder()
-                    .retirement(NoEffectRetirement(Some(retirement)))
-                    .identity(identity)
-                    .archive(archive)
-                    .base(base)
-                    .deadline(deadline)
-                    .cancel(cancelled)
-                    .reply(reply)
-                    .volume(volume)
-                    .handoff(handoff)
-                    .build(),
-            )
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => DockerError::Busy,
-                mpsc::error::TrySendError::Closed(_) => DockerError::Stopped,
-            })?;
+        let retired = CodeRetirement::new(settled);
+        let request = Envelope::builder()
+            .retirement(NoEffectRetirement(Some(retirement)))
+            .identity(identity)
+            .archive(archive)
+            .base(base)
+            .deadline(deadline)
+            .cancel(cancelled)
+            .reply(reply)
+            .volume(volume)
+            .handoff(handoff)
+            .build();
+        // Publication cannot race accepted work: the envelope is still local.
+        publish(retired.clone());
+        self.sender.try_send(request).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => DockerError::Busy,
+            mpsc::error::TrySendError::Closed(_) => DockerError::Stopped,
+        })?;
         Ok(CodePreparation {
             result: response,
             _cancel: cancel,
-            retired: CodeRetirement::new(settled),
+            retired,
             deadline,
         })
     }
@@ -225,6 +246,10 @@ impl fmt::Debug for CodeVolumeManager {
     }
 }
 impl CodeVolumeManager {
+    pub(in crate::docker) fn physically_settled(&self) -> bool {
+        self.settlement.is_some() && self.port.health.physical.load(Ordering::Acquire)
+    }
+
     /// Start one producing owner for this acquired code-generation directory.
     ///
     /// Historical namespace recovery must precede production. No readiness or
@@ -446,6 +471,7 @@ impl Ledger {
                 self.index.clear();
                 if self.entries.is_empty() {
                     self.context.producer.settle();
+                    self.context.health.physical.store(true, Ordering::Release);
                     return;
                 }
                 for entry in self.entries.values().cloned().collect::<Vec<_>>() {
@@ -552,6 +578,11 @@ impl Drop for Actor {
         self.ledger.context.fail();
         if self.ledger.entries.is_empty() && self.ledger.jobs.is_empty() {
             self.ledger.context.producer.settle();
+            self.ledger
+                .context
+                .health
+                .physical
+                .store(true, Ordering::Release);
             return;
         }
         // Move every original worker; never abort IO in order to replace its observer.

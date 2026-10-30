@@ -12,21 +12,23 @@ use rustack_lambda_model::types::ImageConfig;
 use rustack_lambda_runtime::protocol::EnvironmentId;
 use serde::Serialize;
 use tokio::time::Instant;
+use typed_builder::TypedBuilder;
 use uuid::Uuid;
 
 use super::{
-    DirectoryLease, DockerError, DockerKey, DockerPort,
+    CodeVolumeIdentity, DirectoryLease, DockerError, DockerKey, DockerPort, DockerZipRuntime,
     models::{
         ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, HealthConfig,
-        HostConfig, HostConfigCgroupnsModeEnum, HostConfigLogConfig, RestartPolicy,
-        RestartPolicyNameEnum,
+        HostConfig, HostConfigCgroupnsModeEnum, HostConfigLogConfig, Mount, MountType,
+        MountVolumeOptions, RestartPolicy, RestartPolicyNameEnum,
     },
     mutation::MutationGuard,
+    zip::{AllocationClaim, ZipPlan},
 };
 use crate::{
     artifact::{DeploymentArtifact, PinnedImage},
     executor::{ExecutionRevision, ExecutorBackend},
-    function_config::validate_environment_entries,
+    function_config::{validate_environment_entries, validate_provided_settings},
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -169,6 +171,8 @@ struct Bodies {
 }
 
 /// Fixed create requests retaining revision, image availability and namespace leases.
+#[derive(TypedBuilder)]
+#[builder(builder_method(vis = ""))]
 #[non_exhaustive]
 pub struct EnvironmentPlan {
     pub(super) directory: DirectoryLease,
@@ -177,6 +181,8 @@ pub struct EnvironmentPlan {
     identity: Identity,
     bodies: Bodies,
     warm_key: String,
+    #[builder(default)]
+    pub(super) zip: Option<Arc<ZipPlan>>,
 }
 impl fmt::Debug for EnvironmentPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -198,8 +204,12 @@ impl EnvironmentPlan {
         &self.warm_key
     }
     pub(super) fn same_scope(&self, directory: &DirectoryLease) -> bool {
-        self.directory.owner_id() == directory.owner_id()
-            && self.directory.run_id() == directory.run_id()
+        if self.zip.is_some() {
+            self.directory.same_instance(directory)
+        } else {
+            self.directory.owner_id() == directory.owner_id()
+                && self.directory.run_id() == directory.run_id()
+        }
     }
     pub(super) fn revision(&self) -> &ExecutionRevision {
         &self.revision
@@ -235,7 +245,50 @@ impl EnvironmentPlan {
         {
             return Err(DockerError::Quarantined);
         }
+        if matches!(role, ContainerRole::Function) {
+            if let Some(zip) = &self.zip {
+                let mounts = inspected.mounts.as_ref().ok_or(DockerError::Quarantined)?;
+                if mounts.len() != 1
+                    || mounts.first().is_none_or(|mount| {
+                        mount.typ.as_deref() != Some("volume")
+                            || mount.name.as_deref() != Some(zip.volume.as_str())
+                            || mount.destination.as_deref() != Some("/var/task")
+                            || mount.rw != Some(false)
+                            || mount.driver.as_deref() != Some("local")
+                    })
+                {
+                    return Err(DockerError::Quarantined);
+                }
+            }
+        }
         id.parse()
+    }
+    pub(super) fn claim_code(&self) -> Result<Option<AllocationClaim>, DockerError> {
+        self.zip.as_ref().map(ZipPlan::claim).transpose()
+    }
+    pub(super) fn commit_code_claim(
+        &self,
+        claim: &mut Option<AllocationClaim>,
+    ) -> Result<(), DockerError> {
+        match (&self.zip, claim) {
+            (Some(plan), Some(claim)) if claim.belongs_to(plan) => {
+                claim.commit();
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            _ => Err(DockerError::Configuration),
+        }
+    }
+    pub(super) fn code_clean(&self) -> bool {
+        self.zip.as_ref().is_none_or(|zip| zip.clean())
+    }
+    fn require_code(&self, role: ContainerRole) -> Result<(), DockerError> {
+        if matches!(role, ContainerRole::Function) {
+            if let Some(zip) = &self.zip {
+                zip.ready_mount()?;
+            }
+        }
+        Ok(())
     }
     /// Allocate identities and validate both immutable create bodies before IO.
     ///
@@ -254,103 +307,126 @@ impl EnvironmentPlan {
         revision: Arc<ExecutionRevision>,
         policy: ContainerPolicy,
     ) -> Result<Self, DockerError> {
+        Self::construct(directory, relay, revision, policy, None)
+    }
+
+    /// Plan provided.al2023 execution over an affiliated immutable base and producer.
+    ///
+    /// Conversion and allocation begin only after environment admission.
+    ///
+    /// # Errors
+    /// Rejects incompatible runtime/revision, source scope, platform or policy.
+    ///
+    /// ```no_run
+    /// # fn plan(directory:rustack_lambda_core::docker::DirectoryLease,relay:rustack_lambda_core::artifact::PinnedImage,revision:std::sync::Arc<rustack_lambda_core::executor::ExecutionRevision>,policy:rustack_lambda_core::docker::ContainerPolicy,source:rustack_lambda_core::docker::DockerZipRuntime) {
+    /// let plan=rustack_lambda_core::docker::EnvironmentPlan::new_zip(directory,relay,revision,policy,source);
+    /// # }
+    /// ```
+    pub fn new_zip(
+        directory: DirectoryLease,
+        relay: PinnedImage,
+        revision: Arc<ExecutionRevision>,
+        policy: ContainerPolicy,
+        source: DockerZipRuntime,
+    ) -> Result<Self, DockerError> {
+        Self::construct(directory, relay, revision, policy, Some(source))
+    }
+
+    fn construct(
+        directory: DirectoryLease,
+        relay: PinnedImage,
+        revision: Arc<ExecutionRevision>,
+        policy: ContainerPolicy,
+        zip: Option<DockerZipRuntime>,
+    ) -> Result<Self, DockerError> {
         validate_revision(&revision)?;
-        let function = image(&revision)?;
+        let function = match (&revision.artifact, &zip) {
+            (DeploymentArtifact::Image(_), None) => image(&revision)?,
+            (DeploymentArtifact::Zip(_), Some(source)) => {
+                if !source.same_scope(&directory)
+                    || source.base.resolved().metadata().architecture != revision.architecture
+                {
+                    return Err(DockerError::Configuration);
+                }
+                source.available()?;
+                &source.base
+            }
+            _ => return Err(DockerError::Configuration),
+        };
         if !relay.is_live() || relay.resolved().metadata().architecture != revision.architecture {
             return Err(DockerError::Configuration);
         }
-        let environment = EnvironmentId::default();
+        let code = if zip.is_some() {
+            Some(CodeVolumeIdentity::new(
+                revision
+                    .resource_id
+                    .to_string()
+                    .parse()
+                    .map_err(|_| DockerError::Configuration)?,
+                revision
+                    .revision_id
+                    .parse()
+                    .map_err(|_| DockerError::Configuration)?,
+            )?)
+        } else {
+            None
+        };
+        let environment = match &code {
+            Some(code) => code
+                .environment_id()
+                .to_string()
+                .parse()
+                .map_err(|_| DockerError::Configuration)?,
+            None => EnvironmentId::default(),
+        };
         let identity = Identity {
             environment,
             relay: format!("rustack-relay-{environment}").parse()?,
             function: format!("rustack-function-{environment}").parse()?,
         };
-        let labels = HashMap::from([
-            (
-                "rustack.lambda.ownerId".into(),
-                directory.owner_id().to_string(),
-            ),
-            (
-                "rustack.lambda.runId".into(),
-                directory.run_id().to_string(),
-            ),
-            (
-                "rustack.lambda.environmentId".into(),
-                environment.to_string(),
-            ),
-            (
-                "rustack.lambda.functionResourceId".into(),
-                revision.resource_id.to_string(),
-            ),
-        ]);
-        let user = format!("{}:{}", policy.uid, policy.gid);
-        let mut relay_body = body(&relay, None, &user, &labels, "relay")?;
-        relay_body.env = Some(vec![
-            format!("RUSTACK_LAMBDA_ENVIRONMENT_ID={environment}"),
-            format!(
-                "RUSTACK_LAMBDA_RELAY_IO_SECONDS={}",
-                policy.relay.io.as_secs()
-            ),
-            format!(
-                "RUSTACK_LAMBDA_RELAY_IDLE_SECONDS={}",
-                policy.relay.idle.as_secs()
-            ),
-            format!(
-                "RUSTACK_LAMBDA_RELAY_RETIRE_SECONDS={}",
-                policy.relay.retirement.as_secs()
-            ),
-        ]);
-        relay_body.attach_stdin = Some(true);
-        relay_body.open_stdin = Some(true);
-        relay_body.stdin_once = Some(true);
-        let selected_user = image_user(
-            &function.resolved().metadata().execution.metadata().user,
-            &user,
-        )?;
-        let mut function_body = body(
-            function,
-            revision.image_config.as_ref(),
-            &selected_user,
-            &labels,
-            "function",
-        )?;
-        function_body.env = Some(function_environment(&revision, environment)?);
-        let warm_key = warm_identity(&directory, &relay, &revision, &policy)?;
-        relay_body.host_config = Some(limits(
-            policy.network.0,
-            RELAY_MEMORY,
-            100_000_000,
-            64,
-            MIB,
-        )?);
-
-        let memory = u64::from(revision.memory_mb)
-            .checked_mul(MIB)
-            .ok_or(DockerError::Configuration)?;
-        function_body.host_config = Some(limits(
-            format!("container:{}", identity.relay.as_str()),
-            memory,
-            policy.nano_cpus,
-            256,
-            u64::from(revision.ephemeral_storage_mb)
-                .checked_mul(MIB)
-                .ok_or(DockerError::Configuration)?,
-        )?);
+        let labels = plan_labels(&directory, environment, &revision);
+        let (mut function_body, memory) =
+            function_create_body(function, &revision, &identity, &policy, &labels)?;
+        let warm_key = warm_identity(&directory, &relay, &revision, &policy, function)?;
+        let relay_body = relay_create_body(&relay, policy, environment, &labels)?;
+        let zip = match (zip, code) {
+            (Some(source), Some(code)) => Some(ZipPlan::new(source, code)?),
+            (None, None) => None,
+            _ => return Err(DockerError::Configuration),
+        };
+        if let Some(zip) = &zip {
+            function_body
+                .host_config
+                .as_mut()
+                .ok_or(DockerError::Configuration)?
+                .mounts = Some(vec![Mount {
+                typ: Some(MountType::VOLUME),
+                source: Some(zip.volume.as_str().into()),
+                target: Some("/var/task".into()),
+                read_only: Some(true),
+                volume_options: Some(MountVolumeOptions {
+                    no_copy: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]);
+        }
         let memory = memory
             .checked_add(RELAY_MEMORY)
             .ok_or(DockerError::Configuration)?;
-        Ok(Self {
-            directory,
-            relay,
-            revision,
-            identity,
-            bodies: Bodies {
+        Ok(Self::builder()
+            .directory(directory)
+            .relay(relay)
+            .revision(revision)
+            .identity(identity)
+            .bodies(Bodies {
                 relay: relay_body,
                 function: function_body,
                 memory,
-            },
-            warm_key,
-        })
+            })
+            .warm_key(warm_key)
+            .zip(zip)
+            .build())
     }
 
     /// Fresh environment UUID used by both labels and control protocol.
@@ -444,6 +520,7 @@ impl EnvironmentPlan {
         deadline: Instant,
     ) -> Result<ContainerCreateResponse, DockerError> {
         self.live()?;
+        self.require_code(ContainerRole::Function)?;
         port.create_container_on_platform(
             &self.identity.function,
             &self.bodies.function,
@@ -460,6 +537,7 @@ impl EnvironmentPlan {
         mutation: MutationGuard,
     ) -> Result<ContainerCreateResponse, DockerError> {
         self.live()?;
+        self.require_code(role)?;
         let body = match role {
             ContainerRole::Relay => &self.bodies.relay,
             ContainerRole::Function => &self.bodies.function,
@@ -478,10 +556,119 @@ impl EnvironmentPlan {
             DeploymentArtifact::Image(function) if self.relay.is_live() && function.is_live() => {
                 Ok(())
             }
-            DeploymentArtifact::Image(_) => Err(DockerError::Stopped),
-            DeploymentArtifact::Zip(_) => Err(DockerError::Configuration),
+            DeploymentArtifact::Zip(_) if self.relay.is_live() => {
+                self.zip.as_ref().ok_or(DockerError::Configuration)?.live()
+            }
+            DeploymentArtifact::Image(_) | DeploymentArtifact::Zip(_) => Err(DockerError::Stopped),
         }
     }
+}
+
+fn plan_labels(
+    directory: &DirectoryLease,
+    environment: EnvironmentId,
+    revision: &ExecutionRevision,
+) -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "rustack.lambda.ownerId".into(),
+            directory.owner_id().to_string(),
+        ),
+        (
+            "rustack.lambda.runId".into(),
+            directory.run_id().to_string(),
+        ),
+        (
+            "rustack.lambda.environmentId".into(),
+            environment.to_string(),
+        ),
+        (
+            "rustack.lambda.functionResourceId".into(),
+            revision.resource_id.to_string(),
+        ),
+    ])
+}
+fn relay_create_body(
+    relay: &PinnedImage,
+    policy: ContainerPolicy,
+    environment: EnvironmentId,
+    labels: &HashMap<String, String>,
+) -> Result<ContainerCreateBody, DockerError> {
+    let user = format!("{}:{}", policy.uid, policy.gid);
+    let mut relay = body(relay, None, &user, labels, "relay")?;
+    relay.env = Some(vec![
+        format!("RUSTACK_LAMBDA_ENVIRONMENT_ID={environment}"),
+        format!(
+            "RUSTACK_LAMBDA_RELAY_IO_SECONDS={}",
+            policy.relay.io.as_secs()
+        ),
+        format!(
+            "RUSTACK_LAMBDA_RELAY_IDLE_SECONDS={}",
+            policy.relay.idle.as_secs()
+        ),
+        format!(
+            "RUSTACK_LAMBDA_RELAY_RETIRE_SECONDS={}",
+            policy.relay.retirement.as_secs()
+        ),
+    ]);
+    relay.attach_stdin = Some(true);
+    relay.open_stdin = Some(true);
+    relay.stdin_once = Some(true);
+    relay.host_config = Some(limits(
+        policy.network.0,
+        RELAY_MEMORY,
+        100_000_000,
+        64,
+        MIB,
+    )?);
+    Ok(relay)
+}
+fn function_create_body(
+    function: &PinnedImage,
+    revision: &ExecutionRevision,
+    identity: &Identity,
+    policy: &ContainerPolicy,
+    labels: &HashMap<String, String>,
+) -> Result<(ContainerCreateBody, u64), DockerError> {
+    let user = format!("{}:{}", policy.uid, policy.gid);
+    let zip = matches!(revision.artifact, DeploymentArtifact::Zip(_));
+    let selected_user = if zip {
+        user.clone()
+    } else {
+        image_user(
+            &function.resolved().metadata().execution.metadata().user,
+            &user,
+        )?
+    };
+    let provided = ImageConfig {
+        entry_point: Some(vec!["/var/task/bootstrap".into()]),
+        command: Some(Vec::new()),
+        working_directory: Some("/var/task".into()),
+    };
+    let overrides = if zip {
+        Some(&provided)
+    } else {
+        revision.image_config.as_ref()
+    };
+    let mut body = body(function, overrides, &selected_user, labels, "function")?;
+    body.env = Some(function_environment(
+        revision,
+        identity.environment,
+        function,
+    )?);
+    let memory = u64::from(revision.memory_mb)
+        .checked_mul(MIB)
+        .ok_or(DockerError::Configuration)?;
+    body.host_config = Some(limits(
+        format!("container:{}", identity.relay.as_str()),
+        memory,
+        policy.nano_cpus,
+        256,
+        u64::from(revision.ephemeral_storage_mb)
+            .checked_mul(MIB)
+            .ok_or(DockerError::Configuration)?,
+    )?);
+    Ok((body, memory))
 }
 
 fn warm_identity(
@@ -489,8 +676,8 @@ fn warm_identity(
     relay: &PinnedImage,
     revision: &ExecutionRevision,
     policy: &ContainerPolicy,
+    function: &PinnedImage,
 ) -> Result<String, DockerError> {
-    let function = image(revision)?;
     let environment: BTreeMap<_, _> = revision.environment.iter().collect();
     let encoded = serde_json::to_vec(&(
         (
@@ -515,7 +702,15 @@ fn warm_identity(
             revision.memory_mb,
             revision.ephemeral_storage_mb,
         ),
-        &policy,
+        (
+            &policy,
+            &revision.runtime,
+            &revision.handler,
+            match &revision.artifact {
+                DeploymentArtifact::Zip(code) => Some(code.sha256()),
+                DeploymentArtifact::Image(_) => None,
+            },
+        ),
     ))
     .map_err(|_| DockerError::Configuration)?;
     Ok(crate::storage::compute_sha256(&encoded))
@@ -543,8 +738,6 @@ fn validate_revision(revision: &ExecutionRevision) -> Result<(), DockerError> {
             .parse::<u64>()
             .is_ok_and(|number| number > 0 && number.to_string() == *version);
     if revision.backend != ExecutorBackend::Docker
-        || revision.runtime.is_some()
-        || revision.handler.is_some()
         || id.is_nil()
         || id.to_string() != revision.revision_id
         || !(1..=64).contains(&revision.function_name.len())
@@ -560,7 +753,18 @@ fn validate_revision(revision: &ExecutionRevision) -> Result<(), DockerError> {
     {
         return Err(DockerError::Configuration);
     }
-    image(revision)?;
+    match &revision.artifact {
+        DeploymentArtifact::Image(_)
+            if revision.runtime.is_none() && revision.handler.is_none() =>
+        {
+            image(revision)?;
+        }
+        DeploymentArtifact::Zip(_) if revision.image_config.is_none() => {
+            validate_provided_settings(revision.runtime.as_deref(), revision.handler.as_deref())
+                .map_err(|_| DockerError::Configuration)?;
+        }
+        _ => return Err(DockerError::Configuration),
+    }
     Ok(())
 }
 
@@ -668,6 +872,7 @@ fn account(value: &str) -> bool {
 fn function_environment(
     revision: &ExecutionRevision,
     environment: EnvironmentId,
+    image: &PinnedImage,
 ) -> Result<Vec<String>, DockerError> {
     if revision.environment.len() > 130 {
         return Err(DockerError::Configuration);
@@ -691,7 +896,6 @@ fn function_environment(
     {
         return Err(DockerError::Configuration);
     }
-    let image = image(revision)?;
     let mut output: BTreeMap<String, Option<String>> = BTreeMap::new();
     for entry in &image.resolved().metadata().execution.metadata().environment {
         let (key, value) = entry
@@ -718,6 +922,16 @@ fn function_environment(
         format!("AWS_LAMBDA_LOG_STREAM_NAME=rustack/{environment}"),
         "LAMBDA_TASK_ROOT=/var/task".into(),
     ];
+    if let DeploymentArtifact::Zip(_) = &revision.artifact {
+        output.insert(
+            "_HANDLER".into(),
+            Some(revision.handler.clone().ok_or(DockerError::Configuration)?),
+        );
+        output.insert(
+            "AWS_EXECUTION_ENV".into(),
+            Some("AWS_Lambda_provided.al2023".into()),
+        );
+    }
     for entry in authoritative {
         let (key, value) = entry.split_once('=').ok_or(DockerError::Configuration)?;
         output.insert(key.to_owned(), Some(value.to_owned()));

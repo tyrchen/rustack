@@ -434,3 +434,21 @@ async fn test_should_reject_impossible_memory_before_provider_admission_as_a_thr
     executor.shutdown().await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn test_should_distinguish_unconfigured_zip_from_revoked_backend_without_allocating() {
+    let fixture = Fixture::new().await;
+    let executor = DockerExecutor::new(fixture.config()).unwrap();
+    assert!(matches!(
+        executor.zip_available(Architecture::Arm64),
+        Err(ExecutorError::Unsupported(_))
+    ));
+    fixture.ready.0.store(false, Ordering::Release);
+    assert!(matches!(
+        executor.zip_available(Architecture::Arm64),
+        Err(ExecutorError::Docker(DockerExecutorError::Unavailable))
+    ));
+    assert_eq!(fixture.environments.port().status().allocated, 0);
+    executor.shutdown().await.unwrap();
+    fixture.close().await;
+}
