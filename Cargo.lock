@@ -3137,6 +3137,7 @@ dependencies = [
  "crc32fast",
  "http 1.5.0",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "rustack-apigatewayv2-core",
