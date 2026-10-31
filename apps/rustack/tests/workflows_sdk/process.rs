@@ -190,7 +190,7 @@ impl Server {
             (1..=32).contains(&dispatch),
             "invalid fixture dispatch capacity"
         );
-        let execution = if matches!(profile, Profile::Pure) {
+        let execution = if matches!(profile, Profile::Pure | Profile::Performance) {
             ExecutionFixture::Pure
         } else {
             let bootstrap = PathBuf::from(

@@ -202,6 +202,36 @@ Emit one bounded schema1 JSON measurement report only after the owned server joi
         retained server join/PID absence → bounded JSON report
 ```
 
+### 5.2 Direct Linux arm64 pure-workflow measurements (D101)
+
+Deliver the Linux execution dependency of5.3 without conflating a virtual machine with the dedicated reference machine. `make test-workflows-performance-linux` cross-builds the existing CLI and SDK test harness for aarch64-unknown-linux-gnu with the pinned toolchain, locked dependencies, the existing reviewed Zig linker adapter and explicit lambda/stepfunctions/s3/dynamodb features. Use debug assertions, matching the D74 measurement mode; report this rather than implying release-mode timing. No new dependency or benchmark crate is needed. The performance fixture selects the pure executor, so neither this lane nor the existing host lane needs a Native bootstrap. Other SDK profiles retain Native execution unchanged.
+
+The operator supplies an existing Colima profile through WORKFLOWS_LINUX_PROFILE. Provisioning is a separate discoverable Make target with an explicit new profile, native aarch64 VZ,4 virtual CPUs,8GiB configured memory, no Rosetta/binfmt, read-only repository/target mounts and activate=false. Refuse an existing profile rather than restarting or changing it. Do not touch other engines, global contexts or x86_64. Keep the new VM after measurement. Four dedicated physical CPUs are not established by these virtual allocations: all D101 reports retain referenceQualification=pending, including successful timing budgets. A physical/dedicated reference acceptance requires separate evidence; this slice does not amend that requirement.
+
+Run the Linux SDK harness and its actual CLI directly inside the guest, with no test container, Lambda/Docker invocation, host-native controller, or image initialization in the measured interval. A fixed stdlib Python entrypoint owns the guest test groups through the existing bounded Action process owner. List and freeze the six normal measurement controls and two resource tests before running anything; reject missing/extra/duplicate names. Run the six controls once, then each exact ignored resource once serially with nocapture. Require the precise Rust terminal summaries and one schema1 report per resource, matching the expected workload, Linux/aarch64 identity, configured limits, sample counts, budget ranks and joined-zero-Native cleanup. Never infer success from exit0 alone or accept a report from a skipped/filtered test.
+
+One original450s guest cutoff covers inventory, local file IO/hashing, tests and final report publication, enforced by both monotonic checks and a POSIX real-time alarm. Clamp each resource group to220s or the remaining original cutoff, whichever is smaller; normal controls have30s and listing10s. The existing owner retains its3s retirement allowance after expiry. The host SSH owner has500s, exceeding the guest's453s worst-case cutoff plus retirement, within an original530s host alarm covering local observations and publication. Provisioning has a separate330s cutoff and retains its new profile on any failure. Both owners bound stdout to64KiB and stderr to32KiB and require physical child/group termination. TERM/HUP/INT enter the same exception-driven retirement path; interruption/alarm signals during the existing bounded retirement must not interrupt its physical join. Test these boundaries only after positively observed child entry. Reuse the existing metadata decoder's depth8/member512/string16KiB caps, duplicate/nonfinite rejection and fixed malformed-JSON normalization for each bounded JSON document. The guest remains independently bounded if the host connection fails. Any timeout, late result, output overflow, malformed report, unexpected group or forced retirement fails qualification. Preserve fixed diagnostics and evidence; no environment/request dumps. The helper accepts only bounded shell-safe absolute executable/source paths and profile identifiers, since Colima's SSH boundary may render a remote command. It never invokes a local shell.
+
+Record the configured profile allocations separately from observed guest /proc/meminfo, CPU availability, kernel, Python version, virtualization declaration and child high-water RSS (KiB, not a storage quota). Bound the Cargo stream to4MiB/4096 records and each record to262144 bytes; reject excess record counts before decoding. Record SHA256 of the actual ELF arm64 test and server binaries before and after execution on both sides, plus the bounded Cargo artifact stream used to select exactly one SDK test executable. Reject changed or mismatched artifacts, symlinks, wrong architecture and unexpected Cargo paths. The server must be the sibling target/debug/rustack embedded by Cargo's CARGO_BIN_EXE_rustack, not an independently substituted binary. Reports retain the two ordered raw measurements and their separate cleanup proofs. Results are evidence for Linux pure performance/load only, not image warm/cold timing, image timeout cleanup, Desktop/rootless, dedicated reference resources or complete M4.
+
+```text
+┌─ host Make: locked arm64 cross-build + artifact selection ────────┐
+│ explicit profile → bounded SSH owner → immutable ELF hashes       │
+└─────────────────────────────┬────────────────────────────────────┘
+                              ▼
+┌─ native aarch64 Linux guest: fixed Python owner ──────────────────┐
+│ exact inventory →6 controls → latency resource → loop resource    │
+│ each SDK harness → actual CLI → joined PID/group cleanup         │
+│ no Docker workload; bounded /proc metadata + child RSS + samples  │
+└─────────────────────────────┬────────────────────────────────────┘
+                              ▼
+     artifact recheck → bounded report; reference still pending
+```
+
+Independent controls must reject inventory drift, zero-test success, duplicate/wrong/malformed reports, non-Linux/arm64 identity, sample/rank/budget/cleanup mutations, unsafe paths/profile names, ambiguous Cargo artifacts and architecture/hash changes. Run the actual Linux lane, existing host performance target, required Rust/build/tooling gates and independent review before closing this dependency. Preserve the historical D74/D99 evidence unchanged.
+
+Executed D101 acceptance: thirteen Python controls, all six listed Rust controls and both exact Linux resources pass. Pure p95=10791µs;100-cycle health/Stop maxima318/1335µs; live exhaustion probes175/175. Both actual ELF hashes and Cargo provenance are bound under one1252-source cohort. All13 host gates and the original owner join0; readonly postconditions show zero new-daemon containers/volumes/images and no running Rustack server. W397–W402 are fixed and independently rechecked. See the [raw Linux review](../docs/research/workflows-linux-performance-review.md) and [implementation record](./rustack-workflows-90-impl-plan.md#p5-direct-linux-pure-workflow-measurement-dependency-53-d101). The reference remains pending.
+
 ## 6. Cross-references
 
 - ← [all component contracts](./rustack-workflows-00-prd.md#7-reading-order-and-cross-references)

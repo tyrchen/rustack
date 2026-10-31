@@ -8,6 +8,8 @@
 
 ## Research
 
+- [Direct Linux arm64 Workflows Performance Review](./research/workflows-linux-performance-review.md) - Actual Linux SDK/CLI50-state latency and100 live-loop/Stop cycles, bounded artifact/process evidence and raw VM measurements; dedicated-reference qualification remains pending.
+
 - [Native-host Workflows Performance Review](./research/workflows-native-performance-review.md) - Actual signed SDK50-state latency, live-loop health/history exhaustion and100 single-slot Stop cycles; raw host measurements, process cleanup and source/binary fingerprints, with Linux reference qualification still pending.
 
 - [Bollard Docker Transport Boundaries](./research/study-bollard-docker-transport-boundaries.md) - Pinned response collection, attach framing/EOF and diagnostic behavior; generated-type reuse, bounded production wire implementation, platform identity/default merge validation, owned image pin/quota/cleanup preparation, persisted installation identity with same-connection fences, complete bounded observed namespace inventories, controlled pull/auth/progress ownership, private registry YAML/descriptor-loading boundaries, container-origin endpoint/TLS and production provenance/retained-startup and independent custom-RIC/causal-isolation preflight, plus actual RIC/diagnostic qualification; Bollard and historical Moby sources are pinned.

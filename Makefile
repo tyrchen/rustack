@@ -271,11 +271,29 @@ test-workflows-persistence:
 # D74: actual pure-workflow latency, bounded loops and one-slot Stop reuse.
 test-workflows-performance:
 	@cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions performance::
-	@cargo build --locked -p rustack-lambda-echo-bootstrap --bin bootstrap
-	@RUSTACK_WORKFLOWS_BOOTSTRAP="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/bootstrap" cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions performance:: -- --ignored --test-threads=1 --nocapture
+	@cargo test --locked -p rustack-cli --test workflows_sdk --features stepfunctions performance:: -- --ignored --test-threads=1 --nocapture
 	@cargo clippy --locked -p rustack-cli --test workflows_sdk --features stepfunctions --no-deps -- -D warnings -W clippy::pedantic
 
 .PHONY: test-workflows-performance
+
+# D101: direct native arm64 Linux measurements, separate from dedicated-reference acceptance.
+WORKFLOWS_LINUX_PROFILE ?= rustack-workflows-performance-arm64
+WORKFLOWS_LINUX_EVIDENCE_DIR ?= $(shell cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-linux-performance
+
+test-workflows-performance-linux-controls:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_linux_performance.py -v
+
+workflows-performance-linux-provision: test-workflows-performance-linux-controls
+	@python3 -I -B tests/workflows/linux_performance.py provision "$(WORKFLOWS_LINUX_PROFILE)" "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+
+workflows-performance-linux-build: test-workflows-server-linker test-workflows-performance-linux-controls
+	@mkdir -p "$(WORKFLOWS_LINUX_EVIDENCE_DIR)"
+	@CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$(CURDIR)/tests/workflows/server_linker.py" WORKFLOWS_SERVER_LINKER_TOOL="$$(command -v cargo-zigbuild)" WORKFLOWS_SERVER_LINKER_TARGET=aarch64-linux-gnu CARGO_ZIGBUILD_ZIG_VERSION="$$(zig version)" cargo zigbuild --locked -p rustack-cli --test workflows_sdk --no-default-features --features lambda,stepfunctions,s3,dynamodb --target aarch64-unknown-linux-gnu --message-format=json >"$(WORKFLOWS_LINUX_EVIDENCE_DIR)/build.json"
+
+test-workflows-performance-linux: workflows-performance-linux-build
+	@python3 -I -B tests/workflows/linux_performance.py host "$(WORKFLOWS_LINUX_PROFILE)" "$(WORKFLOWS_LINUX_EVIDENCE_DIR)/build.json"
+
+.PHONY: test-workflows-performance-linux-controls workflows-performance-linux-provision workflows-performance-linux-build test-workflows-performance-linux
 
 # D75: exact same-feature resource inventories, before any resource execution.
 test-workflows-manifest:

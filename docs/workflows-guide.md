@@ -21,7 +21,7 @@ functional evidence, with no native-x86 performance claim.
 ## Run the pure example
 
 Run the commands from the repository root, using Cargo and the pinned Rust toolchain. The qualification commands require a Unix host
-(Linux or macOS); recorded current-host performance evidence is on macOS/aarch64. The feature is absent from the default source build;
+(Linux or macOS); performance evidence includes macOS/aarch64 and a native arm64 Linux VM. The feature is absent from the default source build;
 adding `SERVICES=stepfunctions` to that unchanged binary cannot enable it.
 
 ```bash
@@ -709,6 +709,20 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance
+The [direct Linux measurement review](./research/workflows-linux-performance-review.md)
+records the same signed SDK workloads inside a4-vCPU/8GiB native ARM VZ guest,
+with p95=10.791ms, exact histories and joined process cleanup. To provision a new
+dedicated test VM without activating its Docker context, then run the measurements:
+
+```bash
+make workflows-performance-linux-provision  # Refuses an existing profile.
+make test-workflows-performance-linux       # Reuses the retained ARM guest.
+```
+
+The default profile is `rustack-workflows-performance-arm64`; select an explicit
+profile with `WORKFLOWS_LINUX_PROFILE`. Both source and target mounts are read-only.
+The VM remains running after the test. Four virtual CPUs do not prove four
+dedicated physical CPUs: `referenceQualification` remains `pending`.
+Required dedicated-reference Linux performance
 and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).
