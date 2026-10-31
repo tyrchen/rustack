@@ -10,8 +10,8 @@ below; it uses the actual shared provider for SDK and ASL calls. The configured
 provided.al2023 profile executes original ZIP code and restores bounded ZIP/Image
 archives through the same qualified owner. Official Python, pinned Node24 and an
 independent Rust RIC have functional evidence on the retained lanes. Explicit
-local SDK access to S3/DynamoDB is qualified below. Image callbacks, IaC and final
-platform/release qualification remain unfinished.
+local SDK access to S3/DynamoDB and real image callbacks are qualified below. IaC
+and final platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -142,9 +142,9 @@ not generally sufficient. Startup runs the trusted pinned function in that exact
 network and requires a response from this listener instance. No endpoint is
 inferred from Host or the advertised URL. HTTP is operator-trusted local networking;
 HTTPS uses normal name/certificate verification with embedded public roots, without
-production private-CA loading. This reachability receipt does not establish the
-pending handler S3/DDB/callback acceptance gate. Set user function SDK endpoint and
-explicit local test credentials deliberately; host AWS secrets are never inherited.
+production private-CA loading. This reachability receipt is separate from the actual handler SDK and callback
+acceptance described below. Configure the explicit local SDK pair deliberately;
+host AWS secrets are never inherited.
 
 Before readiness, the actual listener serves bounded diagnostics only. The fixed
 `/_rustack/runtime-probe` identity is public correlation, not authentication.
@@ -194,7 +194,7 @@ retains the same metadata/count limits and adds separate original-code budgets b
 for exact limits. Named Native/pure workflow snapshots remain available within
 their documented profile. The L01–L09 Docker fault/admission matrix is functionally
 qualified on the retained lanes, including the pinned Node24 consumer below.
-Image SDK access to S3/DynamoDB also passes on those lanes. Image callbacks,
+Image SDK access to S3/DynamoDB and image callbacks also pass on those lanes.
 IaC/native reference and final platform/release gates remain open.
 
 The explicit `make test-lambda-startup-docker` gate builds its host executable in
@@ -216,8 +216,8 @@ latest updates successfully to B. Cold published-A/latest-B launches must also
 return counter=1 after other resources displace their environments. Test source tags are uniquely owned and checked
 before removal. The collector is a test barrier, not a required user endpoint or
 handler SDK compatibility claim. Official Python, pinned Node24 and independent
-Rust RIC functional evidence covers the recorded retained lanes; image callbacks
-and the remaining platform matrix stay open. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
+Rust RIC and image callback evidence covers the recorded retained lanes;
+the remaining platform matrix stays open. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
 
 The pinned official Node24 handler image has a separate explicit consumer:
 
@@ -241,7 +241,7 @@ controls without allocating Docker resources. Node ZIP/runtime-name support is
 outside this image profile. Both retained functional lanes execute Node24.22.1.
 See the [official Node contract](../specs/rustack-workflows-20-lambda-runtime-design.md#417-official-node-image-consumption-d94)
 for exact ownership and validation bounds. Native-x86/reference, Docker
-Desktop/rootless and image callbacks remain separate requirements.
+Desktop/rootless remain separate requirements; image callback acceptance is documented below.
 
 The default Node RIC can retain five normal keepalive sockets. The local Runtime
 API allows eight connection tasks, one active invocation/poll and four charged
@@ -291,8 +291,33 @@ resources. Both retained functional lanes pass these SDK consumers. After the
 fixture images have been provisioned, `make test-lambda-image-sdk-consumers-docker`
 repeats the Node/SDK controls, complete compiled manifest and all three exact
 Node/SDK resources using those recorded images. It does not rebuild images;
-missing prerequisites fail. Callback images and remaining IaC/reference/platform
-gates are separate acceptance requirements.
+missing prerequisites fail. Image callback acceptance is documented next;
+remaining IaC/reference/platform gates are separate requirements.
+
+`make test-lambda-callback-docker` builds a separate digest-pinned Node24 callback
+image and runs two exact resources covering all nine callback cases. Supply the
+same selected/other Docker sockets, architecture, bridge, gateway and builder
+settings as the full gate below. `make test-lambda-callback-fixture` checks the
+safe gates and independent privacy/archive observers without allocating Docker
+resources.
+
+The callback Task invokes dispatcher A synchronously. For post-return completion,
+A uses the actual default-provider Lambda SDK to accept worker B with Event/202;
+B stays in its own active invocation while A returns. Safe DynamoDB gates then
+release B to call SendTaskSuccess or SendTaskHeartbeat; gated A supplies the
+early success/failure cases with SendTaskSuccess or SendTaskFailure. This
+requires no work to continue after A's managed handler returns. Tests prove
+before/after-return causality, unrelated Lambda progress with one workflow
+dispatch slot, fresh tokens on retry, heartbeat versus absolute timeout and
+Stop cancelling A while independent B remains owned until released and joined.
+
+Both retained functional lanes pass real Lambda/Step Functions/DynamoDB
+clients3.1105.0, exact SDK error classes and all nine catalog cases. Confirmed
+saved archives retain the two actual functions and terminal workflow rows;
+bounded history/log/archive scans reject leaked tokens or injected credentials.
+See the [image callback contract](../specs/rustack-workflows-40-integrations-design.md#56-real-image-sdk-callbacks-and-independent-event-worker-d96).
+This is native-arm64 VZ/emulated-amd64 QEMU functional acceptance; native-x86,
+reference, Docker Desktop/rootless, IaC and complete release gates remain open.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller
@@ -301,9 +326,8 @@ environment pairs. Its held backlog must report unfinished draining while
 still cleaning owned containers before natural expiry. The bounded observer
 controls run with `make test-lambda-fault-fixture`; library memory/admission
 regressions run with `make test-lambda-faults`. These gates require the same
-explicit images, daemon, bridge and function-visible host. Allocation/cleanup
-IO fault injection, daemon loss and pull/deployment saturation remain separate
-release requirements.
+explicit images, daemon, bridge and function-visible host. The full gate below also qualifies allocation/cleanup IO faults, daemon loss
+and pull/deployment saturation on the retained functional lanes.
 
 The complete current Docker functional resource gate is explicit:
 
@@ -320,7 +344,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 68-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 70-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the

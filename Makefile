@@ -1356,6 +1356,7 @@ WORKFLOWS_DOCKER_TEST_ENV = PATH="$(dir $(WORKFLOWS_DOCKER_BIN)):$(PATH)" \
 	RUSTACK_CUSTOM_IMAGE_A="rustack-custom-ric:a-$(WORKFLOWS_ARCH)" RUSTACK_CUSTOM_IMAGE_B="rustack-custom-ric:b-$(WORKFLOWS_ARCH)" \
 	RUSTACK_NODE_IMAGE="rustack-official-node:$(WORKFLOWS_ARCH)" \
 	RUSTACK_HANDLER_SDK_IMAGE="rustack-handler-sdk:$(WORKFLOWS_ARCH)" \
+	RUSTACK_CALLBACK_IMAGE="rustack-callback:$(WORKFLOWS_ARCH)" \
 	RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" \
 	RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python"
 
@@ -1427,7 +1428,7 @@ test-lambda-node-docker:
 
 # D95: one ordinary CLI cohort and a complete sequential fixture prerequisite set.
 lambda-docker-fixtures:
-	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image workflows-sdk-python test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-docker-manifest
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image workflows-sdk-python test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
 
 lambda-handler-sdk-fixture-image: lambda-pull-fixture-image
 	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/handler-sdk.Dockerfile --tag "rustack-handler-sdk:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
@@ -1454,3 +1455,20 @@ test-lambda-image-sdk-consumers-docker:
 	done
 
 .PHONY: test-lambda-image-sdk-consumers-docker
+
+lambda-callback-fixture-image: lambda-pull-fixture-image
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/callback.Dockerfile --tag "rustack-callback:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
+
+test-lambda-callback-fixture: workflows-sdk-python
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_callback_image.py -v
+	@cargo test --locked -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) callback::audit::tests
+	@cargo clippy --locked -p rustack-cli --bin rustack --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) --no-deps -- -D warnings -W clippy::pedantic
+
+test-lambda-callback-docker: lambda-docker-fixtures
+	@set -eu; for callback_case in \
+		test_should_execute_real_image_callbacks_before_and_after_lambda_response \
+		test_should_enforce_image_callback_retry_heartbeat_timeouts_and_stop; do \
+		$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) "$$callback_case" -- --ignored --exact --nocapture --test-threads=1; \
+	done
+
+.PHONY: lambda-callback-fixture-image test-lambda-callback-fixture test-lambda-callback-docker

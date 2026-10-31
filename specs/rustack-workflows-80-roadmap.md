@@ -2,7 +2,7 @@
 
 Status: M0 functionally qualified on retained P0 lanes; full M0–M4 release incomplete · Date: 2026-10-27
 
-Current checkpoint: P1/M0 passes L01–L09 on the recorded macOS arm64 host/native-arm64 VZ and emulated-Linux-amd64 QEMU Docker lanes, with53 resources on each and exact zero-remnant postconditions. See the [D86 M0 audit](./rustack-workflows-93-review.md#m0-source-and-acceptance-audit-after-d86). The workflow/API/structured/nested/callback/persistence features and current-host Native qualification are implemented. Image callback/service SDK consumers, Node, immutable Image archive restore, Docker ZIP, IaC, native Linux/x86/reference performance, Desktop/rootless and the full M4 platform manifest remain required; this is not complete release qualification.
+Current checkpoint: P1/M0 passes L01–L09 on the retained macOS arm64 host/native-arm64 VZ and emulated-Linux-amd64 QEMU Docker lanes. D96's current full gate passes70 exact resources/519 Rust cases per lane, including real Node24, S3/DynamoDB SDKs, image/ZIP archives and all nine image callback modes. The workflow/API/structured/nested/callback/persistence features and current-host Native qualification are implemented. Exact postconditions prove zero remnants and twelve source IDs preserved per engine. See [final D96 qualification](./rustack-workflows-93-review.md#final-d96-qualification). IaC, server-in-container, native-x86/Linux reference performance, Desktop/rootless and the complete M4 platform manifest remain required; this is not complete release qualification.
 
 ## 1. Delivery principles
 

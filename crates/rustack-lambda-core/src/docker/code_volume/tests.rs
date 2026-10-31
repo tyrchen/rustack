@@ -319,7 +319,7 @@ async fn test_should_expire_or_abandon_ready_without_repolling_its_live_observer
     let port = owner.port();
     let (_source, archive) = code().await;
     let (base, _stop, mut released) = base(&directory);
-    let at = Instant::now() + Duration::from_secs(if abandon { 30 } else { 1 });
+    let at = Instant::now() + Duration::from_secs(30);
     let mut waiting = Box::pin(port.prepare(
         CodeVolumeIdentity::new(Uuid::new_v4(), Uuid::new_v4()).unwrap(),
         archive,
@@ -334,6 +334,10 @@ async fn test_should_expire_or_abandon_ready_without_repolling_its_live_observer
     if abandon {
         drop(waiting);
     } else {
+        // Advance only after physical staging and Ready publication are observed.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::time::resume();
         // This future stays alive, with a queued Ready value, throughout physical cleanup.
         let ((), ()) = tokio::join!(retire(&mut daemon, &volume), empty(&port));
         assert_eq!(port.status().preparing, 0);

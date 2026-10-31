@@ -35,6 +35,7 @@ pub(super) enum Profile {
     Connected,
     Sdk,
     SdkWrongCredentials,
+    Callback,
     Controlled,
     Deadline,
     Pull,
@@ -52,7 +53,7 @@ pub(super) enum Profile {
 }
 impl Profile {
     fn sdk(self) -> bool {
-        matches!(self, Self::Sdk | Self::SdkWrongCredentials)
+        matches!(self, Self::Sdk | Self::SdkWrongCredentials | Self::Callback)
     }
     fn services(self) -> &'static str {
         if self.sdk() {
@@ -86,6 +87,7 @@ impl Profile {
             self,
             Self::Sdk
                 | Self::SdkWrongCredentials
+                | Self::Callback
                 | Self::ZipControlled
                 | Self::Controlled
                 | Self::Deadline
@@ -106,6 +108,7 @@ impl Profile {
             self,
             Self::Sdk
                 | Self::SdkWrongCredentials
+                | Self::Callback
                 | Self::Zip
                 | Self::ZipControlled
                 | Self::ZipArchive
@@ -187,8 +190,18 @@ impl Server {
         if profile == Profile::MemoryPressure {
             text.push_str("  lambdaDockerMemoryBytes: 268435456\n");
         }
-        if profile == Profile::EnvironmentPressure || profile.sdk() {
+        if matches!(
+            profile,
+            Profile::EnvironmentPressure | Profile::Sdk | Profile::SdkWrongCredentials
+        ) {
             text = text.replace("lambdaDockerEnvironments: 2", "lambdaDockerEnvironments: 1");
+        }
+        if profile == Profile::Callback {
+            text.push_str(
+                "  lambdaDockerMemoryBytes: 805306368\n  workflowDispatches: 1\n  \
+                 workflowCallbackTokens: 2\n  workflowCallbackTombstones: 64\n  \
+                 workflowCallbackCommands: 8\n  workflowCallbackWorkers: 1\n",
+            );
         }
         fs::write(&config, text).await?;
         if profile == Profile::Pull {
@@ -621,7 +634,7 @@ async fn launch(
     }
     if matches!(
         profile,
-        Profile::Archive | Profile::ZipArchive | Profile::ZipArchiveNoSource
+        Profile::Archive | Profile::ZipArchive | Profile::ZipArchiveNoSource | Profile::Callback
     ) {
         command
             .arg("--snapshot")

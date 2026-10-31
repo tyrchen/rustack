@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rustack_lambda_core::provider::LambdaSnapshot;
+use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, task::spawn_blocking, time::timeout};
 
@@ -53,7 +54,7 @@ fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
             .try_into()?,
     ))
 }
-fn decode(bytes: &[u8]) -> Result<LambdaSnapshot> {
+pub(super) fn decode(bytes: &[u8]) -> Result<LambdaSnapshot> {
     let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(bytes))?.take(
         u64::try_from(PLAIN_LIMIT)?
             .checked_add(1)
@@ -61,38 +62,41 @@ fn decode(bytes: &[u8]) -> Result<LambdaSnapshot> {
     );
     let mut plain = Vec::new();
     decoder.read_to_end(&mut plain)?;
+    decode_plain(&plain)
+}
+pub(super) fn decode_plain<T: DeserializeOwned>(plain: &[u8]) -> Result<T> {
     ensure!(
         plain.len() <= PLAIN_LIMIT && plain.len() >= 76,
         "fixture plain metadata cap/header"
     );
     ensure!(
         plain.get(..8) == Some(b"RSSNAP\0\x02")
-            && u16_at(&plain, 8)? == 2
-            && u16_at(&plain, 10)? == 0,
+            && u16_at(plain, 8)? == 2
+            && u16_at(plain, 10)? == 0,
         "fixture v2 metadata kind"
     );
     ensure!(
-        u32_at(&plain, 12)? == 36
-            && u32_at(&plain, 16)? == 1
-            && u64_at(&plain, 20)? == u64::try_from(plain.len())?
-            && u64_at(&plain, 28)? == 0,
+        u32_at(plain, 12)? == 36
+            && u32_at(plain, 16)? == 1
+            && u64_at(plain, 20)? == u64::try_from(plain.len())?
+            && u64_at(plain, 28)? == 0,
         "fixture metadata layout"
     );
     ensure!(
-        u16_at(&plain, 36)? == 1
-            && u16_at(&plain, 38)? == 0
-            && u64_at(&plain, 40)? == 64
-            && u64_at(&plain, 56)? == 1,
+        u16_at(plain, 36)? == 1
+            && u16_at(plain, 38)? == 0
+            && u64_at(plain, 40)? == 64
+            && u64_at(plain, 56)? == 1,
         "fixture single state section"
     );
     let end = plain.len().checked_sub(12).context("footer")?;
     ensure!(
-        u64_at(&plain, 48)? == u64::try_from(end.checked_sub(64).context("payload")?)?
-            && u64_at(&plain, end.checked_add(4).context("footer length")?)? == u64::try_from(end)?,
+        u64_at(plain, 48)? == u64::try_from(end.checked_sub(64).context("payload")?)?
+            && u64_at(plain, end.checked_add(4).context("footer length")?)? == u64::try_from(end)?,
         "fixture section bounds"
     );
     ensure!(
-        crc32fast::hash(plain.get(..end).context("CRC range")?) == u32_at(&plain, end)?,
+        crc32fast::hash(plain.get(..end).context("CRC range")?) == u32_at(plain, end)?,
         "fixture CRC"
     );
     let payload = plain.get(64..end).context("state payload")?;
@@ -104,7 +108,7 @@ fn decode(bytes: &[u8]) -> Result<LambdaSnapshot> {
     );
     Ok(snapshot)
 }
-fn encode(snapshot: &LambdaSnapshot) -> Result<Vec<u8>> {
+pub(super) fn encode<T: Serialize>(snapshot: &T) -> Result<Vec<u8>> {
     let mut state = Vec::new();
     ciborium::ser::into_writer(snapshot, &mut state)?;
     let total = state.len().checked_add(76).context("archive length")?;

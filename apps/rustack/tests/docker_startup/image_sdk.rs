@@ -17,6 +17,20 @@ where
     F: for<'a> AsyncFnOnce(&'a mut Server) -> Result<Vec<OsString>>,
     V: FnOnce(&Value) -> Result<()>,
 {
+    exercise_with_audit(profile, prepare, validate, async |_, _| Ok(())).await
+}
+
+pub(super) async fn exercise_with_audit<F, V, A>(
+    profile: Profile,
+    prepare: F,
+    validate: V,
+    after_stop: A,
+) -> Result<()>
+where
+    F: for<'a> AsyncFnOnce(&'a mut Server) -> Result<Vec<OsString>>,
+    V: FnOnce(&Value) -> Result<()>,
+    A: for<'a> AsyncFnOnce(&'a Server, &'a Value) -> Result<()>,
+{
     let mut server = Server::spawn(profile).await?;
     server
         .root
@@ -38,19 +52,27 @@ where
             String::from_utf8_lossy(&report.stderr)
         );
         let observed: Value = serde_json::from_slice(&report.stdout)?;
-        validate(&observed)
+        validate(&observed)?;
+        Ok::<Value, anyhow::Error>(observed)
     }
     .await;
     let stopped = server.stop(true).await;
     let audited = server.audit().await;
     let logs = check_logs(&server).await;
-    if result.is_err() || stopped.is_err() || audited.is_err() || logs.is_err() {
+    let saved = match &result {
+        Ok(observed) if stopped.is_ok() && audited.is_ok() && logs.is_ok() => {
+            after_stop(&server, observed).await
+        }
+        _ => Ok(()),
+    };
+    if result.is_err() || stopped.is_err() || audited.is_err() || logs.is_err() || saved.is_err() {
         server.retain_on_error().await;
     }
     result?;
     stopped?;
     audited?;
     logs?;
+    saved?;
     server
         .root
         .as_mut()

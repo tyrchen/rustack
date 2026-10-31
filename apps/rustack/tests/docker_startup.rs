@@ -4,6 +4,8 @@
 
 #[path = "docker_startup/archive.rs"]
 mod archive;
+#[path = "docker_startup/callback.rs"]
+mod callback;
 #[path = "docker_startup/custom.rs"]
 mod custom;
 #[path = "docker_startup/faults.rs"]
@@ -437,4 +439,16 @@ async fn test_should_execute_local_s3_and_dynamodb_from_an_explicit_image_sdk_co
 #[ignore = "requires explicit Docker socket, fixtures and qualified gateway"]
 async fn test_should_reject_wrong_image_sdk_credentials_without_ambient_fallback() -> Result<()> {
     handler_sdk::exercise(true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit callback image, Docker socket and qualified gateway"]
+async fn test_should_execute_real_image_callbacks_before_and_after_lambda_response() -> Result<()> {
+    callback::exercise(callback::Group::Causal).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit callback image, Docker socket and qualified gateway"]
+async fn test_should_enforce_image_callback_retry_heartbeat_timeouts_and_stop() -> Result<()> {
+    callback::exercise(callback::Group::Timing).await
 }
