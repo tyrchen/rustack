@@ -7,3 +7,6 @@
 [submodule "vendors/moby"]
 	path = vendors/moby
 	url = https://github.com/moby/moby.git
+[submodule "vendors/pulumi"]
+	path = vendors/pulumi
+	url = https://github.com/pulumi/pulumi.git

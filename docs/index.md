@@ -25,3 +25,5 @@
 - [SQS API Research](./research/sqs-api-research.md) - Comprehensive analysis of the AWS SQS API surface, protocol (awsJson1_0 with awsQuery compatibility), Smithy model, features (FIFO, DLQ, long polling, visibility timeout), test suites, and implementation challenges for Rustack.
 - [SQS Integration Test Suites Research](./research/sqs-test-suites.md) - Survey of available SQS compatibility/conformance test suites (ElasticMQ, LocalStack, Moto, GoAWS, AWS SDK tests) and recommendations for adoption, analogous to MinIO Mint for S3.
 - [Cargo Lambda Runtime Execution Spike](./research/spike-cargo-lambda-runtime-execution.md) - How Cargo Lambda `bootstrap.zip` artifacts are executed through the Lambda Runtime API, and what Rustack needs for native, container, or Squib execution.
+
+- [Pulumi process ownership](./research/study-pulumi-process-ownership.md) - Pinned CLI/plugin process groups, cancellation and drain ownership; constraints for managed-image IaC lifecycle qualification.

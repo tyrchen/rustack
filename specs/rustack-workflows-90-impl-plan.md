@@ -398,3 +398,8 @@ Exit only after all literal nine callback modes and precise SDK failure classes,
 
 
 D96 final acceptance satisfies that dependency order and exit on both retained functional lanes: each full gate passes70 exact resources/519 Rust cases/30 summaries, and each focused gate passes both exact resources/451 cases/24 summaries. All nine real SDK callback modes, confirmed-save typed metadata/privacy checks and prior Node/SDK consumers pass. W333–W343 are fixed and independently rechecked (four P2, seven P3). Final standard9, workspace4,217/4,341, strict1,969, Native3,077 and audit/deny pass under the same41 source hashes. Exact26-command postconditions show zero containers/volumes/private references, twelve actual source IDs preserved per engine and only the two exact owned empty bridges removed. See [final D96 qualification](./rustack-workflows-93-review.md#final-d96-qualification). Task4.3/5.3c closes; IaC/server-in-container/native-reference/platform and final5.4 remain required, and the original complete objective stays active.
+
+
+### P5 Pulumi image-Lambda IaC lifecycle (5.3d, D97)
+
+In design preflight under [IaC design](./rustack-workflows-50-iac-design.md). Follow its seven dependency-ordered tasks and exit gates; no implementation or actual acceptance yet. Reuse the managed Image Lambda owner for CLI/plugin lifetime instead of introducing an unsafe host process-tree assumption. Keep D96 evidence and the remaining server-in-container/reference/platform/final5.4 requirements intact.

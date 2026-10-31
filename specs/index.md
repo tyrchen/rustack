@@ -137,3 +137,5 @@ D96 is implemented and independently reviewed: [real image SDK callbacks](./rust
 | [ruststack-snapshot-binary-archive-design](./ruststack-snapshot-binary-archive-design.md) | Design：当前二进制归档目标 |
 | [ruststack-snapshot-impl-plan](./ruststack-snapshot-impl-plan.md) | Impl plan：依赖顺序与实施阶段 |
 | [ruststack-snapshot-verification-plan](./ruststack-snapshot-verification-plan.md) | Verification plan：快照测试与验收 |
+
+D97 is in design preflight: [Pulumi image-Lambda IaC consumer](./rustack-workflows-50-iac-design.md) fixes CLI/provider/SDK provenance and uses the existing managed function namespace to own independently grouped plugins. Actual create/refresh/update/destroy, unsupported-profile and active-plugin Stop acceptance remain pending.
