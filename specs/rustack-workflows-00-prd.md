@@ -1,8 +1,8 @@
 # Rustack Workflows: Step Functions and Real Lambda Execution
 
-Status: implementation in progress; full M0–M4 incomplete · Date: 2026-10-27 · Delivery: M0–M4
+Status: implementation in progress; full M0–M4 incomplete · Date: 2026-10-31 · Delivery: M0–M4
 
-P1/M0 is functionally qualified on the retained P0 native-arm64 VZ/emulated-amd64 QEMU lanes; see the [M0 exit audit](./rustack-workflows-93-review.md#m0-source-and-acceptance-audit-after-d86). Later image consumers and complete reference/platform/release acceptance remain open.
+Real image/SDK/callback/IaC and server-in-container consumers are functionally qualified through D98 on native-arm64 VZ/emulated-amd64 QEMU lanes; see [final D98 qualification](./rustack-workflows-93-review.md#d98-final-qualification-and-exact-postconditions). Workflow/API/structured/nested/callback/persistence and current-host Native qualification are implemented. Default release packaging, native-x86/reference/Desktop/rootless, remaining performance/load and complete M0–M4 acceptance remain open.
 
 ## 1. Problem and vision
 

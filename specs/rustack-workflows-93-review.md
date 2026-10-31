@@ -1823,3 +1823,75 @@ D97 is committed as b5abb6f with its complete immutable evidence. D98 now polish
 
 
 W365 is independently rechecked clean before implementation; the other ownership/topology review has no concrete finding. Design-only text checks validate17 files/592 relative links/314 fragments with zero errors and clean whitespace. No Rust execution/toolchain behavior has changed, so Rust verification is not applicable to this design checkpoint.
+
+**W366/P3 (first actual Linux server build):** the actual arm64 release executable builds successfully, but Zig0.16's native linker warns that rustc's GNU -O1 linker optimization is deprecated. Preserve the first build log; select the supported -flld backend through this target's Cargo rustflags instead of suppressing warnings or changing global tooling. The next build must demonstrate warning-free linking before image/resource acceptance. The existing tar crate adds only a CLI test dependency edge; no version changes or new runtime dependency occur.
+
+
+W366's first backend-selection hypothesis is disproved: -flld is accepted by Zig build-exe but rejected as an unknown Clang option by zig cc; -fuse-ld=lld is ignored and retains the warning. Preserve the joined second failed build and small linker-control log. The corrected design uses current cargo-zigbuild0.23.4 for the normal Linux CLI and a version-bounded argv adapter that removes only the known obsolete -Wl,-O1 no-op, retaining every effective option/diagnostic and Rust optimization. Four pure compatibility controls precede the third actual build. No image/server/volume or required D98 resource has run at this checkpoint.
+
+
+**W367/P3 (independent build-adapter review):** Make enforces the Zig compatibility version but does not pin cargo-zigbuild0.23.4. Describe that CLI version as the observed development cohort and bind the selected tool path/version in build evidence, rather than implying an unenforced version gate. Actual cargo-zigbuild --version reports0.23.4. The same-process argv adapter otherwise reviews clean.
+
+The third actual ARM Linux build joins0 after51.02s with no warnings, using the adapter/current cargo-zigbuild after all four compatibility controls pass. First/second/control logs remain unchanged. No image, server, volume or required D98 resource has run; full implementation/qualification remains pending.
+
+
+**W368/P2 (independent first implementation review):** the new server log consumer checks only raw credential bytes and misses JSON-escaped keys/values, repeating D97 W351's boundary on another consumer. Apply the same raw-plus-decoded-string-token profile in Rust with64KiB/4096-token/64KiB-decoded caps, fail closed on malformed input and add escaped-key/escaped-secret/error-redaction controls. Fix is implemented before any server resource runs; independent recheck and actual logs remain required.
+
+
+**W369/P2 (first actual ARM consumer):** the first100-source focused owner joins nonzero after its first resource fails2.52s into the container exercise. Actual server startup, persistent identity capture and server exit0 occur, but the SDK child exits before its PID barrier: server_container_sdk imports the CLI-only stepfunctions_sdk entrypoint, whose top-level argv parsing executes on import. A new actual import-with-no-clients control reproduces the failure before the fix. Extract bounded history/omission helpers into an import-safe module, retain the original Native CLI action-tracking callback, and test both imported paths. Add a final successful cleanup receipt and clearer PID-barrier context; do not infer business/ASL acceptance from startup or stopped-container evidence. Original source seal/log/owner/private root remain preserved.
+
+The eighth fixture check passes17 Python controls,12 Rust controls and targeted denied-warning/pedantic Clippy. Read-only post-failure audit observes zero containers/volumes/private aliases on both engines, verifies the first ARM Make's10 actual build exports plus4 unchanged references, and the14 unchanged AMD sources. Rebuilt mutable fixture tags are matched to their own joined build exports, never incorrectly compared to the prebuild IDs. W368's escaped-log correction is independently rechecked clean. W369 still requires independent recheck and actual/Native regression before closure.
+
+W369's extraction and retained cleanup receipt independently recheck clean. The second actual owner reaches direct SDK business success but fails its following environment assertion; its private cleanup receipt proves server/volume removal with no forced retirement. The ninth control pass adds credential-safe allowlisted source-coordinate diagnostics; independent diagnostic review is clean. The third joined owner pinpoints lambda_fault_support.py:164, preserving its complete original failure/source/evidence.
+
+**W370/P2 (actual container identity oracle):** the consumer passes Config.Image to a deliberately owner-private-only image reader. The relay uses a source ID and correctly fails that boundary. Compare inspected container Image directly to each pre-captured source ID instead; never broaden the metadata reader's private-alias authority. Add a control that accepts distinct function-private/relay-source invocation references, rejects either actual Image mismatch and cannot dispatch an image query. Both actual reruns and complete regression remain required.
+
+
+W370 independently rechecks clean. The fourth103-source cohort (SHA25649efe16fa2126e365183fea9d363adb97bee8b5851c7dd99d97d6b5ed67f4d13) passes both focused resources on both engines: ARM Make54.307s, positive3.42s/negative2.49s; QEMU AMD Make140.518s, positive38.21s/negative24.65s. Each focused gate has463 Rust passes/25 summaries/one gated recovery preflight; focused execution does not execute durable recovery or IaC resources. Full implementation review independently verifies all103 hashes and finds no actionable P0–P3 issue. Both full74 and final host/security/postconditions remain in progress; this is not complete5.3e acceptance.
+
+
+The original final host owner joins0 after288.799s: standard9; default workspace4,217/428 gated/81 summaries; lambda,stepfunctions workspace4,354/494/81; strict boundaries1,969/33/20; complete Native3,078/19/41; fresh audit/deny0. This includes the actual old Native SDK consumers after history extraction. The bound final host report is /tmp/rustack-d98-final-host-report.json (SHA256df75ea170df88c19ae2f9a2a11e653421275d245a5d4a34e2c31c12259236b86). The original ARM full Make owner joins0 after389.803s with all74 exact names once,535 Rust passes/31 summaries/one gated recovery preflight; full execution separately runs durable recovery. AMD full and exact final engine/network postconditions still gate closure.
+
+### Release packaging backlog for task5.4
+
+**W371/P1 (independent out-of-phase release audit; open for5.4):** Dockerfile:10–13 copies workspace manifests/crates/apps/tests but omits patches/. Cargo.toml:287–289 unconditionally selects patches/squib-loader, so the first release-container Cargo build cannot resolve that reviewed local security patch. Copy the complete required patch tree into the release build context, retain the security overlay and qualify actual root-Dockerfile builds for both architectures. D98 deliberately certifies its separate GNU fixture, not this default Dockerfile; do not expand or alter the live frozen D98 cohort to hide this release blocker. The root Dockerfile/toolchain version mismatch and absent compiled Step Functions feature also require the planned5.4 packaging reconciliation.
+
+**W372/P2 (same audit; open for5.4):** action.yml:85,98–111,119–120 interpolate action inputs directly into executable Bash source, including unquoted timeout assignment. Command substitution/quote-breaking input can execute before Docker or domain validation. Route inputs through step environment variables, validate tags/ports/timeouts/enums at the boundary and expand quoted argv only; preserve credential redaction. No payload was executed during review.
+
+**W373/P2 (same audit; open for5.4):** .github/workflows/release-docker.yml:28,63 gates publication only on build-rust, then publishes both architectures without executing those immutable images. Require same-commit exact-image qualification receipts before promotion; starting a default container/counting services is insufficient workflow/image acceptance. Do not publish any image during local remediation.
+
+**W374/P3 (same audit; open for5.4):** Dockerfile:4 selects rust1.99.0 while rust-toolchain.toml selects1.99.1. Rustup's repository override should install/select1.99.1, so this is pin drift/redundant installation, not evidence of a wrong resulting compiler. Align the explicit builder pin and record actual compiler provenance.
+
+**W375/P3 (same audit; open for5.4):** action.yml:131 sleeps0.5s while advancing ELAPSED by1, halving the advertised readiness timeout. Use an absolute deadline with validated input; cover the actual action readiness/failure paths.
+
+The release audit finds no additional D98 defect. Default Cargo features intentionally omit Step Functions and current docs disclose the opt-in build;5.4 must explicitly select/document its workflow image profile. Native-x86, reference-Linux, Desktop/rootless and the remaining required performance/load gates stay separate. These five release findings are deferred to their already-required consuming task, not waived or represented as fixed by the D98 fixture.
+
+
+## D98 final qualification and exact postconditions
+
+Task5.3e is functionally qualified on the retained native-arm64 VZ and emulated-amd64 QEMU engines. This installs an actual selected-architecture Linux Rustack server container, explicit daemon-side socket/GID, owned named data volume, internal DNS SDK gateway and independently published loopback SDK origin. No production executor/ASL/isolation relaxation occurs. The existing CLI Runner remains unchanged.
+
+Under one103-source seal, both focused owners join0 (ARM54.307s/AMD140.518s) and both full owners join0 (ARM389.803s/AMD2366.024s). Every full gate executes all74 exact required names once and passes535 Rust cases/31 summaries; every focused gate executes its two exact server resources once and passes463/25. Each has one gated recovery preflight; only the full gate separately executes durable recovery. Full gates also re-execute all real Node/handler SDK/callback/IaC consumers. Actual signed SDK results42/46 and nested .sync:2 child50 have counters1/2/3 and the unchanged complete warm pair; both closed-port startup rejection resources validate bound persisted identities and physical cleanup.
+
+The original final host owner joins0 after288.799s: standard9; default workspace4,217/428 gated/81 summaries; feature workspace4,354/494/81; strict boundaries1,969/33/20; complete Native3,078/19/41; fresh audit/deny0. The old actual Native SDK consumers pass after the import-safe history extraction. Source build evidence verifies both Linux ELF architectures and warning-free original builds with the selected tool path/version/hash. Final source projection matches each engine's ten actual named build exports plus four unchanged prebuild references, giving fourteen distinct preserved IDs.
+
+The guarded final postcondition owner joins0. All26 CLI exits and stdout/stderr hashes are retained. Both complete inventories show zero all-state containers/volumes/private/test/pull references; all fourteen source IDs remain. Only the exact two D98 nonce-bound bridges are removed after repeated engine/ID/name/driver/label/empty-attachment checks. There is no forced repair, global prune, context/VM restart or unrelated cleanup. The three original failed development owners/logs/source cohorts and private roots remain unchanged; D97 artifacts remain immutable.
+
+| Bound artifact under /tmp | SHA256 |
+|---|---|
+| rustack-d98-resource-code-seal.json | 49efe16fa2126e365183fea9d363adb97bee8b5851c7dd99d97d6b5ed67f4d13 |
+| rustack-d98-source-build-exports.json | 0fb693d4e78b92d3cf9dac9a0534f8297ccde15432f516284b6f2e4ec4ca9265 |
+| rustack-d98-server-build-proof.json | 85c1fe16d7f2be18fc004132024921dc3e2c07b87e49e3f9fc47054448a52607 |
+| rustack-d98-final-host-report.json | df75ea170df88c19ae2f9a2a11e653421275d245a5d4a34e2c31c12259236b86 |
+| rustack-d98-postconditions.json | 933a88e6098f0e40120c4318d6acd79e6675aebeb592bf1fc05315338c3dcded |
+
+W365–W370 and W376–W377 are eight valid in-scope findings (four P2/four P3), all fixed and independently rechecked. Complete implementation review finds no remaining actionable D98 P0–P3 issue; final evidence hashes/ownership are independently rechecked before commit. The separate [release packaging backlog](#release-packaging-backlog-for-task54) keeps W371/P1, W372–W373/P2 and W374–W375/P3 open for5.4. Default release Dockerfile/Action/promotion, native-x86/reference/Desktop/rootless, remaining performance/load and full M4 are not qualified by this fixture.
+
+
+**W376/P3 (final current-summary review):** guide:14–15 and implementation-plan:7 retained current introductions listing server-in-container as unfinished after the new D98 acceptance sections. Update both introductions to include D98, while keeping default release packaging/native-reference/platform/performance/full-M4 requirements explicit. Historical D97 and earlier D98 checkpoints remain chronology. Final text checks and independent recheck precede commit.
+
+
+**W377/P3 (same final current-summary review):** specs/index.md:11,13 retained unqualified current clauses describing handler SDK/callback/IaC as pending after D95–D98. Reconcile only these current remaining-work clauses; preserve chronological D93–D97 entries and all default release/native-x86/reference/platform/performance/full-M4 limitations. Final text checks and independent recheck precede commit.
+
+
+Final independent source/evidence review recomputes all103 source hashes, exact full/focused names/counts/receipts, host/ELF/tool/export evidence and all26 CLI stdout/stderr hashes clean. Final actual-file documentation recheck confirms W376/W377 fixed and eight in-scope findings closed; W371–W375 remain open for5.4. Final text checks validate17 files/600 relative links/320 fragments with zero errors; whitespace checks pass. No Rust source changes follow the frozen successful cohort.

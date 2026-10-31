@@ -1,0 +1,11 @@
+budgets:
+  startupSeconds: 180
+  shutdownSeconds: 60
+  lambdaDockerIoSeconds: 60
+  lambdaDockerStartSeconds: 60
+  lambdaDockerCleanupSeconds: 60
+  lambdaDockerEnvironments: 2
+  lambdaDockerImagePins: 16
+  lambdaDockerDeploymentJobs: 2
+  lambdaDockerMemoryBytes: 805306368
+  workflowDispatches: 2

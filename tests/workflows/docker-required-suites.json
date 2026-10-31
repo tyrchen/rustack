@@ -66,6 +66,7 @@
       "tests": [
         "test_should_enforce_image_callback_retry_heartbeat_timeouts_and_stop",
         "test_should_execute_custom_ric_imageconfig_and_immutable_revisions_through_ordinary_service",
+        "test_should_execute_image_sdk_and_nested_asl_from_a_server_container",
         "test_should_execute_local_s3_and_dynamodb_from_an_explicit_image_sdk_context",
         "test_should_execute_official_node_image_with_signed_sdks_and_asl",
         "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_1_deployments",
@@ -80,6 +81,7 @@
         "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_4_legacy",
         "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_5_wrong_endpoint",
         "test_should_refuse_provided_zip_archives_without_configured_runtime",
+        "test_should_refuse_unreachable_server_container_gateway_and_join_startup_cleanup",
         "test_should_reject_wrong_image_sdk_credentials_without_ambient_fallback",
         "test_should_restore_provided_zip_archives_without_replay_and_preserve_invalid_generations",
         "test_should_restore_real_image_archive_and_preserve_generations_after_rejection",

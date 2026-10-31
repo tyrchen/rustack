@@ -11,8 +11,9 @@ provided.al2023 profile executes original ZIP code and restores bounded ZIP/Imag
 archives through the same qualified owner. Official Python, pinned Node24 and an
 independent Rust RIC have functional evidence on the retained lanes. Explicit
 local SDK access to S3/DynamoDB, real image callbacks and managed Pulumi IaC
-consumers are qualified below. Server-in-container, native/reference and final
-platform/release qualification remain unfinished.
+consumers and the separate Linux server-container topology are qualified below.
+Default release packaging, native/reference, remaining performance/load and
+final platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -294,7 +295,7 @@ fixture images have been provisioned, `make test-lambda-image-sdk-consumers-dock
 repeats the Node/SDK controls, complete compiled manifest and all three exact
 Node/SDK resources using those recorded images. It does not rebuild images;
 missing prerequisites fail. Image callback acceptance is documented next;
-remaining server-in-container/reference/platform gates are separate requirements.
+remaining reference/platform gates are separate requirements.
 
 `make test-lambda-callback-docker` builds a separate digest-pinned Node24 callback
 image and runs two exact resources covering all nine callback cases. Supply the
@@ -319,7 +320,7 @@ saved archives retain the two actual functions and terminal workflow rows;
 bounded history/log/archive scans reject leaked tokens or injected credentials.
 See the [image callback contract](../specs/rustack-workflows-40-integrations-design.md#56-real-image-sdk-callbacks-and-independent-event-worker-d96).
 This is native-arm64 VZ/emulated-amd64 QEMU functional acceptance; native-x86,
-reference, server-in-container, Docker Desktop/rootless and complete release gates remain open.
+reference, Docker Desktop/rootless and complete release gates remain open.
 
 `make test-workflows-iac-docker` builds the pinned Pulumi tool image and runs two
 real consumers through the ordinary service. Supply the same architecture,
@@ -347,11 +348,41 @@ language and provider processes alive, retires only the tool function/relay,
 and verifies that the exact business pair remains healthy. The private test
 profile uses two environments, two workflow dispatches and a1,536MiB aggregate
 memory ceiling. See the [IaC contract](../specs/rustack-workflows-50-iac-design.md).
-Both retained functional lanes pass the lifecycle and Stop resources, all72
+At D97, both retained functional lanes passed the lifecycle and Stop resources, all72
 full Docker resources and exact zero-remnant/source-preservation checks. See
 [final D97 qualification](../specs/rustack-workflows-93-review.md#d97-final-qualification-and-exact-postconditions).
-Server-in-container, native-x86, reference and additional Docker platforms remain
-separate required qualification.
+D98 qualifies the separate server-container topology below. Native-x86,
+reference and additional Docker platforms remain required.
+
+`make test-workflows-server-docker` builds the actual Linux Rustack CLI in a
+separate server fixture image and runs two exact resources. In addition to the
+full gate's inputs, explicitly supply `WORKFLOWS_DOCKER_DAEMON_SOCKET` and
+`WORKFLOWS_DOCKER_DAEMON_SOCKET_GID`: these describe the socket path and group
+inside the selected Linux daemon host. They are distinct from the host client's
+Unix socket. No macOS-to-VM path inference is performed. The image build uses
+the pinned toolchain, existing GNU targets, cargo-zigbuild and Zig0.16.0; a
+bounded compatibility adapter handles its obsolete linker optimization flag.
+
+The server runs as UID/GID65532 with the supplemental socket group, a read-only
+root, dropped capabilities and a dedicated named data volume. Only that trusted
+server receives the socket. Its internal bridge DNS address supplies the handler
+SDK endpoint; the host client uses a separately inspected loopback-published
+port. Real signed SDK calls compute42/46, and a nested `.sync:2` child computes50
+through the same warm function/relay pair. The negative case must reject a
+closed internal gateway port during production startup. Both paths validate
+the actual persisted owner/engine records and normal server/runtime shutdown
+before removing their exact server and volume. They never force-clean a failed
+production shutdown into a passing result.
+
+Both focused resources and the complete74-resource gate pass on native-arm64
+VZ and emulated-amd64 QEMU, with535 Rust cases per full lane. Exact postconditions
+prove zero remnants, fourteen preserved source IDs per engine and removal of
+only the two task-owned empty bridges. See [final D98 qualification](../specs/rustack-workflows-93-review.md#d98-final-qualification-and-exact-postconditions).
+`make test-workflows-server-fixture` runs the import, history, identity,
+archive, policy, privacy and diagnostic controls without Docker allocation.
+See the [server-container contract](../specs/rustack-workflows-55-server-container-design.md).
+This fixture topology does not qualify the default release Dockerfile or close
+native-x86/reference/Desktop/rootless/final-release requirements.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller
@@ -369,6 +400,8 @@ The complete current Docker functional resource gate is explicit:
 make test-lambda-docker \
   WORKFLOWS_ARCH=arm64 \
   WORKFLOWS_DOCKER_SOCKET=/absolute/selected/docker.sock \
+  WORKFLOWS_DOCKER_DAEMON_SOCKET=/var/run/docker.sock \
+  WORKFLOWS_DOCKER_DAEMON_SOCKET_GID=991 \
   WORKFLOWS_OTHER_DOCKER_SOCKET=/absolute/other/docker.sock \
   WORKFLOWS_NETWORK=existing-user-bridge \
   WORKFLOWS_GATEWAY_HOST=192.168.5.2 \
@@ -376,9 +409,9 @@ make test-lambda-docker \
   WORKFLOWS_IMAGE_BUILDER=/absolute/path/to/docker-buildx
 ```
 
-Choose values for your actual two distinct daemons and function-visible gateway;
+Choose values for your actual two distinct daemons, daemon-side socket/group and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 72-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 74-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -616,6 +649,6 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance, server-in-container
+Required reference Linux performance
 and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).

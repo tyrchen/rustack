@@ -6,6 +6,8 @@
 mod archive;
 #[path = "docker_startup/callback.rs"]
 mod callback;
+#[path = "docker_startup/container_server.rs"]
+mod container_server;
 #[path = "docker_startup/custom.rs"]
 mod custom;
 #[path = "docker_startup/faults.rs"]
@@ -47,6 +49,21 @@ use tokio::{
     io::AsyncReadExt,
     time::{Instant, timeout},
 };
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit Linux server/socket/image prerequisites; run make \
+            test-workflows-server-docker"]
+async fn test_should_execute_image_sdk_and_nested_asl_from_a_server_container() -> Result<()> {
+    container_server::exercise(container_server::Mode::Sdk).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit Linux server/socket/image prerequisites; run make \
+            test-workflows-server-docker"]
+async fn test_should_refuse_unreachable_server_container_gateway_and_join_startup_cleanup()
+-> Result<()> {
+    container_server::exercise(container_server::Mode::Unreachable).await
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires explicit official Node image prerequisites; run make test-lambda-node-docker"]

@@ -1358,12 +1358,16 @@ WORKFLOWS_DOCKER_TEST_ENV = PATH="$(dir $(WORKFLOWS_DOCKER_BIN)):$(PATH)" \
 	RUSTACK_HANDLER_SDK_IMAGE="rustack-handler-sdk:$(WORKFLOWS_ARCH)" \
 	RUSTACK_CALLBACK_IMAGE="rustack-callback:$(WORKFLOWS_ARCH)" \
 	RUSTACK_PULUMI_IMAGE="rustack-pulumi:$(WORKFLOWS_ARCH)" \
+	RUSTACK_SERVER_IMAGE="$(WORKFLOWS_SERVER_IMAGE)" \
+	RUSTACK_SERVER_DAEMON_SOCKET="$(WORKFLOWS_DOCKER_DAEMON_SOCKET)" \
+	RUSTACK_SERVER_SOCKET_GID="$(WORKFLOWS_DOCKER_DAEMON_SOCKET_GID)" \
 	RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" \
 	RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python"
 
 # Functional Docker scope only. Keep orchestration sequential even under parent make -j.
 test-lambda-docker:
 	@test -n "$(WORKFLOWS_DOCKER_SOCKET)" && test -n "$(WORKFLOWS_OTHER_DOCKER_SOCKET)" && test "$(WORKFLOWS_DOCKER_SOCKET)" != "$(WORKFLOWS_OTHER_DOCKER_SOCKET)" && test -n "$(WORKFLOWS_NETWORK)" && test -n "$(WORKFLOWS_GATEWAY_HOST)" && test -x "$(WORKFLOWS_DOCKER_BIN)"
+	@test -n "$(WORKFLOWS_DOCKER_DAEMON_SOCKET)" && test -n "$(WORKFLOWS_DOCKER_DAEMON_SOCKET_GID)"
 	@$(MAKE) --no-print-directory lambda-docker-fixtures
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --lib -- --ignored --nocapture --test-threads=1
@@ -1373,7 +1377,7 @@ test-lambda-docker:
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --nocapture --test-threads=1
-	@echo 'Verified docker-image-functional resources; handler SDK, IaC and reference/platform/full release acceptance remains required.'
+	@echo 'Verified docker-image-functional resources; native-x86/reference/platform and complete release acceptance remain required.'
 
 .PHONY: test-lambda-docker-manifest test-lambda-docker
 
@@ -1429,7 +1433,7 @@ test-lambda-node-docker:
 
 # D95: one ordinary CLI cohort and a complete sequential fixture prerequisite set.
 lambda-docker-fixtures:
-	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image lambda-pulumi-fixture-image workflows-sdk-python test-workflows-iac-fixture test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image lambda-pulumi-fixture-image lambda-workflows-server-image workflows-sdk-python test-workflows-iac-fixture test-workflows-server-fixture test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
 
 lambda-handler-sdk-fixture-image: lambda-pull-fixture-image
 	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/handler-sdk.Dockerfile --tag "rustack-handler-sdk:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
@@ -1518,3 +1522,42 @@ test-workflows-iac-docker: lambda-docker-fixtures
 	done
 
 .PHONY: test-workflows-iac-docker
+
+# Actual Linux server fixture; credentials arrive only through a private env file.
+WORKFLOWS_SERVER_IMAGE ?= rustack/workflows-server:integration-$(WORKFLOWS_ARCH)
+WORKFLOWS_DOCKER_DAEMON_SOCKET ?=
+WORKFLOWS_DOCKER_DAEMON_SOCKET_GID ?=
+
+test-workflows-server-linker:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_server_linker.py -v
+
+lambda-workflows-server-build: test-workflows-server-linker
+	@case "$(WORKFLOWS_ARCH)" in arm64|amd64) ;; *) echo "WORKFLOWS_ARCH must be arm64 or amd64" >&2; exit 1;; esac
+	@CARGO_TARGET_$(if $(filter arm64,$(WORKFLOWS_ARCH)),AARCH64,X86_64)_UNKNOWN_LINUX_GNU_LINKER="$(CURDIR)/tests/workflows/server_linker.py" WORKFLOWS_SERVER_LINKER_TOOL="$$(command -v cargo-zigbuild)" WORKFLOWS_SERVER_LINKER_TARGET="$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-linux-gnu" CARGO_ZIGBUILD_ZIG_VERSION="$$(zig version)" cargo zigbuild --locked -p rustack-cli --bin rustack --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) --target "$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu" --release
+	@mkdir -p "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/server-image"
+	@cp "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/$(if $(filter arm64,$(WORKFLOWS_ARCH)),aarch64,x86_64)-unknown-linux-gnu/release/rustack" "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/server-image/rustack"
+
+lambda-workflows-server-image: lambda-workflows-server-build lambda-provided-base-image
+	@cp tests/lambda-fixtures/server-config.yaml "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/server-image/config.yaml"
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --build-arg "BASE_IMAGE=$(WORKFLOWS_ZIP_BASE_IMAGE)" --file tests/lambda-fixtures/server.Dockerfile --tag "$(WORKFLOWS_SERVER_IMAGE)" "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/server-image"
+
+.PHONY: test-workflows-server-linker lambda-workflows-server-build lambda-workflows-server-image
+
+test-workflows-server-fixture: workflows-sdk-python test-workflows-server-linker
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_server_container_import.py -v
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_stepfunctions_history.py -v
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_server_container_oracle.py -v
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_handler_sdk_image.py -v
+	@cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) container_server::
+	@cargo clippy --locked -p rustack-cli --bin rustack --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) --no-deps -- -D warnings -W clippy::pedantic
+
+test-workflows-server-docker:
+	@test -n "$(WORKFLOWS_DOCKER_DAEMON_SOCKET)" && test -n "$(WORKFLOWS_DOCKER_DAEMON_SOCKET_GID)"
+	@$(MAKE) --no-print-directory lambda-docker-fixtures
+	@set -eu; for server_container_case in \
+		test_should_execute_image_sdk_and_nested_asl_from_a_server_container \
+		test_should_refuse_unreachable_server_container_gateway_and_join_startup_cleanup; do \
+		$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) "$$server_container_case" -- --ignored --exact --nocapture --test-threads=1; \
+	done
+
+.PHONY: test-workflows-server-fixture test-workflows-server-docker

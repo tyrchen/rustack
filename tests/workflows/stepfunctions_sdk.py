@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import boto3
 from stepfunctions_structured import exercise as structured_exercise
 from stepfunctions_nested import exercise as nested_exercise
+from stepfunctions_history import assert_omitted, history as read_history
 import botocore
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -107,30 +108,7 @@ def terminal(sfn, arn):
 
 
 def history(sfn, arn, reverse=False, data=True):
-    events, tokens = [], set()
-    token = None
-    while True:
-        params = dict(executionArn=arn, maxResults=7, reverseOrder=reverse, includeExecutionData=data)
-        if token is not None:
-            params["nextToken"] = token
-        page = call(sfn, "get_execution_history", **params)
-        events.extend(page["events"])
-        assert len(events) <= 1000
-        token = page.get("nextToken")
-        if token is None:
-            return events
-        assert token not in tokens and len(tokens) < 200
-        tokens.add(token)
-
-
-def assert_omitted(events):
-    for event in events:
-        for details in ["executionStartedEventDetails", "executionSucceededEventDetails", "stateEnteredEventDetails",
-                        "stateExitedEventDetails", "taskSucceededEventDetails", "taskSubmittedEventDetails", "lambdaFunctionScheduledEventDetails",
-                        "lambdaFunctionSucceededEventDetails"]:
-            if details in event:
-                assert not {"input", "output", "inputDetails", "outputDetails"} & set(event[details])
-        assert "taskScheduledEventDetails" not in event
+    return read_history(sfn, arn, reverse=reverse, data=data, invoke=call)
 
 
 def pagination(sfn, arn, events):

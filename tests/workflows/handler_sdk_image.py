@@ -20,12 +20,17 @@ UNSET = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SDK_LOAD_CONFIG", "AWS_SESSI
 
 
 def inspect_sdk_environment(metadata, endpoint, gateway, secret):
-    rows = metadata.rows()
-    assert len(rows) == 2 and {r["Labels"]["rustack.lambda.role"] for r in rows} == {"function", "relay"}
-    projected = {}
     host = ipaddress.ip_address(gateway)
     visible = "http://" + ("[" + str(host) + "]" if host.version == 6 else str(host))
     visible += ":" + str(urllib.parse.urlsplit(endpoint).port) + "/"
+    return inspect_sdk_origin(metadata, visible, secret)
+
+
+def inspect_sdk_origin(metadata, visible, secret):
+    """Project only safe IDs after checking the independently supplied origin."""
+    rows = metadata.rows()
+    assert len(rows) == 2 and {r["Labels"]["rustack.lambda.role"] for r in rows} == {"function", "relay"}
+    projected = {}
     for row in rows:
         inspected = metadata.get("/containers/" + row["Id"] + "/json")
         assert inspected["State"]["Running"] is True
