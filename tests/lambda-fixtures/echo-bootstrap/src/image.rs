@@ -4,8 +4,16 @@
 mod fixture_collector;
 #[path = "image_framing.rs"]
 mod framing;
+#[path = "image_timing.rs"]
+mod timing;
 use std::{
-    env, hint::black_box, io::Read, net::SocketAddr, path::Path, process, thread, time::Duration,
+    env,
+    hint::black_box,
+    io::Read,
+    net::SocketAddr,
+    path::Path,
+    process, thread,
+    time::{Duration, Instant},
 };
 
 use fixture_collector::{barrier, variable};
@@ -148,6 +156,7 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
     let mut previous = None::<String>;
     loop {
         let (id, arn, event) = next(agent, root)?;
+        let handler_started = Instant::now();
         counter = counter
             .checked_add(1)
             .filter(|value| *value <= 10_000)
@@ -166,7 +175,11 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
             .and_then(Value::as_str)
             .unwrap_or("compute");
         let statuses = match mode {
-            "compute" | "error" => Vec::new(),
+            "compute" | "error" | "timed" => Vec::new(),
+            "timed-log-flood" => {
+                timing::flood(agent, &id)?;
+                Vec::new()
+            }
             "hold" => {
                 hold("busy", Some(&id))?;
                 Vec::new()
@@ -217,6 +230,8 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
             _ => return Err("unsupported fixture mode"),
         };
         thread::sleep(Duration::from_millis(delay));
+        let handler_nanos = u64::try_from(handler_started.elapsed().as_nanos())
+            .map_err(|_| "fixture handler duration overflow")?;
         let (suffix, output) = if mode == "error" {
             (
                 "error",
@@ -231,12 +246,21 @@ fn execute(agent: &Agent, root: &str, image: &str, arguments: &[String]) -> Resu
                 "forgedStatuses":statuses,"shellSideEffect":Path::new("/tmp/rustack-shell-side-effect").exists()}),
             )
         };
-        let output = serde_json::to_string(&output).map_err(|_| "fixture response encoding")?;
+        let output = encode_response(output, mode, handler_nanos)?;
         if post(agent, root, &format!("invocation/{id}/{suffix}"), &output)? != 202 {
             return Err("fixture valid completion was not accepted");
         }
         previous = Some(id);
     }
+}
+fn encode_response(mut output: Value, mode: &str, handler_nanos: u64) -> Result<String> {
+    if matches!(mode, "timed" | "timed-log-flood") {
+        output
+            .as_object_mut()
+            .ok_or("fixture response shape")?
+            .insert("handlerNanos".to_owned(), json!(handler_nanos));
+    }
+    serde_json::to_string(&output).map_err(|_| "fixture response encoding")
 }
 fn http_agent(timeout: Duration) -> Agent {
     AgentBuilder::new()

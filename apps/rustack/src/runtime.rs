@@ -26,6 +26,7 @@ use anyhow::Result;
 #[cfg(feature = "lambda")]
 use rustack_lambda_core::diagnostics::InvocationWorkStatus;
 use serde::Serialize;
+use tokio::runtime::Handle;
 
 /// Handles retained until quiescence, snapshot publication, and final shutdown.
 #[derive(Default)]
@@ -66,6 +67,8 @@ pub(crate) struct DeliverySummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkerDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_tasks: Option<usize>,
     #[cfg(feature = "lambda")]
     #[serde(skip_serializing_if = "Option::is_none")]
     lambda_admission: Option<InvocationWorkStatus>,
@@ -135,6 +138,9 @@ impl RuntimeWorkers {
             }),
         ];
         WorkerDiagnostics {
+            runtime_tasks: Handle::try_current()
+                .ok()
+                .map(|handle| handle.metrics().num_alive_tasks()),
             #[cfg(feature = "lambda")]
             lambda_admission: self.lambda.as_ref().map(|provider| provider.work_status()),
             #[cfg(all(feature = "lambda", unix))]

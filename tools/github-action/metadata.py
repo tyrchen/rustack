@@ -19,7 +19,9 @@ CONTAINER_FORMAT = ('{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Im
                     '"restart":{{json .HostConfig.RestartPolicy}}}')
 
 
-def document(raw, maximum=32768, string_limit=256):
+def document(raw, maximum=32768, string_limit=256, member_limit=512):
+    if type(member_limit) is not int or not 1 <= member_limit <= 4096:
+        raise ActionError("metadata-member-policy")
     if not isinstance(raw, bytes) or len(raw) > maximum:
         raise ActionError("metadata-byte-budget")
     try:
@@ -77,7 +79,7 @@ def document(raw, maximum=32768, string_limit=256):
                 raise ActionError("metadata-encoding") from None
         if isinstance(current, (dict, list)):
             members += len(current)
-            if members > 512:
+            if members > member_limit:
                 raise ActionError("metadata-member-budget")
             pending.extend(current.values() if isinstance(current, dict) else current)
     return value

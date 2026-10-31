@@ -8,6 +8,8 @@
 
 ## Research
 
+- [Image Lambda Performance and Repeated Cleanup Review](./research/workflows-image-performance-review.md) - Direct Linux warm100/cold20 and100 causal log-flood timeout cycles, actual initialization/task/resource observations and explicit reference qualification limits.
+
 - [Direct Linux arm64 Workflows Performance Review](./research/workflows-linux-performance-review.md) - Actual Linux SDK/CLI50-state latency and100 live-loop/Stop cycles, bounded artifact/process evidence and raw VM measurements; dedicated-reference qualification remains pending.
 
 - [Native-host Workflows Performance Review](./research/workflows-native-performance-review.md) - Actual signed SDK50-state latency, live-loop health/history exhaustion and100 single-slot Stop cycles; raw host measurements, process cleanup and source/binary fingerprints, with Linux reference qualification still pending.

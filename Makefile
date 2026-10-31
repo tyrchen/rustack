@@ -295,6 +295,31 @@ test-workflows-performance-linux: workflows-performance-linux-build
 
 .PHONY: test-workflows-performance-linux-controls workflows-performance-linux-provision workflows-performance-linux-build test-workflows-performance-linux
 
+# D102: actual image samples and causal log-flood/timeout cleanup.
+test-workflows-image-performance-controls:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_image_performance.py -v
+	@$(MAKE) --no-print-directory test-workflows-performance-linux-controls
+
+test-workflows-image-performance: test-workflows-image-performance-controls test-lambda-docker-manifest
+	@set -eu; for performance_case in \
+		test_should_measure_one_hundred_warm_image_invocations \
+		test_should_measure_twenty_preloaded_cold_image_environments \
+		test_should_reuse_one_image_slot_after_one_hundred_log_flood_timeouts; do \
+		$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) "$$performance_case" -- --ignored --exact --nocapture --test-threads=1; \
+	done
+
+workflows-image-performance-linux-build: test-workflows-server-linker test-workflows-image-performance-controls
+	@mkdir -p "$(WORKFLOWS_LINUX_EVIDENCE_DIR)"
+	@CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$(CURDIR)/tests/workflows/server_linker.py" WORKFLOWS_SERVER_LINKER_TOOL="$$(command -v cargo-zigbuild)" WORKFLOWS_SERVER_LINKER_TARGET=aarch64-linux-gnu CARGO_ZIGBUILD_ZIG_VERSION="$$(zig version)" cargo zigbuild --locked -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions,s3,dynamodb --target aarch64-unknown-linux-gnu --message-format=json >"$(WORKFLOWS_LINUX_EVIDENCE_DIR)/image-build.json"
+
+workflows-image-performance-linux-images:
+	@python3 -I -B tests/workflows/image_performance_images.py prepare "$(WORKFLOWS_LINUX_PROFILE)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_LINUX_EVIDENCE_DIR)" v1
+
+test-workflows-image-performance-linux: workflows-image-performance-linux-build test-lambda-docker-manifest
+	@python3 -I -B tests/workflows/linux_image_performance.py host "$(WORKFLOWS_LINUX_PROFILE)" "$(WORKFLOWS_LINUX_EVIDENCE_DIR)/image-build.json" "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/lib/python3.13/site-packages"
+
+.PHONY: test-workflows-image-performance-controls test-workflows-image-performance workflows-image-performance-linux-build workflows-image-performance-linux-images test-workflows-image-performance-linux
+
 # D75: exact same-feature resource inventories, before any resource execution.
 test-workflows-manifest:
 	@python3 -I -B -m unittest discover -s tests/workflows -p test_required_suites.py -v
@@ -1396,7 +1421,7 @@ test-lambda-docker:
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --nocapture --test-threads=1
-	@echo 'Verified docker-image-functional resources; native-x86/reference/platform and complete release acceptance remain required.'
+	@echo 'Verified docker-image-functional resources; required arm64/reference/Desktop/rootless and complete release acceptance remain required.'
 
 .PHONY: test-lambda-docker-manifest test-lambda-docker
 
@@ -1451,8 +1476,14 @@ test-lambda-node-docker:
 .PHONY: lambda-node-fixture-image test-lambda-node-fixture test-lambda-node-docker
 
 # D95: one ordinary CLI cohort and a complete sequential fixture prerequisite set.
+workflows-retain-fixture-sources:
+	@python3 -I -B tests/workflows/image_performance_images.py retain "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_ARCH)" v1
+
 lambda-docker-fixtures:
+	@$(MAKE) --no-print-directory -j1 workflows-retain-fixture-sources
 	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image lambda-pulumi-fixture-image lambda-workflows-server-image lambda-workflows-release-image workflows-sdk-python test-workflows-iac-fixture test-workflows-server-fixture test-workflows-release-fixture test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
+
+.PHONY: workflows-retain-fixture-sources
 
 lambda-handler-sdk-fixture-image: lambda-pull-fixture-image
 	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/handler-sdk.Dockerfile --tag "rustack-handler-sdk:$(WORKFLOWS_ARCH)" tests/lambda-fixtures

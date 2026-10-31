@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::StatusCode;
 use rustack_lambda_runtime::{
     client::ClientEvent,
-    protocol::{Architecture as RuntimeArchitecture, HandlerTimeout},
+    protocol::{Architecture as RuntimeArchitecture, EnvironmentId, HandlerTimeout},
     session::RuntimeResult,
 };
 use tokio::{
@@ -185,6 +185,7 @@ impl Worker {
         io: &mut IoGuard,
         deadline: Instant,
     ) -> Result<(), EnvironmentError> {
+        let initialization_started = Instant::now();
         if let Some(zip) = &self.plan.zip {
             let DeploymentArtifact::Zip(artifact) = &self.plan.revision().artifact else {
                 return Err(EnvironmentError::Configuration);
@@ -227,6 +228,7 @@ impl Worker {
             ClientEvent::RelayReady => {}
             _ => return Err(DockerError::Protocol.into()),
         }
+        let relay_ready = Instant::now();
         let function = self.create(ContainerRole::Function, deadline).await?;
         io.logs(
             self.docker
@@ -248,10 +250,12 @@ impl Worker {
                     error
                 }
             })?;
-        match ready {
-            ClientEvent::BootstrapReady => Ok(()),
-            event => Err(Self::event_failure(event)),
-        }
+        finish_initialization(
+            ready,
+            self.plan.zip.is_none().then(|| self.plan.environment_id()),
+            initialization_started,
+            relay_ready,
+        )
     }
     async fn next(
         &self,
@@ -401,5 +405,131 @@ impl Worker {
             }
             _ => DockerError::Protocol.into(),
         }
+    }
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos().saturating_add(999) / 1000).unwrap_or(u64::MAX)
+}
+
+fn finish_initialization(
+    event: ClientEvent,
+    image: Option<EnvironmentId>,
+    started: Instant,
+    relay: Instant,
+) -> Result<(), EnvironmentError> {
+    match event {
+        ClientEvent::BootstrapReady => {
+            if let Some(environment) = image {
+                tracing::info!(
+                    target: "rustack_lambda_core::docker::initialization",
+                    environment_id = %environment,
+                    relay_micros = micros(relay.duration_since(started)),
+                    ric_micros = micros(relay.elapsed()),
+                    "Image environment ready"
+                );
+            }
+            Ok(())
+        }
+        event => Err(Worker::event_failure(event)),
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use std::{
+        error::Error,
+        io::{self, Write},
+        mem,
+        sync::mpsc::{SyncSender, sync_channel},
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+    use rustack_lambda_runtime::{
+        client::ClientEvent,
+        protocol::{EnvironmentId, Payload},
+    };
+    use tokio::time::{Instant, advance};
+
+    use super::{finish_initialization, micros};
+
+    #[derive(Debug)]
+    struct Line {
+        bytes: Vec<u8>,
+        sender: SyncSender<Vec<u8>>,
+    }
+    impl Write for Line {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.bytes.len().saturating_add(bytes.len()) > 1024 {
+                return Err(io::Error::other("bounded initialization diagnostic"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for Line {
+        fn drop(&mut self) {
+            let _ = self.sender.try_send(mem::take(&mut self.bytes));
+        }
+    }
+
+    #[test]
+    fn test_should_round_initialization_durations_up_without_overflow() {
+        assert_eq!(micros(Duration::ZERO), 0);
+        assert_eq!(micros(Duration::from_nanos(1)), 1);
+        assert_eq!(micros(Duration::from_nanos(1000)), 1);
+        assert_eq!(micros(Duration::from_nanos(1001)), 2);
+        assert_eq!(micros(Duration::MAX), u64::MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_should_report_only_successful_image_initialization_without_payloads()
+    -> Result<(), Box<dyn Error>> {
+        let (sender, received) = sync_channel(4);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Line {
+                bytes: Vec::new(),
+                sender: sender.clone(),
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let started = Instant::now();
+        advance(Duration::from_millis(1)).await;
+        let relay = Instant::now();
+        advance(Duration::from_millis(2)).await;
+        let environment = EnvironmentId::default();
+        finish_initialization(
+            ClientEvent::BootstrapReady,
+            Some(environment),
+            started,
+            relay,
+        )?;
+        let line = String::from_utf8(received.try_recv()?)?;
+        assert!(line.contains("relay_micros=1000") && line.contains("ric_micros=2000"));
+        assert!(line.contains(&environment.to_string()));
+        let secret = Payload::try_from(Bytes::from_static(b"runtime-boundary-secret"))?;
+        assert!(
+            finish_initialization(
+                ClientEvent::InitError(secret),
+                Some(environment),
+                started,
+                relay
+            )
+            .is_err()
+        );
+        assert!(
+            finish_initialization(ClientEvent::RelayReady, Some(environment), started, relay)
+                .is_err()
+        );
+        finish_initialization(ClientEvent::BootstrapReady, None, started, relay)?;
+        assert!(received.try_recv().is_err());
+        assert!(!line.contains("runtime-boundary-secret"));
+        Ok(())
     }
 }

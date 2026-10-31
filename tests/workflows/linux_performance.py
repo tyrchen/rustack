@@ -113,7 +113,8 @@ def fingerprint(path):
     return hashlib.sha256(raw).hexdigest()
 
 
-def artifact(raw):
+def artifact(raw, test_name="workflows_sdk"):
+    require(test_name in ("workflows_sdk", "docker_startup"), "cargo-target-policy")
     require(0 < len(raw) <= 4 * MIB, "cargo-stream-bound")
     require(raw.count(b"\n") <= 4096, "cargo-record-budget")
     lines = raw.split(b"\n")
@@ -128,7 +129,7 @@ def artifact(raw):
         if row.get("reason") == "compiler-artifact":
             require(isinstance(row.get("target"), dict) and isinstance(row.get("profile"), dict),
                     "cargo-artifact-shape")
-        if row.get("reason") == "compiler-artifact" and row.get("target", {}).get("name") == "workflows_sdk":
+        if row.get("reason") == "compiler-artifact" and row.get("target", {}).get("name") == test_name:
             require(row.get("profile", {}).get("test") is True
                     and row.get("target", {}).get("kind") == ["test"], "cargo-test-artifact")
             selected.append(safe_path(row.get("executable")))
@@ -136,7 +137,7 @@ def artifact(raw):
     binary = selected[0]
     require(binary.parent.name == "deps" and binary.parent.parent.name == "debug"
             and binary.parent.parent.parent.name == "aarch64-unknown-linux-gnu"
-            and re.fullmatch(r"workflows_sdk-[0-9a-f]{16}", binary.name) is not None,
+            and re.fullmatch(re.escape(test_name) + r"-[0-9a-f]{16}", binary.name) is not None,
             "cargo-target-path")
     server = binary.parent.parent / "rustack"
     servers = [row for row in records if row.get("reason") == "compiler-artifact"

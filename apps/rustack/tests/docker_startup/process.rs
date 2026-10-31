@@ -20,7 +20,7 @@ use rustack_lambda_core::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -33,6 +33,7 @@ use tokio::{
 pub(super) enum Profile {
     Disconnected,
     Connected,
+    Performance,
     Sdk,
     SdkWrongCredentials,
     Callback,
@@ -53,6 +54,19 @@ pub(super) enum Profile {
     ZipArchiveNoSource,
 }
 impl Profile {
+    fn configure_diagnostics(self, command: &mut Command) {
+        if self == Self::Performance {
+            command
+                .env(
+                    "LOG_LEVEL",
+                    "error,rustack_lambda_core::docker::initialization=info",
+                )
+                .env("NO_COLOR", "1")
+                .env("LAMBDA_IDLE_TIMEOUT_SECS", "2");
+        } else {
+            command.env("LOG_LEVEL", "error");
+        }
+    }
     fn sdk(self) -> bool {
         matches!(
             self,
@@ -90,6 +104,7 @@ impl Profile {
         if matches!(
             self,
             Self::Sdk
+                | Self::Performance
                 | Self::SdkWrongCredentials
                 | Self::Callback
                 | Self::Iac
@@ -112,6 +127,7 @@ impl Profile {
         matches!(
             self,
             Self::Sdk
+                | Self::Performance
                 | Self::SdkWrongCredentials
                 | Self::Callback
                 | Self::Iac
@@ -141,6 +157,12 @@ pub(super) struct Server {
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
 }
+fn private_root() -> Result<TempDir> {
+    TempDirBuilder::new()
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir()
+        .context("create private Docker fixture evidence")
+}
 pub(super) fn image() -> Result<String> {
     Ok(env::var("RUSTACK_RUNTIME_IMAGE")?)
 }
@@ -153,7 +175,11 @@ pub(super) fn architecture() -> Result<String> {
     Ok(value)
 }
 pub(super) fn handler() -> Result<String> {
-    Ok(format!("rustack-p0-handler:{}", architecture()?))
+    match env::var("RUSTACK_RUNTIME_HANDLER_IMAGE") {
+        Ok(value) => Ok(value),
+        Err(env::VarError::NotPresent) => Ok(format!("rustack-p0-handler:{}", architecture()?)),
+        Err(error) => Err(error.into()),
+    }
 }
 pub(super) fn socket() -> Result<String> {
     Ok(format!(
@@ -162,6 +188,9 @@ pub(super) fn socket() -> Result<String> {
     ))
 }
 impl Server {
+    pub(super) fn process_id(&self) -> Result<u32> {
+        self.child.id().context("owned server PID")
+    }
     pub async fn spawn(profile: Profile) -> Result<Self> {
         Self::spawn_with_socket(profile, None).await
     }
@@ -169,7 +198,7 @@ impl Server {
         profile: Profile,
         socket_override: Option<&Path>,
     ) -> Result<Self> {
-        let root = tempfile::tempdir()?;
+        let root = private_root()?;
         let reserved = TcpListener::bind("0.0.0.0:0").await?;
         let port = reserved.local_addr()?.port();
         drop(reserved);
@@ -198,7 +227,10 @@ impl Server {
         }
         if matches!(
             profile,
-            Profile::EnvironmentPressure | Profile::Sdk | Profile::SdkWrongCredentials
+            Profile::EnvironmentPressure
+                | Profile::Sdk
+                | Profile::SdkWrongCredentials
+                | Profile::Performance
         ) {
             text = text.replace("lambdaDockerEnvironments: 2", "lambdaDockerEnvironments: 1");
         }
@@ -601,12 +633,12 @@ async fn launch(
         .env("STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION", "false")
         .env("ACCESS_KEY", "local-key")
         .env("SECRET_KEY", "local-secret")
-        .env("LOG_LEVEL", "error")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .kill_on_drop(true);
     configure_sdk(&mut command, profile);
+    profile.configure_diagnostics(&mut command);
     if profile.zip() {
         command.env(
             "LAMBDA_DOCKER_ZIP_IMAGE",

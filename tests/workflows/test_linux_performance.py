@@ -141,6 +141,15 @@ class LinuxPerformanceControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cargo-record-budget"):
                 subject.artifact(b"{}\n" * 4097)
 
+    def test_should_select_only_an_explicit_allowlisted_linux_test_target(self):
+        records = cargo_records()
+        records[1]["target"]["name"] = "docker_startup"
+        records[1]["executable"] = records[1]["executable"].replace("workflows_sdk", "docker_startup")
+        selected, _ = subject.artifact(cargo_stream(records), "docker_startup")
+        self.assertTrue(selected.name.startswith("docker_startup-"))
+        for name in ("workflows_sdk", "untrusted", "docker_startup;id"):
+            with self.assertRaises(ValueError): subject.artifact(cargo_stream(records), name)
+
     def test_should_reject_remote_shell_paths_profiles_and_document_expansion(self):
         for path in ("relative", "/tmp/a b", "/tmp/../test", "/tmp//test", "/tmp/$(id)",
                      "/tmp/a\n", "/tmp/" + "a" * 4096):

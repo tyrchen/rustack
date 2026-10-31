@@ -22,6 +22,8 @@ mod image_sdk;
 mod io_faults;
 #[path = "docker_startup/node.rs"]
 mod node;
+#[path = "docker_startup/performance.rs"]
+mod performance;
 #[path = "docker_startup/process.rs"]
 mod process;
 #[path = "docker_startup/provided.rs"]
@@ -511,4 +513,22 @@ async fn test_should_manage_a_real_image_workflow_through_pulumi_lifecycle() -> 
 #[ignore = "requires explicit Pulumi image, Docker socket and qualified gateway"]
 async fn test_should_retire_the_pulumi_plugin_tree_after_controller_stop() -> Result<()> {
     iac::exercise(iac::Mode::Stop).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "actual image timings; run make test-workflows-image-performance"]
+async fn test_should_measure_one_hundred_warm_image_invocations() -> Result<()> {
+    performance::exercise("warm").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "actual cold environment timings; run make test-workflows-image-performance"]
+async fn test_should_measure_twenty_preloaded_cold_image_environments() -> Result<()> {
+    performance::exercise("cold").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "actual log-flood/timeout cleanup; run make test-workflows-image-performance"]
+async fn test_should_reuse_one_image_slot_after_one_hundred_log_flood_timeouts() -> Result<()> {
+    performance::exercise("cycles").await
 }
