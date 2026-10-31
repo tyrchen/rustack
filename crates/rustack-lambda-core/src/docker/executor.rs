@@ -28,8 +28,9 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    ContainerPolicy, DirectoryLease, DockerError, DockerZipRuntime, EnvironmentError,
-    EnvironmentPlan, EnvironmentPool, EnvironmentPort, EnvironmentResponse, PoolConfig, PoolPort,
+    ContainerPolicy, DirectoryLease, DockerError, DockerSdkEnvironment, DockerZipRuntime,
+    EnvironmentError, EnvironmentPlan, EnvironmentPool, EnvironmentPort, EnvironmentResponse,
+    PoolConfig, PoolPort,
 };
 use crate::{
     artifact::{Architecture, DeploymentArtifact, PinnedImage},
@@ -147,6 +148,9 @@ pub struct DockerExecutorConfig {
     /// Optional affiliated provided.al2023 source, qualified by production startup.
     #[builder(default)]
     pub zip: Option<DockerZipRuntime>,
+    /// Optional opaque handler SDK context issued by the same private startup proof.
+    #[builder(default)]
+    pub sdk: Option<DockerSdkEnvironment>,
 }
 
 #[derive(Debug)]
@@ -198,6 +202,9 @@ impl DockerExecutor {
             }
             zip.available().map_err(EnvironmentError::from)?;
         }
+        if config.sdk.as_ref().is_some_and(|sdk| !sdk.matches(&config)) {
+            return Err(DockerExecutorError::Configuration);
+        }
         let runtime = Handle::try_current().map_err(|_| DockerExecutorError::Unavailable)?;
         let root = EnvironmentPool::start(config.environments.clone(), config.settings.pool)?;
         let port = root.port();
@@ -221,6 +228,14 @@ impl DockerExecutor {
         }
     }
     fn plan(&self, request: &InvokeRequest) -> Result<EnvironmentPlan, DockerExecutorError> {
+        if self
+            .config
+            .sdk
+            .as_ref()
+            .is_some_and(|sdk| !sdk.matches(&self.config))
+        {
+            return Err(DockerExecutorError::Unavailable);
+        }
         let plan = match &request.revision.artifact {
             DeploymentArtifact::Image(_) => EnvironmentPlan::new(
                 self.config.directory.clone(),
@@ -240,6 +255,12 @@ impl DockerExecutor {
             ),
         }
         .map_err(EnvironmentError::from)?;
+        let plan = match &self.config.sdk {
+            Some(sdk) => plan
+                .with_sdk_environment(sdk)
+                .map_err(EnvironmentError::from)?,
+            None => plan,
+        };
         let _: FunctionArn = request.function_arn.parse()?;
         let (_, function) = request
             .function_arn

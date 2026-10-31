@@ -11,6 +11,31 @@ from botocore.exceptions import ClientError
 from custom_ric_sdk import Collector, unique_object
 
 
+
+def poll_response(read, accepted, seconds, clock=time.monotonic, sleep=time.sleep):
+    """Fence every SDK observation before dispatch and after response."""
+    cutoff = clock() + seconds
+    while True:
+        if clock() >= cutoff:
+            raise TimeoutError("SDK observer expired before dispatch")
+        response = read()
+        if clock() >= cutoff:
+            raise TimeoutError("SDK observer response expired")
+        if accepted(response):
+            return response
+        sleep(0.025)
+
+
+def invoke_json(client, name, event, **arguments):
+    response = client.invoke(FunctionName=name, Payload=json.dumps(event).encode(), **arguments)
+    body = response["Payload"]
+    try:
+        raw = body.read(65537)
+    finally:
+        body.close()
+    assert len(raw) <= 65536 and response["StatusCode"] == 200
+    return response, json.loads(raw, object_pairs_hook=unique_object)
+
 def recover_before(deadline, invoke, empty, clock=time.monotonic, pause=time.sleep):
     """Accept only timely success; retain only explicit, allocation-free throttling."""
     while True:

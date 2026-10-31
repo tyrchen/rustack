@@ -16,19 +16,22 @@ use typed_builder::TypedBuilder;
 use uuid::Uuid;
 
 use super::{
-    CodeVolumeIdentity, DirectoryLease, DockerError, DockerKey, DockerPort, DockerZipRuntime,
+    CodeVolumeIdentity, DirectoryLease, DockerError, DockerKey, DockerPort, DockerSdkEnvironment,
+    DockerZipRuntime,
     models::{
         ContainerCreateBody, ContainerCreateResponse, ContainerInspectResponse, HealthConfig,
         HostConfig, HostConfigCgroupnsModeEnum, HostConfigLogConfig, Mount, MountType,
         MountVolumeOptions, RestartPolicy, RestartPolicyNameEnum,
     },
     mutation::MutationGuard,
+    sdk::SdkAffiliation,
     zip::{AllocationClaim, ZipPlan},
 };
 use crate::{
     artifact::{DeploymentArtifact, PinnedImage},
     executor::{ExecutionRevision, ExecutorBackend},
     function_config::{validate_environment_entries, validate_provided_settings},
+    storage::compute_sha256,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -183,6 +186,8 @@ pub struct EnvironmentPlan {
     warm_key: String,
     #[builder(default)]
     pub(super) zip: Option<Arc<ZipPlan>>,
+    #[builder(default)]
+    sdk: Option<SdkAffiliation>,
 }
 impl fmt::Debug for EnvironmentPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -194,6 +199,24 @@ impl fmt::Debug for EnvironmentPlan {
     }
 }
 impl EnvironmentPlan {
+    pub(super) fn with_sdk_environment(
+        mut self,
+        sdk: &DockerSdkEnvironment,
+    ) -> Result<Self, DockerError> {
+        let guard = sdk.liveness();
+        guard.live()?;
+        let entries = self
+            .bodies
+            .function
+            .env
+            .take()
+            .ok_or(DockerError::Configuration)?;
+        self.bodies.function.env = Some(sdk.environment(entries)?);
+        self.warm_key =
+            compute_sha256(format!("sdk-v1:{}:{}", self.warm_key, sdk.identity()).as_bytes());
+        self.sdk = Some(guard);
+        Ok(self)
+    }
     pub(super) fn image_id(&self, role: ContainerRole) -> &str {
         match role {
             ContainerRole::Relay => self.relay.resolved().metadata().image_id.as_str(),
@@ -552,6 +575,9 @@ impl EnvironmentPlan {
         .await
     }
     pub(super) fn live(&self) -> Result<(), DockerError> {
+        if let Some(sdk) = &self.sdk {
+            sdk.live()?;
+        }
         match &self.revision.artifact {
             DeploymentArtifact::Image(function) if self.relay.is_live() && function.is_live() => {
                 Ok(())
@@ -713,7 +739,7 @@ fn warm_identity(
         ),
     ))
     .map_err(|_| DockerError::Configuration)?;
-    Ok(crate::storage::compute_sha256(&encoded))
+    Ok(compute_sha256(&encoded))
 }
 
 fn image(revision: &ExecutionRevision) -> Result<&PinnedImage, DockerError> {

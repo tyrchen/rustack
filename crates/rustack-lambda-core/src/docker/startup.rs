@@ -23,11 +23,12 @@ use typed_builder::TypedBuilder;
 
 use super::{
     CodeVolumeManager, DirectoryLease, DirectoryLeaseError, DockerError, DockerExecutor,
-    DockerExecutorError, DockerPort, DockerReadiness, DockerRuntimeSettings, DockerWire,
-    DockerZipRuntime, EndpointProbe, EndpointProbeConfig, EnvironmentCapacity, EnvironmentError,
-    EnvironmentManager, EnvironmentProbe, EnvironmentProbeConfig, EnvironmentProbeError,
-    GatewayInstanceId, ImageLeaseManager, ImageLeasePort, RegistryAuthError,
+    DockerExecutorError, DockerPort, DockerReadiness, DockerRuntimeSettings, DockerSdkEnvironment,
+    DockerWire, DockerZipRuntime, EndpointProbe, EndpointProbeConfig, EnvironmentCapacity,
+    EnvironmentError, EnvironmentManager, EnvironmentProbe, EnvironmentProbeConfig,
+    EnvironmentProbeError, GatewayInstanceId, ImageLeaseManager, ImageLeasePort, RegistryAuthError,
     ownership::{DataDirectory, DirectoryAcquisition},
+    sdk::{LocalSdkCredentials, SdkAffiliation},
 };
 use crate::{
     artifact::{Architecture, PinnedImage},
@@ -176,6 +177,31 @@ struct Qualification {
     installed: AtomicBool,
     revoked: AtomicBool,
     evidence: OnceLock<Evidence>,
+}
+impl Qualification {
+    fn sdk_environment(
+        self: &Arc<Self>,
+        credentials: LocalSdkCredentials,
+    ) -> Result<DockerSdkEnvironment, DockerStartupError> {
+        self.check().map_err(|_| DockerStartupError::Unavailable)?;
+        let evidence = self.evidence.get().ok_or(DockerStartupError::Unavailable)?;
+        let (endpoint, _) = evidence
+            .endpoint
+            .as_ref()
+            .ok_or(DockerStartupError::Configuration)?;
+        let readiness: Arc<dyn DockerReadiness> = self.clone();
+        Ok(DockerSdkEnvironment::new(
+            credentials,
+            endpoint.gateway_endpoint().clone(),
+            SdkAffiliation::new(
+                evidence.base.directory.clone(),
+                evidence.base.relay.clone(),
+                evidence.base.policy.clone(),
+                evidence.base.environments.clone(),
+                readiness,
+            ),
+        )?)
+    }
 }
 impl DockerReadiness for Qualification {
     fn check(&self) -> Result<(), DockerExecutorError> {

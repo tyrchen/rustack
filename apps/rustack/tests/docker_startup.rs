@@ -8,6 +8,10 @@ mod archive;
 mod custom;
 #[path = "docker_startup/faults.rs"]
 mod faults;
+#[path = "docker_startup/handler_sdk.rs"]
+mod handler_sdk;
+#[path = "docker_startup/image_sdk.rs"]
+mod image_sdk;
 #[path = "docker_startup/io_faults.rs"]
 mod io_faults;
 #[path = "docker_startup/node.rs"]
@@ -421,4 +425,16 @@ async fn test_should_restore_provided_zip_archives_without_replay_and_preserve_i
             test-lambda-provided-archive-docker"]
 async fn test_should_refuse_provided_zip_archives_without_configured_runtime() -> Result<()> {
     provided_archive::exercise(true).await
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Docker socket, fixtures and qualified gateway"]
+async fn test_should_execute_local_s3_and_dynamodb_from_an_explicit_image_sdk_context() -> Result<()>
+{
+    handler_sdk::exercise(false).await
+}
+#[tokio::test]
+#[ignore = "requires explicit Docker socket, fixtures and qualified gateway"]
+async fn test_should_reject_wrong_image_sdk_credentials_without_ambient_fallback() -> Result<()> {
+    handler_sdk::exercise(true).await
 }

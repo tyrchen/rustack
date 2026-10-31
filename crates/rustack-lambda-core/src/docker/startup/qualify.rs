@@ -315,6 +315,13 @@ impl State {
                 .environments(base.environments)
                 .readiness(qualification.clone())
                 .zip(self.zip.clone())
+                .sdk(
+                    settings
+                        .sdk_credentials()
+                        .cloned()
+                        .map(|credentials| qualification.sdk_environment(credentials))
+                        .transpose()?,
+                )
                 .settings(DockerExecutorSettings::new(
                     PoolSettings::builder()
                         .warm(

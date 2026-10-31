@@ -1010,7 +1010,9 @@ fn build_services_with_runtime(
             dynamodb_skip_signature_validation = dynamodb_config.skip_signature_validation,
             "initializing DynamoDB service",
         );
-        let mut dynamodb_provider = RustackDynamoDB::new(dynamodb_config.clone());
+        let dynamodb_provider = RustackDynamoDB::new(dynamodb_config.clone());
+        #[cfg(feature = "dynamodbstreams")]
+        let mut dynamodb_provider = dynamodb_provider;
 
         // Wire in DynamoDB Streams emitter and lifecycle manager if enabled.
         #[cfg(feature = "dynamodbstreams")]

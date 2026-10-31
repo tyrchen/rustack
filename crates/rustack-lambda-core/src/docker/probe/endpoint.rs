@@ -25,6 +25,9 @@ pub struct EndpointProbeConfig {
     instance: GatewayInstanceId,
 }
 impl EndpointProbeConfig {
+    pub(in crate::docker) fn gateway_endpoint(&self) -> &DockerGatewayEndpoint {
+        &self.endpoint
+    }
     /// Capture the exact qualified resource inputs and configured endpoint instance.
     /// # Errors
     /// Rejects disconnected networks and revoked/mismatching retained resource evidence.

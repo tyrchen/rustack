@@ -9,8 +9,9 @@ configured ownership/recovery and real kernel/network/optional gateway probes
 below; it uses the actual shared provider for SDK and ASL calls. The configured
 provided.al2023 profile executes original ZIP code and restores bounded ZIP/Image
 archives through the same qualified owner. Official Python, pinned Node24 and an
-independent Rust RIC have functional evidence on the retained lanes. Handler SDK
-networking, IaC and final platform/release qualification remain unfinished.
+independent Rust RIC have functional evidence on the retained lanes. Explicit
+local SDK access to S3/DynamoDB is qualified below. Image callbacks, IaC and final
+platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -193,8 +194,8 @@ retains the same metadata/count limits and adds separate original-code budgets b
 for exact limits. Named Native/pure workflow snapshots remain available within
 their documented profile. The L01–L09 Docker fault/admission matrix is functionally
 qualified on the retained lanes, including the pinned Node24 consumer below.
-Handler SDK networking, IaC/native reference and final platform/release gates
-remain open.
+Image SDK access to S3/DynamoDB also passes on those lanes. Image callbacks,
+IaC/native reference and final platform/release gates remain open.
 
 The explicit `make test-lambda-startup-docker` gate builds its host executable in
 an isolated Cargo target directory and captures a fixture-owned executable copy,
@@ -215,7 +216,7 @@ latest updates successfully to B. Cold published-A/latest-B launches must also
 return counter=1 after other resources displace their environments. Test source tags are uniquely owned and checked
 before removal. The collector is a test barrier, not a required user endpoint or
 handler SDK compatibility claim. Official Python, pinned Node24 and independent
-Rust RIC functional evidence covers the recorded retained lanes; handler SDK
+Rust RIC functional evidence covers the recorded retained lanes; image callbacks
 and the remaining platform matrix stay open. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
 
 The pinned official Node24 handler image has a separate explicit consumer:
@@ -240,7 +241,7 @@ controls without allocating Docker resources. Node ZIP/runtime-name support is
 outside this image profile. Both retained functional lanes execute Node24.22.1.
 See the [official Node contract](../specs/rustack-workflows-20-lambda-runtime-design.md#417-official-node-image-consumption-d94)
 for exact ownership and validation bounds. Native-x86/reference, Docker
-Desktop/rootless and general handler SDK networking remain separate requirements.
+Desktop/rootless and image callbacks remain separate requirements.
 
 The default Node RIC can retain five normal keepalive sockets. The local Runtime
 API allows eight connection tasks, one active invocation/poll and four charged
@@ -249,6 +250,49 @@ payload is queued even if its HTTP observer expires. General header values remai
 256 bytes within16KiB aggregate; only the exact FunctionError X-Ray cause field
 allows up to8KiB. Rejected metadata does not settle the invocation. Custom images
 with larger worker/socket pools must fit these bounds.
+
+Image and provided-runtime functions can opt into local AWS SDK access. Configure
+both `LAMBDA_DOCKER_SDK_ACCESS_KEY_ID` and
+`LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY`, together with the existing qualified
+`LAMBDA_DOCKER_GATEWAY_ENDPOINT` and a selected user bridge. The pair must match
+the local services' credentials. Build with `lambda,stepfunctions,s3,dynamodb`
+and explicitly enable those services when using S3/DynamoDB. Server credential
+aliases must agree; differing `ACCESS_KEY` and `AWS_ACCESS_KEY_ID` fail validation.
+
+Startup issues the SDK context only after its actual same-instance endpoint
+proof. The function receives the explicit pair and canonical `AWS_ENDPOINT_URL`;
+profile, session, role, metadata/container credential and per-service endpoint
+selectors are cleared, including inherited image defaults. SDK clients can use
+their default credential/endpoint providers. S3 clients should use path-style
+addressing for the local gateway. Client code can still explicitly select other
+credentials or endpoints. With the pair absent, existing user environment
+behavior is preserved. Partial pairs fail startup; host credentials are never
+used as a fallback for this context.
+
+The injected pair belongs to the installed runtime and its function containers.
+It does not enter relay/probe environments, GetFunctionConfiguration, captured
+revisions or saved archives. A new installation can supply a different pair;
+restored function metadata cannot choose it. `sdkGateway` continues to report
+qualified reachability, rather than authorization for a particular service.
+See the [local SDK contract](../specs/rustack-workflows-20-lambda-runtime-design.md#418-explicit-local-handler-sdk-environment-d95)
+for limits, affiliation and environment precedence.
+
+`make test-lambda-handler-sdk-docker` uses the same explicit socket, architecture,
+owned bridge, function-visible gateway, Docker CLI and image-builder settings as
+the full gate below. It builds a separate pinned Node24 SDK image and runs two
+exact resources: real default-provider S3/DynamoDB cold/warm read/write with
+independent host verification, and wrong explicit credentials with precise
+authorization errors despite valid ambient server credentials. Its quiet-body
+control checks cancellation after HTTP headers. The pinned image's actual
+clients are 3.1105.0; no npm installation is needed.
+`make test-lambda-handler-sdk-fixture` runs the configuration, environment,
+affiliation, bounded archive-omission and observer controls without Docker
+resources. Both retained functional lanes pass these SDK consumers. After the
+fixture images have been provisioned, `make test-lambda-image-sdk-consumers-docker`
+repeats the Node/SDK controls, complete compiled manifest and all three exact
+Node/SDK resources using those recorded images. It does not rebuild images;
+missing prerequisites fail. Callback images and remaining IaC/reference/platform
+gates are separate acceptance requirements.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller
@@ -276,7 +320,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 66-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 68-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -352,7 +396,7 @@ projection, codec, staging, candidate and clock controls;
 `make test-lambda-provided-archive-docker` runs both ordinary archive resources
 after fixture provisioning and the exact compiled manifest check.
 
-Handler SDK/IaC, reference/native-x86/platform and complete release
+Image callbacks/IaC, reference/native-x86/platform and complete release
 acceptance remain separate. The implementation ledger records final functional
 qualification; the native-workflow verifier alone does not certify these Docker
 archive resources.
@@ -513,6 +557,6 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance, handler SDK networking, Pulumi lifecycle
+Required reference Linux performance, image callbacks, Pulumi lifecycle
 and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).

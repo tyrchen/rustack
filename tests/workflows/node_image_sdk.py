@@ -4,38 +4,18 @@ import json
 import os
 import re
 import sys
-import time
 import uuid
 
-from lambda_fault_support import Metadata
-
-
-def poll_response(read, accepted, seconds, clock=time.monotonic, sleep=time.sleep):
-    cutoff = clock() + seconds
-    while True:
-        response = read()
-        if clock() >= cutoff:
-            raise TimeoutError("Node SDK observer expired")
-        if accepted(response):
-            return response
-        sleep(0.025)
+from lambda_fault_support import Metadata, invoke_json, poll_response
 
 
 def invoke(client, name, value, *, qualifier=None, fail=False, logs=False):
-    arguments = {"FunctionName": name, "Payload": json.dumps(
-        {"value": value, "fail": fail, "logs": logs}).encode()}
+    arguments = {}
     if qualifier is not None:
         arguments["Qualifier"] = qualifier
     if logs:
         arguments["LogType"] = "Tail"
-    response = client.invoke(**arguments)
-    body = response["Payload"]
-    try:
-        raw = body.read(65537)
-    finally:
-        body.close()
-    assert len(raw) <= 65536 and response["StatusCode"] == 200
-    return response, json.loads(raw)
+    return invoke_json(client, name, {"value": value, "fail": fail, "logs": logs}, **arguments)
 
 
 def check(output, name, architecture, expected, counter, version, handler):

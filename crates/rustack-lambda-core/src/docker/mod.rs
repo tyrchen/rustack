@@ -23,6 +23,7 @@ mod pool;
 mod probe;
 mod pull;
 mod recovery;
+mod sdk;
 mod startup;
 mod types;
 mod volumes;
@@ -88,6 +89,7 @@ pub use recovery::{
 use rustack_core::json::{JsonLimits, from_slice};
 use rustack_lambda_runtime::diagnostics::runtime_dispatch;
 pub use rustack_lambda_runtime::probe::{GatewayInstanceId, GatewayReply};
+pub use sdk::DockerSdkEnvironment;
 use serde::{Serialize, de::DeserializeOwned};
 pub use startup::{
     DockerCapabilities, DockerInstallation, DockerRuntime, DockerRuntimeStatus,

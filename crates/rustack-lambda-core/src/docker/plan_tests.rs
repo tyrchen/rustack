@@ -575,3 +575,7 @@ async fn test_should_retain_both_live_image_leases_through_allocation_plan_lifet
 pub(in crate::docker) fn function_body(plan: &EnvironmentPlan) -> &ContainerCreateBody {
     &plan.bodies.function
 }
+
+pub(in crate::docker) fn relay_body(plan: &EnvironmentPlan) -> &ContainerCreateBody {
+    &plan.bodies.relay
+}

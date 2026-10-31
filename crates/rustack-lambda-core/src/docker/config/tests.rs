@@ -227,3 +227,59 @@ fn test_should_bound_registry_csv_before_collecting_and_accept_full_documented_c
         .is_err()
     );
 }
+
+#[test]
+fn test_should_require_explicit_paired_sdk_settings_and_a_connected_endpoint() {
+    let pair = [
+        ("LAMBDA_DOCKER_SDK_ACCESS_KEY_ID", "private-sdk-key"),
+        ("LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY", "private-sdk-secret"),
+    ];
+    assert!(settings(&pair).is_err());
+    assert!(settings(&[("LAMBDA_DOCKER_SDK_ACCESS_KEY_ID", "private-sdk-key")]).is_err());
+    assert!(settings(&[("LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY", "private-sdk-secret")]).is_err());
+    let mut connected = pair.to_vec();
+    connected.push(("LAMBDA_DOCKER_NETWORK", "sdk-bridge"));
+    assert!(settings(&connected).is_err());
+    connected.push(("LAMBDA_DOCKER_GATEWAY_ENDPOINT", "http://127.0.0.1:4566"));
+    let configured = settings(&connected).unwrap();
+    assert!(configured.sdk_credentials().is_some());
+    assert!(!format!("{configured:?}").contains("private-sdk"));
+    let disabled =
+        settings(&[("LAMBDA_DOCKER_GATEWAY_ENDPOINT", "http://127.0.0.1:4566")]).unwrap();
+    assert!(disabled.sdk_credentials().is_none());
+}
+#[test]
+fn test_should_never_query_ambient_or_server_credentials_for_handler_sdk_settings() {
+    let configured = DockerRuntimeSettings::from_lookup(
+        |key| {
+            assert!(!matches!(
+                key,
+                "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY" | "ACCESS_KEY" | "SECRET_KEY"
+            ));
+            match key {
+                "LAMBDA_DOCKER_RELAY_IMAGE" => Some("relay:v1".into()),
+                "LAMBDA_DOCKER_NETWORK" => Some("none".into()),
+                _ => None,
+            }
+        },
+        &RuntimeBudgets::default(),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    assert!(configured.sdk_credentials().is_none());
+}
+#[test]
+fn test_should_accept_explicit_sdk_pair_through_the_existing_yaml_schema() {
+    let shared = ValidatedSettings::parse(
+        "environment:\n  LAMBDA_DOCKER_RELAY_IMAGE: relay:v1\n  LAMBDA_DOCKER_NETWORK: sdk-bridge\n  LAMBDA_DOCKER_GATEWAY_ENDPOINT: http://127.0.0.1:4566\n  LAMBDA_DOCKER_SDK_ACCESS_KEY_ID: private-sdk-key\n  LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY: private-sdk-secret\n",
+        &BTreeMap::new(),
+    ).unwrap();
+    let configured = DockerRuntimeSettings::from_lookup(
+        |key| shared.get(key).map(str::to_owned),
+        shared.budgets(),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    assert!(configured.sdk_credentials().is_some());
+    assert!(!format!("{shared:?} {configured:?}").contains("private-sdk"));
+}

@@ -33,6 +33,8 @@ use tokio::{
 pub(super) enum Profile {
     Disconnected,
     Connected,
+    Sdk,
+    SdkWrongCredentials,
     Controlled,
     Deadline,
     Pull,
@@ -49,6 +51,16 @@ pub(super) enum Profile {
     ZipArchiveNoSource,
 }
 impl Profile {
+    fn sdk(self) -> bool {
+        matches!(self, Self::Sdk | Self::SdkWrongCredentials)
+    }
+    fn services(self) -> &'static str {
+        if self.sdk() {
+            "lambda,stepfunctions,s3,dynamodb"
+        } else {
+            "lambda,stepfunctions"
+        }
+    }
     pub fn rejects(self) -> bool {
         matches!(
             self,
@@ -72,7 +84,9 @@ impl Profile {
     fn init_seconds(self) -> &'static str {
         if matches!(
             self,
-            Self::ZipControlled
+            Self::Sdk
+                | Self::SdkWrongCredentials
+                | Self::ZipControlled
                 | Self::Controlled
                 | Self::Deadline
                 | Self::Pull
@@ -90,7 +104,9 @@ impl Profile {
     fn network(self) -> bool {
         matches!(
             self,
-            Self::Zip
+            Self::Sdk
+                | Self::SdkWrongCredentials
+                | Self::Zip
                 | Self::ZipControlled
                 | Self::ZipArchive
                 | Self::Connected
@@ -171,7 +187,7 @@ impl Server {
         if profile == Profile::MemoryPressure {
             text.push_str("  lambdaDockerMemoryBytes: 268435456\n");
         }
-        if profile == Profile::EnvironmentPressure {
+        if profile == Profile::EnvironmentPressure || profile.sdk() {
             text = text.replace("lambdaDockerEnvironments: 2", "lambdaDockerEnvironments: 1");
         }
         fs::write(&config, text).await?;
@@ -494,6 +510,26 @@ async fn observation_record(path: PathBuf, length: usize, magic: &[u8; 8]) -> Re
     );
     Ok(raw)
 }
+fn configure_sdk(command: &mut Command, profile: Profile) {
+    if profile.sdk() {
+        let wrong = profile == Profile::SdkWrongCredentials;
+        command
+            .env("S3_SKIP_SIGNATURE_VALIDATION", "false")
+            .env("DYNAMODB_SKIP_SIGNATURE_VALIDATION", "false")
+            .env("LAMBDA_DOCKER_SDK_ACCESS_KEY_ID", "local-key")
+            .env(
+                "LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY",
+                if wrong {
+                    "sdk-wrong-secret"
+                } else {
+                    "local-secret"
+                },
+            )
+            .env("AWS_ACCESS_KEY_ID", "local-key")
+            .env("AWS_SECRET_ACCESS_KEY", "local-secret");
+    }
+}
+
 async fn launch(
     root: &Path,
     profile: Profile,
@@ -510,7 +546,7 @@ async fn launch(
     let mut command = Command::new(root.join("rustack"));
     command
         .env_clear()
-        .env("SERVICES", "lambda,stepfunctions")
+        .env("SERVICES", profile.services())
         .env("GATEWAY_LISTEN", format!("0.0.0.0:{port}"))
         .env("RUSTACK_CONFIG", root.join("config.yaml"))
         .env("DATA_DIR", root.join("data"))
@@ -548,6 +584,7 @@ async fn launch(
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .kill_on_drop(true);
+    configure_sdk(&mut command, profile);
     if profile.zip() {
         command.env(
             "LAMBDA_DOCKER_ZIP_IMAGE",

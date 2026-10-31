@@ -12,15 +12,32 @@ class NodeObserverControls(unittest.TestCase):
                              clock=lambda: next(times), sleep=lambda _: None)
 
     def test_should_accept_terminal_before_original_cutoff(self):
-        self.assertEqual(self.observe([0, 89], ["done"]), "done")
+        self.assertEqual(self.observe([0, 0, 89], ["done"]), "done")
 
     def test_should_reject_terminal_at_original_cutoff(self):
         with self.assertRaises(TimeoutError):
-            self.observe([0, 90], ["done"])
+            self.observe([0, 0, 90], ["done"])
 
     def test_should_reject_late_terminal_after_running(self):
         with self.assertRaises(TimeoutError):
-            self.observe([0, 1, 91], ["running", "done"])
+            self.observe([0, 0, 1, 2, 91], ["running", "done"])
+
+
+    def test_should_reject_expired_initial_observer_without_dispatch(self):
+        reads = []
+        ticks = iter([0, 90])
+        with self.assertRaises(TimeoutError):
+            poll_response(lambda: reads.append("read"), lambda _: True, 90,
+                          clock=lambda: next(ticks))
+        self.assertEqual(reads, [])
+
+    def test_should_not_dispatch_again_after_running_observer_expires(self):
+        reads = []
+        ticks = iter([0, 0, 1, 90])
+        with self.assertRaises(TimeoutError):
+            poll_response(lambda: reads.append("read") or "running", lambda _: False, 90,
+                          clock=lambda: next(ticks), sleep=lambda _: None)
+        self.assertEqual(reads, ["read"])
 
 
 if __name__ == "__main__":

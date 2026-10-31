@@ -1660,7 +1660,7 @@ pub fn compute_sha256(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[tokio::test]
@@ -2052,7 +2052,7 @@ mod tests {
         }
     }
 
-    fn sample_record(name: &str) -> FunctionRecord {
+    pub(crate) fn sample_record(name: &str) -> FunctionRecord {
         FunctionRecord {
             resource_id: FunctionResourceId::default(),
             name: name.to_owned(),

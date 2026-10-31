@@ -1,60 +1,28 @@
 //! Real official Node runtime consumption with retained server and SDK owners.
 
-use std::{env, ffi::OsString, path::PathBuf, time::Duration};
+use std::{env, ffi::OsString, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use tokio::time::{Instant, timeout_at};
 
 use super::{
-    faults::check_logs,
+    image_sdk,
     process::{self, Profile, Server},
-    runner::{Report, Runner, interpreter},
     sdk,
 };
 
 pub(super) async fn exercise() -> Result<()> {
-    let mut server = Server::spawn(Profile::Connected).await?;
-    server
-        .root
-        .as_mut()
-        .context("Node evidence root")?
-        .disable_cleanup(true);
-    let cutoff = Instant::now() + Duration::from_secs(480);
-    let prepared = timeout_at(cutoff, prepare(&mut server))
-        .await
-        .context("ordinary Node observer expired")
-        .and_then(|result| result);
-    let result = match prepared {
-        Ok(arguments) => run_sdk(arguments, cutoff).await,
-        Err(error) => Err(error),
-    };
-    let stopped = server.stop(true).await;
-    let audited = server.audit().await;
-    let logs = check_logs(&server).await;
-    if result.is_err() || stopped.is_err() || audited.is_err() || logs.is_err() {
-        server.retain_on_error().await;
-    }
-    result?;
-    stopped?;
-    audited?;
-    logs?;
-    server
-        .root
-        .as_mut()
-        .context("Node evidence root after cleanup")?
-        .disable_cleanup(false);
-    Ok(())
+    image_sdk::exercise(Profile::Connected, prepare, validate).await
 }
 
-async fn prepare(server: &mut Server) -> Result<[OsString; 7]> {
+async fn prepare(server: &mut Server) -> Result<Vec<OsString>> {
     let image = env::var("RUSTACK_NODE_IMAGE").context("explicit official Node fixture")?;
     server.track_image(&image).await?;
     server.ready().await?;
     sdk::node_compute(&server.endpoint, &image, &process::architecture()?).await?;
     let (owner, engine) = server.observation_identity().await?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    Ok([
+    Ok(vec![
         root.join("tests/workflows/node_image_sdk.py")
             .into_os_string(),
         OsString::from(&server.endpoint),
@@ -70,29 +38,7 @@ async fn prepare(server: &mut Server) -> Result<[OsString; 7]> {
     ])
 }
 
-async fn join_sdk(mut child: Runner, cutoff: Instant) -> Result<(Result<u32>, Report)> {
-    let entered = child
-        .await_pid_before(cutoff.min(Instant::now() + Duration::from_secs(5)))
-        .await;
-    let report = child
-        .wait(if entered.is_ok() {
-            cutoff
-        } else {
-            Instant::now()
-        })
-        .await?;
-    Ok((entered, report))
-}
-
-async fn run_sdk(arguments: [OsString; 7], cutoff: Instant) -> Result<()> {
-    let child = Runner::spawn(&interpreter()?, &arguments)?;
-    let (entered, report) = join_sdk(child, cutoff).await?;
-    ensure!(
-        report.pid == entered? && !report.forced && report.status.success(),
-        "ordinary Node SDK failed: {}",
-        String::from_utf8_lossy(&report.stderr)
-    );
-    let observed: Value = serde_json::from_slice(&report.stdout)?;
+fn validate(observed: &Value) -> Result<()> {
     ensure!(
         observed["schemaVersion"] == 1
             && observed["cases"]
@@ -119,7 +65,7 @@ mod tests {
     use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
     use tokio::time::{Duration, Instant};
 
-    use super::{Runner, join_sdk};
+    use super::super::{image_sdk::join_with_pid_before, runner::Runner};
 
     #[tokio::test]
     async fn test_should_join_late_node_sdk_child_before_reporting_expired_handshake() -> Result<()>
@@ -133,7 +79,7 @@ mod tests {
             ],
         )?;
         let held = child.await_pid().await;
-        let (entered, report) = join_sdk(child, cutoff).await?;
+        let (entered, report) = join_with_pid_before(child, cutoff).await?;
         let held_pid = held?;
         ensure!(
             entered.is_err() && report.pid == held_pid && report.forced && !report.status.success(),

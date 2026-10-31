@@ -1,22 +1,32 @@
 use std::{
+    collections::HashMap,
     error::Error as _,
     future::Future,
-    task::{Context, Waker},
+    task::{Context, Poll, Waker},
 };
 
 use bytes::Bytes;
-use tokio::sync::{oneshot, watch};
+use serde_json::{to_string, to_value};
+use tokio::sync::{mpsc::error::TryRecvError, oneshot, watch};
 use uuid::Uuid;
 
 use super::*;
 use crate::{
+    artifact::ImageArtifact,
+    config::LambdaConfig,
+    deployment::ImageDeploymentConfig,
     docker::{
-        DockerWire, EnvironmentConfig, EnvironmentManager,
+        DockerWire, EnvironmentConfig, EnvironmentManager, ImageLeaseConfig, ImageLeaseManager,
+        ImagePinScope, RelayBudgets,
         environment::test_peer,
-        plan::tests::{image_with, policy, revision},
+        plan::tests::{function_body, image_with, policy, relay_body, revision},
+        sdk::{LocalSdkCredentials, SdkAffiliation},
         tests::Daemon,
     },
     error::LambdaServiceError,
+    executor::ExecutorBackend,
+    provider::RustackLambda,
+    storage::{FunctionStore, tests::sample_record},
     work::WorkManager,
 };
 
@@ -450,5 +460,252 @@ async fn test_should_distinguish_unconfigured_zip_from_revoked_backend_without_a
     ));
     assert_eq!(fixture.environments.port().status().allocated, 0);
     executor.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+fn sdk_context(config: &DockerExecutorConfig) -> DockerSdkEnvironment {
+    let credentials: LocalSdkCredentials = ("private-sdk-key".into(), "private-sdk-secret".into())
+        .try_into()
+        .unwrap();
+    DockerSdkEnvironment::new(
+        credentials,
+        "http://127.0.0.1:4566".parse().unwrap(),
+        SdkAffiliation::new(
+            config.directory.clone(),
+            config.relay.clone(),
+            config.policy.clone(),
+            config.environments.clone(),
+            config.readiness.clone(),
+        ),
+    )
+    .unwrap()
+}
+#[rstest::rstest]
+#[case::qualification("qualification")]
+#[case::acquisition("acquisition")]
+#[case::manager("manager")]
+#[case::network("network")]
+#[case::relay("relay")]
+#[tokio::test]
+async fn test_should_refuse_foreign_sdk_affiliation_before_pool_or_container_allocation(
+    #[case] changed: &str,
+) {
+    let fixture = Fixture::new().await;
+    let original = fixture.config();
+    let sdk = sdk_context(&original);
+    let mut other_manager = EnvironmentManager::start(
+        fixture.wire.port(),
+        original.directory.clone(),
+        EnvironmentConfig::default(),
+    )
+    .unwrap();
+    let mut foreign = original.clone();
+    match changed {
+        "qualification" => foreign.readiness = Arc::new(Readiness(AtomicBool::new(true))),
+        "acquisition" => {
+            foreign.directory =
+                DirectoryLease::testing(original.directory.owner_id(), original.directory.run_id());
+        }
+        "manager" => foreign.environments = other_manager.port(),
+        "network" => {
+            foreign.policy = ContainerPolicy::new(
+                "other-bridge".parse().unwrap(),
+                1000,
+                1000,
+                1_000_000_000,
+                RelayBudgets::default(),
+            )
+            .unwrap();
+        }
+        "relay" => foreign.relay = image_with("1000", vec!["CHANGED=value".into()]),
+        _ => unreachable!("fixed affiliation cases"),
+    }
+    assert!(!sdk.matches(&foreign));
+    foreign.sdk = Some(sdk.clone());
+    assert!(matches!(
+        DockerExecutor::new(foreign),
+        Err(DockerExecutorError::Configuration)
+    ));
+    assert_eq!(fixture.environments.port().status().allocated, 0);
+    assert_eq!(other_manager.port().status().allocated, 0);
+    other_manager.shutdown(deadline()).await.unwrap();
+    fixture.close().await;
+}
+#[tokio::test]
+async fn test_should_isolate_sdk_warm_identity_without_mutating_revision_or_relay_environment() {
+    let fixture = Fixture::new().await;
+    let mut config = fixture.config();
+    let first = sdk_context(&config);
+    let second = sdk_context(&config);
+    assert_eq!(first.identity(), first.clone().identity());
+    assert_ne!(first.identity(), second.identity());
+    assert_eq!(format!("{first:?}"), "DockerSdkEnvironment(<redacted>)");
+    let mut call = request();
+    Arc::make_mut(&mut call.revision).environment.insert(
+        "AWS_ENDPOINT_URL".into(),
+        "http://user-selected:4566".into(),
+    );
+    let original_env = call.revision.environment.clone();
+    let plain = DockerExecutor::new(config.clone()).unwrap();
+    let without_sdk = plain.plan(&call).unwrap();
+    assert!(
+        function_body(&without_sdk)
+            .env
+            .as_ref()
+            .unwrap()
+            .contains(&"AWS_ENDPOINT_URL=http://user-selected:4566".to_owned())
+    );
+    config.sdk = Some(first.clone());
+    let enabled = DockerExecutor::new(config.clone()).unwrap();
+    let first_plan = enabled.plan(&call).unwrap();
+    let cloned_plan = enabled.plan(&call).unwrap();
+    assert_ne!(without_sdk.warm_key(), first_plan.warm_key());
+    assert_eq!(first_plan.warm_key(), cloned_plan.warm_key());
+    assert!(
+        function_body(&first_plan)
+            .env
+            .as_ref()
+            .unwrap()
+            .contains(&"AWS_ENDPOINT_URL=http://127.0.0.1:4566/".to_owned())
+    );
+    assert!(
+        relay_body(&first_plan)
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|entry| !entry.starts_with("AWS_") && !entry.contains("private-sdk"))
+    );
+    assert_eq!(call.revision.environment, original_env);
+    config.sdk = Some(second);
+    let other = DockerExecutor::new(config).unwrap();
+    assert_ne!(first_plan.warm_key(), other.plan(&call).unwrap().warm_key());
+    fixture.ready.0.store(false, Ordering::Release);
+    assert!(matches!(
+        enabled.plan(&call),
+        Err(DockerExecutorError::Unavailable)
+    ));
+    assert_eq!(fixture.environments.port().status().allocated, 0);
+    drop((without_sdk, first_plan, cloned_plan));
+    plain.shutdown().await.unwrap();
+    enabled.shutdown().await.unwrap();
+    other.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn test_should_retain_sdk_revocation_guard_in_a_prepared_plan_and_refuse_create_without_rpc()
+{
+    let mut fixture = Fixture::new().await;
+    let mut config = fixture.config();
+    config.sdk = Some(sdk_context(&config));
+    let executor = DockerExecutor::new(config).unwrap();
+    let plan = executor.plan(&request()).unwrap();
+    plan.live().unwrap();
+    fixture.ready.0.store(false, Ordering::Release);
+    assert!(matches!(plan.live(), Err(DockerError::Stopped)));
+    let port = fixture.wire.port();
+    let mut relay = Box::pin(plan.create_relay(&port, deadline()));
+    assert!(matches!(
+        relay.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(DockerError::Stopped))
+    ));
+    drop(relay);
+    let mut function = Box::pin(plan.create_function(&port, deadline()));
+    assert!(matches!(
+        function
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(DockerError::Stopped))
+    ));
+    drop(function);
+    assert!(matches!(
+        fixture.daemon.requests.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
+    assert_eq!(fixture.environments.port().status().allocated, 0);
+    drop(plan);
+    executor.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn test_should_export_real_sdk_provider_snapshot_without_injected_keys_or_credentials() {
+    let fixture = Fixture::new().await;
+    let mut config = fixture.config();
+    config.sdk = Some(sdk_context(&config));
+    let executor = Arc::new(DockerExecutor::new(config).unwrap());
+    let mut call = request();
+    let user_env = HashMap::from([
+        ("BUSINESS".to_owned(), "retained".to_owned()),
+        (
+            "AWS_ENDPOINT_URL".to_owned(),
+            "http://user-selected:4566".to_owned(),
+        ),
+    ]);
+    Arc::make_mut(&mut call.revision)
+        .environment
+        .extend(user_env.clone());
+    let plan = executor.plan(&call).unwrap();
+    assert!(
+        function_body(&plan)
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "AWS_SECRET_ACCESS_KEY=private-sdk-secret")
+    );
+    let DeploymentArtifact::Image(image) = &call.revision.artifact else {
+        panic!("fixed image fixture");
+    };
+    let root = tempfile::tempdir().unwrap();
+    let store = FunctionStore::new(root.path());
+    let mut record = sample_record(&call.revision.function_name);
+    record.resource_id = call.revision.resource_id;
+    record.arn = call.function_arn.clone();
+    record.latest.package_type = "Image".into();
+    record.latest.runtime = None;
+    record.latest.handler = None;
+    record.latest.image_uri = Some(image.resolved().metadata().requested_reference.to_string());
+    record.latest.image = ImageArtifact::Pinned(image.clone());
+    record.latest.architectures = vec!["arm64".into()];
+    record.latest.environment = user_env.clone();
+    record.latest.code_sha256 = image.resolved().code_sha256().unwrap();
+    record.latest.code_size = image.unpacked_size().get();
+    store.insert(record).unwrap();
+    let mut images = ImageLeaseManager::start(
+        fixture.wire.port(),
+        ImagePinScope::new(fixture.directory.clone()),
+        ImageLeaseConfig::default(),
+    )
+    .unwrap();
+    let provider = RustackLambda::with_executor(
+        store,
+        LambdaConfig {
+            executor: ExecutorBackend::Docker,
+            ..Default::default()
+        },
+        executor,
+    )
+    .with_image_preparation(images.port(), ImageDeploymentConfig::default())
+    .unwrap();
+    let snapshot = provider.export_snapshot_before(deadline()).await.unwrap();
+    let encoded = to_string(&snapshot).unwrap();
+    for private in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "private-sdk-key",
+        "private-sdk-secret",
+    ] {
+        assert!(!encoded.contains(private));
+    }
+    let projected = to_value(&snapshot).unwrap();
+    assert_eq!(
+        projected["functions"]["functions"][0]["latest"]["environment"],
+        to_value(user_env).unwrap()
+    );
+    drop(plan);
+    provider.shutdown_before(deadline()).await.unwrap();
+    images.shutdown(deadline()).await.unwrap();
     fixture.close().await;
 }

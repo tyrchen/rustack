@@ -515,3 +515,15 @@ fn test_should_accept_pinned_zip_only_with_separate_source_pin_capacity(
         accepted
     );
 }
+
+#[test]
+fn test_should_never_issue_handler_sdk_context_without_qualified_endpoint_evidence() {
+    let qualification = Arc::new(Qualification::default());
+    let credentials: LocalSdkCredentials = ("local-key".into(), "local-secret".into())
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        qualification.sdk_environment(credentials),
+        Err(DockerStartupError::Unavailable)
+    ));
+}

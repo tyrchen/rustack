@@ -17,7 +17,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     ContainerPolicy, DockerError, DockerSocket, ImagePullPolicy, NetworkSelection,
-    RegistryCredentials, RegistryHost, RelayBudgets,
+    RegistryCredentials, RegistryHost, RelayBudgets, sdk::LocalSdkCredentials,
 };
 use crate::artifact::ImageReference;
 
@@ -131,6 +131,7 @@ pub struct DockerRuntimeSettings {
     relay: ImageReference,
     zip: Option<ImageReference>,
     endpoint: Option<DockerGatewayEndpoint>,
+    sdk_credentials: Option<LocalSdkCredentials>,
     policy: ContainerPolicy,
     budgets: RuntimeBudgets,
     log_ring_bytes: usize,
@@ -143,6 +144,9 @@ impl fmt::Debug for DockerRuntimeSettings {
     }
 }
 impl DockerRuntimeSettings {
+    pub(super) fn sdk_credentials(&self) -> Option<&LocalSdkCredentials> {
+        self.sdk_credentials.as_ref()
+    }
     /// Validate explicit settings and shared budgets without reading files or Docker.
     /// # Errors
     /// Rejects missing required settings, malformed domain values or inconsistent budgets.
@@ -185,6 +189,16 @@ impl DockerRuntimeSettings {
             Some("true") => true,
             _ => return Err(DockerError::Configuration),
         };
+        let endpoint = lookup("LAMBDA_DOCKER_GATEWAY_ENDPOINT")
+            .map(|raw| raw.parse::<DockerGatewayEndpoint>())
+            .transpose()?;
+        let sdk_credentials = LocalSdkCredentials::parse(
+            lookup("LAMBDA_DOCKER_SDK_ACCESS_KEY_ID"),
+            lookup("LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY"),
+        )?;
+        if sdk_credentials.is_some() && (endpoint.is_none() || policy.network.value() == "none") {
+            return Err(DockerError::Configuration);
+        }
         Ok(Self::builder()
             .socket(socket)
             .relay(relay)
@@ -199,11 +213,8 @@ impl DockerRuntimeSettings {
                     })
                     .transpose()?,
             )
-            .endpoint(
-                lookup("LAMBDA_DOCKER_GATEWAY_ENDPOINT")
-                    .map(|raw| raw.parse())
-                    .transpose()?,
-            )
+            .endpoint(endpoint)
+            .sdk_credentials(sdk_credentials)
             .policy(policy)
             .budgets(budgets.clone())
             .log_ring_bytes(
