@@ -6,3 +6,11 @@ docs/
 specs/
 *.md
 LICENSE
+**/.env
+**/.env.*
+**/node_modules
+**/__pycache__
+**/.venv
+**/.pulumi
+.DS_Store
+**/.DS_Store

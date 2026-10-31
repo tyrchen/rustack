@@ -2,6 +2,8 @@
 
 Status: implementation contract · Depends on: [API](./rustack-workflows-10-api-design.md), [Lambda](./rustack-workflows-20-lambda-runtime-design.md), [ASL](./rustack-workflows-30-asl-design.md), [integrations](./rustack-workflows-40-integrations-design.md)
 
+Current platform scope: [D100](./rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation. Historical/native-x86 pending clauses do not impose new runner or test requirements; existing architecture support and completed evidence remain. Required arm64/Desktop/rootless/reference and other release gates still apply.
+
 ## 1. Extend the existing configuration system
 
 Use `RUSTACK_CONFIG` and the existing YAML `environment`, `budgets`, `advertisedEndpoint` schema. Do not add a parallel configuration loader or mutate process environment. Add keys to the validated settings allowlist and add typed, camelCase budget fields. Process environment overrides YAML; defaults apply last. Reject unknown keys, malformed scalars, zero/excessive budgets and conflicting executor settings before listening. Configuration structs use typed-builder and validated newtypes.

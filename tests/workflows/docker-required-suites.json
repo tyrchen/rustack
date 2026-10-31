@@ -104,7 +104,9 @@
         "test_should_settle_real_image_faults_and_public_cancellation_admission::case_1_typed_faults",
         "test_should_settle_real_image_faults_and_public_cancellation_admission::case_2_initializing_disconnect",
         "test_should_settle_real_image_faults_and_public_cancellation_admission::case_3_busy_disconnect",
-        "test_should_settle_real_image_faults_and_public_cancellation_admission::case_4_accepted_work_shutdown"
+        "test_should_settle_real_image_faults_and_public_cancellation_admission::case_4_accepted_work_shutdown",
+        "test_should_execute_image_sdk_and_nested_asl_from_the_release_image",
+        "test_should_refuse_unreachable_release_image_gateway_and_join_startup_cleanup"
       ]
     },
     {

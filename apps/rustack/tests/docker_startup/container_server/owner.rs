@@ -2,6 +2,8 @@
 
 #[path = "owner/cleanup.rs"]
 mod cleanup;
+#[path = "owner/configuration.rs"]
+mod configuration;
 
 use std::{fs::Permissions, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
@@ -17,13 +19,13 @@ use tokio::{
 };
 
 use super::{
-    Mode,
+    ImageProfile, Mode,
     cli::{self, Cli, arguments},
     policy::{self, Expected, Inputs},
     records::{self, Identity},
 };
 
-const INSPECT: &str = r#"{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},"State":{{json .State}},"Config":{"Image":{{json .Config.Image}},"User":{{json .Config.User}},"WorkingDir":{{json .Config.WorkingDir}},"Entrypoint":{{json .Config.Entrypoint}},"Cmd":{{json .Config.Cmd}},"Labels":{{json .Config.Labels}}},"HostConfig":{{json .HostConfig}},"NetworkSettings":{{json .NetworkSettings}},"Mounts":{{json .Mounts}}}"#;
+const INSPECT: &str = r#"{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},"State":{{json .State}},"Config":{"Image":{{json .Config.Image}},"User":{{json .Config.User}},"WorkingDir":{{json .Config.WorkingDir}},"Entrypoint":{{json .Config.Entrypoint}},"Cmd":{{json .Config.Cmd}},"Labels":{{json .Config.Labels}},"Healthcheck":{{json .Config.Healthcheck}}},"HostConfig":{{json .HostConfig}},"NetworkSettings":{{json .NetworkSettings}},"Mounts":{{json .Mounts}}}"#;
 const SOURCE: &str =
     r#"{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}}}"#;
 
@@ -48,6 +50,7 @@ struct Source {
 #[derive(Debug)]
 pub(super) struct Owner {
     root: TempDir,
+    profile: ImageProfile,
     path: PathBuf,
     pub cli: Cli,
     pub inputs: Inputs,
@@ -61,8 +64,8 @@ pub(super) struct Owner {
 }
 
 impl Owner {
-    pub async fn new(mode: Mode, cutoff: Instant) -> Result<Self> {
-        let inputs = Inputs::load()?;
+    pub async fn new(mode: Mode, profile: ImageProfile, cutoff: Instant) -> Result<Self> {
+        let inputs = Inputs::load(profile)?;
         let root = tempfile::tempdir()?;
         timeout_at(
             cutoff,
@@ -95,6 +98,7 @@ impl Owner {
             sources.push((reference.clone(), policy::source_id(&value.id)?));
         }
         let source = sources.first().context("server source capture")?.1.clone();
+        profile.source(&cli, &source, cutoff).await?;
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let expected = Expected {
             name: format!("rustack-server-{nonce}"),
@@ -108,6 +112,7 @@ impl Owner {
         };
         let mut owner = Self {
             root,
+            profile,
             path,
             cli,
             inputs,
@@ -163,6 +168,11 @@ impl Owner {
         self.write("server.json", &serde_json::to_vec(&json!({"id":id,"engine":self.expected.engine.to_string(),
             "nonce":self.expected.nonce,"source":self.expected.source,"volume":self.expected.volume}))?, cutoff).await?;
         self.inspect_server(cutoff).await?;
+        self.uncertain = false;
+        if self.profile == ImageProfile::Release {
+            self.install_public_configuration(cutoff).await?;
+        }
+        self.uncertain = true;
         let started = self.cli.run(&arguments(&["start", &id]), cutoff).await?;
         ensure!(
             started == format!("{id}\n").as_bytes(),
@@ -249,7 +259,9 @@ impl Owner {
             if let Ok((status, value)) =
                 super::super::process::get(&endpoint, "/_rustack/capabilities").await
             {
-                if value.get("ready").and_then(serde_json::Value::as_bool) == Some(true) {
+                if value.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+                    && self.profile.healthy(&view)
+                {
                     ensure!(
                         status == 200
                             && value
@@ -370,6 +382,8 @@ impl Owner {
             "server inspected a different container"
         );
         policy::server(&view, &self.expected, volume)?;
+        self.profile
+            .health(view.config.as_ref().and_then(|c| c.healthcheck.as_ref()))?;
         Ok(view)
     }
     async fn capture_identity(&mut self, cutoff: Instant) -> Result<()> {
@@ -424,8 +438,9 @@ impl Owner {
     }
     async fn write_environment(&self, mode: Mode, cutoff: Instant) -> Result<()> {
         let relay = self.source(&self.inputs.relay)?;
+        let configuration = self.profile.configuration();
         let text = format!("SERVICES=lambda,stepfunctions,s3,dynamodb\nGATEWAY_LISTEN=0.0.0.0:4566\n\
-            RUSTACK_CONFIG=/etc/rustack/config.yaml\nDATA_DIR=/data/state\nLAMBDA_EXECUTOR=docker\n\
+            RUSTACK_CONFIG={configuration}\nDATA_DIR=/data/state\nLAMBDA_EXECUTOR=docker\n\
             LAMBDA_DOCKER_SOCKET=unix:///run/rustack/docker.sock\nLAMBDA_DOCKER_RELAY_IMAGE={relay}\n\
             LAMBDA_DOCKER_NETWORK={}\nLAMBDA_DOCKER_GATEWAY_ENDPOINT=http://{}:{}/\n\
             LAMBDA_DOCKER_CROSS_ARCHITECTURE=false\nLAMBDA_INIT_TIMEOUT_SECS=20\nLOG_LEVEL=error\n\

@@ -54,7 +54,11 @@ use tokio::{
 #[ignore = "requires explicit Linux server/socket/image prerequisites; run make \
             test-workflows-server-docker"]
 async fn test_should_execute_image_sdk_and_nested_asl_from_a_server_container() -> Result<()> {
-    container_server::exercise(container_server::Mode::Sdk).await
+    container_server::exercise(
+        container_server::Mode::Sdk,
+        container_server::ImageProfile::Fixture,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -62,7 +66,11 @@ async fn test_should_execute_image_sdk_and_nested_asl_from_a_server_container() 
             test-workflows-server-docker"]
 async fn test_should_refuse_unreachable_server_container_gateway_and_join_startup_cleanup()
 -> Result<()> {
-    container_server::exercise(container_server::Mode::Unreachable).await
+    container_server::exercise(
+        container_server::Mode::Unreachable,
+        container_server::ImageProfile::Fixture,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -446,6 +454,27 @@ async fn test_should_restore_provided_zip_archives_without_replay_and_preserve_i
             test-lambda-provided-archive-docker"]
 async fn test_should_refuse_provided_zip_archives_without_configured_runtime() -> Result<()> {
     provided_archive::exercise(true).await
+}
+
+#[tokio::test]
+#[ignore = "requires actual root release image and explicit Docker resources"]
+async fn test_should_execute_image_sdk_and_nested_asl_from_the_release_image() -> Result<()> {
+    container_server::exercise(
+        container_server::Mode::Sdk,
+        container_server::ImageProfile::Release,
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires actual root release image and explicit Docker resources"]
+async fn test_should_refuse_unreachable_release_image_gateway_and_join_startup_cleanup()
+-> Result<()> {
+    container_server::exercise(
+        container_server::Mode::Unreachable,
+        container_server::ImageProfile::Release,
+    )
+    .await
 }
 
 #[tokio::test]

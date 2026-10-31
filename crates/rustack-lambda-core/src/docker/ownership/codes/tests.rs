@@ -64,11 +64,14 @@ fn signed(bytes: &mut [u8]) {
 fn test_should_reject_corrupt_canonical_fields_even_with_recomputed_checksum(
     #[case] offset: usize,
 ) {
-    let owner = Uuid::new_v4();
+    // Make the former 0xff owner-byte no-op a deterministic regression case.
+    let owner = Uuid::from_u128(u128::MAX);
     let row = record(Uuid::new_v4(), VolumeState::Known, LoaderState::Planned);
     let mut bytes = CodeCodec::encode(owner, &[row]).unwrap();
     if matches!(offset, 25 | 41 | 57 | 73) {
         bytes[offset..offset + 16].fill(0);
+    } else if offset == 8 {
+        bytes[offset] ^= 0xff;
     } else {
         bytes[offset] = 0xff;
     }

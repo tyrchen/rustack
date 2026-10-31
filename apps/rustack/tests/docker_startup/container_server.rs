@@ -9,6 +9,8 @@
 
 #[path = "container_server/cli.rs"]
 mod cli;
+#[path = "container_server/image_profile.rs"]
+mod image_profile;
 #[path = "container_server/logs.rs"]
 mod logs;
 #[path = "container_server/owner.rs"]
@@ -26,6 +28,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+pub(super) use image_profile::ImageProfile;
 use owner::Owner;
 use serde::Deserialize;
 use tokio::time::Instant;
@@ -75,9 +78,9 @@ struct Evidence {
     child_execution: String,
 }
 
-pub(super) async fn exercise(mode: Mode) -> Result<()> {
+pub(super) async fn exercise(mode: Mode, profile: ImageProfile) -> Result<()> {
     let cutoff = Instant::now() + Duration::from_secs(600);
-    let mut owner = Owner::new(mode, cutoff).await?;
+    let mut owner = Owner::new(mode, profile, cutoff).await?;
     let observed = async {
         owner.prepare(cutoff).await?;
         match mode {
@@ -97,8 +100,13 @@ pub(super) async fn exercise(mode: Mode) -> Result<()> {
     }
     observed?;
     cleaned?;
+    let topology = if profile == ImageProfile::Release {
+        "release-image server-container"
+    } else {
+        "server-container"
+    };
     println!(
-        "actual server-container linux/{}: {}",
+        "actual {topology} linux/{}: {}",
         owner.inputs.architecture,
         mode.name()
     );

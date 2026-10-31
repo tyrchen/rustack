@@ -2,6 +2,8 @@
 
 Status: Implemented and functionally qualified on retained ARM64/QEMU AMD64 lanes · Updated: 2026-10-31 · Work item: D98 /5.3e
 
+Current platform scope: [D100](./rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation. Historical/native-x86 pending clauses do not impose new runner or test requirements; existing architecture support and completed evidence remain. Required arm64/Desktop/rootless/reference and other release gates still apply.
+
 ## 1. Outcome and dependency
 
 Run the actual registered Rustack Linux executable inside a Docker container, using the same daemon as its managed Lambda function/relay pairs. Ordinary signed host clients must create/invoke image functions and execute nested ASL; a real handler must call the containerized Rustack S3/DynamoDB gateway through its ordinary SDK. Readiness and graceful shutdown retain the existing production provenance, endpoint, kernel and physical cleanup requirements. This consumes [D97](./rustack-workflows-50-iac-design.md) and the existing [runtime](./rustack-workflows-20-lambda-runtime-design.md), [operator configuration](./rustack-workflows-60-operations-design.md#11-docker-configuration) and [verification](./rustack-workflows-70-verification-plan.md) contracts.

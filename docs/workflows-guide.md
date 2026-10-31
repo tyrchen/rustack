@@ -12,14 +12,17 @@ archives through the same qualified owner. Official Python, pinned Node24 and an
 independent Rust RIC have functional evidence on the retained lanes. Explicit
 local SDK access to S3/DynamoDB, real image callbacks and managed Pulumi IaC
 consumers and the separate Linux server-container topology are qualified below.
-Default release packaging, native/reference, remaining performance/load and
-final platform/release qualification remain unfinished.
+The actual root release image and composite Action are qualified through D99.
+W373 promotion, required arm64/reference/Desktop/rootless, remaining performance/load
+and complete release qualification remain unfinished. The user has waived
+further Linux x86_64 validation; recorded amd64/QEMU results are historical
+functional evidence, with no native-x86 performance claim.
 
 ## Run the pure example
 
 Run the commands from the repository root, using Cargo and the pinned Rust toolchain. The qualification commands require a Unix host
-(Linux or macOS); recorded current-host performance evidence is on macOS/aarch64. The feature is absent from the default build;
-adding `SERVICES=stepfunctions` to an unchanged default binary cannot enable it.
+(Linux or macOS); recorded current-host performance evidence is on macOS/aarch64. The feature is absent from the default source build;
+adding `SERVICES=stepfunctions` to that unchanged binary cannot enable it.
 
 ```bash
 # Compile the Step Functions service without Lambda or other service adapters.
@@ -243,7 +246,7 @@ CMD updates and named FunctionError followed by a fresh healthy replacement.
 controls without allocating Docker resources. Node ZIP/runtime-name support is
 outside this image profile. Both retained functional lanes execute Node24.22.1.
 See the [official Node contract](../specs/rustack-workflows-20-lambda-runtime-design.md#417-official-node-image-consumption-d94)
-for exact ownership and validation bounds. Native-x86/reference, Docker
+for exact ownership and validation bounds. Required arm64/reference and Docker
 Desktop/rootless remain separate requirements; image callback acceptance is documented below.
 
 The default Node RIC can retain five normal keepalive sockets. The local Runtime
@@ -319,7 +322,7 @@ clients3.1105.0, exact SDK error classes and all nine catalog cases. Confirmed
 saved archives retain the two actual functions and terminal workflow rows;
 bounded history/log/archive scans reject leaked tokens or injected credentials.
 See the [image callback contract](../specs/rustack-workflows-40-integrations-design.md#56-real-image-sdk-callbacks-and-independent-event-worker-d96).
-This is native-arm64 VZ/emulated-amd64 QEMU functional acceptance; native-x86,
+This is native-arm64 VZ/emulated-amd64 QEMU functional acceptance; required arm64
 reference, Docker Desktop/rootless and complete release gates remain open.
 
 `make test-workflows-iac-docker` builds the pinned Pulumi tool image and runs two
@@ -351,7 +354,7 @@ memory ceiling. See the [IaC contract](../specs/rustack-workflows-50-iac-design.
 At D97, both retained functional lanes passed the lifecycle and Stop resources, all72
 full Docker resources and exact zero-remnant/source-preservation checks. See
 [final D97 qualification](../specs/rustack-workflows-93-review.md#d97-final-qualification-and-exact-postconditions).
-D98 qualifies the separate server-container topology below. Native-x86,
+D98 qualifies the separate server-container topology below. Required arm64
 reference and additional Docker platforms remain required.
 
 `make test-workflows-server-docker` builds the actual Linux Rustack CLI in a
@@ -382,7 +385,63 @@ only the two task-owned empty bridges. See [final D98 qualification](../specs/ru
 archive, policy, privacy and diagnostic controls without Docker allocation.
 See the [server-container contract](../specs/rustack-workflows-55-server-container-design.md).
 This fixture topology does not qualify the default release Dockerfile or close
-native-x86/reference/Desktop/rootless/final-release requirements.
+required arm64/reference/Desktop/rootless/final-release requirements.
+
+## Build and qualify the release image
+
+The root `Dockerfile` now builds the normal default CLI plus `stepfunctions`
+with the pinned Rust toolchain and the repository's security patch. This Docker
+distribution profile differs from the opt-in source feature above. Compiled
+Step Functions supports pure ASL without a Lambda executor; real code execution
+still requires explicit backend settings and successful startup probes.
+
+```bash
+make lambda-workflows-release-image \
+  WORKFLOWS_ARCH=arm64 \
+  WORKFLOWS_DOCKER_SOCKET=/absolute/selected/docker.sock \
+  WORKFLOWS_IMAGE_BUILDER=/absolute/path/to/docker-buildx
+```
+
+The default local tag is `rustack/workflows-release:integration-arm64`; choose
+`amd64` for the other architecture. `WORKFLOWS_RELEASE_BUILD_JOBS` defaults to2
+and accepts1..8. The production recipe builds musl inside the selected Linux
+engine; it keeps scratch, UID65532, CA roots and its real image healthcheck.
+Builds/pulls are separate from runtime timing. Every build also runs the
+`test-workflows-release-image` gate: it saves the captured immutable image ID
+without starting a container, checks the actual static ELF and exact scratch
+filesystem/health profile, and retains a private artifact receipt. The same
+target can recheck an existing image. Kernel file limits, bounded decompression
+and finite CLI observations guard this inspection.
+
+`make test-workflows-release-docker` accepts the same explicit daemon-side
+socket/group, network, gateway, other daemon and builder inputs as the complete
+gate below. It builds the actual root image and runs two exact resources:
+signed SDK42/46 plus nested `.sync:2` child50, and unreachable-gateway startup
+rejection. It reuses the server owner and places only public budget YAML into
+the exact data volume; private credentials remain in a separate env file.
+Release acceptance requires actual Docker health, persisted identity proof and
+normal server/runtime cleanup. Source/build completion alone is insufficient.
+
+The composite GitHub Action exposes `stepfunctions-skip-auth` with the existing
+service conventions. Its default container does not receive a daemon socket;
+pure workflows work without enabling function code execution. All inputs enter
+the runtime through environment values and are validated before effects.
+Readiness uses elapsed time, exact container/image/daemon identity and structured
+health. A healthy full container ID is handed to the caller for cleanup.
+`make test-workflows-action-fixture` runs26 actual-body adversarial/process
+controls under an independent Rust process owner and an exact one-resource
+Action manifest. This Action profile is separate from Native26 and Docker76.
+The default Action CI consumer also checks pure ASL21→42 and its exact history;
+local YAML/control verification is not a remote CI result.
+
+The [release-image contract](../specs/rustack-workflows-56-release-image-design.md)
+records the required both-lane acceptance and remaining publication/platform
+work. Both actual image profiles pass final D99 qualification: all76 resources
+and558 aggregate Rust cases per full lane, with zero remnants and fifteen
+source identities preserved per engine. See [final D99 evidence](../specs/rustack-workflows-93-review.md#d99-final-qualification-and-exact-postconditions).
+[D100](../specs/rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation.
+Existing both-lane commands/results describe completed evidence; future required
+platform work uses arm64 and the remaining Desktop/rootless/reference gates.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller
@@ -411,7 +470,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons, daemon-side socket/group and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 74-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 76-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -488,8 +547,9 @@ projection, codec, staging, candidate and clock controls;
 after fixture provisioning and the exact compiled manifest check.
 
 Image callbacks and managed Pulumi IaC are functionally qualified on the retained
-lanes. Server-in-container, reference/native-x86/platform and complete release
-acceptance remain separate. The implementation ledger records final functional
+lanes. Server-in-container and the actual root release image are separately
+qualified through D98/D99. Required arm64/reference/platform and complete release
+acceptance remain separate under D100. The implementation ledger records final functional
 qualification; the native-workflow verifier alone does not certify these Docker
 archive resources.
 See the [ordinary ZIP contract](../specs/rustack-workflows-20-lambda-runtime-design.md#68-ordinary-provided-runtime-installation-and-environment-consumption-d92)

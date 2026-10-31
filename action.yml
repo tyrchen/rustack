@@ -1,5 +1,5 @@
 name: "Rustack"
-description: "Start a high-performance AWS-compatible server (S3 + DynamoDB + SQS + SSM + SNS + Lambda) on localhost:4566 (drop-in replacement for LocalStack)"
+description: "Start a high-performance AWS-compatible server (S3, DynamoDB, Lambda and Step Functions) on localhost:4566 (drop-in replacement for LocalStack)"
 author: "Tyr Chen"
 
 branding:
@@ -28,11 +28,11 @@ inputs:
     required: false
     default: "30"
   access-key:
-    description: "AWS access key for authentication (set to empty to disable auth)"
+    description: "AWS access key (empty pair omits credentials; enabled strict services require a pair)"
     required: false
     default: "test"
   secret-key:
-    description: "AWS secret key for authentication (set to empty to disable auth)"
+    description: "AWS secret key (empty pair omits credentials; skip-auth flags still govern)"
     required: false
     default: "test"
   s3-skip-auth:
@@ -59,6 +59,10 @@ inputs:
     description: "Skip Lambda signature validation (true/false)"
     required: false
     default: "true"
+  stepfunctions-skip-auth:
+    description: "Skip Step Functions signature validation (true/false)"
+    required: false
+    default: "true"
   persistence:
     description: "Enable durable storage persistence (true/false)"
     required: false
@@ -79,66 +83,25 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Pull Rustack image
-      shell: bash
-      run: |
-        IMAGE="ghcr.io/tyrchen/rustack:${{ inputs.image-tag }}"
-        if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-          echo "Image $IMAGE already available locally"
-        else
-          docker pull "$IMAGE"
-        fi
-
-    - name: Start Rustack
+    - name: Validate, start and qualify Rustack
       id: start
       shell: bash
-      run: |
-        CONTAINER_ID=$(docker run -d \
-          --name rustack \
-          -p "${{ inputs.port }}:4566" \
-          -e "DEFAULT_REGION=${{ inputs.default-region }}" \
-          -e "LOG_LEVEL=${{ inputs.log-level }}" \
-          -e "S3_SKIP_SIGNATURE_VALIDATION=${{ inputs.s3-skip-auth }}" \
-          -e "DYNAMODB_SKIP_SIGNATURE_VALIDATION=${{ inputs.dynamodb-skip-auth }}" \
-          -e "SQS_SKIP_SIGNATURE_VALIDATION=${{ inputs.sqs-skip-auth }}" \
-          -e "SSM_SKIP_SIGNATURE_VALIDATION=${{ inputs.ssm-skip-auth }}" \
-          -e "SNS_SKIP_SIGNATURE_VALIDATION=${{ inputs.sns-skip-auth }}" \
-          -e "LAMBDA_SKIP_SIGNATURE_VALIDATION=${{ inputs.lambda-skip-auth }}" \
-          -e "ACCESS_KEY=${{ inputs.access-key }}" \
-          -e "SECRET_KEY=${{ inputs.secret-key }}" \
-          -e "PERSISTENCE=${{ inputs.persistence }}" \
-          -e "SERVICES=${{ inputs.services }}" \
-          "ghcr.io/tyrchen/rustack:${{ inputs.image-tag }}")
-
-        echo "container_id=$CONTAINER_ID" >> "$GITHUB_OUTPUT"
-        echo "endpoint=http://localhost:${{ inputs.port }}" >> "$GITHUB_OUTPUT"
-
-    - name: Wait for healthy
-      shell: bash
-      run: |
-        ENDPOINT="http://localhost:${{ inputs.port }}"
-        TIMEOUT=${{ inputs.wait-timeout }}
-        ELAPSED=0
-
-        echo "Waiting for Rustack at $ENDPOINT ..."
-
-        until curl -sf "$ENDPOINT/_localstack/health" > /dev/null 2>&1; do
-          if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-            echo "::error::Rustack did not become healthy within ${TIMEOUT}s"
-            docker logs rustack
-            exit 1
-          fi
-          sleep 0.5
-          ELAPSED=$((ELAPSED + 1))
-        done
-
-        echo "Rustack is ready at $ENDPOINT (S3 + DynamoDB + SQS + SSM + SNS + Lambda)"
-
-    - name: Export environment
-      shell: bash
-      run: |
-        echo "AWS_ENDPOINT_URL=http://localhost:${{ inputs.port }}" >> "$GITHUB_ENV"
-        echo "LOCALSTACK_ENDPOINT=http://localhost:${{ inputs.port }}" >> "$GITHUB_ENV"
-        echo "AWS_DEFAULT_REGION=${{ inputs.default-region }}" >> "$GITHUB_ENV"
-        echo "AWS_ACCESS_KEY_ID=${{ inputs.access-key }}" >> "$GITHUB_ENV"
-        echo "AWS_SECRET_ACCESS_KEY=${{ inputs.secret-key }}" >> "$GITHUB_ENV"
+      env:
+        RUSTACK_ACTION_ROOT: ${{ github.action_path }}
+        RUSTACK_ACTION_IMAGE_TAG: ${{ inputs.image-tag }}
+        RUSTACK_ACTION_PORT: ${{ inputs.port }}
+        RUSTACK_ACTION_DEFAULT_REGION: ${{ inputs.default-region }}
+        RUSTACK_ACTION_LOG_LEVEL: ${{ inputs.log-level }}
+        RUSTACK_ACTION_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        RUSTACK_ACTION_ACCESS_KEY: ${{ inputs.access-key }}
+        RUSTACK_ACTION_SECRET_KEY: ${{ inputs.secret-key }}
+        RUSTACK_ACTION_PERSISTENCE: ${{ inputs.persistence }}
+        RUSTACK_ACTION_SERVICES: ${{ inputs.services }}
+        RUSTACK_ACTION_S3_SKIP_AUTH: ${{ inputs.s3-skip-auth }}
+        RUSTACK_ACTION_DYNAMODB_SKIP_AUTH: ${{ inputs.dynamodb-skip-auth }}
+        RUSTACK_ACTION_SQS_SKIP_AUTH: ${{ inputs.sqs-skip-auth }}
+        RUSTACK_ACTION_SSM_SKIP_AUTH: ${{ inputs.ssm-skip-auth }}
+        RUSTACK_ACTION_SNS_SKIP_AUTH: ${{ inputs.sns-skip-auth }}
+        RUSTACK_ACTION_LAMBDA_SKIP_AUTH: ${{ inputs.lambda-skip-auth }}
+        RUSTACK_ACTION_STEPFUNCTIONS_SKIP_AUTH: ${{ inputs.stepfunctions-skip-auth }}
+      run: exec python3 -B "$RUSTACK_ACTION_ROOT/tools/github-action/runtime.py"

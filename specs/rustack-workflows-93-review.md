@@ -1910,3 +1910,80 @@ Committed D98 (658ad61) remains immutable. [D99/5.4a](./rustack-workflows-56-rel
 
 
 W378–W380 independently recheck clean before implementation; both design reviewers find no remaining concrete P0–P3 gap. Text checks validate18 files/613 relative links/322 fragments with zero errors and clean whitespace. Only the six design documents changed at this checkpoint; executable/source behavior remains unchanged and no D99 image/resource ran. Implementation and actual qualification remain required.
+
+
+**W381/P2 (first actual Action process controls):** Darwin returns EPERM from killpg(group,0) while the terminated direct child remains an unreaped zombie. The first retirement loop aborts before wait, producing ResourceWarning rather than joined evidence. A controlled same-child probe confirms signal0 succeeds before TERM, returns EPERM before wait and ESRCH after wait. Reap that owned child and independently retry group observation; persistent denial stays failure, never absence. Preserve the original failed control log; fresh process controls and independent recheck remain required.
+
+Independent root-Dockerfile development builds run while the Action-only module is implemented, before the final frozen qualification cohort; this overlaps independent build work without claiming actual runtime acceptance. The original ARM owner joins0 after224.857s, actual Linux/arm64 image b586dbc4e7b2dab086e1eafdd973b98c6685726c0ce19441616f91ce0e875486/21,198,862 bytes, unchanged source snapshot and all fourteen prior source IDs preserved. AMD development compilation remains live. No D99 resource or complete qualification has run.
+
+
+**W382/P2 (root Action source review):** curl --fail alone accepts3xx and reads ambient curl configuration, violating the exact local HTTP200 boundary. Put --disable first, disable proxies/other protocols, project the actual status separately and require200 without expanding the64KiB body budget; cover redirected status and argv policy.
+
+**W383/P2 (independent Action implementation review):** emitting defined empty ACCESS_KEY/SECRET_KEY fails the installed settings boundary. Omit the absent pair/provider, retain empty caller exports, and reject empty credentials with enabled strict flags before effects. Skip-auth flags still govern; do not silently invent test credentials.
+
+**W384/P2 (same review):** DOCKER_CONTEXT overrides DOCKER_HOST, but the initial client selected the host first. Resolve effective explicit context first, reject remote results even with a local host variable, then pin the local endpoint; add both-present controls.
+
+**W385/P2 (same review):** runner output paths are opened write-only before regular-file checks, so a FIFO can block before handoff/cleanup. Add nonblocking/no-follow open and an actual FIFO control proving prompt failure and exact server cleanup.
+
+**W386/P3 (same review):** a0.15s pre-spawn deadline can expire before a loaded child writes its PID marker, testing startup latency instead of retirement. Advance a controlled clock only after positive child entry, retain an independent real entry cutoff and assert actual PID absence.
+
+**W387/P3 (same review):** lone-child/flood tests do not qualify the promised descendant-group boundary. Add a causally entered real parent/descendant, retain both PIDs and require both absent with settled pipes after forced observation.
+
+**W388/P2 (same review):** the first Python control harness reused the new owner under test without its required independent Rust deadline/PID/capture boundary. Restore an explicitly selected exact Action process suite under the unchanged Rust Runner, with its own bounded manifest/listing; keep Native26/Docker76 counts separate. The normal YAML contract test remains independent of external resources. These implementation/control fixes require fresh component gates and independent recheck before closure.
+
+
+**W389/P2 (actual D99 ARM release consumer):** the design and public-configuration oracle assumed default docker cp assigns root0:0. The actual bounded read-back reports host501:20, exact296 bytes and0644, so the first sealed ARM owner fails closed before start (78.841s/exit2). The exact stopped server/volume and private evidence remain retained; the original source seal, log, receipt and raw public archive are immutable. Official CLI passes --archive to CopyUIDGID; pinned vendors/moby/daemon/archive_unix.go:136 and archive_tarcopyoptions_unix.go:18 bind that mode to Config.User. Correct the spec and command to explicit --archive, require the already validated numeric65532:65532, retain byte/mode/path/volume checks and add flag/ownership controls. Identity archives remain unchanged. Independent source review confirms this fix shape. The initial host gates finish on their original source before a new complete source cohort; fresh same-source full acceptance remains required.
+
+
+**W390/P3 (actual D99 AMD prerequisite):** codes/tests.rs:71 assigns0xff to offset8 of a random owner UUID, producing a no-op whenever that byte is already0xff. The second AMD focused owner fails case_02 in test-lambda-code-fixture before running either Release resource (99.341s/exit2); the production codec correctly accepts unchanged valid bytes. Preserve that original failure. Set this corruption test owner to fixed all0xff and XOR the owner byte so the mutation is guaranteed different and the prior defect is deterministically covered. Other malformed canonical fields and production code stay unchanged. The ongoing second ARM full/host cohorts finish before source changes; third complete-source acceptance must rerun all required gates.
+
+
+W389 reconciliation provenance: the first read-only manual observer stops before any mutation because its mount-count assertion expected one rather than the independently visible socket plus data mounts. Its partial two-command report/script and failed-owner companion remain retained. The second observer verifies both exact mounts, source/nonce/engine and never-started state, reads back the exact public archive, then removes only that stopped server and its unreferenced owned volume. All17 command results/hashes independently recheck; receipt SHA2564ec73cf52bd4b0cc05f277d2d48657bcd3423a4bef5c2281518e9502e3ff97f1. This post-failure reconciliation does not convert the original failed resource into passing acceptance.
+
+
+**W391/P2 (actual exported root-image filesystem audit):** Dockerfile top-level COPY /runtime/tmp→/tmp and /runtime/data→/data do not preserve the new destination directory modes. The saved actual arm64 root image has both0755, despite the builder correctly preparing1777/0700. Existing functional cases pass because UID65532 can still write; they do not prove the declared filesystem contract. The independent layer audit fails closed and retains its original archive/script/log. Prepare65532 ownership in the builder and copy the entire /runtime/ tree into final /, preserving nested data/tmp/run directory attributes. A small OCI-output-only COPY probe precedes source changes; final actual root images must independently prove file modes, ownership, static ELF architecture and image health under a new complete source cohort. Third-cohort full gates already in flight remain historical, not final D99 acceptance.
+
+
+**W392/P3 (independent artifact-gate design review):** spec56§3.3 initially rejected all nonregular members, conflicting with legitimate zero-size directories in both OCI outer archives and the required rootfs. Explicitly permit bounded canonical empty directories and regular files, reject every link/device/FIFO/other type and preserve duplicate/path/tree/size checks. Probe source/archive/log hashes and exact metadata independently recheck.
+
+
+**W393/P2 (independent artifact verifier review):** the prepared helper checked archive size only after docker image save joined. Captured image Size does not bound bytes emitted to disk. Install a helper-process POSIX RLIMIT_FSIZE hard/soft cap before CLI dispatch, preserving stricter inherited limits; every Runner child inherits it. Keep original child deadlines/retirement and post-join regular-file/link-count/byte checks. Add actual child output-limit proof.
+
+**W394/P3 (same review):** truncated gzip raises EOFError outside the prepared verifier exception normalization. Catch it as the fixed ImageError diagnostic and add truncated-header/trailer and CRC controls; never expose archive-derived tracebacks.
+
+
+**W395/P3 (artifact decompression recheck):** gzip also propagates zlib.error for a valid header with invalid DEFLATE data. Normalize that fixed failure alongside EOF/CRC errors and add a correctly rehashed blob/graph control with a reserved DEFLATE block. Kernel file-cap review otherwise rechecks clean.
+
+
+**W396/P2 (second independent artifact verifier review):** normalized tarfile iteration consumes GNU longname/longlink/PAX internally, bypassing physical type/count checks and permitting recursive metadata chains before validation. Add a bounded raw512-byte header/checksum/type/path/size/count pass first, permit only one bounded local timing PAX per member, reject all GNU/global/chained metadata, and compare normalized member identities to the raw table. Add hidden/chained metadata negatives and an allowed timing-PAX positive. Dockerfile/Make wiring and other artifact bounds independently review clean.
+
+
+### D99 fourth-source qualification in progress
+
+All source findings through W396 recheck clean. The actual root images now pass the permanent artifact gate on both engines, including exact0700/1777/0555 directory modes, numeric ownership, captured image/daemon/graph binding and static Linux ELF machines183/62. The installed archive controls pass13 cases, Action controls26 and shared server policy controls16. The complete fourth source cohort seals1250 non-Markdown files/modes (SHA256f4a37df83ed06f096f6363b8ec711ec16f4ffb4cf9478542f34547529c3dbc4f), independently rechecked.
+
+Both fourth focused2 owners physically join0 (ARM76.441s/AMD174.231s), with484 aggregate Rust passes/27 summaries and one gated recovery preflight each. The final ARM full76 owner joins0 after412.097s, with558 passes/33 summaries and every exact resource once. Fourth host qualification joins0 after252.740s: standard9; default4,218/429 gated/82 summaries; feature4,359/497/82; strict1,969/33/20; Native3,078/19/41; audit/deny0. The original host-fourth wrapper first exits1 before running any command because a cloned old command-report pathname was wrong; its original script/receipt remain retained. Corrected fourth-retry owner/results are separately recorded and provide final host evidence; no failure is rewritten to green.
+
+The earlier third cohort is preserved: both full76 owners join0 (ARM418.752s/AMD2461.369s), but W391's image filesystem defect prevents those successful functional runs from qualifying the final package. The fourth source fixes it and adds the artifact gate. Final fourth AMD full76, source/build-export/artifact reconciliation, exact postconditions, final current-summary review and commit are still pending at this checkpoint. No native-x86/reference/Desktop/rootless/performance/load/promotion or complete M4 acceptance follows from these local functional prerequisites.
+
+## D99 final qualification and exact postconditions
+
+Task5.4a is complete on the retained native-arm64 VZ and emulated-amd64 QEMU functional lanes. The actual root Dockerfile compiles Step Functions with the existing default CLI, keeps source Cargo defaults unchanged, includes the security patch and matches Rust1.99.1. Its required readonly artifact gate binds the actual daemon/image/graph, verifies static ELF machines183/62, exact scratch contents, data65532:65532/0700, tmp65532:65532/1777, run0:0/0555 and the unchanged real healthcheck. A kernel inherited file-size cap and bounded physical TAR/gzip parsing protect inspection; no test-only alternate image establishes this result.
+
+Under the final1250-source seal, both original focused owners physically join0 (ARM76.441s/AMD174.231s) and both full owners physically join0 (ARM412.097s/AMD2453.155s). Each full gate executes every one of76 exact required resources once, with558 aggregate Rust passes/33 summaries. Each focused gate executes its two required Release resources once, with484/27. One durable-recovery preflight is separately gated in each; only the full gate subsequently executes that actual required recovery resource. Full gates retain the existing GNU topology and all official/custom RIC, ZIP, SDK, callback, managed IaC and fault consumers. Signed SDK42/46, nested .sync:2 child50, warm counters1/2/3, expected gateway rejection, actual image health, persisted identities and physical shutdown all pass.
+
+The permanent archive controls pass13 cases; actual composite Action controls pass26 under the independent unchanged Rust Runner; shared Rust server/archive/policy controls pass16. Action1 is a distinct exact process-resource profile, separate from Native26 and Docker76/43 ordinary/eight suites. The normal Action YAML contract and malicious-input/privacy/timeout/descendant controls use the actual body. The default Action CI consumer now asserts pure ASL21→42 and exact four-event history; local checks do not claim a remote CI run. W373 publication remains open.
+
+The final host owner physically joins0 after252.740s: standard9, default workspace4,218/429 gated/82 summaries, feature workspace4,359/497/82, strict boundaries1,969/33/20, complete Native3,078/19/41 and fresh audit/deny0. The first fourth host orchestration attempt fails before running commands because an old report pathname was cloned incorrectly; its original script/receipt are retained. The corrected fourth-retry owner supplies the final host results. Earlier real failed resources/cohorts, initial unsealed builds, raw archives and diagnostic/lint failures remain historical evidence; none is edited into success. D97/D98 artifacts remain immutable.
+
+Final source projection matches eleven actual named build exports plus four unchanged prebuild references per engine, giving fifteen distinct source IDs. The independent artifact proof decodes each actual full-gate saved image, matches its immutable ID to the corresponding build export and rechecks literal filesystem/health/static-ELF expectations. Final exact postconditions verify all26 CLI results and stdout/stderr hashes: zero all-state containers, volumes and forbidden private/test/pull references; fifteen source IDs preserved per engine. Only the two exact D99 engine/ID/name/nonce/driver/scope-bound empty bridges are removed. No forced production cleanup, global prune, context/VM restart, registry publication, tag or git push occurs.
+
+| Bound artifact under /tmp | SHA256 |
+|---|---|
+| rustack-d99-resource-code-seal.json | f4a37df83ed06f096f6363b8ec711ec16f4ffb4cf9478542f34547529c3dbc4f |
+| rustack-d99-source-build-exports.json | 6acc679104120fb731c44c8af1517b7aca90c435c65cb9f65dcf2e640e65f2d1 |
+| rustack-d99-release-build-proof.json | c373903c2a8b4793d07297e3925416833998aba3e75d3319e7f2a221608d1da9 |
+| rustack-d99-final-host-report.json | dba0a12e0aeef67244c3a277503de518a5dc6f91237ce444c73bc4ef1f7aa59a |
+| rustack-d99-postconditions.json | 6fb8303471bfa3c88ef74312d145e6aace8e27fcac3ccd363ce1ed6eb72a52ae |
+
+W371/W372/W374/W375 and W378–W396 are23 valid in-scope findings (one P1/fourteen P2/eight P3), fixed and independently rechecked. W373, required arm64/reference/Desktop/rootless, remaining performance/load and complete M4 remain open. After all original D99 runs and cleanup completed, the user explicitly waived further Linux x86_64 validation; [D100](./rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) governs future work and supersedes historical native-x86 blockers without relabeling QEMU evidence. Existing x86_64 implementation support and already completed records remain intact.

@@ -2,7 +2,7 @@
 
 Status: M0 functionally qualified on retained P0 lanes; full M0–M4 release incomplete · Date: 2026-10-31
 
-Current checkpoint: retained native-arm64 VZ/emulated-Linux-amd64 QEMU functional lanes pass the complete D98 gate:74 exact resources/535 Rust cases per lane, including the actual Linux server container, Node24, S3/DynamoDB SDKs, nested .sync:2, image/ZIP archives, callbacks and managed Pulumi lifecycle/active-plugin Stop. The workflow/API/structured/nested/callback/persistence features and current-host Native qualification are implemented. Exact postconditions prove zero remnants and fourteen source IDs preserved per engine. See [final D98 qualification](./rustack-workflows-93-review.md#d98-final-qualification-and-exact-postconditions). Default release packaging W371–W375, native-x86/Linux reference performance, Desktop/rootless, remaining load/performance and complete M4 remain required.
+Current checkpoint: D99/5.4a qualifies the actual root release image and safe composite Action on the retained functional lanes. Each full gate executes76 exact resources with558 aggregate Rust passes/33 summaries; each focused gate executes2 exact resources with484/27. One1250-file source cohort, standard/strict/Native/security checks, actual image filesystem/ELF audits and exact zero-remnant/fifteen-source/two-owned-bridge postconditions pass. See [final D99 evidence](./rustack-workflows-93-review.md#d99-final-qualification-and-exact-postconditions). W373 promotion, required arm64/reference/Desktop/rootless platforms, remaining performance/load and complete M4 remain open. [D100](./rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation; existing QEMU evidence remains historical functional evidence.
 
 ## 1. Delivery principles
 
@@ -48,7 +48,7 @@ All milestone evidence refers to the [verification plan](./rustack-workflows-70-
 
 ## 3. Calendar and confidence
 
-Assume one experienced Rust engineer, a working Docker environment, preexisting gateway/Lambda hardening, no distributed persistence requirement and access to both Linux architectures plus Docker Desktop. Estimate 56–83 engineering days including P0, then add 25% for review, integration and platform troubleshooting: approximately **14–21 calendar weeks**. These are planning estimates based on identified work, not measured delivery velocity.
+Assume one experienced Rust engineer, a working Docker environment, preexisting gateway/Lambda hardening, no distributed persistence requirement and access to both Linux architectures plus Docker Desktop in the original estimate. D100 now waives Linux x86_64 validation; this does not supply a new measured delivery estimate. Estimate 56–83 engineering days including P0, then add 25% for review, integration and platform troubleshooting: approximately **14–21 calendar weeks**. These are planning estimates based on identified work, not measured delivery velocity.
 
 | User-visible checkpoint | Approximate cumulative calendar window |
 |---|---|

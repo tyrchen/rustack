@@ -19,7 +19,7 @@ use rustack_lambda_core::{
 };
 use uuid::Uuid;
 
-use super::cli::container_id;
+use super::{ImageProfile, cli::container_id};
 
 pub(super) const NONCE_LABEL: &str = "rustack.test.server-container.nonce";
 pub(super) const ROLE_LABEL: &str = "rustack.test.server-container.role";
@@ -40,7 +40,7 @@ pub(super) struct Inputs {
     pub architecture: String,
 }
 impl Inputs {
-    pub fn load() -> Result<Self> {
+    pub fn load(profile: ImageProfile) -> Result<Self> {
         let program = env::var("RUSTACK_DOCKER_BIN")?;
         ensure!(
             program.len() <= 4096
@@ -60,7 +60,7 @@ impl Inputs {
             network != "none",
             "server container requires an explicit user bridge"
         );
-        let image = image_variable("RUSTACK_SERVER_IMAGE")?;
+        let image = image_variable(profile.variable())?;
         let sdk_image = image_variable("RUSTACK_HANDLER_SDK_IMAGE")?;
         let relay = image_variable("RUSTACK_RUNTIME_IMAGE")?;
         let architecture = super::super::process::architecture()?;

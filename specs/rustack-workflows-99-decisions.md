@@ -744,5 +744,15 @@ Reuse the pinned provided.al2023 base for the GNU-linked qualification CLI and t
 - Context: D98 qualifies a purpose-built GNU fixture; W371/W372/W374/W375 expose distinct release build/Action defects.
 - Decision: keep the source stepfunctions feature explicit, compile it into the normal root Docker image, preserve scratch/non-root/health behavior and all security patches, and reuse the D98 owner through an explicit Release profile. Copy only public budget YAML into the owned volume; no extra host bind or image-baked credentials/configuration. Route Action inputs through validated env values/private env files and a real monotonic readiness deadline.
 - Why: actual distribution artifacts and shell boundaries need consuming evidence; a second runtime/Runner or an alternate test image cannot establish it. Existing workspace YAML parsing is reused only for trusted Action controls.
-- Remaining: W373 promotion, native-x86/reference/Desktop/rootless/performance/load and complete M4 stay required. No image publication or push is performed by local qualification.
+- Remaining: W373 promotion, Linux arm64 reference/Desktop/rootless/performance/load and complete M4 stay required. D100 removes further Linux x86_64 validation. No image publication or push is performed by local qualification.
 - Pinned by: [release image design](./rustack-workflows-56-release-image-design.md). Date:2026-10-31.
+
+- Executed evidence: [final D99 qualification](./rustack-workflows-93-review.md#d99-final-qualification-and-exact-postconditions).
+
+## D100 — Linux x86_64 validation is waived
+
+- Authority: the user's explicit2026-10-31 instruction, translated as “No need to validate Linux x86_64.” This supersedes earlier requirements for native Linux x86_64 and further emulated-amd64 validation; it is an intentional scope change, not missing evidence or a silent skip.
+- Decision: schedule no further Linux x86_64 builds/tests or native-x86 runner acquisition for this objective. Retain already completed D99 amd64/QEMU results and source artifacts as historical functional evidence; do not relabel them native/performance evidence. Existing x86_64 code/image support and existing general CI configuration are not removed; the agent will not initiate additional dedicated Linux x86_64 qualification for this objective.
+- Required platform scope: Linux arm64 and macOS arm64/Desktop, plus rootless and the recorded Linux reference/performance/load obligations. The reference machine is native Linux arm64 with4 dedicated CPUs,8GiB RAM and local Docker. Tests requiring two daemon installations may use two distinct arm64 engines; different CPU architectures are unnecessary.
+- Release consequence: native Linux x86_64 is no longer a prerequisite or blocker for5.3/5.4/M4. W373 exact-image/same-commit promotion, required arm64 platforms, reference performance and remaining load/correctness gates stay required. No new remote CI execution, publication, push, VM/context restart or unrelated cleanup is authorized by this scope change.
+- Chronology: all D99 focused/full AMD runs had completed and their original owners joined before this instruction arrived; final resource cleanup had also completed. Preserve the historical “both lanes” contracts/results. Apply this decision when interpreting their older pending native-x86 clauses.

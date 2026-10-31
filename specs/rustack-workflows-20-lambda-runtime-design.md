@@ -2,6 +2,8 @@
 
 Status: implementation contract; relay feasibility validated with platform qualifications · Depends on: [PRD](./rustack-workflows-00-prd.md), [Lambda hardening](./rustack-lambda-hardening-design.md)
 
+Current platform scope: [D100](./rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation. Historical/native-x86 pending clauses do not impose new runner or test requirements; existing architecture support and completed evidence remain. Required arm64/Desktop/rootless/reference and other release gates still apply.
+
 ## 1. Ownership and execution contract
 
 Extend `rustack-lambda-core::executor` with DockerExecutor implementing the existing Executor interface. Lambda provider remains the only invocation entry point: HTTP Invoke, Step Functions and future event sources share version resolution, reserved concurrency, 32 global execution permits, default 8 permits per logical function, and 128 accepted asynchronous-work slots. Bridges must not bypass the provider by invoking an executor directly.

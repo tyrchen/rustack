@@ -29,7 +29,23 @@ pub(super) fn identity(owner: &[u8], daemon: &[u8], engine: Uuid) -> Result<Iden
     Ok(Identity { owner: id, engine })
 }
 
-fn record(raw: &[u8], name: &str, magic: [u8; 8], length: usize) -> Result<Vec<u8>> {
+#[derive(Debug, Clone, Copy)]
+struct Member<'a> {
+    name: &'a str,
+    length: usize,
+    uid: u64,
+    gid: u64,
+    mode: u32,
+}
+
+fn member(raw: &[u8], expected: Member<'_>) -> Result<Vec<u8>> {
+    let Member {
+        name,
+        length,
+        uid,
+        gid,
+        mode,
+    } = expected;
     ensure!(
         (2048..=32768).contains(&raw.len()) && raw.len().is_multiple_of(512),
         "identity archive byte bound"
@@ -71,9 +87,9 @@ fn record(raw: &[u8], name: &str, magic: [u8; 8], length: usize) -> Result<Vec<u
                 && path.as_ref() == name.as_bytes()
                 && entry.header().entry_type().is_file()
                 && entry.size() == u64::try_from(length)?
-                && entry.header().uid()? == 65532
-                && entry.header().gid()? == 65532
-                && entry.header().mode()? == 0o600
+                && entry.header().uid()? == uid
+                && entry.header().gid()? == gid
+                && entry.header().mode()? == mode
                 && entry.link_name_bytes().is_none(),
             "identity archive member differs"
         );
@@ -89,6 +105,20 @@ fn record(raw: &[u8], name: &str, magic: [u8; 8], length: usize) -> Result<Vec<u
         "identity archive terminator or trailing content"
     );
     let bytes = payload.context("missing installation identity")?;
+    Ok(bytes)
+}
+
+fn record(raw: &[u8], name: &str, magic: [u8; 8], length: usize) -> Result<Vec<u8>> {
+    let bytes = member(
+        raw,
+        Member {
+            name,
+            length,
+            uid: 65532,
+            gid: 65532,
+            mode: 0o600,
+        },
+    )?;
     let end = length.checked_sub(32).context("identity checksum length")?;
     let data = bytes.get(..end).context("identity checksum payload")?;
     ensure!(
@@ -97,6 +127,25 @@ fn record(raw: &[u8], name: &str, magic: [u8; 8], length: usize) -> Result<Vec<u
         "installation identity checksum or generation differs"
     );
     Ok(bytes)
+}
+
+pub(super) fn configuration(raw: &[u8], expected: &[u8]) -> Result<()> {
+    ensure!(
+        (1..=4096).contains(&expected.len()),
+        "public configuration byte bound"
+    );
+    let observed = member(
+        raw,
+        Member {
+            name: "qualification.yaml",
+            length: expected.len(),
+            uid: 65532,
+            gid: 65532,
+            mode: 0o644,
+        },
+    )?;
+    ensure!(observed == expected, "copied public configuration differs");
+    Ok(())
 }
 
 fn timing(mut bytes: &[u8]) -> Result<()> {
@@ -152,6 +201,35 @@ mod tests {
     use tar::{Builder, EntryType, Header};
 
     use super::*;
+
+    #[test]
+    fn test_should_require_exact_public_config_bytes_container_ownership_and_readable_mode()
+    -> Result<()> {
+        let bytes = b"budgets:\n  startupSeconds: 180\n";
+        for (name, uid, gid, mode, accepted) in [
+            ("qualification.yaml", 65532, 65532, 0o644, true),
+            ("other.yaml", 65532, 65532, 0o644, false),
+            ("qualification.yaml", 0, 0, 0o644, false),
+            ("qualification.yaml", 501, 20, 0o644, false),
+            ("qualification.yaml", 65532, 0, 0o644, false),
+            ("qualification.yaml", 0, 65532, 0o644, false),
+            ("qualification.yaml", 65532, 65532, 0o600, false),
+        ] {
+            let mut builder = Builder::new(Vec::new());
+            let mut header = Header::new_ustar();
+            header.set_entry_type(EntryType::Regular);
+            header.set_uid(uid);
+            header.set_gid(gid);
+            header.set_mode(mode);
+            header.set_size(u64::try_from(bytes.len())?);
+            header.set_cksum();
+            builder.append_data(&mut header, name, bytes.as_slice())?;
+            let raw = builder.into_inner()?;
+            assert_eq!(configuration(&raw, bytes).is_ok(), accepted);
+            assert!(configuration(&raw, b"budgets:\n  startupSeconds: 181\n").is_err());
+        }
+        Ok(())
+    }
 
     fn payload(magic: [u8; 8], owner: Uuid, engine: Option<Uuid>) -> Vec<u8> {
         let mut bytes = magic.to_vec();

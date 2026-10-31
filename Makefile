@@ -1359,6 +1359,7 @@ WORKFLOWS_DOCKER_TEST_ENV = PATH="$(dir $(WORKFLOWS_DOCKER_BIN)):$(PATH)" \
 	RUSTACK_CALLBACK_IMAGE="rustack-callback:$(WORKFLOWS_ARCH)" \
 	RUSTACK_PULUMI_IMAGE="rustack-pulumi:$(WORKFLOWS_ARCH)" \
 	RUSTACK_SERVER_IMAGE="$(WORKFLOWS_SERVER_IMAGE)" \
+	RUSTACK_RELEASE_IMAGE="$(WORKFLOWS_RELEASE_IMAGE)" \
 	RUSTACK_SERVER_DAEMON_SOCKET="$(WORKFLOWS_DOCKER_DAEMON_SOCKET)" \
 	RUSTACK_SERVER_SOCKET_GID="$(WORKFLOWS_DOCKER_DAEMON_SOCKET_GID)" \
 	RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" \
@@ -1433,7 +1434,7 @@ test-lambda-node-docker:
 
 # D95: one ordinary CLI cohort and a complete sequential fixture prerequisite set.
 lambda-docker-fixtures:
-	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image lambda-pulumi-fixture-image lambda-workflows-server-image workflows-sdk-python test-workflows-iac-fixture test-workflows-server-fixture test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image lambda-pulumi-fixture-image lambda-workflows-server-image lambda-workflows-release-image workflows-sdk-python test-workflows-iac-fixture test-workflows-server-fixture test-workflows-release-fixture test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
 
 lambda-handler-sdk-fixture-image: lambda-pull-fixture-image
 	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/handler-sdk.Dockerfile --tag "rustack-handler-sdk:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
@@ -1561,3 +1562,48 @@ test-workflows-server-docker:
 	done
 
 .PHONY: test-workflows-server-fixture test-workflows-server-docker
+
+# D99: the actual release recipe; source defaults remain unchanged.
+WORKFLOWS_RELEASE_IMAGE ?= rustack/workflows-release:integration-$(WORKFLOWS_ARCH)
+WORKFLOWS_RELEASE_BUILD_JOBS ?= 2
+
+lambda-workflows-release-image:
+	@case "$(WORKFLOWS_ARCH)" in arm64|amd64) ;; *) echo "WORKFLOWS_ARCH must be arm64 or amd64" >&2; exit 1;; esac
+	@case "$(WORKFLOWS_RELEASE_BUILD_JOBS)" in 1|2|3|4|5|6|7|8) ;; *) echo "WORKFLOWS_RELEASE_BUILD_JOBS must be between 1 and 8" >&2; exit 1;; esac
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --build-arg "CARGO_BUILD_JOBS=$(WORKFLOWS_RELEASE_BUILD_JOBS)" --file Dockerfile --tag "$(WORKFLOWS_RELEASE_IMAGE)" .
+	@$(MAKE) --no-print-directory test-workflows-release-image
+
+test-workflows-release-image:
+	@python3 -B tests/workflows/release_image.py "$(WORKFLOWS_ARCH)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_RELEASE_IMAGE)" "$(WORKFLOWS_DOCKER_BIN)"
+
+.PHONY: lambda-workflows-release-image test-workflows-release-image
+
+# Independent process-control qualification, separate from Native/Docker resources.
+test-workflows-action-manifest:
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/workflows -p test_action_required_suites.py -v
+	@set -eu; action_inventory_dir=$$(mktemp -d); chmod 700 "$$action_inventory_dir"; \
+	cargo test --locked -p rustack-cli --test workflows_action -- --ignored --list --color never >"$$action_inventory_dir/composite-action.txt"; \
+	python3 -B tests/workflows/action_required_suites.py "$$action_inventory_dir"; \
+	rm -r "$$action_inventory_dir"
+
+test-workflows-action-fixture: workflows-sdk-python test-workflows-action-manifest
+	@RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" cargo test --locked -p rustack-cli --test workflows_action test_should_execute_actual_action_process_controls -- --ignored --exact --nocapture
+
+.PHONY: test-workflows-action-manifest test-workflows-action-fixture
+
+# Actual release image policy, Action and complete both-topology regression inputs.
+test-workflows-release-fixture: test-workflows-action-fixture
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/workflows -p test_release_image.py -v
+	@cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) container_server::
+	@cargo clippy --locked -p rustack-cli --test workflows_action --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) --no-deps -- -D warnings -W clippy::pedantic
+
+test-workflows-release-docker:
+	@test -n "$(WORKFLOWS_DOCKER_DAEMON_SOCKET)" && test -n "$(WORKFLOWS_DOCKER_DAEMON_SOCKET_GID)"
+	@$(MAKE) --no-print-directory lambda-docker-fixtures
+	@set -eu; for release_image_case in \
+		test_should_execute_image_sdk_and_nested_asl_from_the_release_image \
+		test_should_refuse_unreachable_release_image_gateway_and_join_startup_cleanup; do \
+		$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) "$$release_image_case" -- --ignored --exact --nocapture --test-threads=1; \
+	done
+
+.PHONY: test-workflows-release-fixture test-workflows-release-docker

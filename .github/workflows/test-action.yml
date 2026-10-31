@@ -31,13 +31,13 @@ jobs:
     name: "Build Docker image"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           load: true
@@ -49,7 +49,7 @@ jobs:
         run: docker save "$IMAGE" | gzip > /tmp/rustack-image.tar.gz
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rustack-image
           path: /tmp/rustack-image.tar.gz
@@ -63,7 +63,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -246,6 +246,59 @@ jobs:
           aws lambda list-functions | jq -e '.Functions'
           aws lambda get-account-settings | jq -e '.AccountLimit'
           echo "Lambda OK"
+
+      - name: "Step Functions: execute pure ASL and verify exact history"
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=3s 60s bash <<'SMOKE'
+          set -euo pipefail
+          [[ "$AWS_ENDPOINT_URL" =~ ^http://localhost:[0-9]{1,5}$ ]]
+          unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN AWS_ENDPOINT_URL_STEPFUNCTIONS
+          export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+          export AWS_MAX_ATTEMPTS=1 AWS_EC2_METADATA_DISABLED=true AWS_PAGER=""
+          sfn() {
+            timeout --signal=TERM --kill-after=2s 8s aws \
+              --endpoint-url "$AWS_ENDPOINT_URL" --region "$AWS_DEFAULT_REGION" \
+              --cli-connect-timeout 2 --cli-read-timeout 3 --no-cli-pager --no-paginate \
+              stepfunctions "$@"
+          }
+          machine=""
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if [ -n "$machine" ]; then
+              sfn delete-state-machine --state-machine-arn "$machine" || status=1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          name="action-pure-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          machine=$(sfn create-state-machine --name "$name" --type STANDARD \
+            --role-arn arn:aws:iam::000000000000:role/ActionPure \
+            --definition '{"StartAt":"Double","States":{"Double":{"Type":"Pass","Parameters":{"result.$":"States.MathAdd($.n, $.n)"},"End":true}}}' \
+            --query stateMachineArn --output text)
+          execution=$(sfn start-execution --state-machine-arn "$machine" --input '{"n":21}' \
+            --query executionArn --output text)
+          for attempt in $(seq 1 20); do
+            result=$(sfn describe-execution --execution-arn "$execution")
+            state=$(jq -er '.status' <<<"$result")
+            [ "$state" != RUNNING ] && break
+            sleep 0.2
+          done
+          jq -e '.status == "SUCCEEDED" and (.output | fromjson) == {result:42}' <<<"$result"
+          history=$(sfn get-execution-history --execution-arn "$execution" --max-results 10)
+          jq -e '
+            (has("nextToken") | not) and
+            [.events[].type] == ["ExecutionStarted","PassStateEntered","PassStateExited","ExecutionSucceeded"] and
+            [.events[].id] == [1,2,3,4] and [.events[].previousEventId] == [0,1,2,3] and
+            (.events[0].executionStartedEventDetails.input | fromjson) == {n:21} and
+            .events[1].stateEnteredEventDetails.name == "Double" and
+            (.events[2].stateExitedEventDetails.output | fromjson) == {result:42} and
+            (.events[3].executionSucceededEventDetails.output | fromjson) == {result:42}
+          ' <<<"$history"
+          echo "Step Functions pure ASL 21 -> 42 and exact four-event history OK"
+          SMOKE
 
       # ── CloudWatch smoke test ─────────────────────────────────────────
       - name: "CloudWatch: put metric + list metrics"
@@ -462,7 +515,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -514,7 +567,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -557,7 +610,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -596,7 +649,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -671,7 +724,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -712,7 +765,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image
@@ -741,7 +794,7 @@ jobs:
     needs: build-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load Docker image
         uses: ./.github/actions/load-image

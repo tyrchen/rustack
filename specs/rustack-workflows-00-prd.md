@@ -2,7 +2,7 @@
 
 Status: implementation in progress; full M0–M4 incomplete · Date: 2026-10-31 · Delivery: M0–M4
 
-Real image/SDK/callback/IaC and server-in-container consumers are functionally qualified through D98 on native-arm64 VZ/emulated-amd64 QEMU lanes; see [final D98 qualification](./rustack-workflows-93-review.md#d98-final-qualification-and-exact-postconditions). Workflow/API/structured/nested/callback/persistence and current-host Native qualification are implemented. Default release packaging, native-x86/reference/Desktop/rootless, remaining performance/load and complete M0–M4 acceptance remain open.
+D99/5.4a qualifies the actual root release image and safe composite Action on the retained functional lanes. Each full gate executes76 exact resources with558 aggregate Rust passes/33 summaries; each focused gate executes2 exact resources with484/27. One1250-file source cohort, standard/strict/Native/security checks, actual image filesystem/ELF audits and exact zero-remnant/fifteen-source/two-owned-bridge postconditions pass. See [final D99 evidence](./rustack-workflows-93-review.md#d99-final-qualification-and-exact-postconditions). W373 promotion, required arm64/reference/Desktop/rootless platforms, remaining performance/load and complete M4 remain open. [D100](./rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation; existing QEMU evidence remains historical functional evidence. Workflow/API/structured/nested/callback/persistence and current-host Native qualification are implemented.
 
 ## 1. Problem and vision
 
@@ -31,7 +31,7 @@ Primary users maintain Rust, Python or Node Lambda projects with CDK/Terraform/P
 | G2 | Work with ordinary SDKs | Rust SDK and boto3 create/start/describe/history/stop scenarios pass without Rustack-only required wire fields |
 | G3 | Make core ASL trustworthy | Every required case in the [verification matrix](./rustack-workflows-70-verification-plan.md) passes |
 | G4 | Implement actual `.sync` | Parents await child termination; `.sync` and `.sync:2` preserve different Output types; invalid `lambda:invoke.sync` is rejected during creation |
-| G5 | Reuse deployment artifacts | Native-architecture Linux x86_64, Linux arm64 and macOS arm64 + Docker Desktop lanes pass; the prepared example completes within five minutes excluding builds and pulls |
+| G5 | Reuse deployment artifacts | Required Linux arm64 and macOS arm64 + Docker Desktop lanes pass (D100 waives Linux x86_64 validation); the prepared example completes within five minutes excluding builds and pulls |
 | G6 | Bound and clean up work | Overload is explicit; Stop, timeout and shutdown leave no unowned tasks or containers; cleanup failures remain tracked and diagnosable |
 | G7 | Expose compatibility honestly | Unsupported syntax and integrations fail validation at a precise location; capabilities distinguish compiled, enabled, probed and limited behavior |
 
