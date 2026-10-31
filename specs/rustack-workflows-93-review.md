@@ -1813,3 +1813,13 @@ W344–W364 are fixed and independently rechecked: twelve P2, nine P3, no P0/P1 
 
 
 The final independent persisted-evidence review recomputes all78 source hashes, all52 CLI stdout/stderr hashes, exact full/focused inventories and original owner receipts, host argv/results/logs, thirteen-source/nine-export/four-unchanged projections, image sizes and exact bridge authority/removals without mismatch. W363–W364 are independently rechecked clean. Final text checks validate580 relative links/313 fragments across16 spec/guide/index files with zero errors; working/staged whitespace checks pass. All55 named staged paths match working bytes and all qualified implementation blobs match their78-source seal. Rust verification for these final documentation-only corrections is not applicable; the complete final78 Rust/resource gates above remain authoritative.
+
+
+## P5 server-in-container design preflight (D98)
+
+D97 is committed as b5abb6f with its complete immutable evidence. D98 now polishes [the separate containerized-server topology](./rustack-workflows-55-server-container-design.md) before implementation. Official Docker bind/network/run documentation and pinned Moby archive code distinguish client/daemon socket paths, internal DNS, bounded env-file input and persistent-volume records. Read-only local VM preflight observes /var/run/docker.sock root:GID991/mode0660 on both selected profiles. Existing workspace tar0.4.46 is verified current and selected only as a test dependency, with raw bounded parsing/no extraction. No D98 image, server container, volume, source/code/Make implementation or required resource has run/changed at this checkpoint; design review and all actual acceptance remain required.
+
+**W365/P2 (independent D98 design review):** ownership capture was specified only after readiness, while the expected unreachable-gateway resource fails before readiness and still needs bound owner-scoped cleanup. Require that negative path to validate the same actual persisted owner/daemon records after its verified nonzero exit, before inventory/removal. Missing/invalid/unbound records fail and retain resources/evidence; a broad empty inventory cannot substitute. The executable design is corrected before implementation.
+
+
+W365 is independently rechecked clean before implementation; the other ownership/topology review has no concrete finding. Design-only text checks validate17 files/592 relative links/314 fragments with zero errors and clean whitespace. No Rust execution/toolchain behavior has changed, so Rust verification is not applicable to this design checkpoint.

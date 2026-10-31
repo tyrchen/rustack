@@ -730,3 +730,10 @@ The pinned [Pulumi process study](../docs/research/study-pulumi-process-ownershi
 
 
 D97 actual-consumer refinements: Docker GET archive cannot see live tmpfs because Moby creates a private mount view. Use a pinned read-only observer in the same namespace with independent host decoding and same-exec successful-termination proof. The actual Pulumi provider also lists versions while reading an unpublished resource. Support an authenticated/scope-validated existing-machine empty inventory, with no publication, qualified ARN or mutation support. These are compatibility corrections required by actual consumer evidence; they do not broaden the versioning product scope.
+
+
+## D98 — Qualify a separate containerized server owner and an internal DNS gateway
+
+Use the actual Linux CLI on the same explicit user bridge as its existing function/relay pairs. Keep client Unix socket, daemon-side socket source and handler gateway origin distinct; mount the socket only into the trusted nonroot server with an explicit supplementary GID, and use its known unique DNS name at4566 for container-origin traffic. External SDK clients use an independently inspected loopback publication. A separate retained fixture owner holds server, named volume, private env file and all CLI/SDK waits; it does not reinterpret the existing host-process Child. Existing production startup/shutdown and function isolation remain authoritative.
+
+Reuse the pinned provided.al2023 base for the GNU-linked qualification CLI and the existing explicit SDK credential environment, so neither a new base nor a credential copy channel is needed. Read only bounded owner/engine records from the actual persistent volume, with the existing workspace tar crate's raw iteration and no host extraction. Treat uncertainty/forced effects as failure with retained evidence, and require clean production runtime shutdown before removing the exact stopped server/volume. See [the executable contract](./rustack-workflows-55-server-container-design.md). This design does not certify the default release Dockerfile or missing native/reference/platform lanes.

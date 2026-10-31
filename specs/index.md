@@ -33,6 +33,7 @@ D89/5.1a is implemented and independently reviewed: [provided-runtime ZIP delive
 | 30 | [ASL engine](./rustack-workflows-30-asl-design.md) | Scoped compiler, bounded frame scheduler and async resource owner, causal history, retries and deadlines |
 | 40 | [Task integrations](./rustack-workflows-40-integrations-design.md) | Real Lambda invocation, nested `.sync`/`.sync:2`, callbacks and heartbeats |
 | 50 | [IaC consumer](./rustack-workflows-50-iac-design.md) | Pinned Pulumi inside managed image Lambda, independent lifecycle/privacy oracles and plugin retirement |
+| 55 | [Server container](./rustack-workflows-55-server-container-design.md) | Actual Linux server, explicit socket/DNS/volume ownership, signed SDK/nested ASL and joined shutdown |
 | 60 | [Operations](./rustack-workflows-60-operations-design.md) | YAML configuration, budgets, topology, shutdown and snapshots |
 | 70 | [Verification plan](./rustack-workflows-70-verification-plan.md) | Acceptance matrix, security boundaries, SDK/platform coverage and performance budgets |
 | 80 | [Roadmap](./rustack-workflows-80-roadmap.md) | User-visible M0–M4 outcomes and calendar assumptions |
