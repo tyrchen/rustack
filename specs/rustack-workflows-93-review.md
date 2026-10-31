@@ -1895,3 +1895,18 @@ W365–W370 and W376–W377 are eight valid in-scope findings (four P2/four P3),
 
 
 Final independent source/evidence review recomputes all103 source hashes, exact full/focused names/counts/receipts, host/ELF/tool/export evidence and all26 CLI stdout/stderr hashes clean. Final actual-file documentation recheck confirms W376/W377 fixed and eight in-scope findings closed; W371–W375 remain open for5.4. Final text checks validate17 files/600 relative links/320 fragments with zero errors; whitespace checks pass. No Rust source changes follow the frozen successful cohort.
+
+
+## D99 release image and Action design preflight
+
+Committed D98 (658ad61) remains immutable. [D99/5.4a](./rustack-workflows-56-release-image-design.md) now specifies actual root-Dockerfile qualification and W371/W372/W374/W375 remediation before source changes. Current official GitHub/Docker/YAML references are checked; Docker Hub tag metadata is unavailable through the web tool and is not treated as verified image provenance. Actual source builds must record their resolved builder/compiler/platform instead. The Action tests reuse the existing workspace YAML parser edge rather than silently upgrading production configuration. W373 and the remaining native/reference/platform/performance/load/full-M4 requirements remain open. No D99 source/image/resource has changed/run at this design checkpoint.
+
+
+**W378/P2 (independent D99 design reviews):** the initial Action design bounds readiness curl but gives Docker image lookup/pull/run no finite observer/termination/join contract. Specify one launch cutoff, separate finite per-command caps, one bounded direct subprocess owner, exact group termination/reaping and pre-effect nonsecret uncertainty retention; add real hung-child/pipe controls. Do not silently redefine wait-timeout to include image pulling.
+
+**W379/P2 (same preflight):** the proposed region allowlist permits uppercase, while production settings.rs:928–934 rejects it. Narrow the Action boundary to lowercase [a-z0-9][a-z0-9-]{0,63}, rejecting before Docker/runner output effects; do not widen production settings.
+
+**W380/P2 (same preflight):** localhost HTTP200 alone does not establish readiness of the returned Action container. Require exact daemon/CID/source/nonce/port/running/healthy affiliation around a structured /_health/ready observation under one monotonic cutoff, unchanged StartedAt and meaningful wrong-publication/exited-CID/unrelated200/ready=false controls. All three design gaps are corrected before implementation; independent recheck remains required.
+
+
+W378–W380 independently recheck clean before implementation; both design reviewers find no remaining concrete P0–P3 gap. Text checks validate18 files/613 relative links/322 fragments with zero errors and clean whitespace. Only the six design documents changed at this checkpoint; executable/source behavior remains unchanged and no D99 image/resource ran. Implementation and actual qualification remain required.
