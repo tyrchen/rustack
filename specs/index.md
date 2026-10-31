@@ -32,6 +32,7 @@ D89/5.1a is implemented and independently reviewed: [provided-runtime ZIP delive
 | 20 | [Lambda runtime](./rustack-workflows-20-lambda-runtime-design.md) | Image execution, typed operator settings, controlled pulls, container-origin endpoint proofs, Docker relay, revisions, pooling and cleanup |
 | 30 | [ASL engine](./rustack-workflows-30-asl-design.md) | Scoped compiler, bounded frame scheduler and async resource owner, causal history, retries and deadlines |
 | 40 | [Task integrations](./rustack-workflows-40-integrations-design.md) | Real Lambda invocation, nested `.sync`/`.sync:2`, callbacks and heartbeats |
+| 50 | [IaC consumer](./rustack-workflows-50-iac-design.md) | Pinned Pulumi inside managed image Lambda, independent lifecycle/privacy oracles and plugin retirement |
 | 60 | [Operations](./rustack-workflows-60-operations-design.md) | YAML configuration, budgets, topology, shutdown and snapshots |
 | 70 | [Verification plan](./rustack-workflows-70-verification-plan.md) | Acceptance matrix, security boundaries, SDK/platform coverage and performance budgets |
 | 80 | [Roadmap](./rustack-workflows-80-roadmap.md) | User-visible M0–M4 outcomes and calendar assumptions |
@@ -74,6 +75,8 @@ D94 is implemented and independently reviewed: [official Node image consumption]
 D95 is implemented and independently reviewed: [explicit local handler SDK context](./rustack-workflows-20-lambda-runtime-design.md#418-explicit-local-handler-sdk-environment-d95) binds operator-selected local credentials and endpoint injection to the exact qualified runtime scope, omits injected credentials from archives and isolates warm contexts. Actual default-provider Node clients3.1105.0 complete strict-auth S3/DynamoDB cold/warm work and precise negative authorization cases. Both full68-resource gates pass509 Rust cases/29 summaries; both current-source three-consumer gates pass71 cases/seven summaries after the reviewed equivalent owner relocation. Standard/strict/Native/security and exact zero-remnant/eleven-source/two-owned-bridge retirement checks pass. Task5.3b/L10 closes; image callbacks/IaC/server-in-container/reference/platform and full M4 remain active.
 
 D96 is implemented and independently reviewed: [real image SDK callbacks](./rustack-workflows-40-integrations-design.md#56-real-image-sdk-callbacks-and-independent-event-worker-d96) use a managed Node dispatcher, an independently accepted Event worker and safe local DynamoDB gates. Both retained functional lanes pass all nine actual SDK3.1105.0 modes, both exact focused resources and all70 full resources/519 Rust cases/30 summaries. Final host/strict/Native/security gates and exact zero-remnant/twelve-source/two-owned-bridge retirement checks pass under41 unchanged source hashes. W333–W343 are fixed/rechecked; see [final D96 qualification](./rustack-workflows-93-review.md#final-d96-qualification). Task4.3/5.3c closes; IaC/server-in-container/reference/platform and full M0–M4 release remain active.
+
+D97 is implemented and independently reviewed: [Pulumi image-Lambda IaC consumer](./rustack-workflows-50-iac-design.md) runs the actual18-command lifecycle with independent SDK/current-state/privacy oracles and active-plugin Stop under the managed function owner. Both retained lanes pass the two focused resources and all72 full resources/521 Rust cases/30 summaries under78 sealed source hashes. Standard/strict/Native/security gates and exact26-command zero-remnant/thirteen-source/two-owned-bridge postconditions pass. W344–W364 are fixed/rechecked; see [final D97 qualification](./rustack-workflows-93-review.md#d97-final-qualification-and-exact-postconditions). Task5.3d closes; server-in-container/native-reference/platform and complete5.4 remain required.
 
 ## 推荐阅读顺序
 
@@ -137,5 +140,3 @@ D96 is implemented and independently reviewed: [real image SDK callbacks](./rust
 | [ruststack-snapshot-binary-archive-design](./ruststack-snapshot-binary-archive-design.md) | Design：当前二进制归档目标 |
 | [ruststack-snapshot-impl-plan](./ruststack-snapshot-impl-plan.md) | Impl plan：依赖顺序与实施阶段 |
 | [ruststack-snapshot-verification-plan](./ruststack-snapshot-verification-plan.md) | Verification plan：快照测试与验收 |
-
-D97 is in design preflight: [Pulumi image-Lambda IaC consumer](./rustack-workflows-50-iac-design.md) fixes CLI/provider/SDK provenance and uses the existing managed function namespace to own independently grouped plugins. Actual create/refresh/update/destroy, unsupported-profile and active-plugin Stop acceptance remain pending.

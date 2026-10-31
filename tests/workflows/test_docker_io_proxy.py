@@ -53,14 +53,16 @@ def daemon(handler, connections=1):
         try:
             yield proxy
         finally:
-            proxy.close()
-            stop.set()
-            for stream in streams:
-                with contextlib.suppress(OSError):
-                    stream.shutdown(socket.SHUT_RDWR)
-            listener.close()
-            worker.join(3)
-            assert not worker.is_alive(), "controlled daemon did not join"
+            try:
+                proxy.close()
+            finally:
+                stop.set()
+                for stream in streams:
+                    with contextlib.suppress(OSError):
+                        stream.shutdown(socket.SHUT_RDWR)
+                listener.close()
+                worker.join(3)
+                assert not worker.is_alive(), "controlled daemon did not join"
             assert not errors, "controlled daemon had an unexpected failure"
 
 
@@ -153,7 +155,13 @@ class ProxyControls(unittest.TestCase):
 
     def test_should_truncate_only_pull_front_body_and_positively_drain_backend(self):
         reference = "public.ecr.aws:443/lambda/nodejs@sha256:" + "a"*64
-        finish = threading.Event()
+        finish, publish, reached = threading.Event(), threading.Event(), threading.Event()
+        def deferred_cut(backend, client, headers, deadline, cut):
+            def delayed():
+                reached.set()
+                assert publish.wait(2), "cut publication barrier was abandoned"
+                cut()
+            return interrupted_pull(backend, client, headers, deadline, delayed)
         def backend(stream):
             request(stream)
             first, second = b'{"status":"Downloading"}\n', b'{"status":"Complete"}\n'
@@ -161,7 +169,7 @@ class ProxyControls(unittest.TestCase):
                            format(len(first), "x").encode() + b"\r\n" + first + b"\r\n")
             assert finish.wait(2), "backend drain barrier was abandoned"
             stream.sendall(format(len(second), "x").encode() + b"\r\n" + second + b"\r\n0\r\n\r\n")
-        with daemon(backend) as proxy:
+        with patch("docker_io_proxy.interrupted_pull", side_effect=deferred_cut), daemon(backend) as proxy:
             proxy.interrupt_pull(reference)
             connection = UnixHTTP(proxy.path)
             try:
@@ -171,11 +179,19 @@ class ProxyControls(unittest.TestCase):
                 with self.assertRaises(http.client.IncompleteRead):
                     reply.read()
                 connection.close()
-                self.assertTrue(proxy.pull_cut)
+                self.assertTrue(reached.wait(2))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    observed = pool.submit(proxy.wait_pull_cut, time.monotonic() + 2)
+                    try:
+                        self.assertFalse(observed.done())
+                    finally:
+                        publish.set()
+                    self.assertIsNone(observed.result(2))
                 self.assertFalse(proxy.pull_done)
                 finish.set()
                 self.assertEqual(proxy.wait_pull(time.monotonic() + 2), 2)
             finally:
+                publish.set()
                 finish.set()
                 connection.close()
 

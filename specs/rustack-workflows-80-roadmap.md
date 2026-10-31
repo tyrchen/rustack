@@ -1,8 +1,8 @@
 # Workflows 80: User-Facing Delivery Roadmap
 
-Status: M0 functionally qualified on retained P0 lanes; full M0–M4 release incomplete · Date: 2026-10-27
+Status: M0 functionally qualified on retained P0 lanes; full M0–M4 release incomplete · Date: 2026-10-31
 
-Current checkpoint: P1/M0 passes L01–L09 on the retained macOS arm64 host/native-arm64 VZ and emulated-Linux-amd64 QEMU Docker lanes. D96's current full gate passes70 exact resources/519 Rust cases per lane, including real Node24, S3/DynamoDB SDKs, image/ZIP archives and all nine image callback modes. The workflow/API/structured/nested/callback/persistence features and current-host Native qualification are implemented. Exact postconditions prove zero remnants and twelve source IDs preserved per engine. See [final D96 qualification](./rustack-workflows-93-review.md#final-d96-qualification). IaC, server-in-container, native-x86/Linux reference performance, Desktop/rootless and the complete M4 platform manifest remain required; this is not complete release qualification.
+Current checkpoint: P1/M0 passes L01–L09 on the retained macOS arm64 host/native-arm64 VZ and emulated-Linux-amd64 QEMU Docker lanes. D97's current full gate passes72 exact resources/521 Rust cases per lane, including real Node24, S3/DynamoDB SDKs, image/ZIP archives, all nine image callback modes and managed Pulumi lifecycle/active-plugin Stop. The workflow/API/structured/nested/callback/persistence features and current-host Native qualification are implemented. Exact postconditions prove zero remnants and thirteen source IDs preserved per engine. See [final D97 qualification](./rustack-workflows-93-review.md#d97-final-qualification-and-exact-postconditions). Server-in-container, native-x86/Linux reference performance, Desktop/rootless and the complete M4 platform manifest remain required; this is not complete release qualification.
 
 ## 1. Delivery principles
 

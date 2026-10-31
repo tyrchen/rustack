@@ -12,6 +12,8 @@ mod custom;
 mod faults;
 #[path = "docker_startup/handler_sdk.rs"]
 mod handler_sdk;
+#[path = "docker_startup/iac.rs"]
+mod iac;
 #[path = "docker_startup/image_sdk.rs"]
 mod image_sdk;
 #[path = "docker_startup/io_faults.rs"]
@@ -451,4 +453,16 @@ async fn test_should_execute_real_image_callbacks_before_and_after_lambda_respon
 #[ignore = "requires explicit callback image, Docker socket and qualified gateway"]
 async fn test_should_enforce_image_callback_retry_heartbeat_timeouts_and_stop() -> Result<()> {
     callback::exercise(callback::Group::Timing).await
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Pulumi image, Docker socket and qualified gateway"]
+async fn test_should_manage_a_real_image_workflow_through_pulumi_lifecycle() -> Result<()> {
+    iac::exercise(iac::Mode::Lifecycle).await
+}
+
+#[tokio::test]
+#[ignore = "requires explicit Pulumi image, Docker socket and qualified gateway"]
+async fn test_should_retire_the_pulumi_plugin_tree_after_controller_stop() -> Result<()> {
+    iac::exercise(iac::Mode::Stop).await
 }

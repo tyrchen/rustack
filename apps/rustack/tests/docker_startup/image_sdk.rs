@@ -37,7 +37,8 @@ where
         .as_mut()
         .context("image SDK evidence root")?
         .disable_cleanup(true);
-    let cutoff = Instant::now() + Duration::from_secs(480);
+    let cutoff =
+        Instant::now() + Duration::from_secs(if profile == Profile::Iac { 1020 } else { 480 });
     let prepared = timeout_at(cutoff, prepare(&mut server))
         .await
         .context("ordinary image SDK preparation expired")

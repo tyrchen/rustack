@@ -51,6 +51,13 @@ pub(super) fn prepare(
             included(v.included_data.as_ref())?;
             RegistryCommand::Machine(machine(&v.state_machine_arn, scope)?)
         }
+        Request::ListStateMachineVersions(v) => {
+            let arn = machine(&v.state_machine_arn, scope)?;
+            if v.next_token.is_some() {
+                return Err(error(Code::InvalidToken));
+            }
+            RegistryCommand::Machine(arn)
+        }
         Request::StartExecution(v) => RegistryCommand::Start(
             machine(&v.state_machine_arn, scope)?,
             v.name

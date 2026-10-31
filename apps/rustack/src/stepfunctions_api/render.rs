@@ -101,6 +101,9 @@ pub(super) fn render(op: Op, result: RegistryResult) -> Result<Response, StepFun
             out.tags = m.tags().values().iter().map(|(k, v)| tag(k, v)).collect();
             Ok(out.into())
         }
+        (Op::ListStateMachineVersions, RegistryResult::Machine(_)) => {
+            Ok(output::ListStateMachineVersionsOutput::default().into())
+        }
         (Op::DescribeStateMachine, RegistryResult::Machine(m)) => describe_machine(&m),
         (Op::StartExecution, RegistryResult::Execution(e)) => {
             let mut out = output::StartExecutionOutput::default();

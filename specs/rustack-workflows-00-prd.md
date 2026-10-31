@@ -49,7 +49,7 @@ Performance numbers are acceptance budgets, not existing measurements.
 
 M0 is the smallest useful end-to-end slice: SDK → Lambda API → Docker handler → SDK result. M1 first closes SDK → ASL → Docker Lambda → history. **The complete requested outcome is M4**, not an M0/M1 scaffold.
 
-Excluded from this release: EXPRESS/StartSyncExecution, JSONata/Assign/variables, Distributed Map, Activities, Redrive/TestState, Step Functions versions/aliases, cross-account AssumeRole, arbitrary AWS SDK integrations, ECS/Batch/Glue `.sync`, an ECR emulator, user-image builds, VPC emulation, extensions, SnapStart, streaming responses, Managed Instances, an AWS IAM policy evaluator, and cloud-grade durable workflow recovery.
+Excluded from this release: EXPRESS/StartSyncExecution, JSONata/Assign/variables, Distributed Map, Activities, Redrive/TestState, Step Functions version publication/aliases (the unpublished empty-version inventory read is included for IaC), cross-account AssumeRole, arbitrary AWS SDK integrations, ECS/Batch/Glue `.sync`, an ECR emulator, user-image builds, VPC emulation, extensions, SnapStart, streaming responses, Managed Instances, an AWS IAM policy evaluator, and cloud-grade durable workflow recovery.
 
 Each exclusion requires explicit rejection or an advertised limitation, rather than storing ignored fields and reporting success. An eventual ECS `.sync` adapter requires a real ECS execution service; starting an arbitrary Docker container does not establish ECS compatibility.
 

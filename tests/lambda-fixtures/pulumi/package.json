@@ -1,0 +1,14 @@
+{
+  "name": "rustack-workflows-iac-image",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned Pulumi lifecycle consumer inside a managed Rustack image Lambda.",
+  "dependencies": {
+    "@pulumi/aws": "7.52.1",
+    "@pulumi/pulumi": "3.273.0"
+  },
+  "overrides": {
+    "glob": "14.0.3",
+    "minimatch": "11.0.3"
+  }
+}

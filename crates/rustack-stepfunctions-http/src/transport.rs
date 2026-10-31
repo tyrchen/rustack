@@ -60,6 +60,7 @@ operations! {
     DeleteStateMachine=>DeleteStateMachineInput,DeleteStateMachineOutput;
     DescribeStateMachine=>DescribeStateMachineInput,DescribeStateMachineOutput;
     ListStateMachines=>ListStateMachinesInput,ListStateMachinesOutput;
+    ListStateMachineVersions=>ListStateMachineVersionsInput,ListStateMachineVersionsOutput;
     ValidateStateMachineDefinition=>ValidateStateMachineDefinitionInput,ValidateStateMachineDefinitionOutput;
     StartExecution=>StartExecutionInput,StartExecutionOutput;
     DescribeExecution=>DescribeExecutionInput,DescribeExecutionOutput;

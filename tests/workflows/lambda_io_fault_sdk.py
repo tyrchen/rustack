@@ -258,7 +258,7 @@ class IoCases(Faults):
         self.proxy.interrupt_pull(fixtures[1])
         self.client.update_function_code(FunctionName=name, ImageUri=fixtures[1])
         failed = self.state(name, lambda row: row.get("LastUpdateStatus") == "Failed")
-        assert self.proxy.pull_cut, "failure preceded actual progress interruption"
+        self.proxy.wait_pull_cut(time.monotonic() + 30)
         assert failed["State"] == "Active" and failed["CodeSha256"] == before["CodeSha256"]
         assert failed["RevisionId"] == before["RevisionId"]
         output, _ = self.invoke(name, {"value":8}, qualifier=version)

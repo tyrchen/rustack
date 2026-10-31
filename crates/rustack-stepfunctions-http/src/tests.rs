@@ -87,6 +87,7 @@ fn reply(op: Op) -> Response {
         Op::DeleteStateMachine => output::DeleteStateMachineOutput::default().into(),
         Op::DescribeStateMachine => output::DescribeStateMachineOutput::default().into(),
         Op::ListStateMachines => output::ListStateMachinesOutput::default().into(),
+        Op::ListStateMachineVersions => output::ListStateMachineVersionsOutput::default().into(),
         Op::ValidateStateMachineDefinition => {
             output::ValidateStateMachineDefinitionOutput::default().into()
         }
@@ -175,6 +176,10 @@ fn cases() -> Vec<(Op, Value)> {
         ),
         (Op::ListStateMachines, json!({})),
         (
+            Op::ListStateMachineVersions,
+            json!({"stateMachineArn":"machine"}),
+        ),
+        (
             Op::ValidateStateMachineDefinition,
             json!({"definition":"not-asl"}),
         ),
@@ -250,7 +255,7 @@ async fn test_should_dispatch_all_typed_actions_without_enum_wrappers_or_data_in
             assert_eq!(value.input.as_deref(), Some("{ \"secret\": 7 }"));
         }
     }
-    assert_eq!(handler.count.load(Ordering::SeqCst), 18);
+    assert_eq!(handler.count.load(Ordering::SeqCst), 19);
 }
 #[tokio::test]
 async fn test_should_accept_empty_body_as_empty_json_and_reject_unknown_or_unsupported_actions() {

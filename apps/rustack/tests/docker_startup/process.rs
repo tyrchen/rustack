@@ -36,6 +36,7 @@ pub(super) enum Profile {
     Sdk,
     SdkWrongCredentials,
     Callback,
+    Iac,
     Controlled,
     Deadline,
     Pull,
@@ -53,7 +54,10 @@ pub(super) enum Profile {
 }
 impl Profile {
     fn sdk(self) -> bool {
-        matches!(self, Self::Sdk | Self::SdkWrongCredentials | Self::Callback)
+        matches!(
+            self,
+            Self::Sdk | Self::SdkWrongCredentials | Self::Callback | Self::Iac
+        )
     }
     fn services(self) -> &'static str {
         if self.sdk() {
@@ -88,6 +92,7 @@ impl Profile {
             Self::Sdk
                 | Self::SdkWrongCredentials
                 | Self::Callback
+                | Self::Iac
                 | Self::ZipControlled
                 | Self::Controlled
                 | Self::Deadline
@@ -109,6 +114,7 @@ impl Profile {
             Self::Sdk
                 | Self::SdkWrongCredentials
                 | Self::Callback
+                | Self::Iac
                 | Self::Zip
                 | Self::ZipControlled
                 | Self::ZipArchive
@@ -202,6 +208,9 @@ impl Server {
                  workflowCallbackTokens: 2\n  workflowCallbackTombstones: 64\n  \
                  workflowCallbackCommands: 8\n  workflowCallbackWorkers: 1\n",
             );
+        }
+        if profile == Profile::Iac {
+            text.push_str("  lambdaDockerMemoryBytes: 1610612736\n  workflowDispatches: 2\n");
         }
         fs::write(&config, text).await?;
         if profile == Profile::Pull {

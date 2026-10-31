@@ -10,8 +10,9 @@ below; it uses the actual shared provider for SDK and ASL calls. The configured
 provided.al2023 profile executes original ZIP code and restores bounded ZIP/Image
 archives through the same qualified owner. Official Python, pinned Node24 and an
 independent Rust RIC have functional evidence on the retained lanes. Explicit
-local SDK access to S3/DynamoDB and real image callbacks are qualified below. IaC
-and final platform/release qualification remain unfinished.
+local SDK access to S3/DynamoDB, real image callbacks and managed Pulumi IaC
+consumers are qualified below. Server-in-container, native/reference and final
+platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -195,7 +196,8 @@ for exact limits. Named Native/pure workflow snapshots remain available within
 their documented profile. The L01–L09 Docker fault/admission matrix is functionally
 qualified on the retained lanes, including the pinned Node24 consumer below.
 Image SDK access to S3/DynamoDB and image callbacks also pass on those lanes.
-IaC/native reference and final platform/release gates remain open.
+Managed Pulumi IaC also passes on those lanes. Server-in-container, native
+reference and final platform/release gates remain open.
 
 The explicit `make test-lambda-startup-docker` gate builds its host executable in
 an isolated Cargo target directory and captures a fixture-owned executable copy,
@@ -292,7 +294,7 @@ fixture images have been provisioned, `make test-lambda-image-sdk-consumers-dock
 repeats the Node/SDK controls, complete compiled manifest and all three exact
 Node/SDK resources using those recorded images. It does not rebuild images;
 missing prerequisites fail. Image callback acceptance is documented next;
-remaining IaC/reference/platform gates are separate requirements.
+remaining server-in-container/reference/platform gates are separate requirements.
 
 `make test-lambda-callback-docker` builds a separate digest-pinned Node24 callback
 image and runs two exact resources covering all nine callback cases. Supply the
@@ -317,7 +319,39 @@ saved archives retain the two actual functions and terminal workflow rows;
 bounded history/log/archive scans reject leaked tokens or injected credentials.
 See the [image callback contract](../specs/rustack-workflows-40-integrations-design.md#56-real-image-sdk-callbacks-and-independent-event-worker-d96).
 This is native-arm64 VZ/emulated-amd64 QEMU functional acceptance; native-x86,
-reference, Docker Desktop/rootless, IaC and complete release gates remain open.
+reference, server-in-container, Docker Desktop/rootless and complete release gates remain open.
+
+`make test-workflows-iac-docker` builds the pinned Pulumi tool image and runs two
+real consumers through the ordinary service. Supply the same architecture,
+selected/other sockets, bridge, gateway and builder settings as the full gate
+below. `make test-workflows-iac-fixture` runs dependency, artifact, program,
+privacy, replay and process-ownership controls without allocating Docker
+resources. Provisioning stays in the project fixture/cache; no global Pulumi CLI
+or user plugin cache is used.
+
+The tool function runs CLI/core3.273.0 and AWS provider7.52.1 inside the managed
+image namespace. A separate Node image supplies actual business computation.
+The lifecycle runs create/refresh/update, three explicitly rejected unsupported
+updates, valid recovery followed by strict no-change convergence, destroy and
+stack removal. Independent clients require42/46 results with new execution and
+request identities, and observe the actual API resource before and after each
+transition. A scoped existing unpublished machine supports an empty
+ListStateMachineVersions read; publication, qualified version ARNs and aliases
+remain unavailable.
+
+State audits distinguish encrypted provider inputs before destroy, actual
+current state/API absence after destroy, and active-checkpoint absence after
+stack removal. A pinned read-only observer reads the live tmpfs and must finish
+successfully before host decoding. The Stop consumer observes actual CLI,
+language and provider processes alive, retires only the tool function/relay,
+and verifies that the exact business pair remains healthy. The private test
+profile uses two environments, two workflow dispatches and a1,536MiB aggregate
+memory ceiling. See the [IaC contract](../specs/rustack-workflows-50-iac-design.md).
+Both retained functional lanes pass the lifecycle and Stop resources, all72
+full Docker resources and exact zero-remnant/source-preservation checks. See
+[final D97 qualification](../specs/rustack-workflows-93-review.md#d97-final-qualification-and-exact-postconditions).
+Server-in-container, native-x86, reference and additional Docker platforms remain
+separate required qualification.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller
@@ -344,7 +378,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 70-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 72-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -420,7 +454,8 @@ projection, codec, staging, candidate and clock controls;
 `make test-lambda-provided-archive-docker` runs both ordinary archive resources
 after fixture provisioning and the exact compiled manifest check.
 
-Image callbacks/IaC, reference/native-x86/platform and complete release
+Image callbacks and managed Pulumi IaC are functionally qualified on the retained
+lanes. Server-in-container, reference/native-x86/platform and complete release
 acceptance remain separate. The implementation ledger records final functional
 qualification; the native-workflow verifier alone does not certify these Docker
 archive resources.
@@ -500,12 +535,12 @@ rejects Lambda and callback definitions instead of inventing an execution port.
 | States | Pass, Task, Choice, Wait, Succeed, Fail, Parallel, Inline Map |
 | Data/recovery | InputPath/Parameters/ResultSelector/ResultPath/OutputPath, ordered Retry/Catch, bounded jitter/backoff and Task/execution deadlines |
 | Intrinsics | Format, StringToJson, JsonToString, Array, ArrayLength, ArrayGetItem, ArrayContains, ArrayPartition, StringSplit, MathAdd, UUID, shallow JsonMerge |
-| Lifecycle | CRUD/list/describe/tag definitions, Start/Stop/list/describe executions, captured-definition describe, execution history, Validate, installed callback APIs |
+| Lifecycle | CRUD/list/describe/tag definitions, empty unpublished-version inventory, Start/Stop/list/describe executions, captured-definition describe, execution history, Validate, installed callback APIs |
 | Static ceilings | 1MiB definitions, 256KiB state payloads, 25000 events, Inline Map concurrency≤40 |
 | Local budgets | Validated YAML `budgets.workflow*`; transition/history/frame/result/admission limits may terminate or reject work explicitly |
 
 EXPRESS, JSONata/variables, Activities, Distributed Map/MapRun, redrive, arbitrary
-AWS SDK integrations, state-machine versions/aliases/publication, enabled
+AWS SDK integrations, published state-machine version/alias use and mutation, enabled
 CloudWatch logging/tracing and customer-managed encryption are outside this
 profile. Unknown fields/resources or unavailable integration profiles reject
 explicitly. Do not infer implementation from the generated 37-operation model.
@@ -581,6 +616,6 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance, image callbacks, Pulumi lifecycle
+Required reference Linux performance, server-in-container
 and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).

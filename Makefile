@@ -1357,6 +1357,7 @@ WORKFLOWS_DOCKER_TEST_ENV = PATH="$(dir $(WORKFLOWS_DOCKER_BIN)):$(PATH)" \
 	RUSTACK_NODE_IMAGE="rustack-official-node:$(WORKFLOWS_ARCH)" \
 	RUSTACK_HANDLER_SDK_IMAGE="rustack-handler-sdk:$(WORKFLOWS_ARCH)" \
 	RUSTACK_CALLBACK_IMAGE="rustack-callback:$(WORKFLOWS_ARCH)" \
+	RUSTACK_PULUMI_IMAGE="rustack-pulumi:$(WORKFLOWS_ARCH)" \
 	RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" \
 	RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python"
 
@@ -1428,7 +1429,7 @@ test-lambda-node-docker:
 
 # D95: one ordinary CLI cohort and a complete sequential fixture prerequisite set.
 lambda-docker-fixtures:
-	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image workflows-sdk-python test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image lambda-handler-sdk-fixture-image lambda-callback-fixture-image lambda-pulumi-fixture-image workflows-sdk-python test-workflows-iac-fixture test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-handler-sdk-fixture test-lambda-callback-fixture test-lambda-docker-manifest
 
 lambda-handler-sdk-fixture-image: lambda-pull-fixture-image
 	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/handler-sdk.Dockerfile --tag "rustack-handler-sdk:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
@@ -1472,3 +1473,48 @@ test-lambda-callback-docker: lambda-docker-fixtures
 	done
 
 .PHONY: lambda-callback-fixture-image test-lambda-callback-fixture test-lambda-callback-docker
+
+# Private fixture dependencies; no global npm/Pulumi configuration or install scripts.
+WORKFLOWS_IAC_NPM_CACHE ?= $(LAMBDA_IMAGE_FIXTURE_DIR)/iac-npm
+
+workflows-iac-node-dependencies:
+	@python3 -I -B tests/workflows/pulumi_dependencies.py "$(WORKFLOWS_IAC_NPM_CACHE)"
+
+test-workflows-iac-dependencies: workflows-iac-node-dependencies
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/workflows -p test_pulumi_dependencies.py -v
+	@node --test tests/lambda-fixtures/pulumi/dependency-controls.js
+	@env -i PATH="$(PATH)" NPM_CONFIG_UPDATE_NOTIFIER=false npm --prefix tests/lambda-fixtures/pulumi audit --registry=https://registry.npmjs.org --userconfig="$(WORKFLOWS_IAC_NPM_CACHE)/config/user" --globalconfig="$(WORKFLOWS_IAC_NPM_CACHE)/config/global" --cache="$(WORKFLOWS_IAC_NPM_CACHE)"
+
+.PHONY: workflows-iac-node-dependencies test-workflows-iac-dependencies
+
+# Bounded, checksummed Linux executable provisioning; downloads are never executed on the host.
+lambda-pulumi-tools:
+	@python3 -I -B tests/lambda-fixtures/pulumi_tools.py "$(WORKFLOWS_ARCH)" "$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/pulumi-tools"
+
+test-workflows-iac-tools:
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/workflows -p test_pulumi_tools.py -v
+
+.PHONY: lambda-pulumi-tools test-workflows-iac-tools
+
+lambda-pulumi-fixture-image: lambda-pull-fixture-image lambda-pulumi-tools
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --build-context "pulumi-tools=$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/pulumi-tools" --file tests/lambda-fixtures/pulumi.Dockerfile --tag "rustack-pulumi:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
+
+test-workflows-iac-fixture: test-workflows-iac-dependencies test-workflows-iac-tools workflows-sdk-python
+	@node --test tests/lambda-fixtures/pulumi/program-controls.js tests/lambda-fixtures/pulumi/child-controls.js tests/lambda-fixtures/pulumi/input-controls.js tests/lambda-fixtures/pulumi/evidence-controls.js
+	@node --check tests/lambda-fixtures/iac.js
+	@node --check tests/lambda-fixtures/pulumi/iac_session.js
+	@node --check tests/lambda-fixtures/pulumi/iac_runtime.js
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_pulumi_archive.py -v
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_pulumi_replay.py -v
+
+.PHONY: lambda-pulumi-fixture-image test-workflows-iac-fixture
+
+
+test-workflows-iac-docker: lambda-docker-fixtures
+	@set -eu; for iac_case in \
+		test_should_manage_a_real_image_workflow_through_pulumi_lifecycle \
+		test_should_retire_the_pulumi_plugin_tree_after_controller_stop; do \
+		$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) "$$iac_case" -- --ignored --exact --nocapture --test-threads=1; \
+	done
+
+.PHONY: test-workflows-iac-docker

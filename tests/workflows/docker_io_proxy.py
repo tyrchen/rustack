@@ -320,6 +320,16 @@ class Proxy:
             assert self.pull_reference is None
             self.pull_reference = reference
 
+    def wait_pull_cut(self, deadline):
+        """Join publication after actual front shutdown, before backend drain."""
+        with self.condition:
+            while not self.pull_cut and not self.errors:
+                remaining = min(deadline, self.deadline) - time.monotonic()
+                assert remaining > 0, "actual front pull cut was not published"
+                self.condition.wait(remaining)
+            assert self.pull_cut and not self.errors
+            assert time.monotonic() < min(deadline, self.deadline)
+
     def wait_pull(self, deadline):
         with self.condition:
             while not self.pull_done and not self.errors:

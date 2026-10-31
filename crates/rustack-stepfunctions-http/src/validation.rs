@@ -19,6 +19,7 @@ fn resource(request: &Request) -> Result<(), HttpError> {
         Request::UpdateStateMachine(value) => Some(value.state_machine_arn.as_str()),
         Request::DeleteStateMachine(value) => Some(value.state_machine_arn.as_str()),
         Request::DescribeStateMachine(value) => Some(value.state_machine_arn.as_str()),
+        Request::ListStateMachineVersions(value) => Some(value.state_machine_arn.as_str()),
         Request::StartExecution(value) => Some(value.state_machine_arn.as_str()),
         Request::DescribeExecution(value) => Some(value.execution_arn.as_str()),
         Request::StopExecution(value) => Some(value.execution_arn.as_str()),
@@ -41,6 +42,10 @@ fn details(request: &Request) -> Result<(), HttpError> {
         Request::ValidateStateMachineDefinition(value) => {
             text(&value.definition, 1024 * 1024, Code::ValidationException)?;
             page(value.max_results, None, 100)
+        }
+        Request::ListStateMachineVersions(value) => {
+            optional_id(value.next_token.as_deref(), 1024, Code::InvalidToken)?;
+            page(value.max_results, None, 1000)
         }
         Request::ListStateMachines(value) => {
             page(value.max_results, value.next_token.as_deref(), 1000)

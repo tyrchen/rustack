@@ -850,3 +850,93 @@ async fn test_should_map_execution_timeout_consistently_after_start_request_has_
     assert_eq!(history["events"][0]["type"], "ExecutionTimedOut");
     f.close().await;
 }
+
+#[tokio::test]
+async fn test_should_list_only_empty_published_inventory_for_existing_scoped_machines() {
+    let mut fixture = Fixture::new(ApiLimits::default());
+    let arn = fixture.create("UnpublishedInventory", succeed()).await;
+    let before = fixture
+        .call("DescribeStateMachine", json!({"stateMachineArn":arn}))
+        .await
+        .1;
+    for maximum in [None, Some(0), Some(1), Some(1000)] {
+        let mut input = json!({"stateMachineArn":arn});
+        if let Some(maximum) = maximum {
+            input["maxResults"] = json!(maximum);
+        }
+        let (status, response) = fixture.call("ListStateMachineVersions", input).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, json!({"stateMachineVersions":[]}));
+    }
+    for (input, code) in [
+        (
+            json!({"stateMachineArn":arn,"nextToken":"unissued"}),
+            "InvalidToken",
+        ),
+        (
+            json!({"stateMachineArn":arn,"nextToken":""}),
+            "InvalidToken",
+        ),
+        (
+            json!({"stateMachineArn":arn,"nextToken":"x".repeat(1025)}),
+            "InvalidToken",
+        ),
+        (
+            json!({"stateMachineArn":arn,"nextToken":"é"}),
+            "InvalidToken",
+        ),
+        (
+            json!({"stateMachineArn":arn,"maxResults":-1}),
+            "ValidationException",
+        ),
+        (
+            json!({"stateMachineArn":arn,"maxResults":1001}),
+            "ValidationException",
+        ),
+        (json!({"stateMachineArn":format!("{arn}:1")}), "InvalidArn"),
+        (
+            json!({"stateMachineArn":format!("{arn}:alias")}),
+            "InvalidArn",
+        ),
+        (
+            json!({"stateMachineArn":"arn:aws:states:us-west-2:000000000000:stateMachine:Foreign"}),
+            "InvalidArn",
+        ),
+        (
+            json!({"stateMachineArn":"arn:aws:states:us-east-1:000000000000:stateMachine:Missing"}),
+            "StateMachineDoesNotExist",
+        ),
+    ] {
+        let (status, response) = fixture.call("ListStateMachineVersions", input).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["__type"], code);
+    }
+    let (status, response) = fixture
+        .call(
+            "UpdateStateMachine",
+            json!({"stateMachineArn":arn,"publish":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["__type"], "ValidationException");
+    assert_eq!(
+        fixture
+            .call("DescribeStateMachine", json!({"stateMachineArn":arn}))
+            .await
+            .1,
+        before
+    );
+    assert_eq!(
+        fixture
+            .call("DeleteStateMachine", json!({"stateMachineArn":arn}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, response) = fixture
+        .call("ListStateMachineVersions", json!({"stateMachineArn":arn}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["__type"], "StateMachineDoesNotExist");
+    fixture.close().await;
+}
