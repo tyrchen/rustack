@@ -45,12 +45,13 @@ async fn active(client: &Client, name: &str, expected: &str) -> Result<()> {
             .function_name(name)
             .send()
             .await?;
+        ensure!(Instant::now() < at, "deployment observer expired");
         let state = config.state().map(State::as_str);
         if state == Some(expected) {
             return Ok(());
         }
         ensure!(
-            state != Some("Failed") && Instant::now() < at,
+            state != Some("Failed"),
             "deployment did not reach expected state"
         );
         sleep(Duration::from_millis(25)).await;
@@ -283,9 +284,32 @@ async fn workflow_image(endpoint: &str, function: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ComputeFixture {
+    CustomRic,
+    OfficialNode,
+}
+
 pub(super) async fn custom_compute(endpoint: &str, image: &str, architecture: &str) -> Result<()> {
+    compute_image(endpoint, image, architecture, ComputeFixture::CustomRic).await
+}
+
+pub(super) async fn node_compute(endpoint: &str, image: &str, architecture: &str) -> Result<()> {
+    compute_image(endpoint, image, architecture, ComputeFixture::OfficialNode).await
+}
+
+async fn compute_image(
+    endpoint: &str,
+    image: &str,
+    architecture: &str,
+    fixture: ComputeFixture,
+) -> Result<()> {
     let client = lambda(endpoint);
-    let name = format!("RustCustom{}", Uuid::new_v4().simple());
+    let name = format!("RustImage{}", Uuid::new_v4().simple());
+    let (memory, value) = match fixture {
+        ComputeFixture::CustomRic => (128, 35),
+        ComputeFixture::OfficialNode => (256, 21),
+    };
     client
         .create_function()
         .function_name(&name)
@@ -296,19 +320,22 @@ pub(super) async fn custom_compute(endpoint: &str, image: &str, architecture: &s
         } else {
             Architecture::X8664
         })
-        .memory_size(128)
+        .memory_size(memory)
         .timeout(30)
         .code(FunctionCode::builder().image_uri(image).build())
         .send()
         .await?;
     active(&client, &name, "Active").await?;
-    let (output, error) = invoke(&client, &name, json!({"value":35})).await?;
+    let (output, error) = invoke(&client, &name, json!({"value":value})).await?;
+    let identity_matches = match fixture {
+        ComputeFixture::CustomRic => output["imageRevision"] == "A",
+        ComputeFixture::OfficialNode => {
+            output["runtime"] == "node24" && output["handler"] == "handler"
+        }
+    };
     ensure!(
-        error.is_none()
-            && output["computed"] == 42
-            && output["counter"] == 1
-            && output["imageRevision"] == "A",
-        "Rust SDK custom RIC did not compute"
+        error.is_none() && output["computed"] == 42 && output["counter"] == 1 && identity_matches,
+        "Rust SDK image did not compute with the expected runtime"
     );
     client.delete_function().function_name(&name).send().await?;
     Ok(())

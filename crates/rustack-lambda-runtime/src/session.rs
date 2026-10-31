@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc,
+        OwnedSemaphorePermit, mpsc,
         oneshot::{self, error::TryRecvError},
         watch,
     },
@@ -404,12 +404,25 @@ impl Drop for RuntimeSession {
 
 impl SessionHandle {
     fn send(&self, command: Command, deadline: Instant) -> Result<(), SessionError> {
+        self.send_with_body_permit(command, deadline, None)
+    }
+
+    fn send_with_body_permit(
+        &self,
+        command: Command,
+        deadline: Instant,
+        body_permit: Option<OwnedSemaphorePermit>,
+    ) -> Result<(), SessionError> {
         check_deadline(deadline)?;
         if *self.stop.borrow() {
             return Err(SessionError::Unavailable);
         }
         self.inbox
-            .try_send(Envelope { deadline, command })
+            .try_send(Envelope {
+                deadline,
+                command,
+                _body_permit: body_permit,
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => SessionError::Busy,
                 mpsc::error::TrySendError::Closed(_) => SessionError::Unavailable,
@@ -503,9 +516,23 @@ impl SessionHandle {
         payload: Payload,
         deadline: Instant,
     ) -> Result<(), SessionError> {
+        self.complete_with_body_permit(attempt, invocation_id, outcome, payload, deadline, None)
+            .await
+    }
+
+    /// Retain HTTP body admission with the accepted envelope until actor settlement.
+    pub(crate) async fn complete_with_body_permit(
+        &self,
+        attempt: AttemptId,
+        invocation_id: Option<AttemptId>,
+        outcome: Outcome,
+        payload: Payload,
+        deadline: Instant,
+        body_permit: Option<OwnedSemaphorePermit>,
+    ) -> Result<(), SessionError> {
         check_deadline(deadline)?;
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_with_body_permit(
             Command::Complete {
                 attempt,
                 invocation_id,
@@ -514,6 +541,7 @@ impl SessionHandle {
                 reply,
             },
             deadline,
+            body_permit,
         )?;
         receive(response, deadline).await?
     }
@@ -534,9 +562,20 @@ impl SessionHandle {
         payload: Payload,
         deadline: Instant,
     ) -> Result<(), SessionError> {
+        self.initialization_error_with_body_permit(payload, deadline, None)
+            .await
+    }
+
+    /// Retain an initialization error body even after its HTTP observer disappears.
+    pub(crate) async fn initialization_error_with_body_permit(
+        &self,
+        payload: Payload,
+        deadline: Instant,
+        body_permit: Option<OwnedSemaphorePermit>,
+    ) -> Result<(), SessionError> {
         check_deadline(deadline)?;
         let (reply, response) = oneshot::channel();
-        self.send(Command::InitError { payload, reply }, deadline)?;
+        self.send_with_body_permit(Command::InitError { payload, reply }, deadline, body_permit)?;
         receive(response, deadline).await?
     }
 
@@ -617,6 +656,7 @@ async fn receive<T>(response: oneshot::Receiver<T>, deadline: Instant) -> Result
 struct Envelope {
     deadline: Instant,
     command: Command,
+    _body_permit: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug)]
@@ -774,7 +814,7 @@ impl SessionActor {
                     }
                 }
                 command = self.inbox.recv() => {
-                    let Some(Envelope { command, deadline }) = command else { self.close(SessionError::Unavailable); break; };
+                    let Some(Envelope { command, deadline, _body_permit }) = command else { self.close(SessionError::Unavailable); break; };
                     if let Err(error) = check_deadline(deadline) { reject(command, error); continue; }
                     if self.command(command) {
                         let Some(deadline) = Instant::now().checked_add(self.idle_lease) else { self.close(SessionError::InvalidMetadata); break; };

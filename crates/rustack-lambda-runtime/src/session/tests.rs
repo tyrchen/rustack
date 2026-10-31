@@ -1,9 +1,11 @@
 use std::{
     future::Future,
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
 use bytes::Bytes;
+use tokio::sync::Semaphore;
 
 use super::*;
 
@@ -819,4 +821,138 @@ async fn test_should_reconcile_consumed_delivery_when_receipt_and_old_outer_time
     assert!(poll_once(&mut running).is_ready());
     assert_eq!(received.await.unwrap(), Err(SessionError::HandlerTimeout));
     drop((commands, stop));
+}
+
+fn held_http_session() -> (SessionHandle, SessionActor) {
+    let (commands, inbox) = mpsc::channel(MAILBOX_CAPACITY);
+    let (stop, stopped) = watch::channel(false);
+    let (bootstrap, initialized) = watch::channel(false);
+    let actor = SessionActor::builder()
+        .inbox(inbox)
+        .stop(stopped)
+        .bootstrap(bootstrap)
+        .initialization_error(None)
+        .idle_lease(Duration::from_secs(60))
+        .idle_deadline(Instant::now() + Duration::from_secs(60))
+        .build();
+    let handle = SessionHandle {
+        inbox: commands,
+        stop,
+        bootstrap: initialized,
+    };
+    (handle, actor)
+}
+
+async fn http_body_command(
+    handle: &SessionHandle,
+    initialization: bool,
+    deadline: Instant,
+    permit: OwnedSemaphorePermit,
+) -> Result<(), SessionError> {
+    if initialization {
+        handle
+            .initialization_error_with_body_permit(payload(), deadline, Some(permit))
+            .await
+    } else {
+        handle
+            .complete_with_body_permit(
+                AttemptId::default(),
+                None,
+                Outcome::Success,
+                payload(),
+                deadline,
+                Some(permit),
+            )
+            .await
+    }
+}
+
+#[rstest::rstest]
+#[case::completion(false)]
+#[case::initialization_error(true)]
+#[tokio::test(start_paused = true)]
+async fn test_should_charge_http_body_until_accepted_command_is_retired(
+    #[case] initialization: bool,
+    #[values(false, true)] abandon: bool,
+    #[values(false, true)] dispose_actor: bool,
+) {
+    let (handle, mut actor) = held_http_session();
+    let (notification, mut notified) = oneshot::channel();
+    actor.initialization_error = Some(notification);
+    let budget = Arc::new(Semaphore::new(4));
+    let cutoff = Instant::now() + Duration::from_secs(1);
+    let mut observers: Vec<_> = (0..4)
+        .map(|_| {
+            Box::pin(http_body_command(
+                &handle,
+                initialization,
+                cutoff,
+                budget.clone().try_acquire_owned().unwrap(),
+            ))
+        })
+        .collect();
+    for observer in &mut observers {
+        assert!(poll_once(observer).is_pending());
+    }
+    assert_eq!(actor.inbox.len(), 4);
+    assert_eq!(budget.available_permits(), 0);
+    if abandon {
+        observers.clear();
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for observer in &mut observers {
+        assert_eq!(
+            poll_once(observer),
+            Poll::Ready(Err(SessionError::Deadline))
+        );
+    }
+    drop(observers);
+    assert_eq!(actor.inbox.len(), 4);
+    assert!(!*handle.stop.borrow());
+    assert_eq!(budget.available_permits(), 0);
+    assert!(budget.clone().try_acquire_owned().is_err());
+    if dispose_actor {
+        drop(actor);
+    } else {
+        let mut running = Box::pin(actor.run());
+        assert!(poll_once(&mut running).is_pending());
+        assert_eq!(handle.inbox.capacity(), MAILBOX_CAPACITY);
+        assert_eq!(notified.try_recv(), Err(TryRecvError::Empty));
+        handle.close();
+        assert!(poll_once(&mut running).is_ready());
+    }
+    assert_eq!(budget.available_permits(), 4);
+    assert!(budget.try_acquire_owned().is_ok());
+}
+
+#[rstest::rstest]
+#[case::expired(SessionError::Deadline)]
+#[case::full(SessionError::Busy)]
+#[case::closed(SessionError::Unavailable)]
+#[tokio::test(start_paused = true)]
+async fn test_should_charge_http_body_only_when_its_command_is_admitted(
+    #[case] rejection: SessionError,
+    #[values(false, true)] initialization: bool,
+) {
+    let (handle, mut actor) = held_http_session();
+    let mut cutoff = deadline();
+    match rejection {
+        SessionError::Deadline => cutoff = Instant::now(),
+        SessionError::Busy => {
+            for _ in 0..MAILBOX_CAPACITY {
+                let (reply, _) = oneshot::channel();
+                handle.send(Command::Next { reply }, cutoff).unwrap();
+            }
+        }
+        SessionError::Unavailable => actor.inbox.close(),
+        _ => unreachable!("fixed test rejection cases"),
+    }
+    let budget = Arc::new(Semaphore::new(1));
+    let permit = budget.clone().try_acquire_owned().unwrap();
+    assert_eq!(
+        http_body_command(&handle, initialization, cutoff, permit).await,
+        Err(rejection)
+    );
+    assert_eq!(budget.available_permits(), 1);
+    drop(actor);
 }

@@ -10,6 +10,8 @@ mod custom;
 mod faults;
 #[path = "docker_startup/io_faults.rs"]
 mod io_faults;
+#[path = "docker_startup/node.rs"]
+mod node;
 #[path = "docker_startup/process.rs"]
 mod process;
 #[path = "docker_startup/provided.rs"]
@@ -37,6 +39,12 @@ use tokio::{
     io::AsyncReadExt,
     time::{Instant, timeout},
 };
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit official Node image prerequisites; run make test-lambda-node-docker"]
+async fn test_should_execute_official_node_image_with_signed_sdks_and_asl() -> Result<()> {
+    node::exercise().await
+}
 
 #[rstest]
 #[case::disconnected(Profile::Disconnected)]

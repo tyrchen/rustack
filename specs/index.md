@@ -69,6 +69,8 @@ D92 is implemented and independently reviewed: [ordinary provided-runtime ZIP co
 
 D93 is implemented and independently reviewed: [managed ZIP archives](./rustack-workflows-20-lambda-runtime-design.md#69-bounded-provided-runtime-zip-archives-and-mixed-candidate-restoration-d93) preserve original code under explicit data/metadata budgets, validate complete mixed candidates before Image effects and share the retained startup commit deadline. Both final65-resource full gates and standard/strict/Native/security checks pass. Exact postconditions prove zero remnants, nine actual source IDs preserved per engine and both owned empty bridges removed. Task5.2c is complete; Node/handler SDK/IaC/server-in-container/reference/platform and full M4 remain active.
 
+D94 is implemented and independently reviewed: [official Node image consumption](./rustack-workflows-20-lambda-runtime-design.md#417-official-node-image-consumption-d94) executes pinned Node24.22.1 through signed Rust/boto3 and registered ASL, including actual context/filesystem/log/error recovery and immutable published/alias behavior. Shared Runtime HTTP supports its narrow X-Ray metadata and bounded keepalive/body-admission needs, with accepted-envelope permits surviving observer loss. Both final66-resource gates pass482 aggregate Rust cases/28 summaries each; all standard/strict/Native/security checks and exact zero-remnant/ten-source-preservation/two-owned-bridge retirement postconditions pass. Task5.3a/L02 closes; handler SDK/callback images, IaC/server-in-container/reference/platform and complete M4 remain active.
+
 ## 推荐阅读顺序
 
 1. [系统审查与改进 spec](./rustack-system-review.md)：安全、正确性、架构及开发者体验；按 R01–R18 定位问题，按 M0–M4 安排修复。

@@ -22,7 +22,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use thiserror::Error;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{oneshot, watch},
+    sync::{Semaphore, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{Instant, timeout, timeout_at},
 };
@@ -39,8 +39,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const HEADER_BYTES: usize = 16 * 1024;
 const HEADER_COUNT: usize = 64;
 const HEADER_VALUE_BYTES: usize = 256;
+const XRAY_ERROR_CAUSE_BYTES: usize = 8 * 1024;
+const XRAY_ERROR_CAUSE: &str = "lambda-runtime-function-xray-error-cause";
 const TARGET_BYTES: usize = 256;
-const CONNECTIONS: usize = 4;
+const CONNECTIONS: usize = 8;
+const BODY_READERS: usize = 4;
 const INVOCATION_ID: &str = "lambda-runtime-invocation-id";
 
 /// Adapter/supervision failures without invalid peer data in their diagnostics.
@@ -201,6 +204,14 @@ pub async fn start_at(
     addr: SocketAddr,
     idle_lease: Duration,
 ) -> Result<RuntimeApiHandle, ApiError> {
+    start_with_body_budget(addr, idle_lease, Arc::new(Semaphore::new(BODY_READERS))).await
+}
+
+async fn start_with_body_budget(
+    addr: SocketAddr,
+    idle_lease: Duration,
+    body_budget: Arc<Semaphore>,
+) -> Result<RuntimeApiHandle, ApiError> {
     if !addr.ip().is_loopback() {
         return Err(ApiError::NonLoopback);
     }
@@ -213,7 +224,8 @@ pub async fn start_at(
     let initialization_error = owner.take_initialization_error();
     let (stop, _) = watch::channel(false);
     let task = tokio::spawn(
-        serve(listener, owner, idle_lease, stop.clone()).with_subscriber(runtime_dispatch()),
+        serve(listener, owner, idle_lease, stop.clone(), body_budget)
+            .with_subscriber(runtime_dispatch()),
     );
     Ok(RuntimeApiHandle {
         addr,
@@ -232,6 +244,7 @@ async fn serve(
     mut owner: RuntimeSession,
     idle_lease: Duration,
     stop: watch::Sender<bool>,
+    body_budget: Arc<Semaphore>,
 ) -> Result<(), ApiError> {
     let session = owner.handle().clone();
     let mut stopped = stop.subscribe();
@@ -250,7 +263,8 @@ async fn serve(
                     Ok((socket, _)) if connections.len() < CONNECTIONS => {
                         let session = session.clone();
                         let stop = stop.subscribe();
-                        connections.spawn(connection(socket, session, idle_lease, stop).with_current_subscriber());
+                        let body_budget = Arc::clone(&body_budget);
+                        connections.spawn(connection(socket, session, idle_lease, stop, body_budget).with_current_subscriber());
                     }
                     Ok(_) => {}
                     Err(error) => { failure = Some(ApiError::from(error)); break; }
@@ -278,9 +292,17 @@ async fn connection(
     session: SessionHandle,
     idle_lease: Duration,
     mut stop: watch::Receiver<bool>,
+    body_budget: Arc<Semaphore>,
 ) -> Result<(), ApiError> {
     let service_session = session.clone();
-    let service = service_fn(move |request| handle(service_session.clone(), idle_lease, request));
+    let service = service_fn(move |request| {
+        handle(
+            service_session.clone(),
+            idle_lease,
+            request,
+            Arc::clone(&body_budget),
+        )
+    });
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
@@ -297,11 +319,11 @@ async fn connection(
         }
         result = &mut connection => result,
     };
-    // Idle keepalive/header timeouts close only that connection. The session's
-    // own deadline bounds long polls and writes; other IO failures invalidate it.
+    // Rejected HTTP syntax and idle header timeouts close only that connection.
+    // The session bounds long polls/writes; genuine IO failures invalidate it.
     match result {
         Ok(()) => Ok(()),
-        Err(error) if error.is_timeout() => Ok(()),
+        Err(error) if error.is_timeout() || error.is_parse() => Ok(()),
         Err(_) => {
             session.close();
             Err(ApiError::ConnectionFailed)
@@ -362,17 +384,33 @@ fn route(method: &Method, target: &Uri) -> Result<Route, StatusCode> {
     })
 }
 
-fn validate_headers(headers: &HeaderMap) -> Result<(), StatusCode> {
-    if headers.len() > HEADER_COUNT {
+fn validate_headers(headers: &HeaderMap, route: Option<&Route>) -> Result<(), StatusCode> {
+    if headers.len() > HEADER_COUNT || headers.get_all(XRAY_ERROR_CAUSE).iter().count() > 1 {
         return Err(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
     }
+    let error_route = matches!(
+        route,
+        Some(Route::Complete {
+            outcome: Outcome::FunctionError,
+            ..
+        })
+    );
     let mut total = 0usize;
     for (name, value) in headers {
-        if value.as_bytes().len() > HEADER_VALUE_BYTES
-            || !value
-                .as_bytes()
-                .iter()
-                .all(|byte| (32..=126).contains(byte))
+        let xray_cause = error_route && name == XRAY_ERROR_CAUSE;
+        let limit = if xray_cause {
+            XRAY_ERROR_CAUSE_BYTES
+        } else {
+            HEADER_VALUE_BYTES
+        };
+        if value.as_bytes().len() > limit
+            || !value.as_bytes().iter().all(|byte| {
+                if xray_cause {
+                    *byte >= 32 && *byte != 127
+                } else {
+                    (32..=126).contains(byte)
+                }
+            })
         {
             return Err(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
         }
@@ -391,8 +429,9 @@ async fn handle(
     session: SessionHandle,
     idle_lease: Duration,
     request: Request<Incoming>,
+    body_budget: Arc<Semaphore>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(dispatch(&session, idle_lease, request)
+    Ok(dispatch(&session, idle_lease, request, &body_budget)
         .await
         .unwrap_or_else(error_response))
 }
@@ -401,23 +440,15 @@ async fn dispatch(
     session: &SessionHandle,
     idle_lease: Duration,
     request: Request<Incoming>,
+    body_budget: &Arc<Semaphore>,
 ) -> Result<Response<Full<Bytes>>, StatusCode> {
-    validate_headers(request.headers())?;
-    let route = route(request.method(), request.uri())?;
+    let route = route(request.method(), request.uri());
+    validate_headers(request.headers(), route.as_ref().ok())?;
+    let route = route?;
     let invocation_id = if matches!(route, Route::Complete { .. }) {
-        if request.headers().get_all(INVOCATION_ID).iter().count() > 1 {
-            return Ok(invalid_invocation_id());
-        }
-        match request.headers().get(INVOCATION_ID) {
-            None => None,
-            Some(value) => match value
-                .to_str()
-                .ok()
-                .and_then(|value| value.parse::<AttemptId>().ok())
-            {
-                Some(id) => Some(id),
-                None => return Ok(invalid_invocation_id()),
-            },
+        match parse_invocation_id(request.headers()) {
+            Ok(id) => id,
+            Err(_) => return Ok(invalid_invocation_id()),
         }
     } else {
         None
@@ -440,6 +471,16 @@ async fn dispatch(
     {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
+    let body_permit = if matches!(route, Route::Next) {
+        None
+    } else {
+        Some(
+            body_budget
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?,
+        )
+    };
     let deadline = Instant::now()
         .checked_add(REQUEST_TIMEOUT)
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -473,7 +514,14 @@ async fn dispatch(
         }
         Route::Complete { attempt, outcome } => {
             let completed = session
-                .complete(attempt, invocation_id, outcome, payload, deadline)
+                .complete_with_body_permit(
+                    attempt,
+                    invocation_id,
+                    outcome,
+                    payload,
+                    deadline,
+                    body_permit,
+                )
                 .await;
             if matches!(completed, Err(SessionError::UnknownAttempt)) && invocation_id.is_some() {
                 return Ok(invalid_invocation_id());
@@ -483,12 +531,28 @@ async fn dispatch(
         }
         Route::InitError => {
             session
-                .initialization_error(payload, deadline)
+                .initialization_error_with_body_permit(payload, deadline, body_permit)
                 .await
                 .map_err(status)?;
             Ok(response(StatusCode::ACCEPTED, Bytes::new(), false))
         }
     }
+}
+
+fn parse_invocation_id(headers: &HeaderMap) -> Result<Option<AttemptId>, StatusCode> {
+    if headers.get_all(INVOCATION_ID).iter().count() > 1 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    headers
+        .get(INVOCATION_ID)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .ok_or(StatusCode::BAD_REQUEST)
+        })
+        .transpose()
 }
 
 fn invocation_response(invocation: &Invocation) -> Result<Response<Full<Bytes>>, StatusCode> {

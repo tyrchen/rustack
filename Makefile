@@ -1353,13 +1353,14 @@ WORKFLOWS_DOCKER_TEST_ENV = PATH="$(dir $(WORKFLOWS_DOCKER_BIN)):$(PATH)" \
 	RUSTACK_ZIP_BASE_IMAGE="$(WORKFLOWS_ZIP_BASE_IMAGE)" \
 	RUSTACK_ZIP_CODE_BOOTSTRAP="$(LAMBDA_IMAGE_FIXTURE_DIR)/$(WORKFLOWS_ARCH)/zip-code-bootstrap/bootstrap" \
 	RUSTACK_CUSTOM_IMAGE_A="rustack-custom-ric:a-$(WORKFLOWS_ARCH)" RUSTACK_CUSTOM_IMAGE_B="rustack-custom-ric:b-$(WORKFLOWS_ARCH)" \
+	RUSTACK_NODE_IMAGE="rustack-official-node:$(WORKFLOWS_ARCH)" \
 	RUSTACK_DOCKER_BIN="$(WORKFLOWS_DOCKER_BIN)" RUSTACK_PULL_IMAGE="$(WORKFLOWS_PULL_IMAGE)" \
 	RUSTACK_WORKFLOWS_PYTHON="$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python"
 
 # Functional Docker scope only. Keep orchestration sequential even under parent make -j.
 test-lambda-docker:
 	@test -n "$(WORKFLOWS_DOCKER_SOCKET)" && test -n "$(WORKFLOWS_OTHER_DOCKER_SOCKET)" && test "$(WORKFLOWS_DOCKER_SOCKET)" != "$(WORKFLOWS_OTHER_DOCKER_SOCKET)" && test -n "$(WORKFLOWS_NETWORK)" && test -n "$(WORKFLOWS_GATEWAY_HOST)" && test -x "$(WORKFLOWS_DOCKER_BIN)"
-	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image workflows-sdk-python test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-docker-manifest
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-custom-ric-images lambda-zip-code-build lambda-provided-zip-build lambda-zip-native-verifier-build lambda-provided-base-image lambda-negative-images lambda-pull-fixture-image lambda-node-fixture-image workflows-sdk-python test-lambda-code-fixture test-lambda-deadline-fixture test-lambda-fault-fixture test-lambda-custom-ric-fixture test-lambda-node-fixture test-lambda-docker-manifest
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --lib -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_environment -- --ignored --nocapture --test-threads=1
@@ -1368,7 +1369,7 @@ test-lambda-docker:
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --nocapture --test-threads=1
-	@echo 'Verified docker-image-functional resources; Node, handler SDK, IaC and reference/platform/full release acceptance remains required.'
+	@echo 'Verified docker-image-functional resources; handler SDK, IaC and reference/platform/full release acceptance remains required.'
 
 .PHONY: test-lambda-docker-manifest test-lambda-docker
 
@@ -1405,3 +1406,19 @@ test-lambda-provided-archive-docker: lambda-runtime-image lambda-runtime-fixture
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions provided_zip_archives -- --ignored --nocapture --test-threads=1
 
 .PHONY: test-lambda-zip-archive test-lambda-provided-archive-docker
+
+# D94: official pinned Node24 RIC, explicit selected-platform source and SDK observer.
+lambda-node-fixture-image: lambda-pull-fixture-image
+	@DOCKER_HOST="unix://$(WORKFLOWS_DOCKER_SOCKET)" $(WORKFLOWS_IMAGE_BUILDER) build --load --provenance=false --platform "linux/$(WORKFLOWS_ARCH)" --file tests/lambda-fixtures/node.Dockerfile --tag "rustack-official-node:$(WORKFLOWS_ARCH)" tests/lambda-fixtures
+
+test-lambda-node-fixture: workflows-sdk-python
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_node_image.py -v
+	@cargo test --locked -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions node::tests
+	@cargo test --locked -p rustack-lambda-runtime --lib http::tests
+	@cargo test --locked -p rustack-lambda-runtime --lib session::tests::test_should_charge_http_body
+
+test-lambda-node-docker:
+	@$(MAKE) --no-print-directory -j1 lambda-runtime-image lambda-runtime-fixture-image lambda-node-fixture-image workflows-sdk-python test-lambda-node-fixture test-lambda-docker-manifest
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions test_should_execute_official_node_image_with_signed_sdks_and_asl -- --ignored --exact --nocapture --test-threads=1
+
+.PHONY: lambda-node-fixture-image test-lambda-node-fixture test-lambda-node-docker

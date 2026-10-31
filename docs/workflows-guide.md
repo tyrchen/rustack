@@ -8,8 +8,9 @@ Native backend and the ordinary Docker image startup path. Docker requires the
 configured ownership/recovery and real kernel/network/optional gateway probes
 below; it uses the actual shared provider for SDK and ASL calls. The configured
 provided.al2023 profile executes original ZIP code and restores bounded ZIP/Image
-archives through the same qualified owner. Node, handler SDK networking, IaC and
-final platform/release qualification remain unfinished.
+archives through the same qualified owner. Official Python, pinned Node24 and an
+independent Rust RIC have functional evidence on the retained lanes. Handler SDK
+networking, IaC and final platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -191,8 +192,9 @@ retains the same metadata/count limits and adds separate original-code budgets b
 [Image archive contract](../specs/rustack-workflows-20-lambda-runtime-design.md#216-candidate-store-image-archive-restoration-d88)
 for exact limits. Named Native/pure workflow snapshots remain available within
 their documented profile. The L01–L09 Docker fault/admission matrix is functionally
-qualified on the retained lanes; Node, handler SDK networking,
-IaC/native reference and final platform/release gates remain open.
+qualified on the retained lanes, including the pinned Node24 consumer below.
+Handler SDK networking, IaC/native reference and final platform/release gates
+remain open.
 
 The explicit `make test-lambda-startup-docker` gate builds its host executable in
 an isolated Cargo target directory and captures a fixture-owned executable copy,
@@ -212,9 +214,41 @@ foreign/stale completions; it also proves a published A call finishes as A after
 latest updates successfully to B. Cold published-A/latest-B launches must also
 return counter=1 after other resources displace their environments. Test source tags are uniquely owned and checked
 before removal. The collector is a test barrier, not a required user endpoint or
-handler SDK compatibility claim. Official Python and independent Rust RIC
-functional evidence do not qualify the remaining Node/handler SDK/platform
-matrix. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
+handler SDK compatibility claim. Official Python, pinned Node24 and independent
+Rust RIC functional evidence covers the recorded retained lanes; handler SDK
+and the remaining platform matrix stay open. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
+
+The pinned official Node24 handler image has a separate explicit consumer:
+
+```bash
+make test-lambda-node-docker \
+  WORKFLOWS_ARCH=arm64 \
+  WORKFLOWS_DOCKER_SOCKET=/absolute/selected/docker.sock \
+  WORKFLOWS_NETWORK=existing-user-bridge \
+  WORKFLOWS_GATEWAY_HOST=192.168.5.2 \
+  WORKFLOWS_DOCKER_BIN=/absolute/path/to/docker \
+  WORKFLOWS_IMAGE_BUILDER=/absolute/path/to/docker-buildx
+```
+
+This builds the digest-pinned Node24 base with the checked-in built-in-only
+handler and exercises signed Rust/boto3 calls and an optimized ASL Lambda task.
+It checks actual Node version/architecture/UID, read-only code, writable temporary
+storage, stdout/stderr tails, cold/warm counters, published versions/aliases after
+CMD updates and named FunctionError followed by a fresh healthy replacement.
+`make test-lambda-node-fixture` runs its observer, child-join, Runtime HTTP and session-admission
+controls without allocating Docker resources. Node ZIP/runtime-name support is
+outside this image profile. Both retained functional lanes execute Node24.22.1.
+See the [official Node contract](../specs/rustack-workflows-20-lambda-runtime-design.md#417-official-node-image-consumption-d94)
+for exact ownership and validation bounds. Native-x86/reference, Docker
+Desktop/rootless and general handler SDK networking remain separate requirements.
+
+The default Node RIC can retain five normal keepalive sockets. The local Runtime
+API allows eight connection tasks, one active invocation/poll and four charged
+POST bodies of at most6MiB each. Admission remains charged while an accepted
+payload is queued even if its HTTP observer expires. General header values remain
+256 bytes within16KiB aggregate; only the exact FunctionError X-Ray cause field
+allows up to8KiB. Rejected metadata does not settle the invocation. Custom images
+with larger worker/socket pools must fit these bounds.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller
@@ -242,7 +276,7 @@ make test-lambda-docker \
 
 Choose values for your actual two distinct daemons and function-visible gateway;
 the addresses above are placeholders. The gate builds fixtures, compares eight
-compiled inventories against the [frozen 63-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
+compiled inventories against the [frozen 66-resource manifest](../tests/workflows/docker-required-suites.json), then runs every
 resource sequentially. Missing/extra/renamed ignored tests fail preflight.
 It includes the standalone relay suite and real cross-daemon binding; run each
 selected architecture with the other daemon supplied. This qualifies the
@@ -280,7 +314,7 @@ and IO, then code volumes, image pins and the Docker wire.
 `make test-lambda-provided-docker` selects the ordinary signed SDK/ASL/revision/
 fault/cancellation cases and the exact-same-ZIP Linux Native verifier after the
 compiled inventory check. It consumes the explicit fixture variables set by the
-full gate; run `make test-lambda-docker` to provision and verify all65 resources.
+full gate; run `make test-lambda-docker` to provision and verify all66 resources.
 Keep fixture files unchanged throughout a run. The verifier executes the same
 original A ZIP bytes through the real Native provider and joins its child; it
 uses an executable temporary mount only inside that separately owned verifier.
@@ -318,7 +352,7 @@ projection, codec, staging, candidate and clock controls;
 `make test-lambda-provided-archive-docker` runs both ordinary archive resources
 after fixture provisioning and the exact compiled manifest check.
 
-Node runtimes, handler SDK/IaC, reference/native-x86/platform and complete release
+Handler SDK/IaC, reference/native-x86/platform and complete release
 acceptance remain separate. The implementation ledger records final functional
 qualification; the native-workflow verifier alone does not certify these Docker
 archive resources.
@@ -479,6 +513,6 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance, Node, handler SDK
-networking, Pulumi lifecycle and final platform lanes remain open in the
+Required reference Linux performance, handler SDK networking, Pulumi lifecycle
+and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).

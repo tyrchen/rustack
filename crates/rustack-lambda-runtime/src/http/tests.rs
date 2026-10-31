@@ -12,6 +12,310 @@ use tokio::{
 use super::*;
 use crate::{metadata::local_trace_id, session::RuntimeResult};
 
+#[tokio::test]
+async fn test_should_retain_five_completed_keepalive_connections_for_default_node_ric() {
+    let cutoff = Instant::now() + Duration::from_secs(4);
+    let mut api = start().await.unwrap();
+    let mut retained = Vec::new();
+    for _ in 0..5 {
+        let call = invocation();
+        let ticket = api
+            .session()
+            .submit(call.clone(), call.parts().1)
+            .await
+            .unwrap();
+        api.session().next(call.parts().1).await.unwrap();
+        let mut stream = TcpStream::connect(api.addr()).await.unwrap();
+        let request = format!(
+            "POST /2018-06-01/runtime/invocation/{}/response HTTP/1.1\r\nHost: \
+             {}\r\nContent-Length: 0\r\n\r\n",
+            ticket.attempt(),
+            api.addr()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let head = timeout_at(cutoff, async {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                assert!(head.len() < 16384);
+                head.push(stream.read_u8().await.unwrap());
+            }
+            String::from_utf8(head).unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(head.starts_with("HTTP/1.1 202"));
+        assert!(!head.to_ascii_lowercase().contains("connection: close"));
+        assert!(
+            matches!(ticket.wait().await.unwrap(), RuntimeResult::Success(payload) if payload.as_ref().is_empty())
+        );
+        retained.push(stream);
+    }
+    assert!(
+        Instant::now() < cutoff,
+        "keepalive proof exceeded the original pre-idle-timeout cutoff"
+    );
+    assert_eq!(retained.len(), 5);
+    drop(retained);
+    api.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_should_bound_four_actual_body_readers_without_consuming_the_current_attempt() {
+    let body_budget = Arc::new(Semaphore::new(4));
+    let mut api = start_with_body_budget(
+        "127.0.0.1:0".parse().unwrap(),
+        Duration::from_secs(60),
+        Arc::clone(&body_budget),
+    )
+    .await
+    .unwrap();
+    let call = invocation();
+    let ticket = api
+        .session()
+        .submit(call.clone(), call.parts().1)
+        .await
+        .unwrap();
+    api.session().next(call.parts().1).await.unwrap();
+    let mut held = Vec::new();
+    let foreign = AttemptId::default();
+    for _ in 0..4 {
+        let mut stream = TcpStream::connect(api.addr()).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /2018-06-01/runtime/invocation/{foreign}/error HTTP/1.1\r\nHost: \
+                     {}\r\nConnection: close\r\nContent-Length: 1\r\n\r\n",
+                    api.addr()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        held.push(stream);
+    }
+    timeout(Duration::from_secs(2), async {
+        while body_budget.available_permits() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let path = format!(
+        "/2018-06-01/runtime/invocation/{}/response",
+        ticket.attempt()
+    );
+    assert_eq!(
+        request(api.addr(), "POST", &path, "", b"not-accepted")
+            .await
+            .status,
+        429
+    );
+    assert_eq!(
+        request(
+            api.addr(),
+            "GET",
+            "/2018-06-01/runtime/invocation/next",
+            "",
+            b""
+        )
+        .await
+        .status,
+        409
+    );
+    for mut stream in held {
+        stream.write_all(b"x").await.unwrap();
+        let mut reply = Vec::new();
+        timeout(
+            Duration::from_secs(3),
+            stream.take(16385).read_to_end(&mut reply),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(reply.starts_with(b"HTTP/1.1 400"));
+    }
+    assert_eq!(body_budget.available_permits(), 4);
+    assert_eq!(
+        request(api.addr(), "POST", &path, "", b"original-result")
+            .await
+            .status,
+        202
+    );
+    assert!(
+        matches!(ticket.wait().await.unwrap(), RuntimeResult::Success(payload) if payload.as_ref()==b"original-result")
+    );
+    api.shutdown().await.unwrap();
+}
+
+#[rstest]
+#[case(8192, true)]
+#[case(8193, false)]
+fn test_should_bound_the_exact_xray_error_cause(#[case] bytes: usize, #[case] accepted: bool) {
+    let route = Route::Complete {
+        attempt: AttemptId::default(),
+        outcome: Outcome::FunctionError,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        XRAY_ERROR_CAUSE,
+        HeaderValue::from_str(&"x".repeat(bytes)).unwrap(),
+    );
+    assert_eq!(validate_headers(&headers, Some(&route)).is_ok(), accepted);
+}
+
+#[rstest]
+#[case("GET", "/2018-06-01/runtime/invocation/next", XRAY_ERROR_CAUSE)]
+#[case("POST", "/2018-06-01/runtime/init/error", XRAY_ERROR_CAUSE)]
+#[case(
+    "POST",
+    "/2018-06-01/runtime/invocation/12345678-1234-4234-8234-123456789012/response",
+    XRAY_ERROR_CAUSE
+)]
+#[case(
+    "GET",
+    "/2018-06-01/runtime/invocation/12345678-1234-4234-8234-123456789012/error",
+    XRAY_ERROR_CAUSE
+)]
+#[case(
+    "POST",
+    "/2018-06-01/runtime/invocation/not-a-uuid/error",
+    XRAY_ERROR_CAUSE
+)]
+#[case(
+    "POST",
+    "/2018-06-01/runtime/invocation/12345678-1234-4234-8234-123456789012/error",
+    "x-xray-error-cause"
+)]
+fn test_should_not_grant_xray_allowance_to_other_headers_or_routes(
+    #[case] method: &str,
+    #[case] path: &str,
+    #[case] name: &'static str,
+) {
+    let parsed = route(&method.parse().unwrap(), &path.parse().unwrap());
+    let mut headers = HeaderMap::new();
+    headers.insert(name, HeaderValue::from_str(&"x".repeat(257)).unwrap());
+    assert_eq!(
+        validate_headers(&headers, parsed.as_ref().ok()),
+        Err(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE)
+    );
+}
+
+#[test]
+fn test_should_bound_xray_opaque_bytes_duplicates_count_and_aggregate() {
+    let route = Route::Complete {
+        attempt: AttemptId::default(),
+        outcome: Outcome::FunctionError,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        XRAY_ERROR_CAUSE,
+        HeaderValue::from_bytes(&[0x80, 0xff]).unwrap(),
+    );
+    assert!(validate_headers(&headers, Some(&route)).is_ok());
+    headers.insert(XRAY_ERROR_CAUSE, HeaderValue::from_bytes(b"x\tx").unwrap());
+    assert!(validate_headers(&headers, Some(&route)).is_err());
+    headers.insert(XRAY_ERROR_CAUSE, HeaderValue::from_static("first"));
+    headers.append(XRAY_ERROR_CAUSE, HeaderValue::from_static("second"));
+    assert!(validate_headers(&headers, Some(&route)).is_err());
+    headers.clear();
+    headers.insert(
+        XRAY_ERROR_CAUSE,
+        HeaderValue::from_str(&"x".repeat(8192)).unwrap(),
+    );
+    for _ in 0..30 {
+        headers.append("x-other", HeaderValue::from_str(&"o".repeat(256)).unwrap());
+    }
+    headers.append("x-other", HeaderValue::from_str(&"o".repeat(255)).unwrap());
+    assert!(validate_headers(&headers, Some(&route)).is_ok());
+    headers.append("x-other", HeaderValue::from_str(&"o".repeat(256)).unwrap());
+    assert_eq!(
+        validate_headers(&headers, Some(&route)),
+        Err(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE)
+    );
+    headers.clear();
+    for _ in 0..65 {
+        headers.append("x-other", HeaderValue::from_static(""));
+    }
+    assert_eq!(
+        validate_headers(&headers, Some(&route)),
+        Err(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE)
+    );
+}
+
+#[tokio::test]
+async fn test_should_preserve_attempt_through_rejected_xray_then_deliver_original_error() {
+    let mut api = start().await.unwrap();
+    let call = invocation();
+    let ticket = api
+        .session()
+        .submit(call.clone(), call.parts().1)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            api.addr(),
+            "GET",
+            "/2018-06-01/runtime/invocation/next",
+            "",
+            b""
+        )
+        .await
+        .status,
+        200
+    );
+    let path = format!("/2018-06-01/runtime/invocation/{}/error", ticket.attempt());
+    for (headers, expected) in [
+        (format!("{XRAY_ERROR_CAUSE}: {}\r\n", "x".repeat(8193)), 431),
+        (
+            format!("{XRAY_ERROR_CAUSE}: x\r\n{XRAY_ERROR_CAUSE}: y\r\n"),
+            431,
+        ),
+        (format!("{XRAY_ERROR_CAUSE}: x\tx\r\n"), 431),
+        (format!("{XRAY_ERROR_CAUSE}: x\x7fx\r\n"), 400),
+        (format!("{XRAY_ERROR_CAUSE}: x\0x\r\n"), 400),
+    ] {
+        assert_eq!(
+            request(api.addr(), "POST", &path, &headers, b"rejected-error")
+                .await
+                .status,
+            expected
+        );
+    }
+    let cause = format!(
+        "{XRAY_ERROR_CAUSE}: {}诊断\r\n",
+        "private-xray-cause".repeat(200)
+    );
+    let mismatch = format!("{cause}{INVOCATION_ID}: {}\r\n", AttemptId::default());
+    assert_eq!(
+        request(api.addr(), "POST", &path, &mismatch, b"wrong-error")
+            .await
+            .status,
+        400
+    );
+    let foreign = format!(
+        "/2018-06-01/runtime/invocation/{}/error",
+        AttemptId::default()
+    );
+    assert_eq!(
+        request(api.addr(), "POST", &foreign, &cause, b"foreign-error")
+            .await
+            .status,
+        400
+    );
+    let payload = b"original-error\0\xff";
+    let accepted = format!("{cause}{INVOCATION_ID}: {}\r\n", ticket.attempt());
+    assert_eq!(
+        request(api.addr(), "POST", &path, &accepted, payload)
+            .await
+            .status,
+        202
+    );
+    assert!(
+        matches!(ticket.wait().await.unwrap(), RuntimeResult::FunctionError(bytes) if bytes.as_ref()==payload)
+    );
+    api.shutdown().await.unwrap();
+}
+
 #[derive(Debug)]
 pub(crate) struct Reply {
     pub(crate) status: u16,
@@ -397,6 +701,47 @@ async fn test_should_retain_failed_supervision_on_repeated_shutdown() {
     ));
 }
 
+async fn observe_private_error_diagnostics(api: &RuntimeApiHandle) {
+    let error_call = invocation();
+    let error_ticket = api
+        .session()
+        .submit(error_call.clone(), error_call.parts().1)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            api.addr(),
+            "GET",
+            "/2018-06-01/runtime/invocation/next",
+            "",
+            b""
+        )
+        .await
+        .status,
+        200
+    );
+    let error_path = format!(
+        "/2018-06-01/runtime/invocation/{}/error",
+        error_ticket.attempt()
+    );
+    assert_eq!(
+        request(
+            api.addr(),
+            "POST",
+            &error_path,
+            &format!(
+                "{XRAY_ERROR_CAUSE}: {}\r\n",
+                "secret-xray-cause".repeat(100)
+            ),
+            b"secret-function-error"
+        )
+        .await
+        .status,
+        202
+    );
+    error_ticket.wait().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_should_omit_payloads_headers_and_targets_from_trace_level_runtime_diagnostics() {
     let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -443,6 +788,7 @@ async fn test_should_omit_payloads_headers_and_targets_from_trace_level_runtime_
         202
     );
     ticket.wait().await.unwrap();
+    observe_private_error_diagnostics(&api).await;
     assert_eq!(
         request(
             api.addr(),
@@ -478,6 +824,8 @@ async fn test_should_omit_payloads_headers_and_targets_from_trace_level_runtime_
         "secret-result",
         "secret-target",
         "secret-fragmented-trailer",
+        "secret-xray-cause",
+        "secret-function-error",
     ] {
         assert!(
             !output.contains(secret),
