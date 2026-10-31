@@ -320,6 +320,28 @@ test-workflows-image-performance-linux: workflows-image-performance-linux-build 
 
 .PHONY: test-workflows-image-performance-controls test-workflows-image-performance workflows-image-performance-linux-build workflows-image-performance-linux-images test-workflows-image-performance-linux
 
+# D103: isolated rootless infrastructure; full platform qualification stays separate.
+WORKFLOWS_ROOTLESS_PROFILE ?= rustack-workflows-rootless-arm64
+WORKFLOWS_ROOTLESS_PREVIOUS_EVIDENCE_DIR ?=
+WORKFLOWS_ROOTLESS_EVIDENCE_DIR ?= $(shell cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-rootless-d103
+
+test-workflows-rootless-controls:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_rootless_platform.py -v
+
+workflows-rootless-provision: test-workflows-rootless-controls
+	@python3 -I -B tests/workflows/rootless_platform.py provision "$(WORKFLOWS_ROOTLESS_PROFILE)" "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')" "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)"
+
+workflows-rootless-attest: test-workflows-rootless-controls
+	@python3 -I -B tests/workflows/rootless_platform.py attest "$(WORKFLOWS_ROOTLESS_PROFILE)" "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)"
+
+workflows-rootless-resume-setup: test-workflows-rootless-controls
+	@python3 -I -B tests/workflows/rootless_platform.py resume "$(WORKFLOWS_ROOTLESS_PROFILE)" "$(WORKFLOWS_ROOTLESS_PREVIOUS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)"
+
+workflows-rootless-recover-attestation: test-workflows-rootless-controls
+	@python3 -I -B tests/workflows/rootless_platform.py recover-attest "$(WORKFLOWS_ROOTLESS_PROFILE)" "$(WORKFLOWS_ROOTLESS_PREVIOUS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)"
+
+.PHONY: test-workflows-rootless-controls workflows-rootless-provision workflows-rootless-attest workflows-rootless-resume-setup workflows-rootless-recover-attestation
+
 # D75: exact same-feature resource inventories, before any resource execution.
 test-workflows-manifest:
 	@python3 -I -B -m unittest discover -s tests/workflows -p test_required_suites.py -v

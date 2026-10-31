@@ -42,6 +42,7 @@ D89/5.1a is implemented and independently reviewed: [provided-runtime ZIP delive
 | 55 | [Server container](./rustack-workflows-55-server-container-design.md) | Actual Linux server, explicit socket/DNS/volume ownership, signed SDK/nested ASL and joined shutdown |
 | 56 | [Release image and Action](./rustack-workflows-56-release-image-design.md) | Actual root image build/profile, safe Action inputs/deadlines, shared release-container qualification |
 | 57 | [Image performance and repeated cleanup](./rustack-workflows-57-image-performance-design.md) | Warm100/cold20 timing, initialization diagnostics,100 log-flood timeout cycles and direct ARM Linux owners |
+| 58 | [Rootless platform](./rustack-workflows-58-rootless-platform-design.md) | Isolated user daemon, effective cgroup attestation and complete resource qualification |
 | 60 | [Operations](./rustack-workflows-60-operations-design.md) | YAML configuration, budgets, topology, shutdown and snapshots |
 | 70 | [Verification plan](./rustack-workflows-70-verification-plan.md) | Acceptance matrix, security boundaries, SDK/platform coverage and performance budgets |
 | 80 | [Roadmap](./rustack-workflows-80-roadmap.md) | User-visible M0–M4 outcomes and calendar assumptions |
