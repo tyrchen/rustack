@@ -397,7 +397,7 @@ impl SnapshotService for LambdaSnapshotService {
     }
 
     fn payload_limit(&self) -> Option<usize> {
-        self.provider.image_archive_payload_limit()
+        self.provider.archive_payload_limit()
     }
 
     async fn load_meta_before(
@@ -407,7 +407,10 @@ impl SnapshotService for LambdaSnapshotService {
         deadline: Deadline,
     ) -> Result<()> {
         check_load_deadline(deadline)?;
-        let snapshot: LambdaSnapshot = decode_state(&state_cbor)?;
+        let snapshot: LambdaSnapshot = match self.provider.docker_archive_profile() {
+            Some(profile) => archive::from_cbor_lambda(&state_cbor, profile)?,
+            None => decode_state(&state_cbor)?,
+        };
         self.provider
             .import_snapshot_before(snapshot, deadline)
             .await?;
@@ -415,16 +418,21 @@ impl SnapshotService for LambdaSnapshotService {
     }
 
     async fn save_meta(&self, _data_staging_dir: &Path) -> Result<Vec<u8>> {
-        encode_state(
-            &self
-                .provider
-                .export_snapshot_before(Deadline::now() + Duration::from_secs(300))
-                .await?,
-        )
+        let snapshot = self
+            .provider
+            .export_snapshot_before(Deadline::now() + Duration::from_secs(300))
+            .await?;
+        match self.provider.docker_archive_profile() {
+            Some(profile) => archive::to_cbor_lambda(&snapshot, profile),
+            None => encode_state(&snapshot),
+        }
     }
 
     async fn load_meta(&self, state_cbor: Vec<u8>, _data_staging_dir: &Path) -> Result<()> {
-        let snapshot: LambdaSnapshot = decode_state(&state_cbor)?;
+        let snapshot: LambdaSnapshot = match self.provider.docker_archive_profile() {
+            Some(profile) => archive::from_cbor_lambda(&state_cbor, profile)?,
+            None => decode_state(&state_cbor)?,
+        };
         self.provider.import_snapshot(snapshot).await?;
         Ok(())
     }

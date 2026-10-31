@@ -35,6 +35,7 @@ use crate::{
     error::LambdaServiceError,
     executor::ExecutorError,
     invocation::CleanupTask,
+    provider::DockerArchiveProfile,
     storage::{FunctionRecord, FunctionStore, FunctionStoreSnapshot, PreparedImport, image_error},
 };
 
@@ -411,10 +412,11 @@ impl ImageDeploymentManager {
         &self,
         snapshot: FunctionStoreSnapshot,
         deadline: Instant,
+        profile: DockerArchiveProfile,
     ) -> Result<PreparedImport<'_>, LambdaServiceError> {
         self.restore_available()?;
         self.store
-            .prepare_image_snapshot(snapshot, &self.preparation, deadline)
+            .prepare_docker_snapshot(snapshot, &self.preparation, deadline, profile)
             .await
     }
 

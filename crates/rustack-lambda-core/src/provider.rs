@@ -126,6 +126,7 @@ fn build_executor(config: &LambdaConfig) -> Arc<dyn Executor> {
 }
 
 mod snapshot;
+pub use snapshot::DockerArchiveProfile;
 
 /// Outcome of an [`RustackLambda::invoke`] call, mapping cleanly to AWS
 /// `Invoke` response codes.
@@ -506,20 +507,41 @@ impl RustackLambda {
         }
         if self.config.executor == ExecutorBackend::Docker {
             self.executor.image_available()?;
+            if let Some(architecture) = self.executor.docker_zip_architecture() {
+                self.executor.zip_available(architecture)?;
+            }
         }
         Ok(())
     }
 
-    /// Docker metadata archive bound, separate from Native ZIP archive payloads.
+    /// Configured Docker archive bound, separate from Native archive payloads.
     ///
     /// ```no_run
     /// # fn limit(provider: &rustack_lambda_core::provider::RustackLambda) {
-    /// let limit = provider.image_archive_payload_limit();
+    /// let limit = provider.archive_payload_limit();
     /// # }
     /// ```
     #[must_use]
-    pub fn image_archive_payload_limit(&self) -> Option<usize> {
-        (self.config.executor == ExecutorBackend::Docker).then_some(snapshot::IMAGE_METADATA_BYTES)
+    pub fn archive_payload_limit(&self) -> Option<usize> {
+        self.docker_archive_profile()
+            .map(DockerArchiveProfile::payload_limit)
+    }
+
+    /// Configured Docker archive profile, independently of current readiness.
+    ///
+    /// ```
+    /// # use rustack_lambda_core::{config::LambdaConfig, provider::RustackLambda};
+    /// let provider = RustackLambda::new(LambdaConfig::default());
+    /// assert_eq!(provider.docker_archive_profile(), None);
+    /// ```
+    #[must_use]
+    pub fn docker_archive_profile(&self) -> Option<DockerArchiveProfile> {
+        (self.config.executor == ExecutorBackend::Docker).then(|| {
+            self.executor.docker_zip_architecture().map_or(
+                DockerArchiveProfile::ImageOnly,
+                DockerArchiveProfile::ProvidedZip,
+            )
+        })
     }
 
     /// Stop accepting invocation work and drain it before snapshot export.
@@ -592,7 +614,13 @@ impl RustackLambda {
             )?;
             #[cfg(unix)]
             {
-                let saved = snapshot::export_image(self, deadline).await?;
+                let saved = snapshot::export_docker(
+                    self,
+                    deadline,
+                    self.docker_archive_profile()
+                        .ok_or(LambdaServiceError::DockerNotAvailable)?,
+                )
+                .await?;
                 self.validate_runtime_restore()?;
                 self.image_deployments()?;
                 return Ok(saved);
@@ -641,18 +669,28 @@ impl RustackLambda {
             #[cfg(unix)]
             {
                 self.image_deployments()?;
-                let snapshot = snapshot::validate_image(
+                let profile = self
+                    .docker_archive_profile()
+                    .ok_or(LambdaServiceError::DockerNotAvailable)?;
+                if let Some(architecture) = profile.zip_architecture() {
+                    self.executor.zip_available(architecture)?;
+                }
+                let snapshot = snapshot::validate_docker(
                     snapshot,
                     deadline,
                     &self.config.default_region,
                     &self.config.account_id,
+                    profile,
                 )
                 .await?;
                 let manager = self.image_deployments()?;
                 let prepared = manager
-                    .prepare_restore(snapshot.functions, deadline)
+                    .prepare_restore(snapshot.functions, deadline, profile)
                     .await?;
                 self.image_deployments()?.restore_available()?;
+                if let Some(architecture) = profile.zip_architecture() {
+                    self.executor.zip_available(architecture)?;
+                }
                 prepared.commit_before(deadline)?;
                 self.layer_store.import_snapshot(snapshot.layers);
                 self.esm_store
@@ -5831,4 +5869,4 @@ mod tests {
 
 #[cfg(all(test, unix))]
 #[path = "provider/zip_tests.rs"]
-mod provided_zip_tests;
+pub(crate) mod provided_zip_tests;

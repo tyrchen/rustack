@@ -62,6 +62,20 @@ pub trait Executor: std::fmt::Debug + Send + Sync + 'static {
         ))
     }
 
+    /// Configured Docker ZIP platform for bounded archive profile selection.
+    ///
+    /// This does not grant readiness; callers must separately use
+    /// [`Self::zip_available`] before preparation and publication.
+    ///
+    /// ```
+    /// # fn profile(executor: &dyn rustack_lambda_core::executor::Executor) {
+    /// let configured = executor.docker_zip_architecture();
+    /// # }
+    /// ```
+    fn docker_zip_architecture(&self) -> Option<Architecture> {
+        None
+    }
+
     /// Check optional provided-runtime ZIP support for a captured architecture.
     ///
     /// # Errors

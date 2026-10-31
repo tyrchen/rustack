@@ -14,6 +14,8 @@ mod io_faults;
 mod process;
 #[path = "docker_startup/provided.rs"]
 mod provided;
+#[path = "docker_startup/provided_archive.rs"]
+mod provided_archive;
 #[path = "workflows_sdk/runner.rs"]
 mod runner;
 #[path = "docker_startup/sdk.rs"]
@@ -293,6 +295,8 @@ fn test_should_reject_earlier_startup_failure_as_negative_stage_evidence() {
     assert!(!Profile::MissingRelay.matches_failure(
         "Docker startup relay preparation failed: Docker response status 500 Internal Server Error"
     ));
+    assert!(!Profile::ZipArchiveNoSource.matches_failure("Docker ownership profile mismatch"));
+    assert!(!Profile::ZipArchive.matches_failure("Docker startup resource probe failed"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -395,4 +399,18 @@ async fn test_should_execute_ordinary_provided_zip_and_join_owned_retirement(
     #[case] phase: &str,
 ) -> Result<()> {
     provided::exercise(phase).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires actual ZIP/Image archive startup; run make test-lambda-provided-archive-docker"]
+async fn test_should_restore_provided_zip_archives_without_replay_and_preserve_invalid_generations()
+-> Result<()> {
+    provided_archive::exercise(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires configured and image-only real startup; run make \
+            test-lambda-provided-archive-docker"]
+async fn test_should_refuse_provided_zip_archives_without_configured_runtime() -> Result<()> {
+    provided_archive::exercise(true).await
 }

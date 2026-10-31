@@ -45,6 +45,8 @@ pub(super) enum Profile {
     Archive,
     Zip,
     ZipControlled,
+    ZipArchive,
+    ZipArchiveNoSource,
 }
 impl Profile {
     pub fn rejects(self) -> bool {
@@ -61,6 +63,8 @@ impl Profile {
             Self::Legacy => "Docker ownership predates journal provenance",
             Self::WrongEndpoint => "Docker startup endpoint qualification failed",
             Self::Archive => "Restored image storage proof mismatch",
+            Self::ZipArchive => "Invalid or oversized Docker ZIP archive candidate",
+            Self::ZipArchiveNoSource => "snapshot CBOR scalar limit exceeded",
             _ => return false,
         };
         text.contains(expected)
@@ -81,13 +85,14 @@ impl Profile {
         }
     }
     fn zip(self) -> bool {
-        matches!(self, Self::Zip | Self::ZipControlled)
+        matches!(self, Self::Zip | Self::ZipControlled | Self::ZipArchive)
     }
     fn network(self) -> bool {
         matches!(
             self,
             Self::Zip
                 | Self::ZipControlled
+                | Self::ZipArchive
                 | Self::Connected
                 | Self::Controlled
                 | Self::Deadline
@@ -577,7 +582,10 @@ async fn launch(
     } else {
         command.env("LAMBDA_DOCKER_NETWORK", "none");
     }
-    if profile == Profile::Archive {
+    if matches!(
+        profile,
+        Profile::Archive | Profile::ZipArchive | Profile::ZipArchiveNoSource
+    ) {
         command
             .arg("--snapshot")
             .arg("images")

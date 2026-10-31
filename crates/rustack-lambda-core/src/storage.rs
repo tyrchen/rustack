@@ -7,7 +7,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
-    io::{ErrorKind, Read},
+    io::{Error as IoError, ErrorKind, Read},
     iter::once,
     path::{Path, PathBuf},
     str::from_utf8,
@@ -23,7 +23,7 @@ use rustack_lambda_model::types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::watch;
+use tokio::{sync::watch, time::Instant};
 use zip::{System, read::ZipFile};
 
 use crate::{
@@ -34,11 +34,13 @@ use crate::{
 };
 
 mod restore;
+mod restore_zip;
 mod snapshot_view;
 mod zip_layout;
 pub(crate) use restore::PreparedImport;
 #[cfg(unix)]
 pub(crate) use restore::{check_deadline as check_restore_deadline, image_error};
+use restore_zip::ZipRestoreBudget;
 pub(crate) use snapshot_view::{FunctionSnapshotRef, LayerSnapshotRef, MappingSnapshotRef};
 pub(crate) use zip_layout::ZipLayout;
 
@@ -775,16 +777,20 @@ impl FunctionRecordSnapshot {
         }
     }
 
-    async fn into_record(
+    async fn into_record<'a>(
         self,
-        store: &FunctionStore,
-    ) -> Result<(FunctionRecord, Vec<StagedArtifact<'_>>), LambdaServiceError> {
+        store: &'a FunctionStore,
+        mut zip: Option<&mut ZipRestoreBudget>,
+    ) -> Result<(FunctionRecord, Vec<StagedArtifact<'a>>), LambdaServiceError> {
         let name = self.name;
-        let (latest, pending) = self.latest.into_record(store, &name).await?;
+        let (latest, pending) = self
+            .latest
+            .into_record(store, &name, zip.as_deref_mut())
+            .await?;
         let mut artifacts: Vec<_> = pending.into_iter().collect();
         let mut versions = BTreeMap::new();
         for (version, record) in self.versions {
-            let (record, artifact) = record.into_record(store, &name).await?;
+            let (record, artifact) = record.into_record(store, &name, zip.as_deref_mut()).await?;
             artifacts.extend(artifact);
             versions.insert(version, record);
         }
@@ -850,28 +856,33 @@ impl VersionRecordSnapshot {
         self,
         store: &'a FunctionStore,
         function_name: &str,
+        mut zip: Option<&mut ZipRestoreBudget>,
     ) -> Result<(VersionRecord, Option<StagedArtifact<'a>>), LambdaServiceError> {
         crate::function_config::validate_snapshot_settings(&self)?;
-        let zip_bytes = match self.zip_bytes_base64 {
-            Some(encoded) => {
-                let decoded = STANDARD.decode(encoded.as_bytes()).map_err(|source| {
+        if let Some(budget) = zip.as_deref() {
+            budget.check()?;
+        }
+        let (zip_bytes, artifact) = match (self.zip_bytes_base64, zip.as_deref_mut()) {
+            (Some(encoded), Some(budget)) => {
+                let staged = budget.stage(store, encoded).await?;
+                (Some(staged.artifact().zip_bytes().clone()), Some(staged))
+            }
+            (Some(encoded), None) => {
+                let bytes = Bytes::from(STANDARD.decode(encoded.as_bytes()).map_err(|source| {
                     LambdaServiceError::Internal {
                         message: format!("Failed to decode Lambda zip bytes: {source}"),
                     }
-                })?;
-                Some(Bytes::from(decoded))
+                })?);
+                let staged = store
+                    .stage_zip_code(function_name, &self.version, &bytes)
+                    .await?;
+                (Some(bytes), Some(staged))
             }
-            None => None,
+            (None, _) => (None, None),
         };
-        let artifact = if let Some(bytes) = zip_bytes.as_ref() {
-            Some(
-                store
-                    .stage_zip_code(function_name, &self.version, bytes)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        if let Some(budget) = zip {
+            budget.check()?;
+        }
         let code_path = artifact
             .as_ref()
             .map(|artifact| artifact.artifact().code_root().to_path_buf());
@@ -1415,11 +1426,22 @@ impl FunctionStore {
 }
 
 /// Stage a package in a freshly created private directory on a blocking worker.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Synchronous filesystem work is isolated to spawn_blocking.
 pub(crate) fn stage_zip(
     root: &Path,
     bytes: Bytes,
 ) -> Result<ValidatedArtifact, LambdaServiceError> {
+    stage_zip_before(root, bytes, MAX_EXTRACTED_SIZE, None)
+}
+
+/// Blocking staging retains only private artifact state, never store publication.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Called only in spawn_blocking, as the original staging boundary.
+fn stage_zip_before(
+    root: &Path,
+    bytes: Bytes,
+    max_extracted: u64,
+    deadline: Option<Instant>,
+) -> Result<ValidatedArtifact, LambdaServiceError> {
+    restore_zip::check(deadline)?;
     let io_error = |source| LambdaServiceError::ArtifactIo { source };
     std::fs::create_dir_all(root).map_err(io_error)?;
     if std::fs::symlink_metadata(root)
@@ -1440,7 +1462,7 @@ pub(crate) fn stage_zip(
     let result = (|| {
         std::fs::create_dir(&extracted).map_err(io_error)?;
         std::fs::write(artifact.path().join("code.zip"), &bytes).map_err(io_error)?;
-        extract_zip(&bytes, &extracted, MAX_EXTRACTED_SIZE)
+        extract_zip(&bytes, &extracted, max_extracted, deadline)
     })();
     if let Err(error) = result {
         artifact.close().map_err(io_error)?;
@@ -1469,6 +1491,7 @@ fn extract_zip(
     zip_bytes: &[u8],
     target: &Path,
     max_extracted: u64,
+    deadline: Option<Instant>,
 ) -> Result<(), LambdaServiceError> {
     use std::{
         fs::{self, File},
@@ -1494,6 +1517,7 @@ fn extract_zip(
     let mut layout = ZipLayout::default();
     let mut extracted_total: u64 = 0;
     for i in 0..archive.len() {
+        restore_zip::check(deadline)?;
         let mut entry = archive
             .by_index(i)
             .map_err(|e| LambdaServiceError::InvalidZipFile {
@@ -1530,19 +1554,9 @@ fn extract_zip(
         }
         let mut out = File::create_new(&out_path)
             .map_err(|source| LambdaServiceError::ArtifactIo { source })?;
-        let copied = io::copy(
-            &mut (&mut entry).take(remaining.saturating_add(1)),
-            &mut out,
-        )
-        .map_err(|source| {
-            if source.kind() == ErrorKind::InvalidData {
-                LambdaServiceError::InvalidZipFile {
-                    message: format!("ZIP CRC/decompression failed: {source}"),
-                }
-            } else {
-                LambdaServiceError::ArtifactIo { source }
-            }
-        })?;
+        let copied =
+            io::copy(&mut (&mut entry).take(remaining), &mut out).map_err(zip_read_error)?;
+        verify_zip_entry(&mut entry, copied)?;
         extracted_total = extracted_total.saturating_add(copied);
         if extracted_total > max_extracted {
             return Err(LambdaServiceError::InvalidZipFile {
@@ -1563,6 +1577,29 @@ fn extract_zip(
         }
     }
     Ok(())
+}
+
+/// Probe EOF/CRC without writing beyond the charged expansion allowance.
+fn verify_zip_entry<R: Read + ?Sized>(
+    entry: &mut ZipFile<'_, R>,
+    copied: u64,
+) -> Result<(), LambdaServiceError> {
+    let mut overflow = [0_u8];
+    if entry.read(&mut overflow).map_err(zip_read_error)? != 0 || copied != entry.size() {
+        return Err(LambdaServiceError::InvalidZipFile {
+            message: "ZIP size/decompression mismatch".into(),
+        });
+    }
+    Ok(())
+}
+fn zip_read_error(source: IoError) -> LambdaServiceError {
+    if source.kind() == ErrorKind::InvalidData {
+        LambdaServiceError::InvalidZipFile {
+            message: "ZIP CRC/decompression failed".into(),
+        }
+    } else {
+        LambdaServiceError::ArtifactIo { source }
+    }
 }
 
 /// Require positive compressed-stream EOF for a metadata-validated directory.
@@ -2633,8 +2670,8 @@ mod tests {
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        let err =
-            extract_zip(&buf, tmp.path(), 100).expect_err("expansion beyond budget must fail");
+        let err = extract_zip(&buf, tmp.path(), 100, None)
+            .expect_err("expansion beyond budget must fail");
         assert!(
             matches!(err, LambdaServiceError::InvalidZipFile { .. }),
             "got: {err:?}"
@@ -2655,7 +2692,7 @@ mod tests {
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        extract_zip(&buf, tmp.path(), 1024).expect("within-budget zip extracts");
+        extract_zip(&buf, tmp.path(), 1024, None).expect("within-budget zip extracts");
         assert!(tmp.path().join("small.txt").exists());
     }
 

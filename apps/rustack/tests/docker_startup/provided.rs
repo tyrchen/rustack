@@ -107,7 +107,7 @@ async fn run(server: &mut Server, phase: &str) -> Result<()> {
     verify_digests(&observed).await
 }
 
-async fn verify_digests(observed: &Value) -> Result<()> {
+pub(super) async fn verify_digests(observed: &Value) -> Result<()> {
     let digests = observed["zipSha256"]
         .as_array()
         .context("ZIP identity report")?;

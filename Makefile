@@ -1225,7 +1225,7 @@ test-lambda-provided-fixture:
 
 .PHONY: test-lambda-provided-fixture
 
-test-lambda-code-fixture: test-lambda-provided-fixture
+test-lambda-code-fixture: test-lambda-provided-fixture test-lambda-zip-archive
 	@cargo test --locked -p rustack-lambda-core --lib docker::code_volume::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::ownership::codes::tests
 	@cargo test --locked -p rustack-lambda-core --lib docker::recovery::code::tests
@@ -1368,11 +1368,11 @@ test-lambda-docker:
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_probe -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire -- --ignored --nocapture --test-threads=1
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-runtime --test docker -- --ignored --nocapture --test-threads=1
-	@echo 'Verified docker-image-functional resources; Node, ZIP archives, handler SDK, IaC and reference/platform/full release acceptance remains required.'
+	@echo 'Verified docker-image-functional resources; Node, handler SDK, IaC and reference/platform/full release acceptance remains required.'
 
 .PHONY: test-lambda-docker-manifest test-lambda-docker
 
-# Durable code namespace recovery only; no production ZIP capability.
+# Durable code namespace recovery only; ordinary runtime qualification is separate.
 test-lambda-code-recovery-docker: lambda-runtime-image
 	@RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_ARCH="$(WORKFLOWS_ARCH)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test --locked -p rustack-lambda-core --lib docker::recovery::code::tests::real::test_should_recover_real_code_volume_and_unstarted_loader_across_reacquisition -- --ignored --exact --nocapture --test-threads=1
 
@@ -1390,3 +1390,18 @@ test-lambda-provided-native-docker: test-lambda-docker-manifest
 	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-lambda-core --test docker_wire code::test_should_execute_the_same_provided_zip_bytes_through_real_linux_native_and_join_children -- --ignored --exact --nocapture --test-threads=1
 
 .PHONY: test-lambda-provided-docker test-lambda-provided-native-docker test-lambda-provided-io-docker
+
+
+# D93: bounded managed archive data/profile/candidate and raw codec controls.
+test-lambda-zip-archive: workflows-sdk-python
+	@PYTHONDONTWRITEBYTECODE=1 "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" -m unittest discover -s tests/workflows -p test_provided_zip_archive.py -v
+	@cargo test --locked -p rustack-lambda-core --lib provider::snapshot
+	@cargo test --locked -p rustack-lambda-core --lib storage::restore_zip
+	@cargo test --locked -p rustack-lambda-core --lib deployment::manager::tests::restore
+	@cargo test --locked -p rustack-cli --bin rustack --no-default-features --features lambda,stepfunctions snapshot::archive::cbor
+	@cargo test --locked -p rustack-cli --bin rustack --no-default-features --features lambda,stepfunctions snapshot::image_tests
+
+test-lambda-provided-archive-docker: lambda-runtime-image lambda-runtime-fixture-image lambda-provided-zip-build lambda-provided-base-image workflows-sdk-python test-lambda-docker-manifest
+	@$(WORKFLOWS_DOCKER_TEST_ENV) cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test docker_startup --no-default-features --features lambda,stepfunctions provided_zip_archives -- --ignored --nocapture --test-threads=1
+
+.PHONY: test-lambda-zip-archive test-lambda-provided-archive-docker

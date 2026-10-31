@@ -7,7 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use rustack_lambda_core::provider::LambdaSnapshot;
+use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, task::spawn_blocking, time::timeout};
 
 const PLAIN_LIMIT: usize = 16 * 1024 * 1024;
@@ -155,6 +157,29 @@ pub(super) async fn corrupt_size(root: &Path) -> Result<()> {
             .code_size
             .checked_add(1)
             .context("code size")?;
+        encode(&snapshot)
+    });
+    let corrupted = timeout(Duration::from_secs(30), &mut job).await???;
+    fs::write(path, corrupted).await?;
+    Ok(())
+}
+
+pub(super) async fn corrupt_zip(root: &Path) -> Result<()> {
+    let path = metadata(root);
+    let original = bytes(&path).await?;
+    let mut job = spawn_blocking(move || {
+        let mut snapshot = decode(&original)?;
+        let version = &mut snapshot
+            .functions
+            .functions
+            .iter_mut()
+            .find(|function| function.latest.package_type == "Zip")
+            .context("actual saved provided ZIP")?
+            .latest;
+        let source = b"invalid ZIP archive source";
+        version.zip_bytes_base64 = Some(STANDARD.encode(source));
+        version.code_sha256 = STANDARD.encode(Sha256::digest(source));
+        version.code_size = u64::try_from(source.len())?;
         encode(&snapshot)
     });
     let corrupted = timeout(Duration::from_secs(30), &mut job).await???;

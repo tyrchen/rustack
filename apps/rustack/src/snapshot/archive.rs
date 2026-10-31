@@ -12,6 +12,8 @@ use anyhow::{Context, Result, bail};
 use crc32fast::Hasher;
 #[cfg(unix)]
 use nix::fcntl::OFlag;
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::provider::DockerArchiveProfile;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{fs, io::AsyncReadExt};
 
@@ -114,6 +116,22 @@ where
     T: DeserializeOwned,
 {
     Ok(cbor::decode(bytes)?)
+}
+
+#[cfg(feature = "lambda")]
+pub(super) fn from_cbor_lambda<T: DeserializeOwned>(
+    bytes: &[u8],
+    profile: DockerArchiveProfile,
+) -> Result<T> {
+    Ok(cbor::decode_lambda(bytes, profile)?)
+}
+
+#[cfg(feature = "lambda")]
+pub(super) fn to_cbor_lambda<T: Serialize>(
+    value: &T,
+    profile: DockerArchiveProfile,
+) -> Result<Vec<u8>> {
+    Ok(cbor::encode_lambda(value, profile)?)
 }
 
 #[cfg(feature = "stepfunctions")]

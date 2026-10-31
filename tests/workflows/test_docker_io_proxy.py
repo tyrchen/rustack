@@ -217,7 +217,7 @@ class ProxyControls(unittest.TestCase):
     def test_should_not_emit_process_handshakes_when_importing_fault_helpers(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            for module in ("lambda_fault_sdk", "provided_zip_sdk", "provided_zip_io"):
+            for module in ("lambda_fault_sdk", "provided_zip_sdk", "provided_zip_archive_sdk", "provided_zip_io"):
                 importlib.import_module(module)
         self.assertEqual(output.getvalue(), "")
 

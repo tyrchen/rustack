@@ -52,7 +52,7 @@ impl Executor for ZipControl {
         Ok(())
     }
 }
-fn fixture() -> (TempDir, RustackLambda) {
+pub(super) fn fixture() -> (TempDir, RustackLambda) {
     let root = tempfile::tempdir().unwrap();
     let provider = RustackLambda::with_executor(
         FunctionStore::new(root.path()),
@@ -64,7 +64,7 @@ fn fixture() -> (TempDir, RustackLambda) {
     );
     (root, provider)
 }
-fn package(elf: bool) -> String {
+pub(crate) fn package(elf: bool) -> String {
     let mut body = vec![0_u8; 64];
     if elf {
         body.get_mut(..7)
@@ -93,7 +93,7 @@ fn package(elf: bool) -> String {
     writer.write_all(&body).unwrap();
     STANDARD.encode(writer.finish().unwrap().into_inner())
 }
-fn input() -> CreateFunctionInput {
+pub(crate) fn input() -> CreateFunctionInput {
     CreateFunctionInput {
         function_name: "provided-control".into(),
         runtime: Some("provided.al2023".into()),

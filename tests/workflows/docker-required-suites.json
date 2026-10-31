@@ -93,7 +93,9 @@
         "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_3_initializing",
         "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_4_busy",
         "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_14_zip_allocating",
-        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_15_zip_cleanup"
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_15_zip_cleanup",
+        "test_should_restore_provided_zip_archives_without_replay_and_preserve_invalid_generations",
+        "test_should_refuse_provided_zip_archives_without_configured_runtime"
       ]
     },
     {

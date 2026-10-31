@@ -319,6 +319,13 @@ impl Executor for DockerExecutor {
         }
         Ok(())
     }
+    fn docker_zip_architecture(&self) -> Option<Architecture> {
+        self.config
+            .zip
+            .as_ref()
+            .map(|source| source.base.resolved().metadata().architecture)
+    }
+
     fn zip_available(&self, architecture: Architecture) -> Result<(), ExecutorError> {
         self.image_available()?;
         let source = self.config.zip.as_ref().ok_or_else(|| {

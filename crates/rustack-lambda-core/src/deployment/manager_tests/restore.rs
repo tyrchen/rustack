@@ -1,15 +1,27 @@
 //! Complete-candidate restore must not publish partial resources or live placeholders.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    io::{Cursor, Read, Write},
+    sync::atomic::AtomicBool,
+};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+use rustack_lambda_model::error::{LambdaError, LambdaErrorCode};
 use serde_json::{Value, json};
+use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::*;
 use crate::{
     artifact::{ImageArtifact, ImageMetadata, ResolvedImage},
-    docker::ImageResolver,
-    provider::LambdaSnapshot,
-    storage::{AliasRecord, EventSourceMappingRecord, LayerRecord, LayerStoreSnapshot},
+    docker::{DockerExecutorError, ImageResolver},
+    provider::{
+        DockerArchiveProfile, LambdaSnapshot,
+        provided_zip_tests::{input as zip_input, package as zip_package},
+    },
+    storage::{
+        AliasRecord, EventSourceMappingRecord, LayerRecord, LayerStoreSnapshot, compute_sha256,
+    },
 };
 
 struct ImportFixture {
@@ -20,6 +32,9 @@ struct ImportFixture {
 }
 impl ImportFixture {
     async fn new(mode: DaemonMode, old_pin: bool) -> Self {
+        Self::with_executor(mode, old_pin, Arc::new(ControlPlaneExecutor)).await
+    }
+    async fn with_executor(mode: DaemonMode, old_pin: bool, executor: Arc<dyn Executor>) -> Self {
         let fake = FakePins::new(mode).await;
         let images = fake.owner(8, 2);
         let root = tempfile::tempdir().unwrap();
@@ -51,7 +66,7 @@ impl ImportFixture {
                     executor: ExecutorBackend::Docker,
                     ..LambdaConfig::default()
                 },
-                Arc::new(ControlPlaneExecutor),
+                executor,
             )
             .with_image_preparation(
                 images.port(),
@@ -300,7 +315,12 @@ async fn test_should_reject_expired_commit_after_complete_pin_preparation_withou
     let candidate = fixture
         .provider
         .store()
-        .prepare_image_snapshot(source.functions, &fixture.images.port(), deadline())
+        .prepare_docker_snapshot(
+            source.functions,
+            &fixture.images.port(),
+            deadline(),
+            DockerArchiveProfile::ImageOnly,
+        )
         .await
         .unwrap();
     assert_eq!(fixture.fake.stats.tags.load(Ordering::Acquire), 2);
@@ -432,5 +452,186 @@ async fn test_should_reject_deep_live_policy_and_oversized_ancillary_export_befo
     assert!(matches!(error, LambdaServiceError::InvalidParameter { .. }));
     assert_eq!(fixture.fake.stats.tags.load(Ordering::Acquire), 1);
     assert_eq!(fixture.provider.store().len(), 1);
+    fixture.close().await;
+}
+
+#[derive(Debug)]
+struct ManagedZipExecutor(Arc<AtomicBool>);
+#[async_trait]
+impl Executor for ManagedZipExecutor {
+    fn image_available(&self) -> Result<(), ExecutorError> {
+        Ok(())
+    }
+    fn docker_zip_architecture(&self) -> Option<Architecture> {
+        Some(Architecture::Arm64)
+    }
+    fn zip_available(&self, architecture: Architecture) -> Result<(), ExecutorError> {
+        if !self.0.load(Ordering::Acquire) || architecture != Architecture::Arm64 {
+            return Err(DockerExecutorError::Unavailable.into());
+        }
+        Ok(())
+    }
+    async fn invoke(
+        &self,
+        _: InvokeRequest,
+        _: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
+        Err(ExecutorError::Unsupported(
+            "archive metadata fixture".into(),
+        ))
+    }
+    async fn shutdown(&self) -> Result<(), ExecutorError> {
+        Ok(())
+    }
+}
+async fn managed_fixture(mode: DaemonMode) -> (ImportFixture, Arc<AtomicBool>, LambdaSnapshot) {
+    let live = Arc::new(AtomicBool::new(true));
+    let fixture =
+        ImportFixture::with_executor(mode, false, Arc::new(ManagedZipExecutor(live.clone()))).await;
+    let mut input = zip_input();
+    input.publish = Some(true);
+    fixture.provider.create_function(input).await.unwrap();
+    let source = fixture
+        .provider
+        .export_snapshot_before(deadline())
+        .await
+        .unwrap();
+    (fixture, live, source)
+}
+#[tokio::test]
+async fn test_should_restore_original_zip_with_valid_long_budget_and_fresh_private_artifacts() {
+    let (fixture, _live, source) = managed_fixture(DaemonMode::Normal).await;
+    let old = fixture
+        .provider
+        .store()
+        .get("provided-control")
+        .unwrap()
+        .unwrap();
+    let expected = fixture.state();
+    fixture
+        .provider
+        .import_snapshot_before(source, Instant::now() + Duration::from_secs(3600))
+        .await
+        .unwrap();
+    let loaded = fixture
+        .provider
+        .store()
+        .get("provided-control")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.latest.code_sha256, old.latest.code_sha256);
+    assert_eq!(loaded.latest.revision_id, old.latest.revision_id);
+    assert_ne!(loaded.latest.code_path, old.latest.code_path);
+    assert_eq!(fixture.state(), expected);
+    assert_eq!(fixture.fake.stats.tags.load(Ordering::Acquire), 0);
+    drop(loaded);
+    drop(old);
+    fixture.close().await;
+}
+#[rstest]
+#[case::non_elf(false)]
+#[case::wrong_elf_target(true)]
+#[tokio::test]
+async fn test_should_classify_checksum_valid_bad_elf_as_input_before_any_image_pin(
+    #[case] wrong_target: bool,
+) {
+    let (fixture, _live, mut source) = managed_fixture(DaemonMode::Normal).await;
+    let image = snapshot(vec![saved_record("a-image", &fixture.saved().await)]);
+    source.functions.functions.extend(image.functions.functions);
+    let mut bad = zip_package(false);
+    if wrong_target {
+        let bytes = STANDARD.decode(zip_package(true)).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut body = Vec::new();
+        zip.by_name("bootstrap")
+            .unwrap()
+            .read_to_end(&mut body)
+            .unwrap();
+        body.get_mut(18..20)
+            .unwrap()
+            .copy_from_slice(&62_u16.to_le_bytes());
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "bootstrap",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        writer.write_all(&body).unwrap();
+        bad = STANDARD.encode(writer.finish().unwrap().into_inner());
+    }
+    let bytes = STANDARD.decode(&bad).unwrap();
+    let row = &mut source
+        .functions
+        .functions
+        .iter_mut()
+        .find(|row| row.name == "provided-control")
+        .unwrap()
+        .latest;
+    row.code_size = u64::try_from(bytes.len()).unwrap();
+    row.code_sha256 = compute_sha256(&bytes);
+    row.zip_bytes_base64 = Some(bad);
+    let before = fixture.state();
+    let error = fixture
+        .provider
+        .import_snapshot_before(source, deadline())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        &error,
+        LambdaServiceError::InvalidParameter { .. }
+    ));
+    let public: LambdaError = error.into();
+    assert_eq!(public.code, LambdaErrorCode::InvalidParameterValueException);
+    assert_eq!(fixture.fake.stats.tags.load(Ordering::Acquire), 0);
+    assert_eq!(fixture.state(), before);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn test_should_preserve_complete_old_zip_store_when_later_image_size_proof_fails() {
+    let (fixture, _live, mut source) = managed_fixture(DaemonMode::Normal).await;
+    let mut image = saved_record("z-image", &fixture.saved().await);
+    image.latest.code_size = 4097;
+    source
+        .functions
+        .functions
+        .extend(snapshot(vec![image]).functions.functions);
+    let before = fixture.state();
+    assert!(matches!(
+        fixture
+            .provider
+            .import_snapshot_before(source, deadline())
+            .await,
+        Err(LambdaServiceError::InvalidParameter { .. })
+    ));
+    fixture.images.port().wait_empty(deadline()).await.unwrap();
+    assert_eq!(fixture.fake.stats.tags.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.fake.stats.deletes.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.state(), before);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn test_should_fence_zip_capability_revocation_after_mixed_pin_preparation() {
+    let (fixture, live, mut source) = managed_fixture(DaemonMode::Never).await;
+    source.functions.functions.extend(
+        snapshot(vec![saved_record("z-image", &fixture.saved().await)])
+            .functions
+            .functions,
+    );
+    let before = fixture.state();
+    let provider = fixture.provider.clone();
+    let caller =
+        tokio::spawn(async move { provider.import_snapshot_before(source, deadline()).await });
+    fixture
+        .fake
+        .stats
+        .until(|| fixture.fake.stats.tags.load(Ordering::Acquire) == 1)
+        .await;
+    live.store(false, Ordering::Release);
+    fixture.fake.commands.send(Command::Commit).await.unwrap();
+    assert!(caller.await.unwrap().is_err());
+    fixture.images.port().wait_empty(deadline()).await.unwrap();
+    assert_eq!(fixture.state(), before);
+    assert_eq!(fixture.fake.stats.deletes.load(Ordering::Acquire), 1);
     fixture.close().await;
 }

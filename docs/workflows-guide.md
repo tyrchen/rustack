@@ -6,10 +6,10 @@ state types, retries/timeouts, Inline Map/Parallel, nested workflows and Lambda
 callbacks. Real Lambda execution is qualified through the explicit trusted-host
 Native backend and the ordinary Docker image startup path. Docker requires the
 configured ownership/recovery and real kernel/network/optional gateway probes
-below; it uses the actual shared provider for SDK and ASL calls. Image archives
-restore saved immutable local content through the same qualified owner. Docker
-ZIP, Node, handler SDK networking, IaC and final platform/release qualification
-remain unfinished.
+below; it uses the actual shared provider for SDK and ASL calls. The configured
+provided.al2023 profile executes original ZIP code and restores bounded ZIP/Image
+archives through the same qualified owner. Node, handler SDK networking, IaC and
+final platform/release qualification remain unfinished.
 
 ## Run the pure example
 
@@ -174,9 +174,9 @@ and explicit entries plus implicit parent directories to10,000 filesystem nodes.
 It rejects traversal/absolute/drive/NUL names, links, special file declarations,
 privileged modes and corrupt directory/file streams.
 
-Docker is currently image-only: ZIP creation/configured ZIP sources and ZIP
-archives reject explicitly. Named Image snapshots restore resources, published
-versions, aliases and terminal workflow history without replay. The archive stores
+Docker runs Image functions by default. The explicitly configured provided-runtime
+profile below adds ZIP execution and managed ZIP archives. Named Image snapshots
+restore resources, published versions, aliases and terminal workflow history without replay. The archive stores
 image references and execution metadata, not image layers. Every usable revision
 requires the exact saved immutable content to remain in the local daemon; restore
 never pulls or follows a changed source tag. The provider account and region must
@@ -184,13 +184,14 @@ match. Fresh platform/fingerprint/size proof precedes publication and ingress.
 Invalid metadata, missing content or an expired startup deadline preserves both
 current and previous archive generations.
 
-Docker Lambda metadata is capped at16MiB,256 functions and1024 total
+Image-only Docker Lambda metadata is capped at16MiB,256 functions and1024 total
 latest/published revisions, with bounded depth, members and scalar sizes. Saving
-over-profile metadata fails before generation publication. See the
+over-profile metadata fails before generation publication. The managed ZIP profile
+retains the same metadata/count limits and adds separate original-code budgets below. See the
 [Image archive contract](../specs/rustack-workflows-20-lambda-runtime-design.md#216-candidate-store-image-archive-restoration-d88)
 for exact limits. Named Native/pure workflow snapshots remain available within
 their documented profile. The L01–L09 Docker fault/admission matrix is functionally
-qualified on the retained lanes; Docker ZIP, Node, handler SDK networking,
+qualified on the retained lanes; Node, handler SDK networking,
 IaC/native reference and final platform/release gates remain open.
 
 The explicit `make test-lambda-startup-docker` gate builds its host executable in
@@ -212,7 +213,7 @@ latest updates successfully to B. Cold published-A/latest-B launches must also
 return counter=1 after other resources displace their environments. Test source tags are uniquely owned and checked
 before removal. The collector is a test barrier, not a required user endpoint or
 handler SDK compatibility claim. Official Python and independent Rust RIC
-functional evidence do not qualify the remaining Node/fault/admission/platform
+functional evidence do not qualify the remaining Node/handler SDK/platform
 matrix. Collector failure controls run with `make test-lambda-custom-ric-fixture`.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
@@ -279,17 +280,51 @@ and IO, then code volumes, image pins and the Docker wire.
 `make test-lambda-provided-docker` selects the ordinary signed SDK/ASL/revision/
 fault/cancellation cases and the exact-same-ZIP Linux Native verifier after the
 compiled inventory check. It consumes the explicit fixture variables set by the
-full gate; run `make test-lambda-docker` to provision and verify all63 resources.
+full gate; run `make test-lambda-docker` to provision and verify all65 resources.
 Keep fixture files unchanged throughout a run. The verifier executes the same
 original A ZIP bytes through the real Native provider and joins its child; it
 uses an executable temporary mount only inside that separately owned verifier.
 This does not change production Lambda's noexec policy.
 
-ZIP snapshot export/import remains unavailable pending its own archive phase;
-Image archives retain their existing behavior. Node runtimes, handler SDK/IaC,
-reference/native-x86/platform and complete release acceptance remain separate.
+Named snapshots include original ZIP bytes, revisions, publications, aliases and
+terminal workflow history when the provided runtime is configured. Image-only
+installations reject ZIP archives before startup ingress. Import validates the
+complete private ZIP candidate before acquiring Image leases and publishes only
+after final source/backend/deadline checks. Invalid metadata/code, unavailable
+immutable content, a missing provided runtime or expiry preserves both committed
+archive generations. No code volumes, containers, host extraction paths, warm
+counters or live invocations are restored; a process restart starts with a fresh
+runtime pool and does not replay function/workflow work.
+
+The managed Lambda archive payload is capped at128MiB, with a separate16MiB
+metadata limit. Original ZIP bytes are capped at50MiB per revision and64MiB total;
+repeated latest/published copies count separately even when their live artifacts
+share memory. The private restore candidate additionally caps expanded logical
+file bytes at512MiB and materialized nodes at20,000, including three artifact
+wrapper nodes per revision. Existing per-ZIP tree/expansion limits still apply.
+The256-function/1024-revision limits remain. These are fixed safety profiles:
+a deployment can be valid to invoke yet too large to save, in which case the
+previous committed generation remains usable. Metadata limits apply globally
+before an owned archive DTO is built; ZIP fields do not enlarge policy/layer or
+other metadata allowances.
+
+The provided base remains operator configuration, outside saved function code.
+Restart requires a qualified immutable base for the saved ZIP architecture.
+Changing that base deliberately changes the runtime environment while preserving
+the original ZIP hash/size; archive metadata cannot select a base, registry,
+network or credentials. Image archives continue requiring their exact saved
+local image identities. `make test-lambda-zip-archive` runs the pure profile,
+projection, codec, staging, candidate and clock controls;
+`make test-lambda-provided-archive-docker` runs both ordinary archive resources
+after fixture provisioning and the exact compiled manifest check.
+
+Node runtimes, handler SDK/IaC, reference/native-x86/platform and complete release
+acceptance remain separate. The implementation ledger records final functional
+qualification; the native-workflow verifier alone does not certify these Docker
+archive resources.
 See the [ordinary ZIP contract](../specs/rustack-workflows-20-lambda-runtime-design.md#68-ordinary-provided-runtime-installation-and-environment-consumption-d92)
-and [verification status](../specs/rustack-workflows-93-review.md#d92-development-qualification-evidence-in-progress).
+and [managed archive contract](../specs/rustack-workflows-20-lambda-runtime-design.md#69-bounded-provided-runtime-zip-archives-and-mixed-candidate-restoration-d93)
+and [verification status](../specs/rustack-workflows-93-review.md#d93-final-actual-qualification-and-exact-postconditions).
 
 The management IO cases hold actual Create/Tag acknowledgments and owned DELETE
 requests. Deleting a Pending deployment cannot release its quota while critical
@@ -444,6 +479,6 @@ scope; it does not certify the unfinished full image/platform release.
 
 Current macOS measurements and raw provenance are in the
 [performance review](./research/workflows-native-performance-review.md).
-Required reference Linux performance, Docker ZIP/Node, handler SDK
+Required reference Linux performance, Node, handler SDK
 networking, Pulumi lifecycle and final platform lanes remain open in the
 [implementation plan](../specs/rustack-workflows-90-impl-plan.md).

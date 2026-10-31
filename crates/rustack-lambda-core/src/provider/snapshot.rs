@@ -1,12 +1,70 @@
-//! Bounded, side-effect-free Image metadata validation before pin preparation.
+//! Bounded Docker archive profiles and validation before candidate preparation.
 
-pub(super) const IMAGE_METADATA_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const MAX_IMAGE_FUNCTIONS: usize = 256;
-pub(super) const MAX_IMAGE_REVISIONS: usize = 1024;
+use crate::artifact::{Architecture, MAX_ZIP_BYTES as MAX_ORIGINAL_ZIP_BYTES};
+
+/// Configured Docker archive allowance, independent of execution readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DockerArchiveProfile {
+    /// Immutable image metadata only.
+    ImageOnly,
+    /// Original provided-runtime ZIP code and image metadata.
+    ProvidedZip(Architecture),
+}
+impl DockerArchiveProfile {
+    /// Compact metadata allowance, excluding original ZIP bodies.
+    pub const METADATA_BYTES: usize = 16 * 1024 * 1024;
+    /// Maximum number of functions in either Docker profile.
+    pub const MAX_FUNCTIONS: usize = 256;
+    /// Maximum aggregate latest and published revisions.
+    pub const MAX_REVISIONS: usize = 1024;
+    /// Maximum original ZIP bytes per revision.
+    pub const MAX_ZIP_BYTES: usize = MAX_ORIGINAL_ZIP_BYTES;
+    /// Aggregate original ZIP bytes, counting every saved revision.
+    pub const MAX_ZIP_DATA_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Complete service payload/work allowance for this configured profile.
+    ///
+    /// ```
+    /// use rustack_lambda_core::provider::DockerArchiveProfile;
+    /// assert_eq!(DockerArchiveProfile::ImageOnly.payload_limit(), 16 * 1024 * 1024);
+    /// ```
+    #[must_use]
+    pub const fn payload_limit(self) -> usize {
+        match self {
+            Self::ImageOnly => Self::METADATA_BYTES,
+            Self::ProvidedZip(_) => 128 * 1024 * 1024,
+        }
+    }
+
+    /// Configured ZIP platform; this is not a health or execution grant.
+    ///
+    /// ```
+    /// use rustack_lambda_core::provider::DockerArchiveProfile;
+    /// assert_eq!(DockerArchiveProfile::ImageOnly.zip_architecture(), None);
+    /// ```
+    #[must_use]
+    pub const fn zip_architecture(self) -> Option<Architecture> {
+        match self {
+            Self::ImageOnly => None,
+            Self::ProvidedZip(architecture) => Some(architecture),
+        }
+    }
+}
+
+pub(super) const IMAGE_METADATA_BYTES: usize = DockerArchiveProfile::METADATA_BYTES;
+pub(super) const MAX_IMAGE_FUNCTIONS: usize = DockerArchiveProfile::MAX_FUNCTIONS;
+pub(super) const MAX_IMAGE_REVISIONS: usize = DockerArchiveProfile::MAX_REVISIONS;
+
+#[cfg(unix)]
+mod projection;
+#[cfg(unix)]
+mod zip;
 
 #[cfg(unix)]
 mod validation {
     use std::{
+        fmt::{Debug, Formatter, Result as FmtResult},
         io::{Error as IoError, ErrorKind, Result as IoResult, Write},
         iter::once,
     };
@@ -20,7 +78,10 @@ mod validation {
         time::{Instant, timeout_at},
     };
 
-    use super::{IMAGE_METADATA_BYTES, MAX_IMAGE_FUNCTIONS, MAX_IMAGE_REVISIONS};
+    use super::{
+        DockerArchiveProfile, IMAGE_METADATA_BYTES, MAX_IMAGE_FUNCTIONS, MAX_IMAGE_REVISIONS,
+        projection::Metadata, zip,
+    };
     use crate::{
         docker::DockerError,
         error::LambdaServiceError,
@@ -34,16 +95,29 @@ mod validation {
 
     static VALIDATORS: Semaphore = Semaphore::const_new(4);
 
-    fn invalid() -> LambdaServiceError {
+    pub(super) fn invalid() -> LambdaServiceError {
         LambdaServiceError::InvalidParameter {
-            message: "Invalid or oversized Docker image archive metadata".into(),
+            message: "Invalid or oversized Docker archive metadata".into(),
         }
     }
-    #[derive(Debug, Default)]
-    struct BoundedBytes(Vec<u8>);
+    struct BoundedBytes(Vec<u8>, usize);
+    impl Debug for BoundedBytes {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+            formatter
+                .debug_struct("BoundedBytes")
+                .field("bytes", &self.0.len())
+                .field("limit", &self.1)
+                .finish()
+        }
+    }
+    impl Default for BoundedBytes {
+        fn default() -> Self {
+            Self(Vec::new(), IMAGE_METADATA_BYTES)
+        }
+    }
     impl Write for BoundedBytes {
         fn write(&mut self, bytes: &[u8]) -> IoResult<usize> {
-            if bytes.len() > IMAGE_METADATA_BYTES.saturating_sub(self.0.len()) {
+            if bytes.len() > self.1.saturating_sub(self.0.len()) {
                 return Err(IoError::from(ErrorKind::FileTooLarge));
             }
             self.0
@@ -136,6 +210,12 @@ mod validation {
         }
         Ok(())
     }
+    fn managed_record(record: &FunctionRecord) -> Result<(), LambdaServiceError> {
+        zip::record(record)?;
+        let mut work = GuardWork::new();
+        work.charge(record.versions.len().checked_add(1).ok_or_else(invalid)?)?;
+        policy(&record.policy, &mut work)
+    }
     fn layer_record(record: &LayerRecord) -> Result<(), LambdaServiceError> {
         layer_record_guarded(record, &mut GuardWork::new())
     }
@@ -149,16 +229,17 @@ mod validation {
         }
         Ok(())
     }
-    #[derive(Serialize)]
+    #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct BorrowedSnapshot<'a> {
         functions: FunctionSnapshotRef<'a>,
         layers: LayerSnapshotRef<'a>,
         event_source_mappings: MappingSnapshotRef<'a>,
     }
-    pub(crate) async fn export_image(
+    pub(crate) async fn export_docker(
         provider: &RustackLambda,
         deadline: Instant,
+        profile: DockerArchiveProfile,
     ) -> Result<LambdaSnapshot, LambdaServiceError> {
         check_restore_deadline(deadline)?;
         let permit = timeout_at(deadline, VALIDATORS.acquire())
@@ -181,20 +262,38 @@ mod validation {
                 .0
                 .0
                 .check_snapshot_counts(MAX_IMAGE_FUNCTIONS, MAX_IMAGE_REVISIONS)?;
+            if profile.zip_architecture().is_some() {
+                retained.0.0.check_snapshot_zip_profile(deadline)?;
+            }
+            let guard = if profile.zip_architecture().is_some() {
+                managed_record
+            } else {
+                function_record
+            };
             let borrowed = BorrowedSnapshot {
-                functions: retained.0.0.borrow_snapshot(function_record),
+                functions: retained.0.0.borrow_snapshot(guard),
                 layers: retained.0.1.borrow_snapshot(layer_record),
                 event_source_mappings: retained.0.2.borrow_snapshot(),
             };
-            let mut bytes = BoundedBytes::default();
+            if profile.zip_architecture().is_some() {
+                let mut metadata = BoundedBytes::default();
+                serde_json::to_writer(&mut metadata, &Metadata::new(&borrowed))
+                    .map_err(|_| invalid())?;
+                let limits = JsonLimits::new(IMAGE_METADATA_BYTES, 64, 65_536, 128 * 1024, 1024)
+                    .map_err(|_| invalid())?;
+                validate(&metadata.0, limits).map_err(|_| invalid())?;
+            }
+            let mut bytes = BoundedBytes(Vec::new(), profile.payload_limit());
             serde_json::to_writer(&mut bytes, &borrowed).map_err(|_| invalid())?;
-            let limits = JsonLimits::new(IMAGE_METADATA_BYTES, 64, 65_536, 128 * 1024, 1024)
-                .map_err(|_| invalid())?;
-            validate(&bytes.0, limits).map_err(|_| invalid())?;
+            if profile.zip_architecture().is_none() {
+                let limits = JsonLimits::new(IMAGE_METADATA_BYTES, 64, 65_536, 128 * 1024, 1024)
+                    .map_err(|_| invalid())?;
+                validate(&bytes.0, limits).map_err(|_| invalid())?;
+            }
             check_restore_deadline(deadline)?;
             let mut snapshot: LambdaSnapshot =
                 serde_json::from_slice(&bytes.0).map_err(|_| invalid())?;
-            input(&snapshot, &scope.0, &scope.1)?;
+            input_profile(&mut snapshot, &scope.0, &scope.1, profile)?;
             snapshot
                 .functions
                 .functions
@@ -247,10 +346,8 @@ mod validation {
             }
             work.charge(function.versions.len().checked_add(1).ok_or_else(invalid)?)?;
             for version in once(&function.latest).chain(function.versions.values()) {
-                if version.package_type == "Zip" {
-                    return Err(LambdaServiceError::InvalidParameter {
-                        message: "Docker ZIP archive execution is unavailable".into(),
-                    });
+                if version.zip_bytes_base64.is_some() {
+                    return Err(invalid());
                 }
             }
             policy(&function.policy, &mut work)?;
@@ -264,20 +361,75 @@ mod validation {
             .map_err(|_| invalid())?;
         validate(&bytes.0, limits).map_err(|_| invalid())
     }
+    fn input_profile(
+        snapshot: &mut LambdaSnapshot,
+        region: &str,
+        account: &str,
+        profile: DockerArchiveProfile,
+    ) -> Result<(), LambdaServiceError> {
+        if snapshot.functions.functions.len() > MAX_IMAGE_FUNCTIONS {
+            return Err(invalid());
+        }
+        let revisions =
+            snapshot
+                .functions
+                .functions
+                .iter()
+                .try_fold(0usize, |count, function| {
+                    count
+                        .checked_add(1)
+                        .and_then(|n| n.checked_add(function.versions.len()))
+                        .ok_or_else(invalid)
+                })?;
+        if revisions > MAX_IMAGE_REVISIONS {
+            return Err(invalid());
+        }
+        let bodies = zip::detach(snapshot, profile)?;
+        input(snapshot, region, account)?;
+        zip::reattach(snapshot, bodies)
+    }
+    pub(crate) async fn validate_docker(
+        snapshot: LambdaSnapshot,
+        deadline: Instant,
+        region: &str,
+        account: &str,
+        profile: DockerArchiveProfile,
+    ) -> Result<LambdaSnapshot, LambdaServiceError> {
+        validate_with(
+            snapshot,
+            deadline,
+            (region.into(), account.into()),
+            move |snapshot, region, account| input_profile(snapshot, region, account, profile),
+        )
+        .await
+    }
+    #[cfg(test)]
     pub(crate) async fn validate_image(
         snapshot: LambdaSnapshot,
         deadline: Instant,
         region: &str,
         account: &str,
     ) -> Result<LambdaSnapshot, LambdaServiceError> {
-        validate_with(snapshot, deadline, (region.into(), account.into()), input).await
+        validate_docker(
+            snapshot,
+            deadline,
+            region,
+            account,
+            DockerArchiveProfile::ImageOnly,
+        )
+        .await
     }
-    async fn validate_with(
+    async fn validate_with<F>(
         snapshot: LambdaSnapshot,
         deadline: Instant,
         scope: (String, String),
-        worker: fn(&LambdaSnapshot, &str, &str) -> Result<(), LambdaServiceError>,
-    ) -> Result<LambdaSnapshot, LambdaServiceError> {
+        worker: F,
+    ) -> Result<LambdaSnapshot, LambdaServiceError>
+    where
+        F: FnOnce(&mut LambdaSnapshot, &str, &str) -> Result<(), LambdaServiceError>
+            + Send
+            + 'static,
+    {
         check_restore_deadline(deadline)?;
         let permit = timeout_at(deadline, VALIDATORS.acquire())
             .await
@@ -286,10 +438,10 @@ mod validation {
         // The read-only job owns input before its slot in drop order, retaining
         // admission through iterative policy destruction even on worker unwind.
         let mut job = spawn_blocking(move || {
-            let retained = (snapshot, permit);
+            let mut retained = (snapshot, permit);
             let result = (|| {
                 check_restore_deadline(deadline)?;
-                worker(&retained.0, &scope.0, &scope.1)?;
+                worker(&mut retained.0, &scope.0, &scope.1)?;
                 check_restore_deadline(deadline)
             })();
             match result {
@@ -385,7 +537,11 @@ mod validation {
                 ),
             );
         }
-        fn panic_worker(_: &LambdaSnapshot, _: &str, _: &str) -> Result<(), LambdaServiceError> {
+        fn panic_worker(
+            _: &mut LambdaSnapshot,
+            _: &str,
+            _: &str,
+        ) -> Result<(), LambdaServiceError> {
             panic!("private-image-validator-panic");
         }
         #[tokio::test]
@@ -482,4 +638,7 @@ mod validation {
     }
 }
 #[cfg(unix)]
-pub(super) use validation::{export_image, validate_image};
+pub(super) use validation::{export_docker, validate_docker};
+
+#[cfg(all(test, unix))]
+mod managed_tests;

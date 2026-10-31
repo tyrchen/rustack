@@ -16,6 +16,10 @@ pub(crate) struct ZipLayout {
 }
 
 impl ZipLayout {
+    pub(super) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// Validate a member and return newly required directories, root first.
     pub(crate) fn admit(
         &mut self,

@@ -13,7 +13,12 @@ use std::{
     str,
 };
 
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::provider::DockerArchiveProfile;
 use serde::{Serialize, de::DeserializeOwned};
+
+mod lambda;
+use lambda::{Budget as LambdaBudget, Path as LambdaPath};
 
 const TYPED_RECURSION_LIMIT: usize = 256;
 
@@ -86,6 +91,7 @@ struct Scan<'a> {
     offset: usize,
     remaining: usize,
     limits: Limits,
+    lambda: Option<LambdaBudget>,
 }
 impl<'a> Scan<'a> {
     fn validate(input: &'a [u8], limits: Limits) -> Result<(), Failure> {
@@ -97,14 +103,21 @@ impl<'a> Scan<'a> {
             offset: 0,
             remaining: limits.nodes,
             limits,
+            lambda: None,
         };
-        scan.item(0)?;
+        scan.item(0, LambdaPath::Root)?;
         if scan.offset != input.len() {
             return Err(Failure::Trailing);
         }
         Ok(())
     }
     fn read(&mut self, len: usize) -> Result<&'a [u8], Failure> {
+        if let Some(budget) = &mut self.lambda {
+            budget.metadata = budget.metadata.checked_sub(len).ok_or(Failure::Bytes)?;
+        }
+        self.read_unaccounted(len)
+    }
+    fn read_unaccounted(&mut self, len: usize) -> Result<&'a [u8], Failure> {
         let end = self.offset.checked_add(len).ok_or(Failure::Syntax)?;
         let bytes = self.input.get(self.offset..end).ok_or(Failure::Syntax)?;
         self.offset = end;
@@ -162,8 +175,9 @@ impl<'a> Scan<'a> {
             _ => Err(Failure::Profile),
         }
     }
-    fn item(&mut self, depth: usize) -> Result<(), Failure> {
+    fn item(&mut self, depth: usize, path: LambdaPath) -> Result<(), Failure> {
         let (major, value) = self.header()?;
+        let path = path.shape(major);
         match major {
             0 | 1 | 7 => {
                 value.ok_or(Failure::Syntax)?;
@@ -172,24 +186,42 @@ impl<'a> Scan<'a> {
                 self.scalar(value, false)?;
             }
             3 => {
-                str::from_utf8(self.scalar(value, false)?).map_err(|_| Failure::Syntax)?;
+                if path == LambdaPath::Zip && self.lambda.as_ref().is_some_and(|budget| budget.zip)
+                {
+                    let len = usize::try_from(value.ok_or(Failure::Profile)?)
+                        .map_err(|_| Failure::Scalar)?;
+                    let bytes = self.read_unaccounted(len)?;
+                    self.lambda.as_mut().ok_or(Failure::Profile)?.blob(bytes)?;
+                    str::from_utf8(bytes).map_err(|_| Failure::Syntax)?;
+                } else {
+                    str::from_utf8(self.scalar(value, false)?).map_err(|_| Failure::Syntax)?;
+                }
             }
             4 | 5 => {
                 let depth = depth.checked_add(1).ok_or(Failure::Depth)?;
                 if depth > self.limits.depth {
                     return Err(Failure::Depth);
                 }
-                self.collection(major == 5, value, depth)?;
+                self.collection(major == 5, value, depth, path)?;
             }
             _ => return Err(Failure::Profile),
         }
         Ok(())
     }
-    fn collection(&mut self, map: bool, count: Option<u64>, depth: usize) -> Result<(), Failure> {
+    fn collection(
+        &mut self,
+        map: bool,
+        count: Option<u64>,
+        depth: usize,
+        path: LambdaPath,
+    ) -> Result<(), Failure> {
         let count = count
             .map(|count| usize::try_from(count).map_err(|_| Failure::Collection))
             .transpose()?;
         if let Some(count) = count {
+            if let Some(budget) = &self.lambda {
+                budget.collection(path, count)?;
+            }
             if count > self.limits.collection {
                 return Err(Failure::Collection);
             }
@@ -217,10 +249,17 @@ impl<'a> Scan<'a> {
             if visited > self.limits.collection {
                 return Err(Failure::Collection);
             }
-            if map && !keys.insert(self.key()?) {
-                return Err(Failure::Duplicate);
+            let key = if map { Some(self.key()?) } else { None };
+            if let Some(budget) = &mut self.lambda {
+                budget.member(path, key.as_ref())?;
             }
-            self.item(depth)?;
+            let child = path.child(key.as_ref());
+            if let Some(key) = key {
+                if !keys.insert(key) {
+                    return Err(Failure::Duplicate);
+                }
+            }
+            self.item(depth, child)?;
         }
     }
 }
@@ -299,6 +338,9 @@ pub(super) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Failure> {
 }
 fn decode_with_limits<T: DeserializeOwned>(bytes: &[u8], limits: Limits) -> Result<T, Failure> {
     Scan::validate(bytes, limits)?;
+    decode_typed(bytes)
+}
+fn decode_typed<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Failure> {
     let mut reader = Cursor::new(bytes);
     let value = ciborium::de::from_reader_with_recursion_limit(&mut reader, TYPED_RECURSION_LIMIT)
         .map_err(|_| Failure::Schema)?;
@@ -308,5 +350,59 @@ fn decode_with_limits<T: DeserializeOwned>(bytes: &[u8], limits: Limits) -> Resu
     Ok(value)
 }
 
+#[cfg(feature = "lambda")]
+fn validate_lambda(bytes: &[u8], profile: DockerArchiveProfile) -> Result<(), Failure> {
+    if bytes.len() > profile.payload_limit() {
+        return Err(Failure::Bytes);
+    }
+    let mut scan = Scan {
+        input: bytes,
+        offset: 0,
+        remaining: 131_073,
+        limits: Limits {
+            bytes: profile.payload_limit(),
+            depth: 64,
+            nodes: 131_073,
+            collection: 65_536,
+            scalar: 128 * 1024,
+            key: 1024,
+        },
+        lambda: Some(LambdaBudget::new(profile)),
+    };
+    scan.item(0, LambdaPath::Root)?;
+    if scan.offset != bytes.len() {
+        return Err(Failure::Trailing);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "lambda")]
+pub(super) fn decode_lambda<T: DeserializeOwned>(
+    bytes: &[u8],
+    profile: DockerArchiveProfile,
+) -> Result<T, Failure> {
+    validate_lambda(bytes, profile)?;
+    decode_typed(bytes)
+}
+
+#[cfg(feature = "lambda")]
+pub(super) fn encode_lambda<T: Serialize>(
+    value: &T,
+    profile: DockerArchiveProfile,
+) -> Result<Vec<u8>, Failure> {
+    let bytes = encode_with_limits(
+        value,
+        Limits {
+            bytes: profile.payload_limit(),
+            ..LIMITS
+        },
+    )?;
+    validate_lambda(&bytes, profile)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "lambda"))]
+mod lambda_tests;

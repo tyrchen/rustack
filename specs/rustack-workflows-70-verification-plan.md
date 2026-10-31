@@ -724,3 +724,21 @@ The full `test-lambda-docker` gate builds all selected-architecture artifacts be
 
 
 Final D92 consumption acceptance: both retained full functional lanes pass all63 frozen resources,263 aggregate Rust cases/20 summaries each. Original per-architecture ZIP bytes are identical across all four ordinary SDK cohorts and the real Linux Native verifier; controlled admission/wire-origin, publication, cleanup and handler-boundary regressions pass. Standard/strict/Native/security gates and the26-command exact zero-remnant/nine-source-preservation/owned-bridge-removal report pass. See the [D92 final qualification](./rustack-workflows-93-review.md#d92-final-actual-qualification-and-exact-postconditions) for original hashes, failed development evidence, source-projection provenance and platform limits. This closes5.1, with ZIP archives and full M4 acceptance still required.
+
+
+### Managed provided-runtime ZIP archive qualification (D93)
+
+Implement [runtime§6.9](./rustack-workflows-20-lambda-runtime-design.md#69-bounded-provided-runtime-zip-archives-and-mixed-candidate-restoration-d93) before lifting ZIP archive rejection. The following are required independent oracles; profile tests use small injected private ceilings for exact/over cases rather than materializing production-sized bombs.
+
+| Boundary | Required observation |
+|---|---|
+| Profile selection | Image-only16MiB/no ZIP; configured managed128MiB plus separate live capability checks; health revocation cannot authorize restore |
+| Raw CBOR before typed decode | Only exact latest/unsigned-published ZIP paths gain large-text allowance; misplaced/unknown/layer/policy bodies and excessive metadata/scalars/keys/depth/nodes reject before Deserialize sentinel |
+| Original bodies | Canonical standard base64, per-body50MiB and aggregate64MiB counting every revision; metadata16MiB remains independent |
+| Private extraction | Aggregate512MiB logical expansion/20,000 nodes including wrappers; exact/over budget and false-size input reject before uncharged artifact allocation, with no pin effects |
+| Complete candidate | Invalid later ZIP/alias/runtime/architecture/hash/size/ELF/tree preserves all old stores and emits no Image Tag; later Image failure discards prior private ZIP staging |
+| Deadline/observer | One original cutoff reaches each version and pre-registration/conversion/pin/commit; expired or dropped observers never grant late publication and original workers retain their cleanup |
+| Ordinary restart | Signed save/restart computes latest B/published A/alias A and mixed Image, preserves original hashes/IDs/settings/history, starts fresh environments, performs no replay |
+| Archive failure | Checksum-valid bad ZIP metadata and missing configured runtime reject ingress/import and preserve both current/previous archive bytes |
+
+Add exact ordinary resource names `test_should_restore_provided_zip_archives_without_replay_and_preserve_invalid_generations` and `test_should_refuse_provided_zip_archives_without_configured_runtime` before first execution, increasing the frozen inventory63→65 (ordinary32 and all other suites unchanged). Add a discoverable Make target for pure profile/candidate/codec controls and a focused real ZIP-archive target using the existing fixture provisioning/manifest gates. Full both-lane Docker, unchanged Native inventory, standard/strict/security/text and independent review with exact zero-remnant/source-preservation/owned-bridge evidence remain required. No Node/handler SDK/IaC/server-in-container/reference/platform/full-M4 completion follows from this archive slice.
