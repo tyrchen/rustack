@@ -1,0 +1,22 @@
+{
+  "boto3": "1.43.118",
+  "botocore": "1.43.118",
+  "protocol": "json",
+  "target": "AWSStepFunctions.StartExecution",
+  "preservesRawInput": true,
+  "timestamps": [
+    {
+      "epoch": 0.125,
+      "iso": "1970-01-01T00:00:00.125000+00:00"
+    },
+    {
+      "epoch": -0.125,
+      "iso": "1969-12-31T23:59:59.875000+00:00"
+    }
+  ],
+  "errorCodes": [
+    "TaskTimedOut",
+    "InvalidToken"
+  ],
+  "awsRequests": 0
+}

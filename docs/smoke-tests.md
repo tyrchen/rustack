@@ -30,6 +30,18 @@ Individual existing integration tests do not all enforce cleanup, and KMS key
 deletion is scheduled rather than immediate. Restart the in-memory server to
 discard remaining fixtures. The runner does not stop a server it did not start.
 
+## Owned Step Functions workflow smoke
+
+`make smoke-workflows` owns a separate strict-auth pure Step Functions server,
+loads the documented YAML/ASL example, asserts success and Fail branches with
+ordinary signed SDK requests, and joins process cleanup. It needs no existing
+server, Native bootstrap, uv/boto3 or Docker. See the [workflow guide](./workflows-guide.md)
+for feature selection and supported behavior. `make verify-workflows-native`
+adds exact resource inventories and the implemented Native/SDK/history/restart
+and performance gates; final image/IaC/reference-platform qualification remains
+separate. These opt-in workflow checks are not included in the 30-case default
+service smoke manifest below.
+
 ## Functional coverage
 
 The Makefile contains an explicit manifest of 30 exact test names. The runner

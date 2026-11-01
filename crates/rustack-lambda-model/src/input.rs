@@ -12,7 +12,7 @@ use crate::types::{
 
 /// Input for `CreateFunction`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct CreateFunctionInput {
     /// Function name (1-140 characters).
     pub function_name: String,
@@ -71,7 +71,7 @@ pub struct CreateFunctionInput {
     /// Logging configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart configuration.
+    /// `SnapStart` configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_start: Option<SnapStart>,
     /// Code signing config ARN (stored, not enforced).
@@ -81,8 +81,14 @@ pub struct CreateFunctionInput {
 
 /// Input for `UpdateFunctionCode`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct UpdateFunctionCodeInput {
+    /// Validate parameters without modifying code or publishing a version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    /// Revision ID precondition for an optimistic update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     /// Base64-encoded zip file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zip_file: Option<String>,
@@ -111,8 +117,11 @@ pub struct UpdateFunctionCodeInput {
 
 /// Input for `UpdateFunctionConfiguration`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct UpdateFunctionConfigurationInput {
+    /// Revision ID precondition for an optimistic update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     /// Runtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -155,7 +164,7 @@ pub struct UpdateFunctionConfigurationInput {
     /// Logging configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging_config: Option<LoggingConfig>,
-    /// SnapStart configuration.
+    /// `SnapStart` configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_start: Option<SnapStart>,
 }
@@ -304,7 +313,7 @@ pub struct PublishLayerVersionInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CreateEventSourceMappingInput {
-    /// ARN of the event source (e.g., SQS queue, DynamoDB stream, Kinesis stream).
+    /// ARN of the event source (e.g., SQS queue, `DynamoDB` stream, Kinesis stream).
     pub event_source_arn: String,
     /// Function name or ARN.
     pub function_name: String,
@@ -423,4 +432,23 @@ pub struct EventInvokeConfigInput {
     /// Destination configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_config: Option<DestinationConfig>,
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::{UpdateFunctionCodeInput, UpdateFunctionConfigurationInput};
+
+    #[test]
+    fn test_should_preserve_explicit_revision_preconditions_in_both_update_wire_shapes() {
+        let json = r#"{"RevisionId":"expected-revision"}"#;
+        let code: UpdateFunctionCodeInput = serde_json::from_str(json).unwrap();
+        let configuration: UpdateFunctionConfigurationInput = serde_json::from_str(json).unwrap();
+        assert_eq!(code.revision_id.as_deref(), Some("expected-revision"));
+        assert_eq!(
+            configuration.revision_id.as_deref(),
+            Some("expected-revision")
+        );
+        assert_eq!(serde_json::to_string(&code).unwrap(), json);
+        assert_eq!(serde_json::to_string(&configuration).unwrap(), json);
+    }
 }

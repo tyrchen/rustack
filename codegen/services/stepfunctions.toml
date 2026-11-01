@@ -1,0 +1,67 @@
+[service]
+name = "stepfunctions"
+display_name = "Step Functions"
+rust_prefix = "StepFunctions"
+namespace = "com.amazonaws.sfn"
+protocol = "awsJson1_0"
+
+[protocol]
+serde_rename = "camelCase"
+target_prefix = "AWSStepFunctions"
+emit_serde_derives = true
+
+[operations]
+all = [
+    "CreateActivity",
+    "CreateStateMachine",
+    "CreateStateMachineAlias",
+    "DeleteActivity",
+    "DeleteStateMachine",
+    "DeleteStateMachineAlias",
+    "DeleteStateMachineVersion",
+    "DescribeActivity",
+    "DescribeExecution",
+    "DescribeMapRun",
+    "DescribeStateMachine",
+    "DescribeStateMachineAlias",
+    "DescribeStateMachineForExecution",
+    "GetActivityTask",
+    "GetExecutionHistory",
+    "ListActivities",
+    "ListExecutions",
+    "ListMapRuns",
+    "ListStateMachineAliases",
+    "ListStateMachines",
+    "ListStateMachineVersions",
+    "ListTagsForResource",
+    "PublishStateMachineVersion",
+    "RedriveExecution",
+    "SendTaskFailure",
+    "SendTaskHeartbeat",
+    "SendTaskSuccess",
+    "StartExecution",
+    "StartSyncExecution",
+    "StopExecution",
+    "TagResource",
+    "TestState",
+    "UntagResource",
+    "UpdateMapRun",
+    "UpdateStateMachine",
+    "UpdateStateMachineAlias",
+    "ValidateStateMachineDefinition",
+]
+
+[errors.custom]
+AccessDeniedException = { status = 403, message = "Request scope is not authorized" }
+InternalFailure = { status = 500, message = "Request processing failed" }
+RequestTimeoutException = { status = 408, message = "Request deadline exceeded" }
+ServiceUnavailable = { status = 503, message = "Workflow API unavailable" }
+ThrottlingException = { status = 400, message = "Workflow API admission exhausted" }
+UnknownOperationException = { status = 404, message = "Unknown Step Functions operation" }
+UnsupportedOperation = { status = 400, message = "Operation is outside the supported Step Functions profile" }
+
+[output]
+file_layout = "flat"
+always_serialize_arrays = true
+
+strict_model = true

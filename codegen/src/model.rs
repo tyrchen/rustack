@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 
 /// Top-level Smithy model document.
 #[derive(Debug, Deserialize)]
@@ -31,13 +31,13 @@ pub enum Shape {
     String(SimpleShape),
     /// A boolean shape.
     #[serde(rename = "boolean")]
-    Boolean(SimpleShape),
+    Boolean(IgnoredAny),
     /// A 32-bit integer shape.
     #[serde(rename = "integer")]
-    Integer(SimpleShape),
+    Integer(IgnoredAny),
     /// A 64-bit integer shape.
     #[serde(rename = "long")]
-    Long(SimpleShape),
+    Long(IgnoredAny),
     /// A timestamp shape.
     #[serde(rename = "timestamp")]
     Timestamp(SimpleShape),
@@ -58,19 +58,19 @@ pub enum Shape {
     Union(UnionShape),
     /// A service shape (ignored).
     #[serde(rename = "service")]
-    Service(SimpleShape),
+    Service(IgnoredAny),
     /// A resource shape (ignored).
     #[serde(rename = "resource")]
-    Resource(SimpleShape),
+    Resource(IgnoredAny),
     /// An integer enum shape (ignored).
     #[serde(rename = "intEnum")]
-    IntEnum(SimpleShape),
+    IntEnum(IgnoredAny),
     /// A double shape.
     #[serde(rename = "double")]
-    Double(SimpleShape),
+    Double(IgnoredAny),
     /// A float shape.
     #[serde(rename = "float")]
-    Float(SimpleShape),
+    Float(IgnoredAny),
 }
 
 /// A simple shape with optional traits.
@@ -112,9 +112,6 @@ pub struct OperationShape {
     /// Error shape references.
     #[serde(default)]
     pub errors: Vec<ShapeRef>,
-    /// Traits applied to this shape.
-    #[serde(default)]
-    pub traits: HashMap<String, serde_json::Value>,
 }
 
 /// A reference to another shape.
@@ -130,9 +127,6 @@ pub struct EnumShape {
     /// Enum variants (member name -> member shape).
     #[serde(default)]
     pub members: HashMap<String, MemberShape>,
-    /// Traits applied to this shape.
-    #[serde(default)]
-    pub traits: HashMap<String, serde_json::Value>,
 }
 
 /// A list shape.
@@ -140,9 +134,6 @@ pub struct EnumShape {
 pub struct ListShape {
     /// The shape of the list's elements.
     pub member: ShapeRef,
-    /// Traits applied to this shape.
-    #[serde(default)]
-    pub traits: HashMap<String, serde_json::Value>,
 }
 
 /// A map shape.
@@ -152,9 +143,6 @@ pub struct MapShape {
     pub key: ShapeRef,
     /// The shape of the map's values.
     pub value: ShapeRef,
-    /// Traits applied to this shape.
-    #[serde(default)]
-    pub traits: HashMap<String, serde_json::Value>,
 }
 
 /// A union shape.
@@ -163,9 +151,6 @@ pub struct UnionShape {
     /// Union variants.
     #[serde(default)]
     pub members: HashMap<String, MemberShape>,
-    /// Traits applied to this shape.
-    #[serde(default)]
-    pub traits: HashMap<String, serde_json::Value>,
 }
 
 impl SmithyModel {

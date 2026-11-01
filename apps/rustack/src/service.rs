@@ -1,6 +1,6 @@
 //! Service router abstraction for the gateway.
 //!
-//! Each AWS service (S3, DynamoDB, etc.) implements [`ServiceRouter`] to
+//! Each AWS service (S3, `DynamoDB`, etc.) implements [`ServiceRouter`] to
 //! declare how it matches incoming requests and handles them. The gateway
 //! holds a list of routers and dispatches to the first match.
 //!
@@ -9,6 +9,15 @@
 use std::{convert::Infallible, future::Future, io, pin::Pin};
 
 use bytes::Bytes;
+#[cfg(any(
+    feature = "sns",
+    feature = "ses",
+    feature = "cloudwatch",
+    feature = "iam",
+    feature = "sts",
+    feature = "cloudfront"
+))]
+use http::HeaderMap;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 
@@ -66,11 +75,32 @@ pub trait ServiceRouter: Send + Sync {
     /// Returns `true` if this router should handle the given request.
     fn matches(&self, req: &http::Request<Incoming>) -> bool;
 
+    /// Whether this bounded transport owns its complete modeled request timeout.
+    ///
+    /// Other services keep the gateway's generic deadline.
+    fn owns_request_deadline(&self) -> bool {
+        false
+    }
+
     /// Handle the request, producing a response with a type-erased body.
     fn call(
         &self,
         req: http::Request<Incoming>,
     ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>;
+}
+
+#[cfg(any(
+    feature = "sns",
+    feature = "ses",
+    feature = "cloudwatch",
+    feature = "iam",
+    feature = "sts",
+    feature = "cloudfront"
+))]
+fn extract_sigv4_service(headers: &HeaderMap) -> Option<&str> {
+    let auth = headers.get("authorization")?.to_str().ok()?;
+    let (_, rest) = auth.split_once("Credential=")?;
+    rest.split(',').next()?.split('/').nth(3)
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +173,7 @@ mod dynamodb_router {
 
     use super::{GatewayBody, ServiceRouter};
 
-    /// Routes requests to the DynamoDB service.
+    /// Routes requests to the `DynamoDB` service.
     ///
     /// Matches requests whose `X-Amz-Target` header starts with `DynamoDB_`.
     pub struct DynamoDBServiceRouter<H: DynamoDBHandler> {
@@ -202,7 +232,7 @@ mod dynamodbstreams_router {
 
     use super::{GatewayBody, ServiceRouter};
 
-    /// Routes requests to the DynamoDB Streams service.
+    /// Routes requests to the `DynamoDB` Streams service.
     ///
     /// Matches requests whose `X-Amz-Target` header starts with `DynamoDBStreams_`.
     pub struct DynamoDBStreamsServiceRouter<H: DynamoDBStreamsHandler> {
@@ -371,29 +401,12 @@ mod sns_router {
     use hyper::{body::Incoming, service::Service};
     use rustack_sns_http::{dispatch::SnsHandler, service::SnsHttpService};
 
-    use super::{GatewayBody, ServiceRouter};
-
-    /// Extract the SigV4 service name from the Authorization header.
-    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
-        let auth = headers.get("authorization")?.to_str().ok()?;
-        let credential_start = auth.find("Credential=")? + "Credential=".len();
-        let credential_end = auth[credential_start..]
-            .find(',')
-            .map_or(auth.len(), |i| credential_start + i);
-        let credential = &auth[credential_start..credential_end];
-        // Format: AKID/date/region/service/aws4_request
-        let parts: Vec<&str> = credential.split('/').collect();
-        if parts.len() >= 4 {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
+    use super::{GatewayBody, ServiceRouter, extract_sigv4_service};
 
     /// Routes requests to the SNS service.
     ///
     /// Matches `POST /` requests with `Content-Type: application/x-www-form-urlencoded`
-    /// where the SigV4 signing service is `sns`. SNS uses the `awsQuery` protocol
+    /// where the `SigV4` signing service is `sns`. SNS uses the `awsQuery` protocol
     /// where the operation is determined by the `Action=` parameter in the form body.
     pub struct SnsServiceRouter<H: SnsHandler> {
         inner: SnsHttpService<H>,
@@ -411,8 +424,8 @@ mod sns_router {
             "sns"
         }
 
-        /// SNS matches form-urlencoded POST requests signed with `sns` SigV4
-        /// service name. All SNS operations require SigV4 authentication.
+        /// SNS matches form-urlencoded POST requests signed with `sns` `SigV4`
+        /// service name. All SNS operations require `SigV4` authentication.
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             if *req.method() != http::Method::POST {
                 return false;
@@ -463,57 +476,18 @@ mod lambda_router {
     /// Lambda API uses multiple date-versioned path prefixes.
     /// The SDK may use different dates than the spec documents.
     fn is_lambda_path(path: &str) -> bool {
-        // Function CRUD and invoke paths.
-        if path.contains("/functions") {
-            // Match any date prefix for /YYYY-MM-DD/functions
-            if let Some(rest) = path.strip_prefix('/') {
-                let parts: Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() == 2 && parts[0].len() == 10 && parts[1].starts_with("functions") {
-                    return true;
-                }
-            }
-        }
-        // Tags paths (e.g., /2017-03-31/tags/{arn}).
-        if path.contains("/tags/") {
-            if let Some(rest) = path.strip_prefix('/') {
-                let parts: Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() == 2 && parts[0].len() == 10 && parts[1].starts_with("tags/") {
-                    return true;
-                }
-            }
-        }
-        // Account settings paths.
-        if path.contains("/account-settings") {
-            if let Some(rest) = path.strip_prefix('/') {
-                let parts: Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() == 2 && parts[0].len() == 10 && parts[1] == "account-settings" {
-                    return true;
-                }
-            }
-        }
-        // Layer paths (e.g., /2018-10-31/layers/{name}/versions).
-        if path.contains("/layers") {
-            if let Some(rest) = path.strip_prefix('/') {
-                let parts: Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() == 2 && parts[0].len() == 10 && parts[1].starts_with("layers") {
-                    return true;
-                }
-            }
-        }
-        // Event source mapping paths (e.g., /2015-03-31/event-source-mappings/).
-        if path.contains("/event-source-mappings") {
-            if let Some(rest) = path.strip_prefix('/') {
-                let parts: Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() == 2
-                    && parts[0].len() == 10
-                    && parts[1].starts_with("event-source-mappings")
-                {
-                    return true;
-                }
-            }
-        }
-        // Function URL invocation paths.
         path.starts_with("/lambda-url/")
+            || path
+                .strip_prefix('/')
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(date, resource)| {
+                    date.len() == 10
+                        && (resource.starts_with("functions")
+                            || resource.starts_with("tags/")
+                            || resource == "account-settings"
+                            || resource.starts_with("layers")
+                            || resource.starts_with("event-source-mappings"))
+                })
     }
 
     /// Routes requests to the Lambda service.
@@ -553,6 +527,36 @@ mod lambda_router {
             })
         }
     }
+    #[cfg(test)]
+    mod tests {
+        use super::is_lambda_path;
+
+        #[test]
+        fn test_should_preserve_lambda_prefix_classification_without_indexing() {
+            for path in [
+                "/2015-03-31/functions/Fn/invocations",
+                "/2017-03-31/tags/arn",
+                "/2016-08-19/account-settings",
+                "/2018-10-31/layers/L/versions",
+                "/2015-03-31/event-source-mappings/",
+                "/lambda-url/Fn/",
+            ] {
+                assert!(is_lambda_path(path), "{path}");
+            }
+            for path in [
+                "",
+                "/",
+                "/functions",
+                "/2015-03-3/functions",
+                "/2015-03-311/functions",
+                "/2015-03-31/tags",
+                "/2015-03-31/account-settings/other",
+                "/bucket/key",
+            ] {
+                assert!(!is_lambda_path(path), "{path}");
+            }
+        }
+    }
 }
 
 #[cfg(feature = "lambda")]
@@ -572,7 +576,7 @@ mod events_router {
 
     use super::{GatewayBody, ServiceRouter};
 
-    /// Routes requests to the EventBridge service.
+    /// Routes requests to the `EventBridge` service.
     ///
     /// Matches requests whose `X-Amz-Target` header starts with `AWSEvents.`.
     pub struct EventsServiceRouter<H: EventsHandler> {
@@ -629,7 +633,7 @@ mod logs_router {
 
     use super::{GatewayBody, ServiceRouter};
 
-    /// Routes requests to the CloudWatch Logs service.
+    /// Routes requests to the `CloudWatch` Logs service.
     ///
     /// Matches requests whose `X-Amz-Target` header starts with `Logs_20140328.`.
     pub struct LogsServiceRouter<H: LogsHandler> {
@@ -857,30 +861,11 @@ mod ses_router {
     use hyper::{body::Incoming, service::Service};
     use rustack_ses_http::{dispatch::SesHandler, service::SesHttpService, v2::SesV2HttpService};
 
-    use super::{GatewayBody, ServiceRouter};
-
-    /// Extract the SigV4 service name from the Authorization header.
-    ///
-    /// Parses `Credential=AKID/date/region/SERVICE/aws4_request` and returns SERVICE.
-    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
-        let auth = headers.get("authorization")?.to_str().ok()?;
-        let credential_start = auth.find("Credential=")? + "Credential=".len();
-        let credential_end = auth[credential_start..]
-            .find(',')
-            .map_or(auth.len(), |i| credential_start + i);
-        let credential = &auth[credential_start..credential_end];
-        // Format: AKID/date/region/service/aws4_request
-        let parts: Vec<&str> = credential.split('/').collect();
-        if parts.len() >= 4 {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
+    use super::{GatewayBody, ServiceRouter, extract_sigv4_service};
 
     /// Routes requests to the SES service.
     ///
-    /// Matches SES v1 (`awsQuery` via SigV4 service=`email`) and SES v2
+    /// Matches SES v1 (`awsQuery` via `SigV4` service=`email`) and SES v2
     /// (`restJson1` via `/v2/email/` path prefix). Also handles the
     /// `/_aws/ses` retrospection endpoint.
     pub struct SesServiceRouter<H: SesHandler> {
@@ -906,7 +891,7 @@ mod ses_router {
         /// SES matches in three ways:
         /// 1. SES v2: path starts with `/v2/email/`
         /// 2. SES retrospection: path starts with `/_aws/ses`
-        /// 3. SES v1: form-urlencoded POST with SigV4 service=`email`
+        /// 3. SES v1: form-urlencoded POST with `SigV4` service=`email`
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             let path = req.uri().path();
 
@@ -1218,29 +1203,12 @@ mod cloudwatch_router {
     use hyper::{body::Incoming, service::Service};
     use rustack_cloudwatch_http::{dispatch::CloudWatchHandler, service::CloudWatchHttpService};
 
-    use super::{GatewayBody, ServiceRouter};
+    use super::{GatewayBody, ServiceRouter, extract_sigv4_service};
 
-    /// Extract the SigV4 service name from the Authorization header.
-    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
-        let auth = headers.get("authorization")?.to_str().ok()?;
-        let credential_start = auth.find("Credential=")? + "Credential=".len();
-        let credential_end = auth[credential_start..]
-            .find(',')
-            .map_or(auth.len(), |i| credential_start + i);
-        let credential = &auth[credential_start..credential_end];
-        // Format: AKID/date/region/service/aws4_request
-        let parts: Vec<&str> = credential.split('/').collect();
-        if parts.len() >= 4 {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
-
-    /// Routes requests to the CloudWatch Metrics service.
+    /// Routes requests to the `CloudWatch` Metrics service.
     ///
     /// Matches awsQuery requests (`POST /` with form-urlencoded body signed
-    /// with `monitoring` SigV4 service) and rpcv2Cbor requests (POST to
+    /// with `monitoring` `SigV4` service) and rpcv2Cbor requests (POST to
     /// `/service/GraniteServiceVersion20100801/operation/{Op}`).
     pub struct CloudWatchServiceRouter<H: CloudWatchHandler> {
         inner: CloudWatchHttpService<H>,
@@ -1258,11 +1226,11 @@ mod cloudwatch_router {
             "cloudwatch"
         }
 
-        /// CloudWatch Metrics matches in three ways:
-        /// 1. awsQuery: form-urlencoded POST signed with `monitoring` SigV4 service.
+        /// `CloudWatch` Metrics matches in three ways:
+        /// 1. awsQuery: form-urlencoded POST signed with `monitoring` `SigV4` service.
         /// 2. rpcv2Cbor path: POST to `/service/GraniteServiceVersion20100801/...`.
         /// 3. rpcv2Cbor header: POST with `smithy-protocol: rpc-v2-cbor` signed with `monitoring`
-        ///    SigV4 service (AWS SDK v1.108+).
+        ///    `SigV4` service (AWS SDK v1.108+).
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             if *req.method() != http::Method::POST {
                 return false;
@@ -1338,29 +1306,12 @@ mod iam_router {
     use hyper::{body::Incoming, service::Service};
     use rustack_iam_http::{dispatch::IamHandler, service::IamHttpService};
 
-    use super::{GatewayBody, ServiceRouter};
-
-    /// Extract the SigV4 service name from the Authorization header.
-    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
-        let auth = headers.get("authorization")?.to_str().ok()?;
-        let credential_start = auth.find("Credential=")? + "Credential=".len();
-        let credential_end = auth[credential_start..]
-            .find(',')
-            .map_or(auth.len(), |i| credential_start + i);
-        let credential = &auth[credential_start..credential_end];
-        // Format: AKID/date/region/service/aws4_request
-        let parts: Vec<&str> = credential.split('/').collect();
-        if parts.len() >= 4 {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
+    use super::{GatewayBody, ServiceRouter, extract_sigv4_service};
 
     /// Routes requests to the IAM service.
     ///
     /// Matches `POST /` requests with `Content-Type: application/x-www-form-urlencoded`
-    /// where the SigV4 signing service is `iam`.
+    /// where the `SigV4` signing service is `iam`.
     pub struct IamServiceRouter<H: IamHandler> {
         inner: IamHttpService<H>,
     }
@@ -1378,7 +1329,7 @@ mod iam_router {
         }
 
         /// IAM matches form-urlencoded POST requests signed
-        /// with the `iam` SigV4 service name.
+        /// with the `iam` `SigV4` service name.
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             if *req.method() != http::Method::POST {
                 return false;
@@ -1424,29 +1375,12 @@ mod sts_router {
     use hyper::{body::Incoming, service::Service};
     use rustack_sts_http::{dispatch::StsHandler, service::StsHttpService};
 
-    use super::{GatewayBody, ServiceRouter};
-
-    /// Extract the SigV4 service name from the Authorization header.
-    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
-        let auth = headers.get("authorization")?.to_str().ok()?;
-        let credential_start = auth.find("Credential=")? + "Credential=".len();
-        let credential_end = auth[credential_start..]
-            .find(',')
-            .map_or(auth.len(), |i| credential_start + i);
-        let credential = &auth[credential_start..credential_end];
-        // Format: AKID/date/region/service/aws4_request
-        let parts: Vec<&str> = credential.split('/').collect();
-        if parts.len() >= 4 {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
+    use super::{GatewayBody, ServiceRouter, extract_sigv4_service};
 
     /// Routes requests to the STS service.
     ///
     /// Matches `POST /` requests with `Content-Type: application/x-www-form-urlencoded`
-    /// where the SigV4 signing service is `sts`.
+    /// where the `SigV4` signing service is `sts`.
     pub struct StsServiceRouter<H: StsHandler> {
         inner: StsHttpService<H>,
     }
@@ -1463,10 +1397,10 @@ mod sts_router {
             "sts"
         }
 
-        /// STS matches form-urlencoded POST requests signed with `sts` SigV4
+        /// STS matches form-urlencoded POST requests signed with `sts` `SigV4`
         /// service name, or unsigned form-urlencoded requests (for federation
         /// operations like `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`
-        /// which do not require SigV4 signing).
+        /// which do not require `SigV4` signing).
         fn matches(&self, req: &http::Request<Incoming>) -> bool {
             if *req.method() != http::Method::POST {
                 return false;
@@ -1521,26 +1455,11 @@ mod cloudfront_router {
     use hyper::{body::Incoming, service::Service};
     use rustack_cloudfront_http::{dispatch::CloudFrontHandler, service::CloudFrontHttpService};
 
-    use super::{GatewayBody, ServiceRouter};
+    use super::{GatewayBody, ServiceRouter, extract_sigv4_service};
 
-    /// Extract SigV4 service name.
-    fn extract_sigv4_service(headers: &http::HeaderMap) -> Option<&str> {
-        let auth = headers.get("authorization")?.to_str().ok()?;
-        let credential_start = auth.find("Credential=")? + "Credential=".len();
-        let credential_end = auth[credential_start..]
-            .find(',')
-            .map_or(auth.len(), |i| credential_start + i);
-        let parts: Vec<&str> = auth[credential_start..credential_end].split('/').collect();
-        if parts.len() >= 4 {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
-
-    /// Routes requests to the CloudFront management service.
+    /// Routes requests to the `CloudFront` management service.
     ///
-    /// Matches `/2020-05-31/` path prefix OR SigV4 signing service `cloudfront`.
+    /// Matches `/2020-05-31/` path prefix OR `SigV4` signing service `cloudfront`.
     pub struct CloudFrontServiceRouter<H: CloudFrontHandler> {
         inner: CloudFrontHttpService<H>,
     }
@@ -1598,7 +1517,7 @@ mod cloudfront_dataplane_router {
 
     use super::{GatewayBody, ServiceRouter};
 
-    /// Routes requests to the CloudFront pass-through data plane.
+    /// Routes requests to the `CloudFront` pass-through data plane.
     pub struct CloudFrontDataPlaneRouter {
         plane: DataPlane,
     }
@@ -1666,3 +1585,94 @@ mod cloudfront_dataplane_router {
 
 #[cfg(feature = "cloudfront-dataplane")]
 pub use cloudfront_dataplane_router::CloudFrontDataPlaneRouter;
+
+#[cfg(feature = "stepfunctions")]
+mod stepfunctions_router {
+    use std::{convert::Infallible, future::Future, pin::Pin};
+
+    use http_body_util::BodyExt;
+    use hyper::body::Incoming;
+    use rustack_stepfunctions_http::{StepFunctionsHttpService, claims_request};
+
+    use super::{GatewayBody, ServiceRouter};
+
+    /// Claims the exact target family, including unsupported operations.
+    pub struct StepFunctionsServiceRouter {
+        inner: StepFunctionsHttpService,
+    }
+    impl StepFunctionsServiceRouter {
+        pub fn new(inner: StepFunctionsHttpService) -> Self {
+            Self { inner }
+        }
+    }
+    impl ServiceRouter for StepFunctionsServiceRouter {
+        fn name(&self) -> &'static str {
+            "stepfunctions"
+        }
+        fn matches(&self, request: &http::Request<Incoming>) -> bool {
+            claims_request(request.headers())
+        }
+        fn owns_request_deadline(&self) -> bool {
+            true
+        }
+        fn call(
+            &self,
+            request: http::Request<Incoming>,
+        ) -> Pin<Box<dyn Future<Output = Result<http::Response<GatewayBody>, Infallible>> + Send>>
+        {
+            let service = self.inner.clone();
+            Box::pin(async move {
+                Ok(service
+                    .handle(request)
+                    .await
+                    .map(|body| body.map_err(|never: Infallible| match never {}).boxed()))
+            })
+        }
+    }
+}
+#[cfg(feature = "stepfunctions")]
+pub use stepfunctions_router::StepFunctionsServiceRouter;
+
+#[cfg(all(
+    test,
+    any(
+        feature = "sns",
+        feature = "ses",
+        feature = "cloudwatch",
+        feature = "iam",
+        feature = "sts",
+        feature = "cloudfront"
+    )
+))]
+mod routing_boundary_tests {
+    use http::{HeaderMap, HeaderValue};
+
+    use super::extract_sigv4_service;
+
+    #[test]
+    fn test_should_classify_credential_service_without_slicing_or_allocating() {
+        for (header, expected) in [
+            (
+                "AWS4-HMAC-SHA256 Credential=key/date/region/ses/aws4_request, SignedHeaders=host",
+                Some("ses"),
+            ),
+            (
+                "Credential=key/date/region/states/aws4_request",
+                Some("states"),
+            ),
+            ("Credential=key/date/region/sts", Some("sts")),
+            ("Credential=key/date/region", None),
+            (
+                "Credential=, Credential=key/date/region/iam/aws4_request",
+                None,
+            ),
+            ("Credential", None),
+            ("", None),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", HeaderValue::from_static(header));
+            assert_eq!(extract_sigv4_service(&headers), expected);
+        }
+        assert_eq!(extract_sigv4_service(&HeaderMap::new()), None);
+    }
+}

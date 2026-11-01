@@ -32,6 +32,8 @@ pub trait LambdaHandler: Send + Sync + 'static {
 }
 
 /// Dispatch a Lambda operation to the handler.
+/// # Errors
+/// Returns the handler error for invalid requests, unavailable resources or failed operations.
 pub async fn dispatch_operation<H: LambdaHandler>(
     handler: &H,
     op: LambdaOperation,

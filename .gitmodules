@@ -1,3 +1,12 @@
 [submodule "vendors/localstack"]
 	path = vendors/localstack
 	url = https://github.com/localstack/localstack.git
+[submodule "vendors/bollard"]
+	path = vendors/bollard
+	url = https://github.com/fussybeaver/bollard.git
+[submodule "vendors/moby"]
+	path = vendors/moby
+	url = https://github.com/moby/moby.git
+[submodule "vendors/pulumi"]
+	path = vendors/pulumi
+	url = https://github.com/pulumi/pulumi.git

@@ -7,7 +7,7 @@
 //! - **Service**: Hyper `Service` implementation for the Lambda protocol
 //! - **Response helpers**: JSON success/error response formatting
 //!
-//! Unlike `awsJson1.1` services (SSM, DynamoDB), Lambda uses REST-style
+//! Unlike `awsJson1.1` services (SSM, `DynamoDB`), Lambda uses REST-style
 //! routing where each operation has a unique method + path combination.
 //! Path parameters (e.g., `{FunctionName}`) are extracted and passed to
 //! the handler.

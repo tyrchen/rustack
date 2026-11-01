@@ -1,4 +1,4 @@
-//! Application-owned EventBridge → SQS delivery bridge.
+//! Application-owned `EventBridge` → SQS delivery bridge.
 use std::sync::Arc;
 
 use async_trait::async_trait;

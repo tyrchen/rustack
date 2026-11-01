@@ -1,0 +1,3 @@
+**/node_modules
+**/__pycache__
+**/.rustack-pulumi-install.lock

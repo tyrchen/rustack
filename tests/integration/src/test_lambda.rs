@@ -9,6 +9,15 @@ mod tests {
 
     use anyhow::{Context, Result, ensure};
     use aws_sdk_lambda::{
+        operation::{
+            create_function::CreateFunctionError,
+            get_function::GetFunctionError,
+            publish_version::PublishVersionError,
+            update_function_code::UpdateFunctionCodeError,
+            update_function_configuration::{
+                UpdateFunctionConfigurationError, UpdateFunctionConfigurationOutput,
+            },
+        },
         primitives::Blob,
         types::{Architecture, Environment, FunctionCode, FunctionUrlAuthType, Runtime},
     };
@@ -158,6 +167,321 @@ mod tests {
         assert!(updated.code_size() > 0);
 
         cleanup_function(&client, &name).await;
+    }
+
+    async fn check_stale_update_requests(
+        client: &aws_sdk_lambda::Client,
+        name: &str,
+        revision: &str,
+    ) -> Result<()> {
+        let error = client
+            .update_function_configuration()
+            .function_name(name)
+            .revision_id(revision)
+            .description("must not commit")
+            .send()
+            .await
+            .err()
+            .context("Stale configuration update unexpectedly succeeded")?;
+        ensure!(
+            error
+                .as_service_error()
+                .is_some_and(UpdateFunctionConfigurationError::is_precondition_failed_exception),
+            "Wrong configuration error type"
+        );
+        ensure!(
+            error
+                .raw_response()
+                .is_some_and(|response| response.status().as_u16() == 412),
+            "Wrong configuration HTTP status"
+        );
+        let error = client
+            .update_function_code()
+            .function_name(name)
+            .revision_id(revision)
+            .zip_file(dummy_zip_blob())
+            .send()
+            .await
+            .err()
+            .context("Stale code update unexpectedly succeeded")?;
+        ensure!(
+            error
+                .as_service_error()
+                .is_some_and(UpdateFunctionCodeError::is_precondition_failed_exception),
+            "Wrong code error type"
+        );
+        ensure!(
+            error
+                .raw_response()
+                .is_some_and(|response| response.status().as_u16() == 412),
+            "Wrong code HTTP status"
+        );
+        Ok(())
+    }
+
+    async fn check_rejected_update_preserved_metadata(
+        client: &aws_sdk_lambda::Client,
+        name: &str,
+        expected: &UpdateFunctionConfigurationOutput,
+    ) -> Result<()> {
+        let current = client
+            .get_function_configuration()
+            .function_name(name)
+            .send()
+            .await?;
+        ensure!(
+            current.revision_id() == expected.revision_id(),
+            "Rejected update changed revision"
+        );
+        ensure!(
+            current.code_sha256() == expected.code_sha256(),
+            "Rejected update changed hash"
+        );
+        ensure!(
+            current.code_size() == expected.code_size(),
+            "Rejected update changed size"
+        );
+        ensure!(
+            current.description() == expected.description(),
+            "Rejected update changed description"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_enforce_revision_preconditions_through_the_sdk_wire() -> Result<()> {
+        let client = lambda_client();
+        let name = create_test_function(&client, "revision-cas").await;
+        let result = async {
+            let initial = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            let original = initial.revision_id().context("Missing initial revision")?;
+            let updated = client
+                .update_function_configuration()
+                .function_name(&name)
+                .revision_id(original)
+                .description("new configuration")
+                .send()
+                .await?;
+            let updated_revision = updated
+                .revision_id()
+                .filter(|value| !value.is_empty())
+                .context("Missing updated revision")?;
+            ensure!(
+                updated_revision != original,
+                "Configuration revision did not advance"
+            );
+            check_stale_update_requests(&client, &name, original).await?;
+            check_rejected_update_preserved_metadata(&client, &name, &updated).await?;
+            let code = client
+                .update_function_code()
+                .function_name(&name)
+                .revision_id(updated_revision)
+                .zip_file(dummy_zip_blob())
+                .send()
+                .await?;
+            let code_revision = code
+                .revision_id()
+                .filter(|value| !value.is_empty())
+                .context("Missing code revision")?;
+            ensure!(
+                code_revision != updated_revision,
+                "Code revision did not advance"
+            );
+            let error = client
+                .publish_version()
+                .function_name(&name)
+                .revision_id(original)
+                .send()
+                .await
+                .err()
+                .context("Stale publication unexpectedly succeeded")?;
+            ensure!(
+                error
+                    .as_service_error()
+                    .is_some_and(PublishVersionError::is_precondition_failed_exception),
+                "Wrong publication error type"
+            );
+            ensure!(
+                error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 412),
+                "Wrong publication HTTP status"
+            );
+            let current = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            ensure!(
+                current.description() == Some("new configuration"),
+                "Rejected mutation changed configuration"
+            );
+            ensure!(
+                current.revision_id() == code.revision_id(),
+                "Rejected mutation changed code revision"
+            );
+            let published = client
+                .publish_version()
+                .function_name(&name)
+                .revision_id(code_revision)
+                .send()
+                .await?;
+            ensure!(
+                published.version() == Some("1"),
+                "Valid publication did not succeed"
+            );
+            Ok(())
+        }
+        .await;
+        cleanup_function(&client, &name).await;
+        result
+    }
+
+    async fn reject_unsupported_creation(
+        client: &aws_sdk_lambda::Client,
+        name: &str,
+    ) -> Result<()> {
+        let error = client
+            .create_function()
+            .function_name(name)
+            .runtime(Runtime::Python312)
+            .role("arn:aws:iam::000000000000:role/test-role")
+            .handler("index.handler")
+            .code(FunctionCode::builder().zip_file(dummy_zip_blob()).build())
+            .kms_key_arn("arn:aws:kms:us-east-1:000000000000:key/unsupported")
+            .send()
+            .await
+            .err()
+            .context("Unsupported creation option was ignored")?;
+        ensure!(
+            error
+                .as_service_error()
+                .is_some_and(CreateFunctionError::is_invalid_parameter_value_exception),
+            "Wrong unsupported-create error"
+        );
+        let missing = client
+            .get_function()
+            .function_name(name)
+            .send()
+            .await
+            .err()
+            .context("Rejected creation inserted a resource")?;
+        ensure!(
+            missing
+                .as_service_error()
+                .is_some_and(GetFunctionError::is_resource_not_found_exception),
+            "Rejected creation was not absent"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_dry_run_code_without_mutation_and_reject_unsupported_deployment_fields()
+    -> Result<()> {
+        let client = lambda_client();
+        let name = create_test_function(&client, "dry-run-code").await;
+        let unsupported = func_name("unsupported-create");
+        let result = async {
+            reject_unsupported_creation(&client, &unsupported).await?;
+            let before = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            let revision = before
+                .revision_id()
+                .filter(|value| !value.is_empty())
+                .context("Missing revision")?;
+            client
+                .update_function_code()
+                .function_name(&name)
+                .revision_id(revision)
+                .zip_file(Blob::new(b"not an archive".to_vec()))
+                .dry_run(true)
+                .publish(true)
+                .send()
+                .await?;
+            client
+                .update_function_code()
+                .function_name(&name)
+                .s3_bucket("missing-bucket")
+                .s3_key("missing.zip")
+                .dry_run(true)
+                .send()
+                .await?;
+            let error = client
+                .update_function_code()
+                .function_name(&name)
+                .zip_file(dummy_zip_blob())
+                .source_kms_key_arn("arn:aws:kms:us-east-1:000000000000:key/unsupported")
+                .dry_run(true)
+                .send()
+                .await
+                .err()
+                .context("Unsupported code option was ignored")?;
+            ensure!(
+                error
+                    .as_service_error()
+                    .is_some_and(UpdateFunctionCodeError::is_invalid_parameter_value_exception),
+                "Wrong unsupported-code error"
+            );
+            let error = client
+                .update_function_configuration()
+                .function_name(&name)
+                .kms_key_arn("arn:aws:kms:us-east-1:000000000000:key/unsupported")
+                .description("must not commit")
+                .send()
+                .await
+                .err()
+                .context("Unsupported configuration option was ignored")?;
+            ensure!(
+                error.as_service_error().is_some_and(
+                    UpdateFunctionConfigurationError::is_invalid_parameter_value_exception
+                ),
+                "Wrong unsupported-config error"
+            );
+            let current = client
+                .get_function_configuration()
+                .function_name(&name)
+                .send()
+                .await?;
+            ensure!(
+                current.revision_id() == Some(revision),
+                "Validation changed revision"
+            );
+            ensure!(
+                current.code_sha256() == before.code_sha256(),
+                "Validation changed hash"
+            );
+            ensure!(
+                current.code_size() == before.code_size(),
+                "Validation changed size"
+            );
+            ensure!(
+                current.description() == before.description(),
+                "Validation changed configuration"
+            );
+            let versions = client
+                .list_versions_by_function()
+                .function_name(&name)
+                .send()
+                .await?;
+            ensure!(
+                versions.versions().len() == 1,
+                "Validation published a version"
+            );
+            Ok(())
+        }
+        .await;
+        cleanup_function(&client, &unsupported).await;
+        cleanup_function(&client, &name).await;
+        result
     }
 
     // ---------------------------------------------------------------------------

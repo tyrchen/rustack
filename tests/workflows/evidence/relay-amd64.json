@@ -1,0 +1,45 @@
+{
+  "architecture": "amd64",
+  "attachEof": [
+    {
+      "runningAfterShutdown": true,
+      "stdinOnce": false
+    },
+    {
+      "runningAfterShutdown": false,
+      "stdinOnce": true
+    }
+  ],
+  "cancelledBusyFunction": true,
+  "closeAck": true,
+  "coldMs": 2526,
+  "errorType": "ValueError",
+  "labelReconciliation": true,
+  "noPublishedRuntimePorts": true,
+  "outputs": [
+    {
+      "computed": 42,
+      "counter": 1,
+      "memoryMax": "201326592",
+      "pidsMax": "256",
+      "requestId": "426463ee-6a63-4a99-ac42-b67075694b96",
+      "rootReadOnly": true,
+      "uid": 1000
+    },
+    {
+      "computed": 7,
+      "counter": 2,
+      "memoryMax": "201326592",
+      "pidsMax": "256",
+      "requestId": "2c470034-bda1-4414-97cf-edeeec4110ce",
+      "rootReadOnly": true,
+      "uid": 1000
+    }
+  ],
+  "runId": "19e31db5-376e-4149-b362-af0210f98a8e",
+  "qualification": "x86_64 Linux guest under QEMU on an arm64 host; functional evidence, not native x86 performance",
+  "rustVersion": "1.99.1",
+  "dockerServerVersion": "29.5.2",
+  "host": "macOS 27 / Apple M5",
+  "observedAt": "2026-10-25"
+}

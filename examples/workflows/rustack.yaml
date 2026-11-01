@@ -1,0 +1,19 @@
+# Dummy local credentials; never put real AWS credentials in this example.
+environment:
+  GATEWAY_LISTEN: "127.0.0.1:4566"
+  SERVICES: "stepfunctions"
+  LAMBDA_EXECUTOR: "disabled"
+  DEFAULT_REGION: "us-east-1"
+  DEFAULT_ACCOUNT_ID: "000000000000"
+  STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION: false
+  ACCESS_KEY: "local-key"
+  SECRET_KEY: "local-secret"
+budgets:
+  workflowOpenExecutions: 32
+  workflowEvaluations: 4
+  workflowDispatches: 8
+  workflowTransitions: 100000
+  workflowHistoryBytes: 33554432
+  workflowTotalHistoryBytes: 268435456
+  workflowSnapshotBytes: 536870912
+  workflowDrainSeconds: 5

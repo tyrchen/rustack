@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-docker-image-v1",
+  "qualification": "docker-image-functional",
+  "suites": [
+    {
+      "id": "docker-core",
+      "tests": [
+        "docker::binding::tests::real::test_should_bind_real_installation_across_reacquisition_and_reject_other_daemon",
+        "docker::recovery::code::tests::real::test_should_recover_real_code_volume_and_unstarted_loader_across_reacquisition",
+        "docker::pull::tests::real::test_should_pull_approved_immutable_image_prepare_live_pin_and_join_cleanup",
+        "docker::recovery::images::tests::test_should_recover_real_private_alias_across_directory_reacquisition::case_1_unknown_visible",
+        "docker::recovery::images::tests::test_should_recover_real_private_alias_across_directory_reacquisition::case_2_committed_absent",
+        "docker::recovery::namespace::tests::real::test_should_reconcile_real_namespace_and_preserve_unrecorded_observations::case_1_recorded",
+        "docker::recovery::namespace::tests::real::test_should_reconcile_real_namespace_and_preserve_unrecorded_observations::case_2_orphan_container",
+        "docker::recovery::namespace::tests::real::test_should_reconcile_real_namespace_and_preserve_unrecorded_observations::case_3_orphan_alias",
+        "docker::recovery::tests::test_should_reconcile_real_previous_run_containers_from_durable_intents"
+      ]
+    },
+    {
+      "id": "docker-endpoint",
+      "tests": [
+        "test_should_qualify_actual_container_endpoint_and_retain_physical_retirement::case_1_matching",
+        "test_should_qualify_actual_container_endpoint_and_retain_physical_retirement::case_2_wrong_instance",
+        "test_should_qualify_actual_container_endpoint_and_retain_physical_retirement::case_3_unavailable_listener",
+        "test_should_qualify_actual_container_endpoint_and_retain_physical_retirement::case_4_abandoned"
+      ]
+    },
+    {
+      "id": "docker-environment",
+      "tests": [
+        "test_should_enforce_captured_handler_timeout_and_replace_the_retired_pooled_environment",
+        "test_should_isolate_requested_log_tails_across_logging_silent_and_uncaptured_warm_calls",
+        "test_should_join_pool_retirement_after_cancelling_an_observed_running_handler::case_1_abandoned",
+        "test_should_join_pool_retirement_after_cancelling_an_observed_running_handler::case_2_awaited_settlement",
+        "test_should_own_real_initialization_warm_calls_function_error_and_cleanup",
+        "test_should_pool_real_warm_calls_and_evict_capacity_across_revision_changes",
+        "test_should_retire_running_code_after_abandoned_call_and_join_all_owned_io"
+      ]
+    },
+    {
+      "id": "docker-executor",
+      "tests": [
+        "test_should_deploy_publish_alias_and_invoke_real_images_through_boto3_http"
+      ]
+    },
+    {
+      "id": "docker-probe",
+      "tests": [
+        "test_should_qualify_actual_kernel_limits_and_join_probe_retirement::case_1_disconnected",
+        "test_should_qualify_actual_kernel_limits_and_join_probe_retirement::case_2_operator_bridge"
+      ]
+    },
+    {
+      "id": "docker-wire",
+      "tests": [
+        "test_should_execute_real_ric_over_production_wire_with_large_binary_frames_and_cleanup",
+        "test_should_preserve_empty_overrides_in_actual_docker_create_merging",
+        "code::test_should_upload_zip_code_to_a_private_volume_and_consume_it_read_only",
+        "code::test_should_prepare_code_with_retained_owner_and_consume_it_read_only",
+        "code::test_should_execute_the_same_provided_zip_bytes_through_real_linux_native_and_join_children"
+      ]
+    },
+    {
+      "id": "ordinary-startup",
+      "tests": [
+        "test_should_enforce_image_callback_retry_heartbeat_timeouts_and_stop",
+        "test_should_execute_custom_ric_imageconfig_and_immutable_revisions_through_ordinary_service",
+        "test_should_execute_image_sdk_and_nested_asl_from_a_server_container",
+        "test_should_execute_image_sdk_and_nested_asl_from_the_release_image",
+        "test_should_execute_local_s3_and_dynamodb_from_an_explicit_image_sdk_context",
+        "test_should_execute_official_node_image_with_signed_sdks_and_asl",
+        "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_1_deployments",
+        "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_2_faults",
+        "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_3_initializing",
+        "test_should_execute_ordinary_provided_zip_and_join_owned_retirement::case_4_busy",
+        "test_should_execute_real_image_callbacks_before_and_after_lambda_response",
+        "test_should_manage_a_real_image_workflow_through_pulumi_lifecycle",
+        "test_should_measure_one_hundred_warm_image_invocations",
+        "test_should_measure_twenty_preloaded_cold_image_environments",
+        "test_should_preserve_live_warm_instance_during_other_owner_crash_recovery",
+        "test_should_preserve_previous_snapshot_when_docker_cleanup_cannot_be_confirmed",
+        "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_1_disconnected",
+        "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_2_connected",
+        "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_3_missing_relay",
+        "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_4_legacy",
+        "test_should_qualify_ordinary_binary_and_retain_negative_startup_cleanup::case_5_wrong_endpoint",
+        "test_should_refuse_provided_zip_archives_without_configured_runtime",
+        "test_should_refuse_unreachable_release_image_gateway_and_join_startup_cleanup",
+        "test_should_refuse_unreachable_server_container_gateway_and_join_startup_cleanup",
+        "test_should_reject_wrong_image_sdk_credentials_without_ambient_fallback",
+        "test_should_restore_provided_zip_archives_without_replay_and_preserve_invalid_generations",
+        "test_should_restore_real_image_archive_and_preserve_generations_after_rejection",
+        "test_should_restore_saved_image_after_tag_move_and_reject_absent_or_foreign_candidates",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_01_allocating",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_02_cleanup",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_03_daemon_loss",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_04_deployment_saturation",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_05_create_io_timeout",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_06_delete_ack_timeout",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_07_interrupted_pull",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_08_negative_images",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_09_runtime_http_bounds",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_10_global_execution_limit",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_11_default_function_limit",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_12_independent_memory_limit",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_13_independent_environment_limit",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_14_zip_allocating",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_15_zip_cleanup",
+        "test_should_retain_actual_management_io_through_cancellation_and_deployment_faults::case_16_composite_pressure",
+        "test_should_retire_the_pulumi_plugin_tree_after_controller_stop",
+        "test_should_reuse_one_image_slot_after_one_hundred_log_flood_timeouts",
+        "test_should_settle_real_image_faults_and_public_cancellation_admission::case_1_typed_faults",
+        "test_should_settle_real_image_faults_and_public_cancellation_admission::case_2_initializing_disconnect",
+        "test_should_settle_real_image_faults_and_public_cancellation_admission::case_3_busy_disconnect",
+        "test_should_settle_real_image_faults_and_public_cancellation_admission::case_4_accepted_work_shutdown"
+      ]
+    },
+    {
+      "id": "relay-runtime",
+      "tests": [
+        "test_should_cancel_a_running_official_ric_and_remove_both_containers",
+        "test_should_compute_reuse_and_report_official_ric_handler_errors",
+        "test_should_drive_real_ric_through_host_client_and_join_its_streams",
+        "test_should_exit_on_close_eof_truncation_and_io_timeout_with_owned_pipes",
+        "test_should_reconcile_failed_setup_and_reap_an_expired_cli_helper"
+      ]
+    }
+  ]
+}

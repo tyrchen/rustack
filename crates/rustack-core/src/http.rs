@@ -320,7 +320,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_should_expire_pending_body_without_eof() {
         let budget = BodyBudget::new(3, Duration::from_secs(1), Duration::from_millis(5)).unwrap();
         assert!(matches!(
@@ -372,7 +372,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_should_not_reset_total_deadline_on_progress() {
         let budget =
             BodyBudget::new(1000, Duration::from_millis(20), Duration::from_millis(10)).unwrap();

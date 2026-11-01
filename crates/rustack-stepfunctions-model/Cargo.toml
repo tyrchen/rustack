@@ -1,0 +1,22 @@
+[package]
+name = "rustack-stepfunctions-model"
+description = "Generated Step Functions protocol model for Rustack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+http = { workspace = true }
+chrono = { workspace = true }
+typed-builder = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }

@@ -2,11 +2,12 @@
 use async_trait::async_trait;
 
 use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse};
+use crate::invocation::InvocationContext;
 
 /// Explicit unavailable backend for metadata-only operation.
 #[derive(Debug, Default, Clone)]
 pub struct NoopExecutor {
-    unsupported_docker: bool,
+    unqualified_docker: bool,
 }
 impl NoopExecutor {
     /// Construct a disabled executor.
@@ -14,14 +15,14 @@ impl NoopExecutor {
     pub fn new() -> Self {
         Self::default()
     }
-    pub(crate) fn docker_unavailable() -> Self {
+    pub(crate) fn without_docker_runtime() -> Self {
         Self {
-            unsupported_docker: true,
+            unqualified_docker: true,
         }
     }
     fn error(&self) -> ExecutorError {
-        if self.unsupported_docker {
-            ExecutorError::Unsupported("Docker execution is not implemented in this build".into())
+        if self.unqualified_docker {
+            ExecutorError::Unsupported("qualified Docker startup has not been installed".into())
         } else {
             ExecutorError::Disabled
         }
@@ -29,11 +30,17 @@ impl NoopExecutor {
 }
 #[async_trait]
 impl Executor for NoopExecutor {
-    fn available(&self) -> Result<(), ExecutorError> {
+    fn available(&self, _request: &InvokeRequest) -> Result<(), ExecutorError> {
         Err(self.error())
     }
-    async fn invoke(&self, _req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
+    async fn invoke(
+        &self,
+        _req: InvokeRequest,
+        _context: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
         Err(self.error())
     }
-    async fn shutdown(&self) {}
+    async fn shutdown(&self) -> Result<(), ExecutorError> {
+        Ok(())
+    }
 }

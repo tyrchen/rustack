@@ -1,10 +1,25 @@
 //! Errors surfaced by an [`Executor`](super::Executor).
 
+#[cfg(unix)]
+use crate::docker::{DockerExecutorError, EnvironmentError};
 use crate::error::LambdaServiceError;
 
 /// Failure modes for an execution backend.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ExecutorError {
+    /// Typed image-runtime, request or readiness failure with redacted sources.
+    #[cfg(unix)]
+    #[error("{0}")]
+    Docker(#[from] DockerExecutorError),
+    /// Caller or owner requested cancellation; settlement is tracked separately.
+    #[error("invocation cancelled")]
+    Cancelled,
+    /// Absolute invocation budget expired.
+    #[error("invocation deadline exceeded")]
+    DeadlineExceeded,
+    /// Cleanup could not be confirmed; ownership remains supervised.
+    #[error("cleanup not confirmed: {0}")]
+    CleanupFailed(String),
     /// No backend is wired up — set `LAMBDA_EXECUTOR=native` (or `docker`).
     #[error("execution is disabled. Set LAMBDA_EXECUTOR=native or LAMBDA_EXECUTOR=docker")]
     Disabled,
@@ -39,6 +54,19 @@ pub enum ExecutorError {
 impl From<ExecutorError> for LambdaServiceError {
     fn from(e: ExecutorError) -> Self {
         match e {
+            #[cfg(unix)]
+            ExecutorError::Docker(error) => match &error {
+                DockerExecutorError::Unavailable => Self::DockerNotAvailable,
+                DockerExecutorError::Environment(
+                    EnvironmentError::Busy | EnvironmentError::MemoryLimit,
+                ) => Self::TooManyRequests,
+                _ => Self::Internal {
+                    message: error.to_string(),
+                },
+            },
+            ExecutorError::Cancelled | ExecutorError::DeadlineExceeded => Self::ResourceNotReady {
+                message: e.to_string(),
+            },
             ExecutorError::Disabled => Self::ResourceNotReady {
                 message: "Lambda execution is disabled; explicitly select a trusted execution \
                           backend"
@@ -48,7 +76,8 @@ impl From<ExecutorError> for LambdaServiceError {
             | ExecutorError::InvalidCode(m)
             | ExecutorError::InitFailed(m)
             | ExecutorError::RuntimeExited(m)
-            | ExecutorError::Io(m) => Self::Internal { message: m },
+            | ExecutorError::Io(m)
+            | ExecutorError::CleanupFailed(m) => Self::Internal { message: m },
             ExecutorError::Timeout(d) => Self::Internal {
                 message: format!("function timed out after {d:?}"),
             },

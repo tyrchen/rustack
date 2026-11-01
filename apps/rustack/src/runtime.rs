@@ -1,13 +1,38 @@
 //! Runtime worker ownership independent of snapshot participation.
 
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+#[cfg(not(all(
+    any(feature = "events", feature = "sns", feature = "dynamodb"),
+    any(feature = "lambda", feature = "sqs")
+)))]
+use std::future::{Ready, ready};
+#[cfg(any(
+    feature = "dynamodb",
+    feature = "events",
+    feature = "sns",
+    feature = "lambda",
+    feature = "sqs"
+))]
+use std::sync::Arc;
+use std::{collections::BTreeMap, fmt};
 
-use anyhow::{Context, Result};
+#[cfg(any(
+    feature = "events",
+    feature = "sns",
+    feature = "dynamodb",
+    feature = "sqs"
+))]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::diagnostics::InvocationWorkStatus;
 use serde::Serialize;
+use tokio::runtime::Handle;
 
 /// Handles retained until quiescence, snapshot publication, and final shutdown.
 #[derive(Default)]
 pub(crate) struct RuntimeWorkers {
+    #[cfg(feature = "stepfunctions")]
+    pub(crate) workflows: Option<crate::workflows::WorkflowStatus>,
     #[cfg(feature = "dynamodb")]
     pub(crate) dynamodb: Option<Arc<rustack_dynamodb_core::provider::RustackDynamoDB>>,
     #[cfg(feature = "events")]
@@ -16,6 +41,8 @@ pub(crate) struct RuntimeWorkers {
     pub(crate) sns: Option<Arc<rustack_sns_core::provider::RustackSns>>,
     #[cfg(feature = "lambda")]
     pub(crate) lambda: Option<Arc<rustack_lambda_core::provider::RustackLambda>>,
+    #[cfg(all(feature = "lambda", unix))]
+    pub(crate) docker: Option<rustack_lambda_core::docker::DockerRuntimeStatus>,
     #[cfg(feature = "sqs")]
     pub(crate) sqs: Option<Arc<rustack_sqs_core::provider::RustackSqs>>,
 }
@@ -40,6 +67,14 @@ pub(crate) struct DeliverySummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkerDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_tasks: Option<usize>,
+    #[cfg(feature = "lambda")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lambda_admission: Option<InvocationWorkStatus>,
+    #[cfg(all(feature = "lambda", unix))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) docker: Option<rustack_lambda_core::docker::DockerCapabilities>,
     pub(crate) ready: bool,
     pub(crate) services: BTreeMap<&'static str, &'static str>,
     delivery: BTreeMap<&'static str, DeliverySummary>,
@@ -49,6 +84,14 @@ impl RuntimeWorkers {
     /// Report live supervisor state, independently of historical delivery failures.
     pub(crate) fn diagnostics(&self) -> WorkerDiagnostics {
         let readiness: &[Option<(&'static str, bool)>] = &[
+            #[cfg(feature = "lambda")]
+            self.lambda
+                .as_ref()
+                .map(|provider| ("lambda", provider.is_ready())),
+            #[cfg(feature = "stepfunctions")]
+            self.workflows
+                .as_ref()
+                .map(|workflow| ("stepfunctions", workflow.is_ready())),
             #[cfg(feature = "events")]
             self.events
                 .as_ref()
@@ -95,6 +138,16 @@ impl RuntimeWorkers {
             }),
         ];
         WorkerDiagnostics {
+            runtime_tasks: Handle::try_current()
+                .ok()
+                .map(|handle| handle.metrics().num_alive_tasks()),
+            #[cfg(feature = "lambda")]
+            lambda_admission: self.lambda.as_ref().map(|provider| provider.work_status()),
+            #[cfg(all(feature = "lambda", unix))]
+            docker: self
+                .docker
+                .as_ref()
+                .map(rustack_lambda_core::docker::DockerRuntimeStatus::capabilities),
             ready: readiness.iter().flatten().all(|(_, ready)| *ready),
             services: readiness
                 .iter()
@@ -105,9 +158,17 @@ impl RuntimeWorkers {
         }
     }
 
-    /// Stop new cross-service work before collecting the supported snapshot state.
-    pub(crate) async fn quiesce(&self, remaining: Duration) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + remaining;
+    #[cfg(feature = "stepfunctions")]
+    pub(crate) fn workflow_capabilities(&self) -> Option<serde_json::Value> {
+        self.workflows
+            .as_ref()
+            .map(crate::workflows::WorkflowStatus::capabilities)
+    }
+
+    /// Quiesce producers before the unique workflow supervisor drains.
+    #[cfg(any(feature = "events", feature = "sns", feature = "dynamodb"))]
+    pub(crate) async fn quiesce_producers(&self, deadline: tokio::time::Instant) -> Result<()> {
+        check_deadline(deadline)?;
         #[cfg(feature = "events")]
         if let Some(events) = &self.events {
             tokio::time::timeout_at(deadline, events.quiesce())
@@ -126,6 +187,13 @@ impl RuntimeWorkers {
                 .await
                 .context("DynamoDB quiesce deadline exceeded")??;
         }
+        Ok(())
+    }
+
+    /// Downstream consumers stay available until workflow cleanup joins.
+    #[cfg(any(feature = "lambda", feature = "sqs"))]
+    pub(crate) async fn quiesce_consumers(&self, deadline: tokio::time::Instant) -> Result<()> {
+        check_deadline(deadline)?;
         #[cfg(feature = "lambda")]
         if let Some(lambda) = &self.lambda {
             lambda
@@ -141,11 +209,22 @@ impl RuntimeWorkers {
         Ok(())
     }
 
+    #[cfg(not(any(feature = "events", feature = "sns", feature = "dynamodb")))]
+    pub(crate) fn quiesce_producers(&self, deadline: tokio::time::Instant) -> Ready<Result<()>> {
+        tracing::debug!(workers = ?self.diagnostics(), "No producer services require quiescence");
+        ready(check_deadline(deadline))
+    }
+    #[cfg(not(any(feature = "lambda", feature = "sqs")))]
+    pub(crate) fn quiesce_consumers(&self, deadline: tokio::time::Instant) -> Ready<Result<()>> {
+        tracing::debug!(workers = ?self.diagnostics(), "No consumer services require quiescence");
+        ready(check_deadline(deadline))
+    }
+
     /// Final resource destruction. Call only after the snapshot decision.
-    pub(crate) async fn shutdown(&self) -> Result<()> {
+    pub(crate) async fn shutdown(&self, deadline: tokio::time::Instant) -> Result<()> {
         // After the snapshot decision, stop independent resource owners together:
         // a failed queue worker must not delay killing Lambda child processes.
-        let (events_result, (), (), ()) = tokio::join!(
+        let (events_result, (), lambda_result, ()) = tokio::join!(
             async {
                 #[cfg(feature = "events")]
                 if let Some(events) = &self.events {
@@ -162,8 +241,9 @@ impl RuntimeWorkers {
             async {
                 #[cfg(feature = "lambda")]
                 if let Some(lambda) = &self.lambda {
-                    lambda.shutdown().await;
+                    lambda.shutdown_before(deadline).await?;
                 }
+                Result::<()>::Ok(())
             },
             async {
                 #[cfg(feature = "sqs")]
@@ -172,6 +252,48 @@ impl RuntimeWorkers {
                 }
             },
         );
-        events_result
+        events_result?;
+        lambda_result?;
+        check_deadline(deadline)
+    }
+}
+
+fn check_deadline(deadline: tokio::time::Instant) -> Result<()> {
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "runtime quiescence deadline exceeded"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[cfg(feature = "lambda")]
+    use rustack_lambda_core::{config::LambdaConfig, provider::RustackLambda};
+
+    use super::*;
+
+    #[test]
+    fn test_should_omit_admission_counts_without_an_installed_lambda_provider() {
+        let value = serde_json::to_value(RuntimeWorkers::default().diagnostics()).unwrap();
+        assert!(value.get("lambdaAdmission").is_none());
+    }
+
+    #[cfg(feature = "lambda")]
+    #[tokio::test]
+    async fn test_should_project_the_actual_installed_lambda_admission_without_starting_work() {
+        let provider = Arc::new(RustackLambda::new(LambdaConfig::default()));
+        let workers = RuntimeWorkers {
+            lambda: Some(provider.clone()),
+            ..RuntimeWorkers::default()
+        };
+        let value = serde_json::to_value(workers.diagnostics()).unwrap();
+        assert_eq!(
+            value.get("lambdaAdmission"),
+            Some(&serde_json::json!({"acceptedInvocations":0,
+            "activeExecutions":0,"accepting":true,"limits":{"acceptedInvocations":128,
+            "activeExecutions":32,"defaultFunctionExecutions":8}}))
+        );
+        assert_eq!(provider.work_status().active_executions, 0);
     }
 }

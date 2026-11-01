@@ -1,0 +1,68 @@
+//! One bounded watcher per accepted physical call, retained through cleanup.
+
+use tokio::sync::{mpsc, watch};
+
+use super::{Completion, Message, Output, WatchExit};
+use crate::{
+    FrameCallId, TaskEvent, TaskFailure, TaskSettlement, engine::runtime::actor::OwnedCall,
+};
+
+pub(super) async fn run(
+    id: FrameCallId,
+    mut owned: OwnedCall,
+    mut cancelled: watch::Receiver<bool>,
+    sender: mpsc::Sender<Message>,
+    child: bool,
+) -> WatchExit {
+    loop {
+        if *cancelled.borrow() {
+            break;
+        }
+        let event =
+            tokio::select! {biased;_ = cancelled.changed()=>break,event=owned.call.next()=>event};
+        let (message, done) = match event {
+            Ok(TaskEvent::Started) => (Message::Started(id), false),
+            Ok(TaskEvent::Submitted(output)) => (
+                Message::Submitted(
+                    id,
+                    Output {
+                        payload: output,
+                        _lease: owned.lease.clone(),
+                    },
+                ),
+                false,
+            ),
+            Ok(TaskEvent::Completed(result)) => (
+                Message::Completed(
+                    id,
+                    Completion {
+                        result,
+                        _lease: Some(owned.lease.clone()),
+                    },
+                ),
+                true,
+            ),
+            Err(_) if child => (Message::Fatal(super::ExecutionError::Unavailable), true),
+            Err(_) => (
+                Message::Completed(
+                    id,
+                    Completion {
+                        result: Err(TaskFailure::service_exception()),
+                        _lease: Some(owned.lease.clone()),
+                    },
+                ),
+                true,
+            ),
+        };
+        let sent = tokio::select! {biased;_=cancelled.changed()=>false,result=sender.send(message)=>result.is_ok()};
+        if !sent || done {
+            break;
+        }
+    }
+    owned.call.cancel();
+    if owned.call.settlement() == TaskSettlement::Quarantined {
+        let _ = sender.try_send(Message::Quarantined(id));
+    }
+    let clean = owned.call.settled().await.is_ok();
+    WatchExit { id, owned, clean }
+}

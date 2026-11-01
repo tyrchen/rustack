@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-standard-jsonpath-structured-v1",
+  "sources": {
+    "map": "https://docs.aws.amazon.com/step-functions/latest/dg/state-map-inline.html",
+    "parallel": "https://docs.aws.amazon.com/step-functions/latest/dg/state-parallel.html",
+    "history": "https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html"
+  },
+  "cases": [
+    {
+      "id": "parallel-order",
+      "definition": {
+        "StartAt": "D",
+        "States": {
+          "D": {
+            "Type": "Parallel",
+            "Branches": [
+              {
+                "StartAt": "D",
+                "States": {
+                  "D": {
+                    "Type": "Pass",
+                    "Result": {
+                      "branch": 0
+                    },
+                    "End": true
+                  }
+                }
+              },
+              {
+                "StartAt": "D",
+                "States": {
+                  "D": {
+                    "Type": "Pass",
+                    "Result": {
+                      "branch": 1
+                    },
+                    "End": true
+                  }
+                }
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "input": {},
+      "expectedOutput": [
+        {
+          "branch": 0
+        },
+        {
+          "branch": 1
+        }
+      ],
+      "round": "ParallelStateSucceeded"
+    },
+    {
+      "id": "map-selector",
+      "definition": {
+        "StartAt": "D",
+        "States": {
+          "D": {
+            "Type": "Map",
+            "ItemProcessor": {
+              "StartAt": "D",
+              "States": {
+                "D": {
+                  "Type": "Pass",
+                  "End": true
+                }
+              }
+            },
+            "End": true,
+            "ItemsPath": "$.items",
+            "MaxConcurrencyPath": "$.limit",
+            "ItemSelector": {
+              "index.$": "$$.Map.Item.Index",
+              "value.$": "$$.Map.Item.Value"
+            }
+          }
+        }
+      },
+      "input": {
+        "items": [
+          3,
+          null,
+          1
+        ],
+        "limit": 2
+      },
+      "expectedOutput": [
+        {
+          "index": 0,
+          "value": 3
+        },
+        {
+          "index": 1,
+          "value": null
+        },
+        {
+          "index": 2,
+          "value": 1
+        }
+      ],
+      "round": "MapStateSucceeded"
+    },
+    {
+      "id": "empty-map",
+      "definition": {
+        "StartAt": "D",
+        "States": {
+          "D": {
+            "Type": "Map",
+            "ItemProcessor": {
+              "StartAt": "D",
+              "States": {
+                "D": {
+                  "Type": "Pass",
+                  "End": true
+                }
+              }
+            },
+            "End": true
+          }
+        }
+      },
+      "input": [],
+      "expectedOutput": [],
+      "round": "MapStateSucceeded"
+    },
+    {
+      "id": "nested-parallel-map",
+      "definition": {
+        "StartAt": "D",
+        "States": {
+          "D": {
+            "Type": "Parallel",
+            "Branches": [
+              {
+                "StartAt": "D",
+                "States": {
+                  "D": {
+                    "Type": "Map",
+                    "ItemProcessor": {
+                      "StartAt": "D",
+                      "States": {
+                        "D": {
+                          "Type": "Pass",
+                          "Result": {
+                            "ok": true
+                          },
+                          "End": true
+                        }
+                      }
+                    },
+                    "End": true
+                  }
+                }
+              },
+              {
+                "StartAt": "D",
+                "States": {
+                  "D": {
+                    "Type": "Pass",
+                    "Result": "second",
+                    "End": true
+                  }
+                }
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "input": [
+        0,
+        1
+      ],
+      "expectedOutput": [
+        [
+          {
+            "ok": true
+          },
+          {
+            "ok": true
+          }
+        ],
+        "second"
+      ],
+      "round": "ParallelStateSucceeded"
+    },
+    {
+      "id": "parallel-catch",
+      "definition": {
+        "StartAt": "P",
+        "States": {
+          "P": {
+            "Type": "Parallel",
+            "Branches": [
+              {
+                "StartAt": "D",
+                "States": {
+                  "D": {
+                    "Type": "Fail",
+                    "Error": "BusinessFailed",
+                    "Cause": "literal"
+                  }
+                }
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "BusinessFailed"
+                ],
+                "ResultPath": null,
+                "Next": "Recovered"
+              }
+            ],
+            "End": true
+          },
+          "Recovered": {
+            "Type": "Pass",
+            "Result": {
+              "recovered": true
+            },
+            "End": true
+          }
+        }
+      },
+      "input": {
+        "keep": 7
+      },
+      "expectedOutput": {
+        "recovered": true
+      },
+      "round": "ParallelStateFailed"
+    },
+    {
+      "id": "lambda-map",
+      "definition": {
+        "StartAt": "D",
+        "States": {
+          "D": {
+            "Type": "Map",
+            "ItemProcessor": {
+              "StartAt": "D",
+              "States": {
+                "D": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "SdkCompute",
+                    "Payload.$": "$"
+                  },
+                  "ResultSelector": {
+                    "value.$": "$.Payload.computed"
+                  },
+                  "OutputPath": "$.value",
+                  "End": true
+                }
+              }
+            },
+            "End": true,
+            "MaxConcurrency": 2
+          }
+        }
+      },
+      "input": [
+        {
+          "n": 1
+        },
+        {
+          "n": 2
+        },
+        {
+          "n": 3
+        }
+      ],
+      "expectedOutput": [
+        2,
+        4,
+        6
+      ],
+      "round": "MapStateSucceeded",
+      "taskAttempts": 3
+    }
+  ]
+}

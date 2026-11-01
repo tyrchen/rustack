@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-standard-jsonpath-v1",
+  "qualification": "native-workflow-only",
+  "suites": [
+    {
+      "id": "native-bridge",
+      "tests": [
+        "stepfunctions_bridge::tests::native::callback::native_e2e_should_observe_callbacks_before_and_after_real_return_prioritize_failure_and_reap_cancelled_process",
+        "stepfunctions_bridge::tests::native::native_e2e_should_cancel_actual_process_on_stop_and_task_timeout",
+        "stepfunctions_bridge::tests::native::native_e2e_should_catch_actual_function_error",
+        "stepfunctions_bridge::tests::native::native_e2e_should_execute_and_cancel_real_child_through_atomic_registry_port",
+        "stepfunctions_bridge::tests::native::native_e2e_should_execute_captured_registry_revisions_and_read_after_machine_deletion",
+        "stepfunctions_bridge::tests::native::native_e2e_should_execute_computation_and_return_actual_invocation_metadata",
+        "stepfunctions_bridge::tests::native::native_e2e_should_execute_overlapping_parallel_functions_through_structured_owner",
+        "stepfunctions_bridge::tests::native::native_e2e_should_execute_real_lambda_through_typed_http_api_and_paginated_history",
+        "stepfunctions_bridge::tests::native::native_e2e_should_kill_and_reap_timed_out_owned_probe_before_returning_error",
+        "stepfunctions_bridge::tests::native::native_e2e_should_preserve_function_timeout_class_for_asl_catch",
+        "stepfunctions_bridge::tests::native::native_e2e_should_preserve_optimized_payload_json_types_and_default",
+        "stepfunctions_bridge::tests::native::native_e2e_should_resolve_alias_again_on_retry_and_capture_new_version",
+        "stepfunctions_bridge::tests::native::native_e2e_should_restore_without_replay_and_execute_new_lambda_requests",
+        "stepfunctions_bridge::tests::native::native_e2e_should_retry_function_error_and_recalculate_parameters",
+        "stepfunctions_bridge::tests::native::registered_callback::native_e2e_should_execute_registered_asl_callbacks_and_join_consumed_native_cancellation"
+      ]
+    },
+    {
+      "id": "registered-sdk",
+      "tests": [
+        "performance::test_should_keep_health_and_stop_responsive_and_reuse_one_execution_slot",
+        "performance::test_should_measure_one_hundred_fifty_state_signed_sdk_executions",
+        "persistence::test_should_restart_named_native_snapshots_without_replay_and_lose_only_unsaved_work",
+        "test_should_accept_ordinary_boto3_through_actual_runtime",
+        "test_should_accept_ordinary_rust_sdk_through_actual_runtime",
+        "test_should_execute_documented_pure_workflow_in_owned_strict_service",
+        "test_should_join_actual_server_and_native_children_after_fixture_gate_release_failure",
+        "test_should_reap_actual_python_after_observed_execution_timeout",
+        "test_should_run_actual_nested_native_with_one_dispatch_slot",
+        "test_should_run_signed_rust_and_boto3_handler_callbacks_with_one_dispatch_slot"
+      ]
+    },
+    {
+      "id": "typed-http-sdk",
+      "tests": [
+        "test_should_exchange_signed_boto3_requests_with_typed_transport"
+      ]
+    }
+  ]
+}

@@ -42,7 +42,7 @@ impl LambdaConfig {
     /// - `GATEWAY_HOST` (default: `localhost`)
     /// - `GATEWAY_PORT` (default: `4566`)
     /// - `LAMBDA_DOCKER_ENABLED` (default: `false` — legacy alias for `LAMBDA_EXECUTOR=docker`).
-    /// - `LAMBDA_EXECUTOR` (default: `disabled`; unsupported Docker settings fail explicitly).
+    /// - `LAMBDA_EXECUTOR` (default: `disabled`; Docker requires qualified runtime installation).
     ///   Accepts `disabled`, `auto`, `native`, `docker`, `squib`. Auto uses Squib for Zip functions
     ///   on macOS and native execution otherwise. The native backend runs `provided.*` bootstraps
     ///   (Rust / Go / C++) directly on the host with no Docker requirement.
@@ -50,6 +50,11 @@ impl LambdaConfig {
     /// - `LAMBDA_IDLE_TIMEOUT_SECS` (default: `600`)
     /// - `LAMBDA_INIT_TIMEOUT_SECS` (default: `5`)
     /// - `LAMBDA_SQUIB_*` variables documented by [`SquibExecutorConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed environment values, invalid budgets,
+    /// conflicting executor settings or invalid Squib configuration.
     pub fn from_env() -> Result<Self, crate::error::LambdaServiceError> {
         Self::from_lookup(|key| match rustack_core::settings::var(key) {
             Ok(value) => Some(value),
@@ -59,6 +64,11 @@ impl LambdaConfig {
     }
 
     /// Parse an explicit environment lookup without changing process globals.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed scalar values, invalid budgets/identifiers, conflicting executor
+    /// settings or invalid Squib configuration.
     pub fn from_lookup(
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, crate::error::LambdaServiceError> {
@@ -93,9 +103,6 @@ impl LambdaConfig {
         };
         if docker_enabled && executor != ExecutorBackend::Docker {
             return Err(error("conflicting Docker/executor settings"));
-        }
-        if executor == ExecutorBackend::Docker {
-            return Err(error("Docker execution is not supported by this build"));
         }
         let mut config = Self {
             executor,
@@ -194,6 +201,21 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_should_parse_explicit_docker_without_granting_unqualified_execution() {
+        for (key, value) in [
+            ("LAMBDA_EXECUTOR", "docker"),
+            ("LAMBDA_DOCKER_ENABLED", "true"),
+        ] {
+            let config =
+                LambdaConfig::from_lookup(|name| (name == key).then(|| value.into())).unwrap();
+            assert_eq!(config.executor, ExecutorBackend::Docker);
+            let provider = crate::provider::RustackLambda::new(config);
+            assert!(!provider.is_ready());
+            assert!(provider.executor().image_available().is_err());
+        }
     }
 
     #[test]

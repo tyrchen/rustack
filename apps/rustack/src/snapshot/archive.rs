@@ -2,14 +2,23 @@
 
 use std::{
     collections::BTreeSet,
+    error::Error as StdError,
+    fmt,
     io::{Cursor, Read as _},
     path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use crc32fast::Hasher;
+#[cfg(unix)]
+use nix::fcntl::OFlag;
+#[cfg(feature = "lambda")]
+use rustack_lambda_core::provider::DockerArchiveProfile;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::fs;
+use tokio::{fs, io::AsyncReadExt};
+
+mod cbor;
+use super::worker::WorkerFailure;
 
 const MAGIC: [u8; 8] = *b"RSSNAP\0\x02";
 const HEADER_LEN: usize = 36;
@@ -99,16 +108,35 @@ pub(super) fn to_cbor<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize,
 {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).context("failed to encode snapshot CBOR")?;
-    Ok(bytes)
+    Ok(cbor::encode(value)?)
 }
 
 pub(super) fn from_cbor<T>(bytes: &[u8]) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    ciborium::from_reader(bytes).context("failed to decode snapshot CBOR")
+    Ok(cbor::decode(bytes)?)
+}
+
+#[cfg(feature = "lambda")]
+pub(super) fn from_cbor_lambda<T: DeserializeOwned>(
+    bytes: &[u8],
+    profile: DockerArchiveProfile,
+) -> Result<T> {
+    Ok(cbor::decode_lambda(bytes, profile)?)
+}
+
+#[cfg(feature = "lambda")]
+pub(super) fn to_cbor_lambda<T: Serialize>(
+    value: &T,
+    profile: DockerArchiveProfile,
+) -> Result<Vec<u8>> {
+    Ok(cbor::encode_lambda(value, profile)?)
+}
+
+#[cfg(feature = "stepfunctions")]
+pub(super) fn to_cbor_bounded<T: Serialize>(value: &T, bytes: usize) -> Result<Vec<u8>> {
+    Ok(cbor::encode_bounded(value, bytes)?)
 }
 
 pub(super) async fn write_archive(
@@ -134,25 +162,126 @@ pub(super) async fn write_archive(
     })
 }
 
+/// Policy exhaustion is not evidence that a committed generation is corrupt.
+#[derive(Debug)]
+pub(super) struct BudgetLimit;
+impl fmt::Display for BudgetLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("snapshot configured archive byte limit exceeded")
+    }
+}
+impl StdError for BudgetLimit {}
+#[derive(Debug)]
+struct ExpansionLimit;
+impl fmt::Display for ExpansionLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("decompressed snapshot archive exceeds maximum size")
+    }
+}
+impl StdError for ExpansionLimit {}
+
+/// Bounded regular-file streaming read, including a single detection byte.
+pub(super) async fn read_file_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    read_file_bounded_owned(
+        path,
+        limit,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+async fn read_file_bounded_owned(
+    path: &Path,
+    limit: u64,
+    #[cfg(test)] gate: Option<&bounded_tests::OpenGate>,
+) -> Result<Vec<u8>> {
+    if !fs::symlink_metadata(path)
+        .await
+        .context("inspect snapshot input path")?
+        .file_type()
+        .is_file()
+    {
+        bail!("snapshot input must be a regular file");
+    }
+    #[cfg(test)]
+    if let Some(gate) = gate {
+        gate.wait().await;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags((OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW).bits());
+    let file = options
+        .open(path)
+        .await
+        .context("open bounded snapshot input")?;
+    let metadata = file
+        .metadata()
+        .await
+        .context("inspect bounded snapshot input")?;
+    if !metadata.is_file() {
+        bail!("snapshot input must be a regular file");
+    }
+    if metadata.len() > limit {
+        return Err(BudgetLimit.into());
+    }
+    let detection = limit.checked_add(1).ok_or(BudgetLimit)?;
+    let mut reader = file.take(detection);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .context("read bounded snapshot input")?;
+    if usize_to_u64(bytes.len())? > limit {
+        return Err(BudgetLimit.into());
+    }
+    Ok(bytes)
+}
+
+pub(super) async fn read_archive_limited(
+    path: &Path,
+    kind: ArchiveKind,
+    payload: Option<usize>,
+) -> Result<Vec<ArchiveSection>> {
+    let Some(payload) = payload else {
+        return read_archive(path, kind).await;
+    };
+    let framed = usize_to_u64(payload)?
+        .checked_add(1024)
+        .ok_or(BudgetLimit)?;
+    let compressed = framed
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(1024 * 1024))
+        .ok_or(BudgetLimit)?
+        .min(MAX_ARCHIVE_BYTES);
+    let bytes = read_file_bounded(path, compressed).await?;
+    let inner = tokio::task::spawn_blocking(move || decode_zstd_with_limit(bytes, framed))
+        .await
+        .map_err(WorkerFailure::new)
+        .context("bounded snapshot decompression worker failed")?
+        .map_err(|error| {
+            if error.is::<ExpansionLimit>() {
+                BudgetLimit.into()
+            } else {
+                error
+            }
+        })?;
+    parse_archive_limited(&inner, kind, Some(payload))
+}
+
 pub(super) async fn read_archive(
     path: &Path,
     expected_kind: ArchiveKind,
 ) -> Result<Vec<ArchiveSection>> {
-    let metadata = fs::metadata(path)
+    let compressed = read_file_bounded(path, MAX_ARCHIVE_BYTES)
         .await
-        .with_context(|| format!("failed to inspect snapshot archive {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!("snapshot archive is not a regular file: {}", path.display());
-    }
-    if metadata.len() > MAX_ARCHIVE_BYTES {
-        bail!(
-            "snapshot archive {} exceeds maximum size of {MAX_ARCHIVE_BYTES} bytes",
-            path.display()
-        );
-    }
-    let compressed = fs::read(path)
-        .await
-        .with_context(|| format!("failed to read snapshot archive {}", path.display()))?;
+        .map_err(|error| {
+            if error.is::<BudgetLimit>() {
+                anyhow::anyhow!("snapshot archive exceeds maximum size")
+            } else {
+                error
+            }
+        })?;
     let inner = decompress(compressed).await?;
     parse_archive(&inner, expected_kind)
 }
@@ -214,11 +343,27 @@ pub(super) async fn pack_data_archive(
     Ok(Some(stats))
 }
 
-pub(super) async fn unpack_data_archive(archive_path: &Path, target_dir: &Path) -> Result<()> {
-    let sections = read_archive(archive_path, ArchiveKind::ServiceData).await?;
+pub(super) async fn unpack_data_archive(
+    archive_path: &Path,
+    target_dir: &Path,
+    payload: Option<usize>,
+    expected_file: Option<&str>,
+) -> Result<()> {
+    let sections = read_archive_limited(archive_path, ArchiveKind::ServiceData, payload).await?;
     let directory_bytes = get_required_section(&sections, SECTION_DATA_DIRECTORY_CBOR)?;
     let data = get_required_section(&sections, SECTION_DATA_BYTES)?;
-    let entries: Vec<DataDirectoryEntry> = from_cbor(directory_bytes)?;
+    let entries: Vec<DataDirectoryEntry> = if let Some(expected) = expected_file {
+        if sections.len() != 2 || directory_bytes.len() > 1024 {
+            bail!("invalid workflow data section layout");
+        }
+        let [entry]: [DataDirectoryEntry; 1] = from_cbor(directory_bytes)?;
+        if entry.relative_path != expected {
+            bail!("invalid workflow data payload path");
+        }
+        vec![entry]
+    } else {
+        from_cbor(directory_bytes)?
+    };
 
     fs::create_dir_all(target_dir).await.with_context(|| {
         format!(
@@ -346,6 +491,13 @@ fn encode_archive(kind: ArchiveKind, sections: Vec<ArchiveSection>) -> Result<Ve
 }
 
 fn parse_archive(bytes: &[u8], expected_kind: ArchiveKind) -> Result<Vec<ArchiveSection>> {
+    parse_archive_limited(bytes, expected_kind, None)
+}
+fn parse_archive_limited(
+    bytes: &[u8],
+    expected_kind: ArchiveKind,
+    payload: Option<usize>,
+) -> Result<Vec<ArchiveSection>> {
     let min_len = checked_add_usize(HEADER_LEN, FOOTER_LEN)?;
     if bytes.len() < min_len {
         bail!("snapshot archive is too short");
@@ -425,6 +577,9 @@ fn parse_archive(bytes: &[u8], expected_kind: ArchiveKind) -> Result<Vec<Archive
     for entry in entries {
         let start = u64_to_usize(entry.offset)?;
         let len = u64_to_usize(entry.len)?;
+        if payload.is_some_and(|limit| len > limit) {
+            return Err(BudgetLimit.into());
+        }
         let end = checked_add_usize(start, len)?;
         let section_bytes = bytes
             .get(start..end)
@@ -516,7 +671,11 @@ async fn decompress(bytes: Vec<u8>) -> Result<Vec<u8>> {
 }
 
 fn decode_zstd_bounded(bytes: Vec<u8>) -> Result<Vec<u8>> {
-    let read_limit = MAX_ARCHIVE_BYTES
+    decode_zstd_with_limit(bytes, MAX_ARCHIVE_BYTES)
+}
+
+fn decode_zstd_with_limit(bytes: Vec<u8>, limit: u64) -> Result<Vec<u8>> {
+    let read_limit = limit
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("snapshot archive size overflow"))?;
     let decoder = zstd::stream::read::Decoder::new(Cursor::new(bytes))
@@ -526,8 +685,8 @@ fn decode_zstd_bounded(bytes: Vec<u8>) -> Result<Vec<u8>> {
     limited
         .read_to_end(&mut output)
         .context("failed to decompress snapshot archive")?;
-    if usize_to_u64(output.len())? > MAX_ARCHIVE_BYTES {
-        bail!("decompressed snapshot archive exceeds maximum size");
+    if usize_to_u64(output.len())? > limit {
+        return Err(ExpansionLimit.into());
     }
     Ok(output)
 }
@@ -678,9 +837,114 @@ fn u64_to_usize(value: u64) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
     use tempfile::tempdir;
+    use zstd::{
+        stream::{read::Decoder as ZstdReader, write::Encoder as ZstdWriter},
+        zstd_safe::{CCtx, DCtx},
+    };
 
     use super::*;
+
+    const LEGACY_V2: &[u8] = include_bytes!("fixtures/legacy-v2-meta.ss.zst");
+
+    #[test]
+    fn test_should_preserve_original_zstd_0133_snapshot_envelope() -> Result<()> {
+        let plain = decode_zstd_bounded(LEGACY_V2.to_vec())?;
+        assert_eq!(plain.len(), 88);
+        let sections = parse_archive(&plain, ArchiveKind::ServiceMeta)?;
+        let section = sections.first().context("legacy section")?;
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            (section.kind, section.flags, section.row_count),
+            (SECTION_STATE_CBOR, 0, 7)
+        );
+        assert_eq!(section.bytes, b"legacy-state");
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_every_truncated_legacy_frame_and_reencoded_corrupt_envelope() -> Result<()>
+    {
+        for end in 0..LEGACY_V2.len() {
+            let prefix = LEGACY_V2.get(..end).context("bounded prefix")?;
+            assert!(
+                decode_zstd_bounded(prefix.to_vec())
+                    .and_then(|plain| parse_archive(&plain, ArchiveKind::ServiceMeta))
+                    .is_err(),
+                "truncated prefix {end}"
+            );
+        }
+        let mut plain = decode_zstd_bounded(LEGACY_V2.to_vec())?;
+        let index = plain.len().checked_sub(FOOTER_LEN).context("CRC offset")?;
+        let crc = plain.get_mut(index).context("CRC byte")?;
+        *crc = crc.wrapping_add(1);
+        let frame = zstd::stream::encode_all(Cursor::new(plain), ZSTD_LEVEL)?;
+        let plain = decode_zstd_bounded(frame)?;
+        assert!(parse_archive(&plain, ArchiveKind::ServiceMeta).is_err());
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(4096)]
+    #[test]
+    fn test_should_enforce_exact_decompressed_byte_boundary(#[case] limit: usize) -> Result<()> {
+        let exact = zstd::stream::encode_all(Cursor::new(vec![b'x'; limit]), ZSTD_LEVEL)?;
+        assert_eq!(
+            decode_zstd_with_limit(exact, u64::try_from(limit)?)?.len(),
+            limit
+        );
+        let excess = zstd::stream::encode_all(Cursor::new(vec![b'x'; limit + 1]), ZSTD_LEVEL)?;
+        assert!(decode_zstd_with_limit(excess, u64::try_from(limit)?).is_err());
+        assert!(decode_zstd_with_limit(Vec::new(), u64::MAX).is_err());
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(4096)]
+    #[case(131_071)]
+    #[test]
+    fn test_should_discard_abandoned_encoder_input_before_reusing_context(
+        #[case] size: usize,
+    ) -> Result<()> {
+        let mut context = CCtx::create();
+        {
+            let mut abandoned = ZstdWriter::with_context(Vec::new(), &mut context);
+            abandoned.write_all(&vec![b'X'; size])?;
+        }
+        let mut current = ZstdWriter::with_context(Vec::new(), &mut context);
+        current.write_all(b"current-stream")?;
+        let frame = current.finish()?;
+        assert_eq!(decode_zstd_with_limit(frame, 64)?, b"current-stream");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(4096)]
+    #[case(131_072)]
+    #[test]
+    fn test_should_discard_abandoned_decoder_output_before_reusing_context(
+        #[case] size: usize,
+    ) -> Result<()> {
+        let mut context = DCtx::create();
+        let previous = zstd::stream::encode_all(Cursor::new(vec![b'X'; size]), ZSTD_LEVEL)?;
+        {
+            let mut abandoned = ZstdReader::with_context(Cursor::new(previous), &mut context);
+            let mut byte = [0_u8; 1];
+            abandoned.read_exact(&mut byte)?;
+            assert_eq!(byte, [b'X']);
+        }
+        let frame = zstd::stream::encode_all(Cursor::new(b"current-stream"), ZSTD_LEVEL)?;
+        let mut current = ZstdReader::with_context(Cursor::new(frame), &mut context).take(64);
+        let mut output = Vec::new();
+        current.read_to_end(&mut output)?;
+        assert_eq!(output, b"current-stream");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_should_round_trip_archive_sections() -> Result<()> {
@@ -770,7 +1034,7 @@ mod tests {
         assert!(stats.compressed_bytes > 0);
 
         let target = dir.path().join("target");
-        unpack_data_archive(&archive, &target).await?;
+        unpack_data_archive(&archive, &target, None, None).await?;
         let restored = fs::read(target.join("objects").join("0.bin"))
             .await
             .context("restored file should be readable")?;
@@ -809,7 +1073,7 @@ mod tests {
         )
         .await?;
 
-        let result = unpack_data_archive(&archive, &dir.path().join("target")).await;
+        let result = unpack_data_archive(&archive, &dir.path().join("target"), None, None).await;
         assert!(result.is_err());
         Ok(())
     }
@@ -820,3 +1084,6 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod bounded_tests;

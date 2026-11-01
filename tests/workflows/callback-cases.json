@@ -1,0 +1,14 @@
+{
+  "source": "https://docs.aws.amazon.com/step-functions/latest/dg/connect-lambda.html",
+  "cases": [
+    {"id":"early","mode":"early","status":"SUCCEEDED"},
+    {"id":"late","mode":"late","status":"SUCCEEDED"},
+    {"id":"external-failure","mode":"externalFailure","status":"FAILED","error":"CallbackExternalFailure"},
+    {"id":"invocation-failure","mode":"invocationFailure","status":"FAILED","error":"CallbackInvocationFailure"},
+    {"id":"retry","mode":"retry","status":"SUCCEEDED"},
+    {"id":"heartbeat","mode":"heartbeat","status":"SUCCEEDED"},
+    {"id":"absolute-timeout","mode":"absoluteTimeout","status":"FAILED","error":"States.Timeout"},
+    {"id":"heartbeat-timeout","mode":"heartbeatTimeout","status":"FAILED","error":"States.HeartbeatTimeout"},
+    {"id":"stop","mode":"stop","status":"ABORTED","error":"Stopped"}
+  ]
+}

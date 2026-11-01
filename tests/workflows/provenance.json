@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "retrievedAt": "2026-10-25",
+  "awsModelCommit": "18e485ce1c8dbf29d47e5ce00d9b8513da95912c",
+  "awsModelSha256": "38dd64c074f5c05320978970dafa6e0f199ab2e33b6065232002e8a603c5f6ed",
+  "rustSdkSfn": "1.123.0",
+  "boto3": "1.43.118",
+  "botocore": "1.43.118",
+  "bollard": "0.21.1",
+  "winnow": "1.0.4",
+  "cloudDifferentialEvidence": false,
+  "vendorLocalstackCommit": "45dfee8ce27df00fcac3f91b8071c8156eb5c5c7",
+  "upstreamAwsValidationDates": {
+    "nestedSync": "2023-06-30",
+    "nestedSync2": "2023-08-12"
+  }
+}

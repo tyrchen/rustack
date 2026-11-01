@@ -115,7 +115,7 @@ fn normalize_date_prefix(path: &str) -> Option<String> {
     let (date_part, rest) = trimmed.split_once('/')?;
 
     // Validate it looks like a date: YYYY-MM-DD (10 chars).
-    if date_part.len() != 10 || date_part.as_bytes()[4] != b'-' || date_part.as_bytes()[7] != b'-' {
+    if !matches!(date_part.as_bytes(), [_, _, _, _, b'-', _, _, b'-', _, _]) {
         return None;
     }
 

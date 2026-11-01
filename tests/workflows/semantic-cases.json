@@ -1,0 +1,659 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-standard-jsonpath-v1",
+  "evidence": "Official-document-derived expectations; not AWS-observed executions and not an interpreter test result.",
+  "retrievedAt": "2026-10-25",
+  "sources": {
+    "asl": "https://states-language.net/spec.html",
+    "pipeline": "https://docs.aws.amazon.com/step-functions/latest/dg/input-output-inputpath-params.html",
+    "paths": "https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-paths.html",
+    "choice": "https://docs.aws.amazon.com/step-functions/latest/dg/state-choice.html",
+    "intrinsics": "https://docs.aws.amazon.com/step-functions/latest/dg/intrinsic-functions.html",
+    "errors": "https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html",
+    "nested": "https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html",
+    "start": "https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html",
+    "success": "https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskSuccess.html",
+    "smithy": "https://smithy.io/2.0/aws/protocols/aws-json-1_0-protocol.html#shape-serialization",
+    "nestedSnapshots": "vendors/localstack/tests/aws/services/stepfunctions/v2/callback/test_callback.snapshot.json@45dfee8ce27df00fcac3f91b8071c8156eb5c5c7",
+    "nestedDates": "https://github.com/aws/aws-cdk/issues/5474"
+  },
+  "cases": [
+    {
+      "id": "path-member-index",
+      "kind": "path",
+      "source": "paths",
+      "path": "$.orders[0].total",
+      "input": {
+        "orders": [
+          {
+            "total": 23
+          }
+        ]
+      },
+      "expected": 23
+    },
+    {
+      "id": "path-quoted-member",
+      "kind": "path",
+      "source": "paths",
+      "path": "$['odd.key']",
+      "input": {
+        "odd.key": 17
+      },
+      "expected": 17
+    },
+    {
+      "id": "path-slice",
+      "kind": "path",
+      "source": "pipeline",
+      "path": "$.items[0:2]",
+      "input": {
+        "items": [
+          3,
+          5,
+          8
+        ]
+      },
+      "expected": [
+        3,
+        5
+      ]
+    },
+    {
+      "id": "path-single-selection",
+      "kind": "path",
+      "source": "paths",
+      "path": "$.items[*].id",
+      "input": {
+        "items": [
+          {
+            "id": 7
+          }
+        ]
+      },
+      "expected": [
+        7
+      ]
+    },
+    {
+      "id": "path-null",
+      "kind": "path",
+      "source": "asl",
+      "path": "$.value",
+      "input": {
+        "value": null
+      },
+      "expected": null
+    },
+    {
+      "id": "path-missing",
+      "kind": "path",
+      "source": "errors",
+      "path": "$.missing",
+      "input": {},
+      "expectedError": "States.Runtime"
+    },
+    {
+      "id": "path-context",
+      "kind": "path",
+      "source": "asl",
+      "path": "$$.Execution.Id",
+      "input": {},
+      "context": {
+        "Execution": {
+          "Id": "arn:aws:states:us-east-1:000000000000:execution:P0:one"
+        }
+      },
+      "expected": "arn:aws:states:us-east-1:000000000000:execution:P0:one"
+    },
+    {
+      "id": "pipeline-original-input-merge",
+      "kind": "pipeline",
+      "source": "pipeline",
+      "input": {
+        "keep": 9,
+        "request": {
+          "number": 4
+        }
+      },
+      "inputPath": "$.request",
+      "parameters": {
+        "value.$": "$.number"
+      },
+      "rawResult": {
+        "status": 200,
+        "payload": {
+          "doubled": 8
+        }
+      },
+      "resultSelector": {
+        "value.$": "$.payload.doubled"
+      },
+      "resultPath": "$.result",
+      "outputPath": "$",
+      "expectedTaskInput": {
+        "value": 4
+      },
+      "expected": {
+        "keep": 9,
+        "request": {
+          "number": 4
+        },
+        "result": {
+          "value": 8
+        }
+      }
+    },
+    {
+      "id": "pipeline-null-input",
+      "kind": "pipeline",
+      "source": "pipeline",
+      "input": {
+        "unused": 4
+      },
+      "inputPath": null,
+      "rawResult": {
+        "answer": 7
+      },
+      "resultPath": "$",
+      "outputPath": "$",
+      "expectedTaskInput": {},
+      "expected": {
+        "answer": 7
+      }
+    },
+    {
+      "id": "pipeline-discard-result",
+      "kind": "pipeline",
+      "source": "asl",
+      "input": {
+        "keep": 4
+      },
+      "inputPath": "$",
+      "rawResult": {
+        "discard": 9
+      },
+      "resultPath": null,
+      "outputPath": "$",
+      "expectedTaskInput": {
+        "keep": 4
+      },
+      "expected": {
+        "keep": 4
+      }
+    },
+    {
+      "id": "pipeline-null-output",
+      "kind": "pipeline",
+      "source": "asl",
+      "input": {
+        "keep": 4
+      },
+      "inputPath": "$",
+      "rawResult": {
+        "discard": 9
+      },
+      "resultPath": "$",
+      "outputPath": null,
+      "expectedTaskInput": {
+        "keep": 4
+      },
+      "expected": {}
+    },
+    {
+      "id": "intrinsic-format",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.Format('job-{}-{}', $.kind, $.id)",
+      "input": {
+        "kind": "image",
+        "id": 7
+      },
+      "expected": "job-image-7"
+    },
+    {
+      "id": "intrinsic-string-to-json",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.StringToJson($.text)",
+      "input": {
+        "text": "{\"count\":7}"
+      },
+      "expected": {
+        "count": 7
+      }
+    },
+    {
+      "id": "intrinsic-json-to-string",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.JsonToString($.value)",
+      "input": {
+        "value": {
+          "count": 7
+        }
+      },
+      "expected": "{\"count\":7}"
+    },
+    {
+      "id": "intrinsic-array",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.Array($.first, $.second)",
+      "input": {
+        "first": 2,
+        "second": 5
+      },
+      "expected": [
+        2,
+        5
+      ]
+    },
+    {
+      "id": "intrinsic-array-length",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.ArrayLength($.items)",
+      "input": {
+        "items": [
+          3,
+          7,
+          11
+        ]
+      },
+      "expected": 3
+    },
+    {
+      "id": "intrinsic-array-get-item",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.ArrayGetItem($.items, 1)",
+      "input": {
+        "items": [
+          3,
+          7,
+          11
+        ]
+      },
+      "expected": 7
+    },
+    {
+      "id": "intrinsic-array-contains",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.ArrayContains($.items, 7)",
+      "input": {
+        "items": [
+          3,
+          7,
+          11
+        ]
+      },
+      "expected": true
+    },
+    {
+      "id": "intrinsic-array-partition",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.ArrayPartition($.items, 2)",
+      "input": {
+        "items": [
+          3,
+          7,
+          11
+        ]
+      },
+      "expected": [
+        [
+          3,
+          7
+        ],
+        [
+          11
+        ]
+      ]
+    },
+    {
+      "id": "intrinsic-string-split",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.StringSplit($.text, '+=:')",
+      "input": {
+        "text": "red+green=blue:gold"
+      },
+      "expected": [
+        "red",
+        "green",
+        "blue",
+        "gold"
+      ]
+    },
+    {
+      "id": "intrinsic-math-add",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.MathAdd($.left, $.right)",
+      "input": {
+        "left": 2.6,
+        "right": 3.4
+      },
+      "expected": 6
+    },
+    {
+      "id": "intrinsic-json-merge",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.JsonMerge($.left, $.right, false)",
+      "input": {
+        "left": {
+          "nested": {
+            "a": 1
+          },
+          "keep": 7
+        },
+        "right": {
+          "nested": {
+            "b": 2
+          }
+        }
+      },
+      "expected": {
+        "nested": {
+          "b": 2
+        },
+        "keep": 7
+      }
+    },
+    {
+      "id": "intrinsic-uuid",
+      "kind": "intrinsic",
+      "source": "intrinsics",
+      "expression": "States.UUID()",
+      "input": {},
+      "expectedPattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    {
+      "id": "choice-missing-guard",
+      "kind": "choice",
+      "source": "choice",
+      "input": {},
+      "rule": {
+        "And": [
+          {
+            "Variable": "$.optional",
+            "IsPresent": true
+          },
+          {
+            "Variable": "$.optional",
+            "StringEquals": "yes"
+          }
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "choice-wrong-type",
+      "kind": "choice",
+      "source": "asl",
+      "input": {
+        "value": "7"
+      },
+      "rule": {
+        "Variable": "$.value",
+        "NumericEquals": 7
+      },
+      "expected": false
+    },
+    {
+      "id": "choice-is-null",
+      "kind": "choice",
+      "source": "asl",
+      "input": {
+        "value": null
+      },
+      "rule": {
+        "Variable": "$.value",
+        "IsNull": true
+      },
+      "expected": true
+    },
+    {
+      "id": "choice-string-matches",
+      "kind": "choice",
+      "source": "choice",
+      "input": {
+        "value": "build-123.json"
+      },
+      "rule": {
+        "Variable": "$.value",
+        "StringMatches": "build-*.json"
+      },
+      "expected": true
+    },
+    {
+      "id": "retry-zero",
+      "kind": "retry",
+      "source": "errors",
+      "retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "MaxAttempts": 0
+        }
+      ],
+      "failures": [
+        "ExampleError"
+      ],
+      "expectedAttempts": 1,
+      "expectedDelays": []
+    },
+    {
+      "id": "retry-backoff",
+      "kind": "retry",
+      "source": "errors",
+      "retry": [
+        {
+          "ErrorEquals": [
+            "ExampleError"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 3,
+          "MaxAttempts": 2
+        }
+      ],
+      "failures": [
+        "ExampleError",
+        "ExampleError",
+        "ExampleError"
+      ],
+      "expectedAttempts": 3,
+      "expectedDelays": [
+        2,
+        6
+      ]
+    },
+    {
+      "id": "retry-capped",
+      "kind": "retry",
+      "source": "errors",
+      "retry": [
+        {
+          "ErrorEquals": [
+            "ExampleError"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 3,
+          "MaxDelaySeconds": 4,
+          "MaxAttempts": 2
+        }
+      ],
+      "failures": [
+        "ExampleError",
+        "ExampleError",
+        "ExampleError"
+      ],
+      "expectedAttempts": 3,
+      "expectedDelays": [
+        2,
+        4
+      ]
+    },
+    {
+      "id": "matcher-timeout",
+      "kind": "errorMatcher",
+      "source": "errors",
+      "error": "States.Timeout",
+      "matcher": "States.TaskFailed",
+      "expected": false
+    },
+    {
+      "id": "matcher-runtime",
+      "kind": "errorMatcher",
+      "source": "errors",
+      "error": "States.Runtime",
+      "matcher": "States.ALL",
+      "expected": false
+    },
+    {
+      "id": "matcher-data-limit-all",
+      "kind": "errorMatcher",
+      "source": "errors",
+      "error": "States.DataLimitExceeded",
+      "matcher": "States.ALL",
+      "expected": false
+    },
+    {
+      "id": "matcher-data-limit-explicit",
+      "kind": "errorMatcher",
+      "source": "errors",
+      "error": "States.DataLimitExceeded",
+      "matcher": "States.DataLimitExceeded",
+      "expected": true
+    },
+    {
+      "id": "nested-sync-string",
+      "kind": "nestedResult",
+      "source": "nestedSnapshots",
+      "resource": "arn:aws:states:::states:startExecution.sync",
+      "childOutput": {
+        "computed": 42
+      },
+      "expectedOutput": "{\"computed\":42}",
+      "childInput": {
+        "value": 7
+      },
+      "expectedInput": "{\"value\":7}"
+    },
+    {
+      "id": "nested-sync-json",
+      "kind": "nestedResult",
+      "source": "nestedSnapshots",
+      "resource": "arn:aws:states:::states:startExecution.sync:2",
+      "childOutput": {
+        "computed": 42
+      },
+      "expectedOutput": {
+        "computed": 42
+      },
+      "childInput": {
+        "value": 7
+      },
+      "expectedInput": {
+        "value": 7
+      }
+    },
+    {
+      "id": "wire-input-string",
+      "kind": "wire",
+      "source": "start",
+      "operation": "StartExecution",
+      "request": {
+        "stateMachineArn": "arn:aws:states:us-east-1:000000000000:stateMachine:P0",
+        "name": "one",
+        "input": "{ \"value\": 7 }"
+      },
+      "expectedTarget": "AWSStepFunctions.StartExecution"
+    },
+    {
+      "id": "callback-completed",
+      "kind": "callbackError",
+      "source": "success",
+      "tokenState": "completed",
+      "expectedError": "TaskTimedOut"
+    },
+    {
+      "id": "callback-cancelled",
+      "kind": "callbackError",
+      "source": "success",
+      "tokenState": "cancelled",
+      "expectedError": "TaskTimedOut"
+    },
+    {
+      "id": "callback-expired",
+      "kind": "callbackError",
+      "source": "success",
+      "tokenState": "expired",
+      "expectedError": "TaskTimedOut"
+    },
+    {
+      "id": "callback-retried",
+      "kind": "callbackError",
+      "source": "success",
+      "tokenState": "revoked",
+      "expectedError": "TaskTimedOut"
+    },
+    {
+      "id": "callback-unknown",
+      "kind": "callbackError",
+      "source": "success",
+      "tokenState": "unknown",
+      "expectedError": "InvalidToken"
+    },
+    {
+      "id": "timestamp-fractional",
+      "kind": "wireTimestamp",
+      "source": "smithy",
+      "epochSeconds": 0.125,
+      "expectedWireType": "number"
+    },
+    {
+      "id": "timestamp-negative",
+      "kind": "wireTimestamp",
+      "source": "smithy",
+      "epochSeconds": -0.125,
+      "expectedWireType": "number"
+    },
+    {
+      "id": "nested-dates-milliseconds",
+      "kind": "nestedTimestamp",
+      "source": "nestedDates",
+      "epochSeconds": 1.125,
+      "expectedStartDate": 1125,
+      "evidenceLimitation": "Historic direct AWS result; current live AWS differential not performed."
+    },
+    {
+      "id": "nested-null-input-default",
+      "kind": "nestedInput",
+      "source": "nestedSnapshots",
+      "input": null,
+      "expectedApiInput": "{}"
+    },
+    {
+      "id": "nested-string-input-preserved",
+      "kind": "nestedInput",
+      "source": "start",
+      "input": "{ \"value\": 7 }",
+      "expectedApiInput": "{ \"value\": 7 }"
+    },
+    {
+      "id": "nested-object-input",
+      "kind": "nestedInput",
+      "source": "nestedSnapshots",
+      "input": {
+        "value": 7
+      },
+      "expectedApiInput": "{\"value\":7}"
+    }
+  ]
+}

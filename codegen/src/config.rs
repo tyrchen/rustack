@@ -126,6 +126,9 @@ pub struct OutputSection {
     /// Whether to always serialize arrays (even when empty).
     #[serde(default)]
     pub always_serialize_arrays: bool,
+    /// Opt-in strict public model generation without blanket lint suppressions.
+    #[serde(default)]
+    pub strict_model: bool,
 }
 
 /// Overlay settings for preserving manual code.
@@ -164,6 +167,10 @@ pub struct ServiceConfig {
     pub namespace: String,
     /// Protocol variant.
     pub protocol: Protocol,
+    /// JSON target prefix copied from protocol configuration.
+    pub target_prefix: Option<String>,
+    /// Whether AWS Query-compatible errors are configured.
+    pub aws_query_compatible: bool,
     /// Serde rename strategy (None means no rename).
     pub serde_rename: Option<String>,
     /// Whether to emit HTTP binding comments.
@@ -174,8 +181,6 @@ pub struct ServiceConfig {
     pub emit_request_wrapper: bool,
     /// Ordered list of all operations to generate.
     pub all_operations: Vec<String>,
-    /// Map from operation name to phase number.
-    pub operation_phases: BTreeMap<String, usize>,
     /// Operation categories for file organization (if categorized layout).
     pub categories: Option<BTreeMap<String, Vec<String>>>,
     /// File layout strategy.
@@ -188,6 +193,8 @@ pub struct ServiceConfig {
     pub overlay_extra_modules: Vec<String>,
     /// Whether to always serialize arrays.
     pub always_serialize_arrays: bool,
+    /// Opt-in strict public model generation.
+    pub strict_model: bool,
 }
 
 /// Supported protocol variants.
@@ -217,6 +224,9 @@ impl ServiceConfig {
             other => bail!("Unknown protocol: {other}"),
         };
 
+        if config.protocol.error_type_format.is_some() || config.output.dir.is_some() {
+            bail!("custom error formats and output.dir are unsupported; use --output");
+        }
         let serde_rename = match config.protocol.serde_rename.as_str() {
             "none" | "" => None,
             s => Some(s.to_owned()),
@@ -225,22 +235,20 @@ impl ServiceConfig {
         // Build all_operations list.
         // Priority: explicit `all` list > phases > categories
         let mut all_operations = Vec::new();
-        let mut operation_phases = BTreeMap::new();
 
         if !config.operations.all.is_empty() {
             // Use the explicit ordered list
             all_operations = config.operations.all.clone();
         } else {
             // Build from phases
-            for (phase_num, phase_ops) in [
-                (0, &config.operations.phase0),
-                (1, &config.operations.phase1),
-                (2, &config.operations.phase2),
-                (3, &config.operations.phase3),
+            for phase_ops in [
+                &config.operations.phase0,
+                &config.operations.phase1,
+                &config.operations.phase2,
+                &config.operations.phase3,
             ] {
                 for op in phase_ops {
                     all_operations.push(op.clone());
-                    operation_phases.insert(op.clone(), phase_num);
                 }
             }
 
@@ -269,18 +277,20 @@ impl ServiceConfig {
             rust_prefix: config.service.rust_prefix,
             namespace: config.service.namespace,
             protocol,
+            target_prefix: config.protocol.target_prefix,
+            aws_query_compatible: config.protocol.aws_query_compatible,
             serde_rename,
             emit_http_bindings: config.protocol.emit_http_bindings,
             emit_serde_derives: config.protocol.emit_serde_derives,
             emit_request_wrapper: config.protocol.emit_request_wrapper,
             all_operations,
-            operation_phases,
             categories,
             file_layout: config.output.file_layout,
             custom_errors: config.errors.custom,
             overlay_preserve: config.overlay.preserve,
             overlay_extra_modules: config.overlay.extra_modules,
             always_serialize_arrays: config.output.always_serialize_arrays,
+            strict_model: config.output.strict_model,
         })
     }
 

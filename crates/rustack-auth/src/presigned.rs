@@ -116,9 +116,9 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 
     // Parse credential: AKID/date/region/service/aws4_request
     let cred_parts: Vec<&str> = credential.splitn(5, '/').collect();
-    if cred_parts.len() != 5 || cred_parts[4] != "aws4_request" {
+    let [access_key_id, date, region, service, "aws4_request"] = cred_parts.as_slice() else {
         return Err(AuthError::InvalidCredential);
-    }
+    };
 
     let expires: u64 = expires_str
         .parse()
@@ -131,10 +131,10 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 
     Ok(ParsedPresignedParams {
         algorithm,
-        access_key_id: cred_parts[0].to_owned(),
-        date: cred_parts[1].to_owned(),
-        region: cred_parts[2].to_owned(),
-        service: cred_parts[3].to_owned(),
+        access_key_id: (*access_key_id).to_owned(),
+        date: (*date).to_owned(),
+        region: (*region).to_owned(),
+        service: (*service).to_owned(),
         timestamp,
         expires,
         signed_headers,
@@ -145,7 +145,7 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 /// Verify a presigned URL request.
 ///
 /// This is the S3 presigned entry point: S3 percent-decodes every query
-/// parameter before acting on it, so the SigV4-normalized fallback's
+/// parameter before acting on it, so the `SigV4`-normalized fallback's
 /// encoding-equivalence assertion holds here. Other endpoints must not use
 /// this function unless their query decoding has been audited the same way.
 ///
@@ -168,6 +168,7 @@ pub fn parse_presigned_params(query: &str) -> Result<ParsedPresignedParams, Auth
 /// - The access key is not found
 /// - Required signed headers are missing
 /// - The signature does not match
+/// - The MAC provider rejects initialization
 pub fn verify_presigned(
     parts: &http::request::Parts,
     credential_provider: &dyn CredentialProvider,
@@ -211,22 +212,22 @@ pub fn verify_presigned(
         parsed.date, parsed.region, parsed.service
     );
     let signing_key =
-        derive_signing_key(&secret_key, &parsed.date, &parsed.region, &parsed.service);
+        derive_signing_key(&secret_key, &parsed.date, &parsed.region, &parsed.service)?;
     let provided_bytes = parsed.signature.as_bytes();
 
     // Check the provided signature against the canonical request built from
     // `canonical_query`. Returns true on a constant-time match.
     // For presigned URLs, the payload hash is always UNSIGNED-PAYLOAD.
     #[rustfmt::skip]
-    let signature_matches = |canonical_query: &str| -> bool {
+    let signature_matches = |canonical_query: &str| -> Result<bool, AuthError> {
         let canonical_request = format!(
             "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n\n{signed_headers_str}\n{UNSIGNED_PAYLOAD}"
         );
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign =
             build_string_to_sign(&parsed.timestamp, &credential_scope, &canonical_hash);
-        let expected_signature = compute_signature(&signing_key, &string_to_sign);
-        bool::from(provided_bytes.ct_eq(expected_signature.as_bytes()))
+        let expected_signature = compute_signature(&signing_key, &string_to_sign)?;
+        Ok(bool::from(provided_bytes.ct_eq(expected_signature.as_bytes())))
     };
 
     debug!("Built presigned canonical request");
@@ -235,7 +236,7 @@ pub fn verify_presigned(
     // `X-Amz-Signature`). This matches clients that sign whatever encoding
     // appears in the URL.
     let canonical_query = build_canonical_query_string_without_signature(query);
-    if signature_matches(&canonical_query) {
+    if signature_matches(&canonical_query)? {
         debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded");
         return Ok(AuthResult {
             access_key_id: parsed.access_key_id,
@@ -262,9 +263,10 @@ pub fn verify_presigned(
     // is impossible; the raw attempt above already failed, so fall through to
     // the signature mismatch below.
     let normalized_matches = !query.contains('+')
-        && build_canonical_query_string_without_signature_normalized(query).is_ok_and(
-            |normalized| normalized != canonical_query && signature_matches(&normalized),
-        );
+        && match build_canonical_query_string_without_signature_normalized(query) {
+            Ok(normalized) if normalized != canonical_query => signature_matches(&normalized)?,
+            _ => false,
+        };
     if normalized_matches {
         debug!(access_key_id = %parsed.access_key_id, "Presigned URL verification succeeded (normalized query string)");
         return Ok(AuthResult {
@@ -287,9 +289,9 @@ fn build_canonical_query_string_without_signature(query: &str) -> String {
     build_canonical_query_string(&filter_signature_param(query))
 }
 
-/// Build the SigV4-normalized canonical query string excluding `X-Amz-Signature`.
+/// Build the `SigV4`-normalized canonical query string excluding `X-Amz-Signature`.
 ///
-/// The remaining parameters are percent-decoded, re-encoded per the SigV4 spec,
+/// The remaining parameters are percent-decoded, re-encoded per the `SigV4` spec,
 /// and sorted. See [`build_canonical_query_string_normalized`].
 ///
 /// # Errors
@@ -484,8 +486,8 @@ mod tests {
         let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
 
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
-        let signature = compute_signature(&signing_key, &string_to_sign);
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3").unwrap();
+        let signature = compute_signature(&signing_key, &string_to_sign).unwrap();
 
         // Attacker's rewrite: the same values attached to the opposite raw
         // names. The normalized canonical query (and signature) is unchanged.
@@ -571,9 +573,10 @@ mod tests {
             &hex::encode(Sha256::digest(canonical.as_bytes())),
         );
         let signature = compute_signature(
-            &derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3"),
+            &derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3").unwrap(),
             &to_sign,
-        );
+        )
+        .unwrap();
         for wire_names in [
             "list-type=1&list-type=2",
             "%6cist-type=1&list-type=2",
@@ -641,7 +644,8 @@ mod tests {
 
         // Verify the signature computation is correct by manually
         // replicating the presigned URL flow.
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3");
+        let signing_key =
+            derive_signing_key(TEST_SECRET_KEY, "20130524", "us-east-1", "s3").unwrap();
 
         // Build canonical request for the presigned URL test vector.
         let canonical_request = "GET\n/test.txt\nX-Amz-Algorithm=AWS4-HMAC-SHA256&\
@@ -662,7 +666,7 @@ mod tests {
             &canonical_hash,
         );
 
-        let signature = compute_signature(&signing_key, &string_to_sign);
+        let signature = compute_signature(&signing_key, &string_to_sign).unwrap();
         assert_eq!(
             signature,
             "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
@@ -698,8 +702,8 @@ mod tests {
         let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
 
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
-        let signature = compute_signature(&signing_key, &string_to_sign);
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3").unwrap();
+        let signature = compute_signature(&signing_key, &string_to_sign).unwrap();
 
         // Build the full query with signature.
         let full_query = format!("{query_without_sig}&X-Amz-Signature={signature}");
@@ -755,8 +759,8 @@ mod tests {
         let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
 
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
-        let signature = compute_signature(&signing_key, &string_to_sign);
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3").unwrap();
+        let signature = compute_signature(&signing_key, &string_to_sign).unwrap();
 
         let full_query = format!("{query_without_sig}&X-Amz-Signature={signature}");
         let uri = format!("http://examplebucket.s3.amazonaws.com/test.txt?{full_query}");
@@ -805,8 +809,8 @@ mod tests {
         let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
 
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
-        let signature = compute_signature(&signing_key, &string_to_sign);
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3").unwrap();
+        let signature = compute_signature(&signing_key, &string_to_sign).unwrap();
 
         // Tamper: `%2B` becomes a raw `+` on the wire.
         let tampered_query = query_without_sig.replace("x=%2B", "x=+");
@@ -859,8 +863,8 @@ mod tests {
         let credential_scope = format!("{date}/us-east-1/s3/aws4_request");
         let string_to_sign = build_string_to_sign(&timestamp, &credential_scope, &canonical_hash);
 
-        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3");
-        let signature = compute_signature(&signing_key, &string_to_sign);
+        let signing_key = derive_signing_key(TEST_SECRET_KEY, &date, "us-east-1", "s3").unwrap();
+        let signature = compute_signature(&signing_key, &string_to_sign).unwrap();
 
         // Tamper: `%20` becomes a raw `+` on the wire.
         let tampered_query = query_without_sig.replace("x=%20", "x=+");

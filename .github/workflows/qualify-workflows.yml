@@ -1,0 +1,54 @@
+name: qualify-workflows
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful same-commit release-docker run containing the exact archives
+        required: true
+        type: string
+      evidence_run_id:
+        description: Successful same-commit run containing the complete workflows-evidence artifact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fence source runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+        run: make workflows-release-input-runs
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          run-id: ${{ inputs.evidence_run_id }}
+          name: workflows-evidence
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qualification
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          run-id: ${{ inputs.candidate_run_id }}
+          pattern: release-candidate-*
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qualification
+      - name: Require complete raw evidence and exact candidates
+        run: make verify-workflows WORKFLOWS_RELEASE_BUNDLE="${{ runner.temp }}/qualification" WORKFLOWS_RELEASE_REPORT="${{ runner.temp }}/qualification/release-report.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workflows-qualified-release
+          path: ${{ runner.temp }}/qualification/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

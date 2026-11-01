@@ -1,11 +1,21 @@
-//! Error types for SigV4 authentication.
+//! Error types for `SigV4` authentication.
 //!
 //! All authentication failures are represented by [`AuthError`], which provides
 //! specific variants for each failure mode encountered during signature verification.
 
+use digest::InvalidLength;
+
 /// Errors that can occur during AWS Signature Version 4 authentication.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    /// The cryptographic provider rejected MAC initialization.
+    #[error("Cryptographic initialization failed")]
+    CryptoInitialization {
+        /// Original provider error, without key or request contents.
+        #[source]
+        source: InvalidLength,
+    },
+
     /// Strict authentication requires a credential provider.
     #[error("Strict authentication requires a credential provider")]
     MissingCredentialProvider,

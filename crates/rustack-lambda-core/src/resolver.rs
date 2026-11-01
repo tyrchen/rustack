@@ -38,6 +38,10 @@ pub fn resolve_function_ref(
 pub struct FunctionName(String);
 impl FunctionName {
     /// Validate an AWS function name.
+    ///
+    /// # Errors
+    /// Rejects empty names, names above64 bytes or characters outside ASCII letters/digits, hyphen
+    /// and underscore.
     pub fn parse(value: &str) -> Result<Self, LambdaServiceError> {
         if value.is_empty()
             || value.len() > 64
@@ -83,6 +87,9 @@ impl FunctionArn {
 pub struct Qualifier(String);
 impl Qualifier {
     /// Validate a version or alias.
+    ///
+    /// # Errors
+    /// Rejects invalid/oversized aliases and zero or overflowing numeric versions.
     pub fn parse(value: &str) -> Result<Self, LambdaServiceError> {
         if value != "$LATEST"
             && (value.is_empty()
@@ -268,14 +275,14 @@ pub fn layer_version_arn(region: &str, account_id: &str, layer_name: &str, versi
 pub fn parse_layer_version_arn(arn: &str) -> Result<(String, u64), LambdaServiceError> {
     let parts: Vec<&str> = arn.split(':').collect();
     // Expected: arn:aws:lambda:region:account:layer:name:version = 8 parts
-    if parts.len() < 8 || parts[0] != "arn" || parts[2] != "lambda" || parts[5] != "layer" {
+    let ["arn", _, "lambda", _, _, "layer", name, version, ..] = parts.as_slice() else {
         return Err(LambdaServiceError::InvalidArn {
             arn: arn.to_owned(),
         });
-    }
+    };
 
-    let name = parts[6].to_owned();
-    let version: u64 = parts[7]
+    let name = (*name).to_owned();
+    let version: u64 = version
         .parse()
         .map_err(|_| LambdaServiceError::InvalidArn {
             arn: arn.to_owned(),
@@ -304,8 +311,9 @@ mod tests {
             package_type: "Zip".to_owned(),
             code_path: None,
             image_uri: None,
+            image: crate::artifact::ImageArtifact::Unresolved,
             zip_bytes: None,
-            state: "Active".to_owned(),
+            deployment: crate::deployment::DeploymentState::Ready,
             last_modified: "2024-01-01T00:00:00.000+0000".to_owned(),
             architectures: vec!["x86_64".to_owned()],
             ephemeral_storage_size: 512,
@@ -339,6 +347,7 @@ mod tests {
         );
 
         FunctionRecord {
+            resource_id: crate::identity::FunctionResourceId::default(),
             name: "my-func".to_owned(),
             arn: "arn:aws:lambda:us-east-1:000000000000:function:my-func".to_owned(),
             latest: make_version("$LATEST"),

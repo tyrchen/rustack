@@ -1,0 +1,742 @@
+//! Exact owned executable, data directory and post-exit daemon audit.
+
+use std::{
+    env,
+    fs::Permissions,
+    io::SeekFrom,
+    os::unix::{fs::PermissionsExt, process::ExitStatusExt},
+    path::{Path, PathBuf},
+    process::{ExitStatus, Stdio},
+    time::Duration,
+};
+
+use anyhow::{Context, Result, ensure};
+use nix::{
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
+use rustack_lambda_core::{
+    artifact::ImageReference,
+    docker::{DirectoryLease, DockerWire, reconcile_namespace},
+};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tempfile::{Builder as TempDirBuilder, TempDir};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    process::{Child, Command},
+    time::{Instant, sleep, timeout},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Profile {
+    Disconnected,
+    Connected,
+    Performance,
+    Sdk,
+    SdkWrongCredentials,
+    Callback,
+    Iac,
+    Controlled,
+    Deadline,
+    Pull,
+    Negative,
+    MemoryPressure,
+    EnvironmentPressure,
+    MissingRelay,
+    Legacy,
+    WrongEndpoint,
+    Archive,
+    Zip,
+    ZipControlled,
+    ZipArchive,
+    ZipArchiveNoSource,
+}
+impl Profile {
+    fn configure_diagnostics(self, command: &mut Command) {
+        if self == Self::Performance {
+            command
+                .env(
+                    "LOG_LEVEL",
+                    "error,rustack_lambda_core::docker::initialization=info",
+                )
+                .env("NO_COLOR", "1")
+                .env("LAMBDA_IDLE_TIMEOUT_SECS", "2");
+        } else {
+            command.env("LOG_LEVEL", "error");
+        }
+    }
+    fn sdk(self) -> bool {
+        matches!(
+            self,
+            Self::Sdk | Self::SdkWrongCredentials | Self::Callback | Self::Iac
+        )
+    }
+    fn services(self) -> &'static str {
+        if self.sdk() {
+            "lambda,stepfunctions,s3,dynamodb"
+        } else {
+            "lambda,stepfunctions"
+        }
+    }
+    pub fn rejects(self) -> bool {
+        matches!(
+            self,
+            Self::MissingRelay | Self::Legacy | Self::WrongEndpoint
+        )
+    }
+    pub(super) fn matches_failure(self, text: &str) -> bool {
+        let expected = match self {
+            Self::MissingRelay => {
+                "Docker startup relay preparation failed: Docker response status 404 Not Found"
+            }
+            Self::Legacy => "Docker ownership predates journal provenance",
+            Self::WrongEndpoint => "Docker startup endpoint qualification failed",
+            Self::Archive => "Restored image storage proof mismatch",
+            Self::ZipArchive => "Invalid or oversized Docker ZIP archive candidate",
+            Self::ZipArchiveNoSource => "snapshot CBOR scalar limit exceeded",
+            _ => return false,
+        };
+        text.contains(expected)
+    }
+    fn init_seconds(self) -> &'static str {
+        if matches!(
+            self,
+            Self::Sdk
+                | Self::Performance
+                | Self::SdkWrongCredentials
+                | Self::Callback
+                | Self::Iac
+                | Self::ZipControlled
+                | Self::Controlled
+                | Self::Deadline
+                | Self::Pull
+                | Self::MemoryPressure
+                | Self::EnvironmentPressure
+        ) {
+            "20"
+        } else {
+            "5"
+        }
+    }
+    fn zip(self) -> bool {
+        matches!(self, Self::Zip | Self::ZipControlled | Self::ZipArchive)
+    }
+    fn network(self) -> bool {
+        matches!(
+            self,
+            Self::Sdk
+                | Self::Performance
+                | Self::SdkWrongCredentials
+                | Self::Callback
+                | Self::Iac
+                | Self::Zip
+                | Self::ZipControlled
+                | Self::ZipArchive
+                | Self::Connected
+                | Self::Controlled
+                | Self::Deadline
+                | Self::Pull
+                | Self::Negative
+                | Self::MemoryPressure
+                | Self::EnvironmentPressure
+                | Self::WrongEndpoint
+        )
+    }
+}
+#[derive(Debug)]
+pub(super) struct Server {
+    child: Child,
+    pub root: Option<TempDir>,
+    pub endpoint: String,
+    profile: Profile,
+    sources: Vec<(ImageReference, String)>,
+    socket_override: Option<PathBuf>,
+    log_start: u64,
+}
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(60)
+}
+fn private_root() -> Result<TempDir> {
+    TempDirBuilder::new()
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir()
+        .context("create private Docker fixture evidence")
+}
+pub(super) fn image() -> Result<String> {
+    Ok(env::var("RUSTACK_RUNTIME_IMAGE")?)
+}
+pub(super) fn architecture() -> Result<String> {
+    let value = env::var("RUSTACK_RUNTIME_ARCH")?;
+    ensure!(
+        matches!(value.as_str(), "arm64" | "amd64"),
+        "explicit runtime architecture"
+    );
+    Ok(value)
+}
+pub(super) fn handler() -> Result<String> {
+    match env::var("RUSTACK_RUNTIME_HANDLER_IMAGE") {
+        Ok(value) => Ok(value),
+        Err(env::VarError::NotPresent) => Ok(format!("rustack-p0-handler:{}", architecture()?)),
+        Err(error) => Err(error.into()),
+    }
+}
+pub(super) fn socket() -> Result<String> {
+    Ok(format!(
+        "unix://{}",
+        env::var("RUSTACK_RUNTIME_DOCKER_SOCKET")?
+    ))
+}
+impl Server {
+    pub(super) fn process_id(&self) -> Result<u32> {
+        self.child.id().context("owned server PID")
+    }
+    pub async fn spawn(profile: Profile) -> Result<Self> {
+        Self::spawn_with_socket(profile, None).await
+    }
+    pub async fn spawn_with_socket(
+        profile: Profile,
+        socket_override: Option<&Path>,
+    ) -> Result<Self> {
+        let root = private_root()?;
+        let reserved = TcpListener::bind("0.0.0.0:0").await?;
+        let port = reserved.local_addr()?.port();
+        drop(reserved);
+        let config = root.path().join("config.yaml");
+        let mut text = "budgets:\n  startupSeconds: 180\n  shutdownSeconds: 60\n  \
+                        lambdaDockerIoSeconds: 60\n  lambdaDockerStartSeconds: 60\n  \
+                        lambdaDockerCleanupSeconds: 60\n  lambdaDockerEnvironments: 2\n  \
+                        lambdaDockerImagePins: 16\n  lambdaDockerDeploymentJobs: 2\n"
+            .to_owned();
+        if profile == Profile::Deadline {
+            text = text.replace("lambdaDockerIoSeconds: 60", "lambdaDockerIoSeconds: 5");
+        }
+        if matches!(
+            profile,
+            Profile::ZipControlled
+                | Profile::Controlled
+                | Profile::Deadline
+                | Profile::Pull
+                | Profile::Negative
+                | Profile::EnvironmentPressure
+        ) {
+            text.push_str("  lambdaDockerMemoryBytes: 402653184\n");
+        }
+        if profile == Profile::MemoryPressure {
+            text.push_str("  lambdaDockerMemoryBytes: 268435456\n");
+        }
+        if matches!(
+            profile,
+            Profile::EnvironmentPressure
+                | Profile::Sdk
+                | Profile::SdkWrongCredentials
+                | Profile::Performance
+        ) {
+            text = text.replace("lambdaDockerEnvironments: 2", "lambdaDockerEnvironments: 1");
+        }
+        if profile == Profile::Callback {
+            text.push_str(
+                "  lambdaDockerMemoryBytes: 805306368\n  workflowDispatches: 1\n  \
+                 workflowCallbackTokens: 2\n  workflowCallbackTombstones: 64\n  \
+                 workflowCallbackCommands: 8\n  workflowCallbackWorkers: 1\n",
+            );
+        }
+        if profile == Profile::Iac {
+            text.push_str("  lambdaDockerMemoryBytes: 1610612736\n  workflowDispatches: 2\n");
+        }
+        fs::write(&config, text).await?;
+        if profile == Profile::Pull {
+            let auth = root.path().join("registry.yaml");
+            fs::write(&auth, b"{}\n").await?;
+            fs::set_permissions(&auth, Permissions::from_mode(0o600)).await?;
+        }
+        if profile == Profile::Legacy {
+            let lease = DirectoryLease::acquire(root.path().join("data"), deadline()).await?;
+            drop(lease);
+            let file = root.path().join("data/.rustack-lambda-docker/owner.v1");
+            let mut bytes = fs::read(&file).await?;
+            bytes
+                .get_mut(..8)
+                .context("owner magic")?
+                .copy_from_slice(b"RSDKOWN1");
+            let digest = Sha256::digest(bytes.get(..24).context("owner payload")?);
+            bytes
+                .get_mut(24..)
+                .context("owner checksum")?
+                .copy_from_slice(&digest);
+            fs::write(&file, &bytes).await?;
+            fs::write(root.path().join("legacy.expected"), bytes).await?;
+        }
+        let sources = fixture_sources().await?;
+        fs::copy(env!("CARGO_BIN_EXE_rustack"), root.path().join("rustack")).await?;
+        let child = launch(root.path(), profile, port, socket_override).await?;
+        Ok(Self {
+            child,
+            root: Some(root),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            profile,
+            sources,
+            socket_override: socket_override.map(Path::to_path_buf),
+            log_start: 0,
+        })
+    }
+    pub async fn track_image(&mut self, source: &str) -> Result<String> {
+        let reference: ImageReference = source.parse()?;
+        let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+        let result = wire.port().inspect_image(&reference, deadline()).await;
+        let stopped = wire.shutdown().await;
+        stopped?;
+        let id = result?.id.context("fixture source identity")?;
+        ensure!(
+            id.len() == 71
+                && id.starts_with("sha256:")
+                && id
+                    .get(7..)
+                    .is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit())),
+            "invalid source content identity"
+        );
+        self.sources.push((reference, id.clone()));
+        Ok(id)
+    }
+    pub async fn track_platform_image(
+        &mut self,
+        source: &str,
+        os: &str,
+        architecture: &str,
+    ) -> Result<String> {
+        let id = self.track_image(source).await?;
+        let reference: ImageReference = id.parse()?;
+        let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+        let observed = wire.port().inspect_image(&reference, deadline()).await;
+        let stopped = wire.shutdown().await;
+        stopped?;
+        let observed = observed?;
+        ensure!(
+            observed.id.as_ref() == Some(&id)
+                && observed.os.as_deref() == Some(os)
+                && observed.architecture.as_deref() == Some(architecture)
+                && observed.size.is_some_and(|size| size > 0),
+            "negative fixture platform/identity precondition differs"
+        );
+        Ok(id)
+    }
+    pub async fn observation_identity(&self) -> Result<(String, String)> {
+        let base = self.path()?.join("data/.rustack-lambda-docker");
+        let magic = if self.profile.zip() {
+            b"RSDKOWN3"
+        } else {
+            b"RSDKOWN2"
+        };
+        let owner = observation_record(base.join("owner.v1"), 56, magic).await?;
+        let id = uuid::Uuid::from_slice(owner.get(8..24).context("owner UUID")?)?;
+        ensure!(!id.is_nil(), "nil owner identity");
+        let daemon = observation_record(base.join("daemon.v1"), 72, b"RSDKDMD1").await?;
+        ensure!(
+            daemon.get(8..24) == Some(id.as_bytes().as_slice()),
+            "daemon record owner differs"
+        );
+        let engine = uuid::Uuid::from_slice(daemon.get(24..40).context("daemon UUID")?)?;
+        ensure!(!engine.is_nil(), "nil daemon identity");
+        Ok((id.to_string(), engine.to_string()))
+    }
+    pub fn path(&self) -> Result<&Path> {
+        Ok(self.root.as_ref().context("owned evidence root")?.path())
+    }
+    pub async fn ready(&mut self) -> Result<Value> {
+        let at = Instant::now() + Duration::from_secs(180);
+        loop {
+            ensure!(
+                self.child.try_wait()?.is_none(),
+                "ordinary binary exited before readiness"
+            );
+            if let Ok((status, value)) = get(&self.endpoint, "/_rustack/capabilities").await {
+                if value["ready"] == true {
+                    ensure!(
+                        status == 200 && value["workers"]["docker"]["ready"] == true,
+                        "false backend readiness"
+                    );
+                    ensure!(
+                        value["workers"]["docker"]["platform"]
+                            == format!("linux/{}", architecture()?),
+                        "wrong qualified platform"
+                    );
+                    ensure!(
+                        value["workers"]["docker"]["sdkGateway"] == self.profile.network(),
+                        "wrong endpoint capability"
+                    );
+                    ensure!(
+                        value["workers"]["docker"]["zip"] == self.profile.zip(),
+                        "false ZIP capability"
+                    );
+                    return Ok(value);
+                }
+            }
+            ensure!(Instant::now() < at, "ordinary startup observer expired");
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+    pub async fn failure(&mut self) -> Result<()> {
+        self.failure_with(None).await
+    }
+    pub async fn failure_with(&mut self, expected: Option<&str>) -> Result<()> {
+        let at = Instant::now() + Duration::from_secs(180);
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                ensure!(!status.success(), "negative startup exited successfully");
+                let mut file = fs::File::open(self.path()?.join("server.log")).await?;
+                file.seek(SeekFrom::Start(self.log_start)).await?;
+                let mut bytes = Vec::new();
+                file.take(32769).read_to_end(&mut bytes).await?;
+                ensure!(bytes.len() <= 32768, "negative startup log cap");
+                let text = std::str::from_utf8(&bytes)?;
+                ensure!(
+                    expected.map_or_else(
+                        || self.profile.matches_failure(text),
+                        |expected| text.contains(expected)
+                    ),
+                    "startup failed at an unrelated prerequisite: {text}"
+                );
+                return Ok(());
+            }
+            if let Ok((_, value)) = get(&self.endpoint, "/_rustack/capabilities").await {
+                ensure!(
+                    value["ready"] != true,
+                    "negative startup opened ordinary ingress"
+                );
+            }
+            ensure!(Instant::now() < at, "negative startup observer expired");
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+    pub async fn stop(&mut self, success: bool) -> Result<()> {
+        let status = self.stop_status().await?;
+        ensure!(
+            status.success() == success,
+            "unexpected ordinary server exit status"
+        );
+        Ok(())
+    }
+    pub async fn reap(&mut self) -> Result<()> {
+        self.stop_status().await?;
+        Ok(())
+    }
+    pub async fn stop_after_transport_loss(&mut self) -> Result<()> {
+        let status = self.stop_status().await?;
+        if !status.success() {
+            let file = fs::File::open(self.path()?.join("server.log")).await?;
+            let mut raw = Vec::new();
+            file.take(32769).read_to_end(&mut raw).await?;
+            ensure!(raw.len() <= 32768, "transport-loss diagnostic cap");
+            let text = String::from_utf8_lossy(&raw);
+            ensure!(
+                text.contains("Error: Docker not available")
+                    || text.contains("Lambda quiesce did not confirm all invocation cleanup"),
+                "unrelated shutdown error after transport loss"
+            );
+        }
+        Ok(())
+    }
+    async fn stop_status(&mut self) -> Result<ExitStatus> {
+        if self.child.try_wait()?.is_none() {
+            let id = self.child.id().context("owned server PID")?;
+            kill(Pid::from_raw(id.try_into()?), Signal::SIGTERM)?;
+        }
+        let result = timeout(Duration::from_secs(70), self.child.wait()).await;
+        let status = if let Ok(result) = result {
+            result?
+        } else {
+            self.child.start_kill()?;
+            timeout(Duration::from_secs(5), self.child.wait()).await??;
+            anyhow::bail!("forced server reap; graceful cleanup unproven");
+        };
+        Ok(status)
+    }
+    pub async fn crash(&mut self) -> Result<()> {
+        ensure!(
+            self.child.try_wait()?.is_none(),
+            "crash target already exited"
+        );
+        self.child.start_kill()?;
+        let status = timeout(Duration::from_secs(10), self.child.wait()).await??;
+        ensure!(
+            status.signal() == Some(Signal::SIGKILL as i32),
+            "crash did not join SIGKILL"
+        );
+        Ok(())
+    }
+    pub async fn restart(&mut self) -> Result<()> {
+        let port = self
+            .endpoint
+            .rsplit(':')
+            .next()
+            .context("owned endpoint port")?
+            .parse()?;
+        self.log_start = fs::metadata(self.path()?.join("server.log")).await?.len();
+        self.child = launch(
+            self.path()?,
+            self.profile,
+            port,
+            self.socket_override.as_deref(),
+        )
+        .await?;
+        Ok(())
+    }
+    pub async fn audit(&self) -> Result<()> {
+        ensure!(self.child.id().is_none(), "audit before child reap");
+        let path = self.path()?;
+        let lease = if self.profile.zip() {
+            DirectoryLease::acquire_code(path.join("data"), deadline()).await?
+        } else {
+            DirectoryLease::acquire(path.join("data"), deadline()).await?
+        };
+        let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+        let result = async {
+            if self.profile == Profile::Legacy {
+                ensure!(
+                    fs::read(path.join("data/.rustack-lambda-docker/owner.v1")).await?
+                        == fs::read(path.join("legacy.expected")).await?,
+                    "legacy identity was rewritten"
+                );
+                ensure!(
+                    !fs::try_exists(path.join("data/.rustack-lambda-docker/daemon.v1")).await?,
+                    "legacy startup reached daemon binding"
+                );
+            } else {
+                ensure!(
+                    fs::try_exists(path.join("data/.rustack-lambda-docker/daemon.v1")).await?,
+                    "fixture never reached production daemon binding"
+                );
+                let port = wire.port().bind_directory(&lease, deadline()).await?;
+                let recovery = reconcile_namespace(&lease, &port, deadline()).await?;
+                ensure!(
+                    recovery.containers.settled == 0
+                        && recovery.containers.remaining == 0
+                        && recovery.pins.settled == 0
+                        && recovery.pins.remaining == 0
+                        && recovery.code.settled == 0
+                        && recovery.code.remaining == 0,
+                    "ordinary shutdown required post-exit recovery"
+                );
+            }
+            for (reference, id) in &self.sources {
+                ensure!(
+                    wire.port()
+                        .inspect_image(reference, deadline())
+                        .await?
+                        .id
+                        .as_ref()
+                        == Some(id),
+                    "operator source changed"
+                );
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        let stopped = wire.shutdown().await;
+        result?;
+        stopped?;
+        Ok(())
+    }
+    pub async fn retain_on_error(&mut self) {
+        if let Ok(path) = self.path() {
+            if let Ok(file) = fs::File::open(path.join("server.log")).await {
+                let mut bytes = Vec::new();
+                let _ = file.take(32768).read_to_end(&mut bytes).await;
+                eprintln!(
+                    "ordinary server diagnostics: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+        }
+        if let Some(root) = self.root.take() {
+            eprintln!("retained startup evidence: {}", root.keep().display());
+        }
+    }
+}
+async fn fixture_sources() -> Result<Vec<(ImageReference, String)>> {
+    let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+    let result = async {
+        let mut sources = Vec::new();
+        for reference in [image()?, handler()?] {
+            let reference: ImageReference = reference.parse()?;
+            let id = wire
+                .port()
+                .inspect_image(&reference, deadline())
+                .await?
+                .id
+                .context("source image identity")?;
+            sources.push((reference, id));
+        }
+        Ok::<_, anyhow::Error>(sources)
+    }
+    .await;
+    let stopped = wire.shutdown().await;
+    stopped?;
+    result
+}
+async fn observation_record(path: PathBuf, length: usize, magic: &[u8; 8]) -> Result<Vec<u8>> {
+    ensure!((32..=72).contains(&length), "invalid fixture record cap");
+    let file = fs::File::open(path).await?;
+    let mut raw = Vec::new();
+    file.take(u64::try_from(length)? + 1)
+        .read_to_end(&mut raw)
+        .await?;
+    ensure!(
+        raw.len() == length && raw.get(..8) == Some(magic.as_slice()),
+        "unexpected runtime identity record"
+    );
+    let payload_end = length.checked_sub(32).context("identity checksum offset")?;
+    let payload = raw.get(..payload_end).context("identity payload")?;
+    ensure!(
+        raw.get(payload_end..) == Some(Sha256::digest(payload).as_slice()),
+        "identity record checksum"
+    );
+    Ok(raw)
+}
+fn configure_sdk(command: &mut Command, profile: Profile) {
+    if profile.sdk() {
+        let wrong = profile == Profile::SdkWrongCredentials;
+        command
+            .env("S3_SKIP_SIGNATURE_VALIDATION", "false")
+            .env("DYNAMODB_SKIP_SIGNATURE_VALIDATION", "false")
+            .env("LAMBDA_DOCKER_SDK_ACCESS_KEY_ID", "local-key")
+            .env(
+                "LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY",
+                if wrong {
+                    "sdk-wrong-secret"
+                } else {
+                    "local-secret"
+                },
+            )
+            .env("AWS_ACCESS_KEY_ID", "local-key")
+            .env("AWS_SECRET_ACCESS_KEY", "local-secret");
+    }
+}
+
+async fn launch(
+    root: &Path,
+    profile: Profile,
+    port: u16,
+    socket_override: Option<&Path>,
+) -> Result<Child> {
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("server.log"))
+        .await?
+        .into_std()
+        .await;
+    let mut command = Command::new(root.join("rustack"));
+    command
+        .env_clear()
+        .env("SERVICES", profile.services())
+        .env("GATEWAY_LISTEN", format!("0.0.0.0:{port}"))
+        .env("RUSTACK_CONFIG", root.join("config.yaml"))
+        .env("DATA_DIR", root.join("data"))
+        .env("LAMBDA_EXECUTOR", "docker")
+        .env(
+            "LAMBDA_DOCKER_SOCKET",
+            match socket_override {
+                Some(path) => format!("unix://{}", path.display()),
+                None => socket()?,
+            },
+        )
+        .env(
+            "LAMBDA_DOCKER_RELAY_IMAGE",
+            if profile == Profile::MissingRelay {
+                format!("missing-{}:never", uuid::Uuid::new_v4().simple())
+            } else {
+                image()?
+            },
+        )
+        .env(
+            "LAMBDA_DOCKER_CROSS_ARCHITECTURE",
+            if architecture()? == "amd64" {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .env("LAMBDA_INIT_TIMEOUT_SECS", profile.init_seconds())
+        .env("LAMBDA_SKIP_SIGNATURE_VALIDATION", "false")
+        .env("STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION", "false")
+        .env("ACCESS_KEY", "local-key")
+        .env("SECRET_KEY", "local-secret")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .kill_on_drop(true);
+    configure_sdk(&mut command, profile);
+    profile.configure_diagnostics(&mut command);
+    if profile.zip() {
+        command.env(
+            "LAMBDA_DOCKER_ZIP_IMAGE",
+            env::var("RUSTACK_ZIP_BASE_IMAGE")?,
+        );
+    }
+    if profile == Profile::Pull {
+        command
+            .env("LAMBDA_DOCKER_PULL_POLICY", "ifMissing")
+            .env("LAMBDA_DOCKER_REGISTRIES", "public.ecr.aws:443")
+            .env(
+                "LAMBDA_DOCKER_REGISTRY_AUTH_FILE",
+                fs::canonicalize(root.join("registry.yaml")).await?,
+            );
+    }
+    if profile.network() {
+        command.env(
+            "LAMBDA_DOCKER_NETWORK",
+            env::var("RUSTACK_RUNTIME_NETWORK")?,
+        );
+        let host = env::var("RUSTACK_RUNTIME_GATEWAY_HOST")?.parse::<std::net::IpAddr>()?;
+        let target = if profile == Profile::WrongEndpoint {
+            let closed = TcpListener::bind("0.0.0.0:0").await?;
+            closed.local_addr()?.port()
+        } else {
+            port
+        };
+        command.env(
+            "LAMBDA_DOCKER_GATEWAY_ENDPOINT",
+            format!("http://{}", std::net::SocketAddr::new(host, target)),
+        );
+    } else {
+        command.env("LAMBDA_DOCKER_NETWORK", "none");
+    }
+    if matches!(
+        profile,
+        Profile::Archive | Profile::ZipArchive | Profile::ZipArchiveNoSource | Profile::Callback
+    ) {
+        command
+            .arg("--snapshot")
+            .arg("images")
+            .env("RUSTACK_SNAPSHOT_DIR", root.join("snapshots"));
+    }
+    Ok(command.spawn()?)
+}
+pub(super) async fn get(endpoint: &str, path: &str) -> Result<(u16, Value)> {
+    timeout(Duration::from_secs(2), async {
+        let mut stream =
+            TcpStream::connect(endpoint.strip_prefix("http://").context("local endpoint")?).await?;
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await?;
+        let mut bytes = Vec::new();
+        stream.take(65537).read_to_end(&mut bytes).await?;
+        ensure!(bytes.len() <= 65536, "diagnostic response cap");
+        let text = std::str::from_utf8(&bytes)?;
+        let (head, body) = text.split_once("\r\n\r\n").context("HTTP framing")?;
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .context("HTTP status")?
+            .parse()?;
+        Ok((status, serde_json::from_str(body)?))
+    })
+    .await
+    .context("diagnostic observer expired")?
+}

@@ -1,0 +1,45 @@
+{
+  "architecture": "arm64",
+  "attachEof": [
+    {
+      "runningAfterShutdown": true,
+      "stdinOnce": false
+    },
+    {
+      "runningAfterShutdown": false,
+      "stdinOnce": true
+    }
+  ],
+  "cancelledBusyFunction": true,
+  "closeAck": true,
+  "coldMs": 122,
+  "errorType": "ValueError",
+  "labelReconciliation": true,
+  "noPublishedRuntimePorts": true,
+  "outputs": [
+    {
+      "computed": 42,
+      "counter": 1,
+      "memoryMax": "201326592",
+      "pidsMax": "256",
+      "requestId": "26d86ab5-d555-4030-afd6-bf070ef8cb55",
+      "rootReadOnly": true,
+      "uid": 1000
+    },
+    {
+      "computed": 7,
+      "counter": 2,
+      "memoryMax": "201326592",
+      "pidsMax": "256",
+      "requestId": "731ec28f-ff9b-40cf-8d4a-07e28478b053",
+      "rootReadOnly": true,
+      "uid": 1000
+    }
+  ],
+  "runId": "b51a309e-613c-475d-b647-07e2257f88b1",
+  "qualification": "macOS arm64 host, native aarch64 VZ guest; not Docker Desktop/rootless qualification",
+  "rustVersion": "1.99.1",
+  "dockerServerVersion": "29.5.2",
+  "host": "macOS 27 / Apple M5",
+  "observedAt": "2026-10-25"
+}

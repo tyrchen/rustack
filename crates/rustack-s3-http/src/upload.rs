@@ -583,7 +583,7 @@ mod tests {
         ] {
             let provider =
                 StaticCredentialProvider::new(vec![("key".to_owned(), "secret".to_owned())]);
-            let key = derive_signing_key("secret", "20260101", "us-east-1", "s3");
+            let key = derive_signing_key("secret", "20260101", "us-east-1", "s3").unwrap();
             let canonical = rustack_auth::canonical::build_canonical_request(
                 "PUT",
                 "/bucket/key",
@@ -599,7 +599,8 @@ mod tests {
                     "20260101/us-east-1/s3/aws4_request",
                     &rustack_auth::hash_payload(canonical.as_bytes()),
                 ),
-            );
+            )
+            .unwrap();
             let make_parts = || {
                 let mut request = parts(marker);
                 if marker.ends_with("-TRAILER") {
@@ -633,6 +634,7 @@ mod tests {
                         rustack_auth::hash_payload(data)
                     ),
                 )
+                .unwrap()
             };
             let first = sign(&seed, b"hello");
             let terminal = sign(&first, b"");
@@ -644,7 +646,8 @@ mod tests {
                          aws4_request\n{terminal}\n{}",
                         rustack_auth::hash_payload(b"x-amz-checksum-crc32:NhCmhg==\n")
                     ),
-                );
+                )
+                .unwrap();
                 format!("x-amz-checksum-crc32:NhCmhg==\r\nx-amz-trailer-signature:{signature}\r\n")
             } else {
                 String::new()

@@ -22,6 +22,7 @@ const SERVICE_NAMES: &[&str] = &[
     "SSM",
     "SNS",
     "LAMBDA",
+    "STEPFUNCTIONS",
     "EVENTS",
     "LOGS",
     "KMS",
@@ -56,6 +57,21 @@ const KEYS: &[&str] = &[
     "S3_DOMAIN",
     "S3_MAX_MEMORY_OBJECT_SIZE",
     "LAMBDA_DOCKER_ENABLED",
+    "LAMBDA_DOCKER_SOCKET",
+    "LAMBDA_DOCKER_RELAY_IMAGE",
+    "LAMBDA_DOCKER_NETWORK",
+    "LAMBDA_DOCKER_PULL_POLICY",
+    "LAMBDA_DOCKER_REGISTRIES",
+    "LAMBDA_DOCKER_REGISTRY_AUTH_FILE",
+    "LAMBDA_DOCKER_GATEWAY_ENDPOINT",
+    "LAMBDA_DOCKER_SDK_ACCESS_KEY_ID",
+    "LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY",
+    "LAMBDA_DOCKER_UID",
+    "LAMBDA_DOCKER_GID",
+    "LAMBDA_DOCKER_CPU",
+    "LAMBDA_DOCKER_LOG_RING_BYTES",
+    "LAMBDA_DOCKER_CROSS_ARCHITECTURE",
+    "LAMBDA_DOCKER_ZIP_IMAGE",
     "LAMBDA_EXECUTOR",
     "LAMBDA_MAX_WARM_INSTANCES",
     "LAMBDA_IDLE_TIMEOUT_SECS",
@@ -101,6 +117,85 @@ static SETTINGS: OnceLock<ValidatedSettings> = OnceLock::new();
 #[non_exhaustive]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeBudgets {
+    /// Maximum busy, idle and quarantined Docker environments.
+    pub lambda_docker_environments: usize,
+    /// Aggregate Docker environment and relay memory capacity.
+    pub lambda_docker_memory_bytes: u64,
+    /// Absolute Docker pull queue and progress deadline.
+    pub lambda_docker_pull_seconds: u64,
+    /// Accepted queued and running Docker deployments.
+    pub lambda_docker_deployment_jobs: usize,
+    /// Absolute Docker deployment preparation deadline.
+    pub lambda_docker_deployment_seconds: u64,
+    /// Retained preparing, live and quarantined private image pins.
+    pub lambda_docker_image_pins: usize,
+    /// Independent Docker management and control IO deadline.
+    pub lambda_docker_io_seconds: u64,
+    /// Code archive upload IO budget, independently bounded by cold startup.
+    pub lambda_docker_code_upload_seconds: u64,
+    /// Docker startup and probe observation deadline.
+    pub lambda_docker_start_seconds: u64,
+    /// Independent Docker cleanup observation deadline.
+    pub lambda_docker_cleanup_seconds: u64,
+
+    /// Accepted workflow API requests, including ready replies.
+    pub workflow_api_accepted: usize,
+    /// Retained workflow API preparation/response CPU workers.
+    pub workflow_api_workers: usize,
+    /// Incremental workflow pagination capture bytes.
+    pub workflow_pagination_bytes: usize,
+    /// Live immutable workflow continuation handles.
+    pub workflow_pagination_tokens: usize,
+    /// Current workflow state machines.
+    pub workflow_registry_machines: usize,
+    /// Retained workflow definition and tag versions, independently.
+    pub workflow_registry_versions: usize,
+    /// Retained workflow execution records.
+    pub workflow_registry_records: usize,
+    /// Accepted workflow registry commands.
+    pub workflow_registry_commands: usize,
+    /// Workflow execution name claims retained for ninety days.
+    pub workflow_name_tombstones: usize,
+    /// Terminal workflow record retention in seconds.
+    pub workflow_retention_seconds: u64,
+    /// Live and unsettled workflow executions.
+    pub workflow_open_executions: usize,
+    /// Retained workflow runtime CPU workers.
+    pub workflow_evaluations: usize,
+    /// Concurrent workflow Task dispatches.
+    pub workflow_dispatches: usize,
+    /// Global retained frame slots, including root and ancestor leases.
+    pub workflow_frames: usize,
+    /// Retained frame slots per execution.
+    pub workflow_frames_per_execution: usize,
+    /// Global intermediate indexed result storage bytes.
+    pub workflow_result_bytes: usize,
+    /// Intermediate indexed result storage bytes per execution.
+    pub workflow_result_bytes_per_execution: usize,
+    /// Independent workflow execution duration ceiling.
+    pub workflow_max_duration_seconds: u64,
+    /// Maximum transitions per workflow execution.
+    pub workflow_transitions: u32,
+    /// Retained history bytes per workflow execution.
+    pub workflow_history_bytes: usize,
+    /// Conservative workflow snapshot copy and per-part encoded byte ceiling.
+    pub workflow_snapshot_bytes: usize,
+    /// Global retained workflow history bytes.
+    pub workflow_total_history_bytes: usize,
+    /// Accepted and quarantined workflow Lambda bridge calls.
+    pub workflow_lambda_accepted_calls: usize,
+    /// Initial workflow Lambda cleanup observation budget.
+    pub workflow_lambda_cleanup_seconds: u64,
+    /// Grace interval before cancelling remaining workflows.
+    pub workflow_drain_seconds: u64,
+    /// Live callback token attempts, including provisional completion.
+    pub workflow_callback_tokens: usize,
+    /// Retained active and closed callback classification entries.
+    pub workflow_callback_tombstones: usize,
+    /// Accepted callback commands, including ready acknowledgments.
+    pub workflow_callback_commands: usize,
+    /// Retained callback mint entropy workers.
+    pub workflow_callback_workers: usize,
     /// Maximum live HTTP connections.
     pub connections: usize,
     /// Maximum concurrently active business requests, including response bodies.
@@ -113,6 +208,8 @@ pub struct RuntimeBudgets {
     pub lambda_invoke_seconds: u64,
     /// Total graceful shutdown deadline in seconds.
     pub shutdown_seconds: u64,
+    /// Absolute process startup budget, including Docker qualification and snapshots.
+    pub startup_seconds: u64,
     /// Maximum aggregate control-plane body bytes.
     pub control_body_bytes: u64,
     /// Maximum Lambda ZIP JSON envelope bytes.
@@ -132,12 +229,53 @@ pub struct RuntimeBudgets {
 impl Default for RuntimeBudgets {
     fn default() -> Self {
         Self {
+            lambda_docker_environments: 32,
+            lambda_docker_memory_bytes: 8_589_934_592,
+            lambda_docker_pull_seconds: 300,
+            lambda_docker_deployment_jobs: 8,
+            lambda_docker_deployment_seconds: 300,
+            lambda_docker_image_pins: 1024,
+            lambda_docker_io_seconds: 5,
+            lambda_docker_code_upload_seconds: 60,
+            lambda_docker_start_seconds: 15,
+            lambda_docker_cleanup_seconds: 10,
+
+            workflow_api_accepted: 32,
+            workflow_api_workers: 8,
+            workflow_pagination_bytes: 67_108_864,
+            workflow_pagination_tokens: 10_000,
+            workflow_registry_machines: 256,
+            workflow_registry_versions: 1024,
+            workflow_registry_records: 10_000,
+            workflow_registry_commands: 128,
+            workflow_name_tombstones: 100_000,
+            workflow_retention_seconds: 86_400,
+            workflow_open_executions: 128,
+            workflow_evaluations: 8,
+            workflow_dispatches: 32,
+            workflow_frames: 4096,
+            workflow_frames_per_execution: 512,
+            workflow_result_bytes: 268_435_456,
+            workflow_result_bytes_per_execution: 33_554_432,
+            workflow_max_duration_seconds: 3600,
+            workflow_transitions: 100_000,
+            workflow_history_bytes: 33_554_432,
+            workflow_snapshot_bytes: 536_870_912,
+            workflow_total_history_bytes: 268_435_456,
+            workflow_lambda_accepted_calls: 128,
+            workflow_lambda_cleanup_seconds: 10,
+            workflow_drain_seconds: 5,
+            workflow_callback_tokens: 4096,
+            workflow_callback_tombstones: 100_000,
+            workflow_callback_commands: 1024,
+            workflow_callback_workers: 8,
             connections: 256,
             requests: 128,
             header_seconds: 5,
             request_seconds: 30,
             lambda_invoke_seconds: 930,
             shutdown_seconds: 30,
+            startup_seconds: 600,
             control_body_bytes: 16 * 1024 * 1024,
             lambda_code_body_bytes: 96 * 1024 * 1024,
             upstream_body_bytes: 64 * 1024 * 1024,
@@ -155,6 +293,23 @@ impl RuntimeBudgets {
     /// # Errors
     /// Rejects zero, excessive, or inconsistent resource deadlines and sizes.
     pub fn validate(&self) -> Result<(), SettingsError> {
+        self.validate_docker()?;
+        self.validate_workflow_api()?;
+        self.validate_workflow_execution()?;
+        self.validate_workflow_frames()?;
+        self.validate_workflow_callbacks()?;
+        if self.workflow_api_workers > self.workflow_api_accepted {
+            return Err(invalid(
+                "budgets.workflowApiWorkers",
+                "must not exceed accepted requests",
+            ));
+        }
+        if self.workflow_history_bytes > self.workflow_total_history_bytes {
+            return Err(invalid(
+                "budgets.workflowHistoryBytes",
+                "must not exceed total history bytes",
+            ));
+        }
         for (key, value, max) in [
             ("budgets.connections", self.connections as u64, 65_536),
             ("budgets.requests", self.requests as u64, 65_536),
@@ -166,6 +321,7 @@ impl RuntimeBudgets {
                 3600,
             ),
             ("budgets.shutdownSeconds", self.shutdown_seconds, 3600),
+            ("budgets.startupSeconds", self.startup_seconds, 3600),
             (
                 "budgets.controlBodyBytes",
                 self.control_body_bytes,
@@ -205,6 +361,299 @@ impl RuntimeBudgets {
                 "budgets.bodyIdleSeconds",
                 "idle deadline must not exceed total deadline",
             ));
+        }
+        Ok(())
+    }
+    fn validate_docker(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            (
+                "lambdaDockerEnvironments",
+                self.lambda_docker_environments as u64,
+                1,
+                32,
+            ),
+            (
+                "lambdaDockerMemoryBytes",
+                self.lambda_docker_memory_bytes,
+                268_435_456,
+                1_099_511_627_776,
+            ),
+            (
+                "lambdaDockerPullSeconds",
+                self.lambda_docker_pull_seconds,
+                1,
+                600,
+            ),
+            (
+                "lambdaDockerDeploymentJobs",
+                self.lambda_docker_deployment_jobs as u64,
+                1,
+                32,
+            ),
+            (
+                "lambdaDockerDeploymentSeconds",
+                self.lambda_docker_deployment_seconds,
+                1,
+                3600,
+            ),
+            (
+                "lambdaDockerImagePins",
+                self.lambda_docker_image_pins as u64,
+                1,
+                8192,
+            ),
+            (
+                "lambdaDockerIoSeconds",
+                self.lambda_docker_io_seconds,
+                1,
+                60,
+            ),
+            (
+                "lambdaDockerCodeUploadSeconds",
+                self.lambda_docker_code_upload_seconds,
+                1,
+                600,
+            ),
+            (
+                "lambdaDockerStartSeconds",
+                self.lambda_docker_start_seconds,
+                1,
+                60,
+            ),
+            (
+                "lambdaDockerCleanupSeconds",
+                self.lambda_docker_cleanup_seconds,
+                1,
+                60,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(
+                    &format!("budgets.{key}"),
+                    "outside supported range",
+                ));
+            }
+        }
+        if self.lambda_docker_deployment_jobs > self.lambda_docker_image_pins {
+            return Err(invalid(
+                "budgets.lambdaDockerDeploymentJobs",
+                "must not exceed image pins",
+            ));
+        }
+        Ok(())
+    }
+    fn validate_workflow_api(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            (
+                "budgets.workflowApiAccepted",
+                self.workflow_api_accepted as u64,
+                1,
+                128,
+            ),
+            (
+                "budgets.workflowApiWorkers",
+                self.workflow_api_workers as u64,
+                1,
+                32,
+            ),
+            (
+                "budgets.workflowPaginationBytes",
+                self.workflow_pagination_bytes as u64,
+                8_388_608,
+                1_073_741_824,
+            ),
+            (
+                "budgets.workflowPaginationTokens",
+                self.workflow_pagination_tokens as u64,
+                1,
+                100_000,
+            ),
+            (
+                "budgets.workflowRegistryMachines",
+                self.workflow_registry_machines as u64,
+                1,
+                4096,
+            ),
+            (
+                "budgets.workflowRegistryVersions",
+                self.workflow_registry_versions as u64,
+                1,
+                4096,
+            ),
+            (
+                "budgets.workflowRegistryRecords",
+                self.workflow_registry_records as u64,
+                1,
+                100_000,
+            ),
+            (
+                "budgets.workflowRegistryCommands",
+                self.workflow_registry_commands as u64,
+                1,
+                1024,
+            ),
+            (
+                "budgets.workflowNameTombstones",
+                self.workflow_name_tombstones as u64,
+                1,
+                1_000_000,
+            ),
+            (
+                "budgets.workflowRetentionSeconds",
+                self.workflow_retention_seconds,
+                60,
+                7_776_000,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(key, "outside supported workflow range"));
+            }
+        }
+        Ok(())
+    }
+    fn validate_workflow_frames(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            ("budgets.workflowFrames", self.workflow_frames, 1, 4096),
+            (
+                "budgets.workflowFramesPerExecution",
+                self.workflow_frames_per_execution,
+                1,
+                512,
+            ),
+            (
+                "budgets.workflowResultBytes",
+                self.workflow_result_bytes,
+                4096,
+                1024 * 1024 * 1024,
+            ),
+            (
+                "budgets.workflowResultBytesPerExecution",
+                self.workflow_result_bytes_per_execution,
+                4096,
+                128 * 1024 * 1024,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(key, "outside supported workflow frame range"));
+            }
+        }
+        if self.workflow_frames_per_execution > self.workflow_frames
+            || self.workflow_result_bytes_per_execution > self.workflow_result_bytes
+        {
+            return Err(invalid(
+                "budgets.workflowFrames",
+                "per-execution frame/result limits must not exceed global limits",
+            ));
+        }
+        Ok(())
+    }
+    fn validate_workflow_callbacks(&self) -> Result<(), SettingsError> {
+        for (key, value, maximum) in [
+            (
+                "budgets.workflowCallbackTokens",
+                self.workflow_callback_tokens,
+                65_536,
+            ),
+            (
+                "budgets.workflowCallbackTombstones",
+                self.workflow_callback_tombstones,
+                1_000_000,
+            ),
+            (
+                "budgets.workflowCallbackCommands",
+                self.workflow_callback_commands,
+                100_000,
+            ),
+            (
+                "budgets.workflowCallbackWorkers",
+                self.workflow_callback_workers,
+                128,
+            ),
+        ] {
+            if !(1..=maximum).contains(&value) {
+                return Err(invalid(key, "outside supported callback range"));
+            }
+        }
+        if self.workflow_callback_tombstones < self.workflow_callback_tokens {
+            return Err(invalid(
+                "budgets.workflowCallbackTombstones",
+                "must include live token reservations",
+            ));
+        }
+        Ok(())
+    }
+    fn validate_workflow_execution(&self) -> Result<(), SettingsError> {
+        for (key, value, min, max) in [
+            (
+                "budgets.workflowOpenExecutions",
+                self.workflow_open_executions as u64,
+                1,
+                4096,
+            ),
+            (
+                "budgets.workflowEvaluations",
+                self.workflow_evaluations as u64,
+                1,
+                128,
+            ),
+            (
+                "budgets.workflowDispatches",
+                self.workflow_dispatches as u64,
+                1,
+                1024,
+            ),
+            (
+                "budgets.workflowMaxDurationSeconds",
+                self.workflow_max_duration_seconds,
+                1,
+                31_536_000,
+            ),
+            (
+                "budgets.workflowTransitions",
+                u64::from(self.workflow_transitions),
+                1,
+                1_000_000,
+            ),
+            (
+                "budgets.workflowHistoryBytes",
+                self.workflow_history_bytes as u64,
+                1_048_576,
+                268_435_456,
+            ),
+            (
+                "budgets.workflowSnapshotBytes",
+                self.workflow_snapshot_bytes as u64,
+                1_048_576,
+                1_073_741_824,
+            ),
+            (
+                "budgets.workflowTotalHistoryBytes",
+                self.workflow_total_history_bytes as u64,
+                8_388_608,
+                4_294_967_296,
+            ),
+            (
+                "budgets.workflowLambdaAcceptedCalls",
+                self.workflow_lambda_accepted_calls as u64,
+                1,
+                1024,
+            ),
+            (
+                "budgets.workflowLambdaCleanupSeconds",
+                self.workflow_lambda_cleanup_seconds,
+                1,
+                60,
+            ),
+            (
+                "budgets.workflowDrainSeconds",
+                self.workflow_drain_seconds,
+                0,
+                60,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(key, "outside supported workflow range"));
+            }
         }
         Ok(())
     }
@@ -436,7 +885,12 @@ fn validate_value(key: &str, value: &mut String) -> Result<(), SettingsError> {
     if value.is_empty() && key != "SERVICES" {
         return Err(invalid(key, "must not be empty"));
     }
-    if value.len() > 4096 || value.chars().any(char::is_control) {
+    let maximum = if key == "LAMBDA_DOCKER_REGISTRIES" {
+        8127
+    } else {
+        4096
+    };
+    if value.len() > maximum || value.chars().any(char::is_control) {
         return Err(invalid(
             key,
             "exceeds byte limit or contains control characters",
@@ -448,6 +902,7 @@ fn validate_value(key: &str, value: &mut String) -> Result<(), SettingsError> {
             "PERSISTENCE"
                 | "S3_VIRTUAL_HOSTING"
                 | "LAMBDA_DOCKER_ENABLED"
+                | "LAMBDA_DOCKER_CROSS_ARCHITECTURE"
                 | "CLOUDFRONT_DETERMINISTIC_IDS"
                 | "CLOUDFRONT_FAIL_ON_FUNCTION"
                 | "CLOUDFRONT_FORWARD_USER_METADATA"
@@ -658,6 +1113,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_should_validate_workflow_budgets_and_strict_credentials() -> Result<(), SettingsError> {
+        let config = ValidatedSettings::parse(
+            "environment:\n  STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION: false\nbudgets:\n  \
+             workflowDrainSeconds: 0\n  workflowApiAccepted: 2\n  workflowApiWorkers: 1",
+            &BTreeMap::new(),
+        )?;
+        assert!(
+            config
+                .validate_credentials(&["stepfunctions".to_owned()])
+                .is_err()
+        );
+        assert_eq!(config.budgets().workflow_drain_seconds, 0);
+        for setting in [
+            "workflowApiAccepted: 0",
+            "workflowApiWorkers: 33",
+            "workflowPaginationBytes: 8388607",
+            "workflowPaginationTokens: 100001",
+            "workflowRegistryMachines: 4097",
+            "workflowRegistryVersions: 0",
+            "workflowRegistryRecords: 100001",
+            "workflowRegistryCommands: 1025",
+            "workflowNameTombstones: 0",
+            "workflowRetentionSeconds: 59",
+            "workflowOpenExecutions: 0",
+            "workflowEvaluations: 129",
+            "workflowDispatches: 1025",
+            "workflowFrames: 0",
+            "workflowFrames: 4097",
+            "workflowFramesPerExecution: 513",
+            "workflowResultBytes: 4095",
+            "workflowResultBytes: 1073741825",
+            "workflowResultBytesPerExecution: 134217729",
+            "workflowFrames: 1\n  workflowFramesPerExecution: 2",
+            "workflowResultBytes: 4096\n  workflowResultBytesPerExecution: 4097",
+            "workflowMaxDurationSeconds: 0",
+            "workflowTransitions: 1000001",
+            "workflowHistoryBytes: 1048575",
+            "workflowSnapshotBytes: 1048575",
+            "workflowSnapshotBytes: 1073741825",
+            "workflowTotalHistoryBytes: 4294967297",
+            "workflowLambdaAcceptedCalls: 0",
+            "workflowLambdaCleanupSeconds: 61",
+            "workflowDrainSeconds: 61",
+            "workflowCallbackTokens: 0",
+            "workflowCallbackTokens: 65537",
+            "workflowCallbackTombstones: 1000001",
+            "workflowCallbackTombstones: 1\n  workflowCallbackTokens: 2",
+            "workflowCallbackCommands: 0",
+            "workflowCallbackCommands: 100001",
+            "workflowCallbackWorkers: 0",
+            "workflowCallbackWorkers: 129",
+            "workflowApiAccepted: 1\n  workflowApiWorkers: 2",
+            "workflowHistoryBytes: 33554432\n  workflowTotalHistoryBytes: 8388608",
+        ] {
+            assert!(
+                ValidatedSettings::parse(&format!("budgets:\n  {setting}"), &BTreeMap::new())
+                    .is_err(),
+                "{setting}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_enforce_exact_frame_and_result_configuration_bounds() -> Result<(), SettingsError>
+    {
+        for (frames, local_frames, results, local_results) in [
+            (1, 1, 4096, 4096),
+            (4096, 512, 1024 * 1024 * 1024, 128 * 1024 * 1024),
+        ] {
+            let config = ValidatedSettings::parse(
+                &format!(
+                    "budgets:\n  workflowFrames: {frames}\n  workflowFramesPerExecution: \
+                     {local_frames}\n  workflowResultBytes: {results}\n  \
+                     workflowResultBytesPerExecution: {local_results}\n"
+                ),
+                &BTreeMap::new(),
+            )?;
+            assert_eq!(config.budgets().workflow_frames, frames);
+            assert_eq!(config.budgets().workflow_frames_per_execution, local_frames);
+            assert_eq!(config.budgets().workflow_result_bytes, results);
+            assert_eq!(
+                config.budgets().workflow_result_bytes_per_execution,
+                local_results
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_enforce_exact_callback_configuration_bounds_and_defaults()
+    -> Result<(), SettingsError> {
+        let defaults = RuntimeBudgets::default();
+        assert_eq!(
+            (
+                defaults.workflow_callback_tokens,
+                defaults.workflow_callback_tombstones,
+                defaults.workflow_callback_commands,
+                defaults.workflow_callback_workers
+            ),
+            (4096, 100_000, 1024, 8)
+        );
+        for (tokens, retained, commands, workers, seconds) in [
+            (1, 1, 1, 1, 60),
+            (65_536, 1_000_000, 100_000, 128, 7_776_000),
+        ] {
+            let config = ValidatedSettings::parse(
+                &format!(
+                    "budgets:\n  workflowCallbackTokens: {tokens}\n  workflowCallbackTombstones: \
+                     {retained}\n  workflowCallbackCommands: {commands}\n  \
+                     workflowCallbackWorkers: {workers}\n  workflowRetentionSeconds: {seconds}\n"
+                ),
+                &BTreeMap::new(),
+            )?;
+            let budgets = config.budgets();
+            assert_eq!(
+                (
+                    budgets.workflow_callback_tokens,
+                    budgets.workflow_callback_tombstones,
+                    budgets.workflow_callback_commands,
+                    budgets.workflow_callback_workers,
+                    budgets.workflow_retention_seconds
+                ),
+                (tokens, retained, commands, workers, seconds)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_should_apply_environment_over_yaml_and_derive_ipv6_endpoint()
     -> Result<(), SettingsError> {
         let overrides = BTreeMap::from([("GATEWAY_LISTEN".to_owned(), "[::1]:4567".to_owned())]);
@@ -699,5 +1284,106 @@ mod tests {
         )?;
         assert!(missing.validate_credentials(&["sqs".to_owned()]).is_err());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod docker_tests {
+    use std::collections::BTreeMap;
+
+    use super::{RuntimeBudgets, ValidatedSettings};
+    #[test]
+    fn test_should_accept_docker_yaml_keys_budgets_and_process_precedence() {
+        let yaml = "environment:\n  LAMBDA_DOCKER_RELAY_IMAGE: local:v1\n  LAMBDA_DOCKER_NETWORK: \
+                    none\n  LAMBDA_DOCKER_PULL_POLICY: never\n  LAMBDA_DOCKER_CROSS_ARCHITECTURE: \
+                    yes\nbudgets:\n  lambdaDockerPullSeconds: 1\n  lambdaDockerImagePins: 32\n  \
+                    lambdaDockerDeploymentJobs: 32\n";
+        let settings = ValidatedSettings::parse(
+            yaml,
+            &BTreeMap::from([("LAMBDA_DOCKER_RELAY_IMAGE".into(), "override:v2".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.get("LAMBDA_DOCKER_RELAY_IMAGE"),
+            Some("override:v2")
+        );
+        assert_eq!(
+            settings.get("LAMBDA_DOCKER_CROSS_ARCHITECTURE"),
+            Some("true")
+        );
+        assert_eq!(settings.budgets().lambda_docker_pull_seconds, 1);
+        assert_eq!(RuntimeBudgets::default().lambda_docker_pull_seconds, 300);
+    }
+    #[test]
+    fn test_should_reject_every_docker_budget_outside_its_supported_range() {
+        for (key, min, max) in [
+            ("lambdaDockerEnvironments", 1_u64, 32_u64),
+            ("lambdaDockerMemoryBytes", 268_435_456, 1_099_511_627_776),
+            ("lambdaDockerPullSeconds", 1, 600),
+            ("lambdaDockerDeploymentJobs", 1, 32),
+            ("lambdaDockerDeploymentSeconds", 1, 3600),
+            ("lambdaDockerImagePins", 1, 8192),
+            ("lambdaDockerIoSeconds", 1, 60),
+            ("lambdaDockerCodeUploadSeconds", 1, 600),
+            ("lambdaDockerStartSeconds", 1, 60),
+            ("lambdaDockerCleanupSeconds", 1, 60),
+        ] {
+            for value in [min - 1, max + 1] {
+                let raw = format!("budgets:\n  {key}: {value}\n");
+                assert!(
+                    ValidatedSettings::parse(&raw, &BTreeMap::new()).is_err(),
+                    "{key}"
+                );
+            }
+            for value in [min, max] {
+                let raw = format!("budgets:\n  lambdaDockerDeploymentJobs: 1\n  {key}: {value}\n");
+                // Avoid duplicate keys when the row itself is deployment jobs.
+                let raw = if key == "lambdaDockerDeploymentJobs" {
+                    format!("budgets:\n  {key}: {value}\n")
+                } else {
+                    raw
+                };
+                assert!(
+                    ValidatedSettings::parse(&raw, &BTreeMap::new()).is_ok(),
+                    "{key}"
+                );
+            }
+        }
+        assert!(
+            ValidatedSettings::parse(
+                "budgets:\n  lambdaDockerImagePins: 1\n  lambdaDockerDeploymentJobs: 2",
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use std::collections::BTreeMap;
+
+    use super::{RuntimeBudgets, ValidatedSettings};
+    #[test]
+    fn test_should_bound_one_process_startup_budget_independently_of_shutdown() {
+        assert_eq!(RuntimeBudgets::default().startup_seconds, 600);
+        for seconds in [0, 3601] {
+            assert!(
+                ValidatedSettings::parse(
+                    &format!("budgets:\n  startupSeconds: {seconds}\n"),
+                    &BTreeMap::new()
+                )
+                .is_err()
+            );
+        }
+        for seconds in [1, 3600] {
+            let settings = ValidatedSettings::parse(
+                &format!("budgets:\n  startupSeconds: {seconds}\n  shutdownSeconds: 10\n"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(settings.budgets().startup_seconds, seconds);
+            assert_eq!(settings.budgets().shutdown_seconds, 10);
+        }
     }
 }

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "package": "squib-loader",
+  "version": "0.2.0",
+  "registryChecksum": "5bd137eb148a011bc2debae200a3c428d5e6c0934c242c64e1c89c374af1a69c",
+  "upstreamCommit": "69ad91905b8fbf0c0e87c344d530a6c8dffa6084",
+  "upstreamRepository": "https://github.com/tyrchen/squib",
+  "dependencyChange": {
+    "zstd": {
+      "from": "0.13",
+      "to": "0.14.3"
+    }
+  },
+  "publishedLicense": "Apache-2.0",
+  "upstreamNotice": "https://github.com/tyrchen/squib/blob/69ad91905b8fbf0c0e87c344d530a6c8dffa6084/LICENSE.md",
+  "noticePolicy": "Preserve the upstream MIT notice separately from unchanged published SPDX metadata.",
+  "sha256": {
+    "src/lib.rs": "2e45625122a3c28bbc66961a4a8b6159fb5bb43c5f5ccd2c3b11e3882bceff0d",
+    "Cargo.toml.registry": "1a1220a9bc9e1be88d54f5c57d42e8862d32e388c457ef1512bd2cb46363555b",
+    "Cargo.toml.orig": "5d8ae47853e907f9551d8e3ac66fc20243d6ec9f44b532a45631e590935ac7df",
+    ".cargo_vcs_info.json": "791431ffe0e76481f4934c01035a9680193b624ac00e954f7e233321112af889",
+    "LICENSE.md": "9276b15bf68cefab4696c3c286883f44ec327ac50b4a2690f80d0c09b5108450"
+  }
+}

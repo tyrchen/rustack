@@ -4,8 +4,9 @@ members = [
   "apps/*",
   "tests/integration",
   "tests/lambda-fixtures/echo-bootstrap",
+  "tests/lambda-fixtures/runtime-verifier",
 ]
-exclude = ["codegen", "tools/lambda-squib-agent"]
+exclude = ["codegen", "tools/lambda-squib-agent", "patches/squib-loader"]
 resolver = "3"
 
 [workspace.package]
@@ -16,6 +17,7 @@ authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 repository = "https://github.com/tyrchen/rustack"
 
 [workspace.lints.rust]
+rust_2024_compatibility = "warn"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 
@@ -50,6 +52,10 @@ rustack-sns-core = { version = "0.11.0", path = "crates/rustack-sns-core" }
 rustack-lambda-model = { version = "0.9.0", path = "crates/rustack-lambda-model" }
 rustack-lambda-http = { version = "0.11.0", path = "crates/rustack-lambda-http" }
 rustack-lambda-core = { version = "0.11.0", path = "crates/rustack-lambda-core" }
+rustack-lambda-runtime = { version = "0.9.0", path = "crates/rustack-lambda-runtime" }
+rustack-stepfunctions-model = { version = "0.9.0", path = "crates/rustack-stepfunctions-model" }
+rustack-stepfunctions-http = { version = "0.9.0", path = "crates/rustack-stepfunctions-http" }
+rustack-stepfunctions-core = { version = "0.9.0", path = "crates/rustack-stepfunctions-core" }
 rustack-events-model = { version = "0.10.0", path = "crates/rustack-events-model" }
 rustack-logs-model = { version = "0.9.0", path = "crates/rustack-logs-model" }
 rustack-logs-http = { version = "0.11.0", path = "crates/rustack-logs-http" }
@@ -90,7 +96,7 @@ rustack-cloudfront-dataplane = { version = "0.11.0", path = "crates/rustack-clou
 squib = "0.2.0"
 
 # Async runtime
-tokio = { version = "1.53", features = [
+tokio = { version = "1.54", features = [
   "rt-multi-thread",
   "macros",
   "signal",
@@ -103,7 +109,7 @@ tokio = { version = "1.53", features = [
 ] }
 
 # HTTP / networking
-hyper = { version = "1.11", features = ["server", "http1", "http2"] }
+hyper = { version = "1.12", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = [
   "tokio",
   "server-auto",
@@ -115,18 +121,29 @@ http-body-util = "0.1"
 
 # Validated runtime configuration (YAML only).
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }
+# Reuse config's audited event-parser cohort for shallow private credentials.
+yaml-rust2 = { version = "~0.11.1", default-features = false }
+# Owned endpoint probe TLS; explicitly select aws-lc despite feature unification.
+rustls = { version = "~0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+tokio-rustls = { version = "~0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+webpki-roots = "~1.0.11"
+rcgen = { version = "~0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 url = "2.5.8"
 
 # Serialization
+bollard-stubs = { version = "=1.53.1-rc.29.3.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+getrandom = { version = "0.4.3", features = ["std"] }
 ciborium = "0.2"
 quick-xml = "0.41"
-zstd = { version = "0.13.3", default-features = false }
+zstd = { version = "~0.14.3", default-features = false }
 
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"
+# Safe relative-descriptor ownership IO; also resolved by ZIP9.
+nix = { version = "0.31.3", default-features = false, features = ["fs", "user", "dir"] }
 
 # Concurrent data structures
 dashmap = "6.2"
@@ -144,6 +161,7 @@ hex = "0.4"
 hmac = "0.13"
 digest = "0.11"
 subtle = "2.6"
+secrecy = "~0.10.3"
 
 # Time / IDs
 chrono = { version = "0.4", features = ["serde"] }
@@ -152,6 +170,7 @@ uuid = { version = "1.26", features = ["v4"] }
 
 # Logging / tracing
 tracing = "0.1"
+tracing-core = "0.1.36"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Async utilities
@@ -164,17 +183,21 @@ regex = "1.13"
 bytes = "1.12"
 rand = "0.10"
 tempfile = "3.27"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.1", default-features = false, features = ["deflate"] }
+tar = { version = "0.4.46", default-features = false }
 percent-encoding = "2.3"
 mime = "0.3"
 futures = "0.3"
 pin-project-lite = "0.2"
 typed-builder = "0.23"
+winnow = { version = "1.0", default-features = false, features = ["std", "parser"] }
 form_urlencoded = "1.2"
 
 # Testing
+rstest = { version = "0.28", default-features = false }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 tokio-test = "0.4"
-aws-config = { version = "1.12", default-features = false, features = [
+aws-config = { version = "1.13", default-features = false, features = [
   "credentials-process",
   "default-https-client",
   "rt-tokio",
@@ -184,13 +207,16 @@ aws-sdk-s3 = { version = "1.145", default-features = false, features = [
   "default-https-client",
   "http-1x",
   "rt-tokio",
-  "sigv4a",
 ] }
 aws-sdk-dynamodb = { version = "1.124", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
 ] }
 aws-sdk-dynamodbstreams = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-sfn = { version = "1.123", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
 ] }
@@ -221,7 +247,6 @@ aws-sdk-cloudwatchlogs = { version = "1.150", default-features = false, features
 aws-sdk-eventbridge = { version = "1.116", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
-  "sigv4a",
 ] }
 aws-sdk-kms = { version = "1", default-features = false, features = [
   "default-https-client",
@@ -250,7 +275,6 @@ aws-sdk-iam = { version = "1", default-features = false, features = [
 aws-sdk-sts = { version = "1", default-features = false, features = [
   "default-https-client",
   "rt-tokio",
-  "sigv4a",
 ] }
 aws-sdk-cloudfront = { version = "1", default-features = false, features = [
   "default-https-client",
@@ -259,3 +283,7 @@ aws-sdk-cloudfront = { version = "1", default-features = false, features = [
 reqwest = { version = "0.13", features = ["json"] }
 aws-credential-types = "1.3"
 aws-smithy-runtime-api = "1.16"
+
+[patch.crates-io]
+# D69: source-identical loader with the patched compression dependency.
+squib-loader = { path = "patches/squib-loader" }

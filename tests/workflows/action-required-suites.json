@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "profile": "rustack-composite-action-v1",
+  "qualification": "action-process-controls",
+  "suites": [
+    {
+      "id": "composite-action",
+      "tests": ["test_should_execute_actual_action_process_controls"]
+    }
+  ]
+}

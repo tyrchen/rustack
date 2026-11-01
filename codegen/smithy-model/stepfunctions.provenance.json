@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/aws/api-models-aws",
+  "commit": "18e485ce1c8dbf29d47e5ce00d9b8513da95912c",
+  "path": "models/sfn/service/2016-11-23/sfn-2016-11-23.json",
+  "sha256": "38dd64c074f5c05320978970dafa6e0f199ab2e33b6065232002e8a603c5f6ed",
+  "service": "com.amazonaws.sfn#AWSStepFunctions",
+  "serviceVersion": "2016-11-23",
+  "retrievedAt": "2026-10-25",
+  "bytes": 370185
+}

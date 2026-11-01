@@ -1,9 +1,9 @@
 //! AWS Signature Version 2 and 4 request authentication for Rustack.
 //!
-//! This crate provides SigV4 and SigV2 signature verification for incoming HTTP
+//! This crate provides `SigV4` and `SigV2` signature verification for incoming HTTP
 //! requests to AWS-compatible services. It supports header-based authentication
 //! (via the `Authorization` header), presigned URL authentication (via query
-//! parameters), and legacy SigV2 authentication (HMAC-SHA1).
+//! parameters), and legacy `SigV2` authentication (HMAC-SHA1).
 //!
 //! # Overview
 //!
@@ -29,12 +29,12 @@
 //!
 //! # Modules
 //!
-//! - [`canonical`] - Canonical request construction per the SigV4 specification
+//! - [`canonical`] - Canonical request construction per the `SigV4` specification
 //! - [`credentials`] - Credential provider trait and in-memory implementation
 //! - [`error`] - Authentication error types
 //! - [`presigned`] - Presigned URL verification
-//! - [`sigv2`] - Legacy SigV2 signature verification (HMAC-SHA1)
-//! - [`sigv4`] - Main SigV4 signature verification logic
+//! - [`sigv2`] - Legacy `SigV2` signature verification (HMAC-SHA1)
+//! - [`sigv4`] - Main `SigV4` signature verification logic
 
 pub mod canonical;
 pub mod credentials;

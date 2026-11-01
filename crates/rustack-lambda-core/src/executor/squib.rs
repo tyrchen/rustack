@@ -6,8 +6,10 @@
 
 use std::{
     collections::HashMap,
-    env,
+    env, fmt,
+    future::Future,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -15,11 +17,18 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::Mutex, time::Instant};
-use tracing::warn;
+use tokio::{
+    runtime::Handle,
+    sync::{Mutex, watch},
+    time::Instant,
+};
 use uuid::Uuid;
 
-use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse, PackageType};
+use super::{Executor, ExecutorError, InvokeRequest, InvokeResponse};
+use crate::{
+    artifact::{Architecture, DeploymentArtifact},
+    invocation::{CleanupTask, InvocationContext},
+};
 
 const DEFAULT_INSTANCE_ID: &str = "rustack_lambda";
 const DEFAULT_STAGE_PORT: u32 = 5003;
@@ -33,9 +42,7 @@ const DEFAULT_RESPONSE_LIMIT_BYTES: usize =
 const DEFAULT_RUN_BUDGET: Duration = Duration::from_hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RESPONSE_LIMIT_BYTES: usize = 128;
-const CONTROL_RESPONSE_LIMIT_BYTES: usize = 1024;
 const PROTOCOL_VERSION: &str = "rustack.squib.lambda.v1";
-const SHUTDOWN_REQUEST_KIND: &str = "shutdown";
 
 /// Configuration for [`SquibExecutor`].
 #[derive(Debug, Clone)]
@@ -60,6 +67,10 @@ pub struct SquibExecutorConfig {
 
 impl SquibExecutorConfig {
     /// Read Squib executor configuration from environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid paths, instance IDs, ports, timeouts, response limits or run budgets.
     pub fn from_env() -> Result<Self, ExecutorError> {
         Self::from_env_reader(|key| match rustack_core::settings::var(key) {
             Ok(value) => Some(value),
@@ -165,12 +176,61 @@ impl Default for SquibExecutorConfig {
 #[derive(Debug)]
 pub struct SquibExecutor {
     config: SquibExecutorConfig,
-    runtime: Mutex<Option<squib::Squib>>,
+    runtime: Mutex<Option<OwnedVm<squib::Squib>>>,
     poisoned: std::sync::atomic::AtomicBool,
+    stop: watch::Sender<bool>,
+    cleanup: Arc<CleanupTask>,
 }
 
+/// A concrete VM owner; even an idle owner's Drop starts retained shutdown.
+struct OwnedVm<R: VmShutdown> {
+    runtime: Option<R>,
+    cleanup: Arc<CleanupTask>,
+    spawner: Handle,
+}
+
+trait VmShutdown: Send + 'static {
+    fn shutdown(self) -> impl Future<Output = Result<(), ExecutorError>> + Send;
+}
+
+impl VmShutdown for squib::Squib {
+    async fn shutdown(mut self) -> Result<(), ExecutorError> {
+        squib::Squib::shutdown(&mut self)
+            .await
+            .map_err(|_| ExecutorError::CleanupFailed("Squib VM shutdown failed".into()))
+    }
+}
+
+impl<R: VmShutdown> OwnedVm<R> {
+    fn new(runtime: R, cleanup: Arc<CleanupTask>) -> Self {
+        Self {
+            runtime: Some(runtime),
+            cleanup,
+            spawner: Handle::current(),
+        }
+    }
+}
+
+impl<R: VmShutdown> fmt::Debug for OwnedVm<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnedVm").finish_non_exhaustive()
+    }
+}
+
+impl<R: VmShutdown> Drop for OwnedVm<R> {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            // This owner creates the only VM for this cleanup task. Use the
+            // captured runtime even if Drop runs outside an entered Tokio context.
+            self.cleanup
+                .start_on(&self.spawner, move || runtime.shutdown());
+        }
+    }
+}
+
+#[derive(Debug)]
 struct RuntimeLease<'a> {
-    runtime: Option<squib::Squib>,
+    runtime: Option<OwnedVm<squib::Squib>>,
     poisoned: &'a std::sync::atomic::AtomicBool,
 }
 impl Drop for RuntimeLease<'_> {
@@ -178,9 +238,18 @@ impl Drop for RuntimeLease<'_> {
         if self.runtime.is_some() {
             self.poisoned
                 .store(true, std::sync::atomic::Ordering::Release);
-            // Squib's RAII handle requests VM shutdown. Never admit another guest after
-            // cancellation.
+            // OwnedVm transfers shutdown to the retained cleanup task on Drop.
         }
+    }
+}
+
+impl Drop for SquibExecutor {
+    fn drop(&mut self) {
+        self.poisoned
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.stop.send_replace(true);
+        // An idle VM must follow the same owned shutdown path as a busy one.
+        drop(self.runtime.get_mut().take());
     }
 }
 
@@ -188,14 +257,17 @@ impl SquibExecutor {
     /// Build a Squib executor.
     #[must_use]
     pub fn new(config: SquibExecutorConfig) -> Self {
+        let (stop, _) = watch::channel(false);
         Self {
             config,
             runtime: Mutex::new(None),
             poisoned: std::sync::atomic::AtomicBool::new(false),
+            stop,
+            cleanup: Arc::new(CleanupTask::default()),
         }
     }
 
-    async fn start_runtime(&self) -> Result<squib::Squib, ExecutorError> {
+    async fn start_runtime(&self) -> Result<OwnedVm<squib::Squib>, ExecutorError> {
         let config_file = self.config.required_config_file()?;
         ensure_config_file_exists(config_file).await?;
 
@@ -206,21 +278,26 @@ impl SquibExecutor {
             .without_api_socket()
             .run_budget(self.config.run_budget);
 
-        let squib = builder
-            .spawn()
-            .await
-            .map_err(|err| ExecutorError::InitFailed(format!("start Squib runtime: {err}")))?;
-        Ok(squib)
+        let squib = builder.spawn().await.map_err(|_| {
+            ExecutorError::CleanupFailed(
+                "Squib startup did not establish confirmed runtime ownership".into(),
+            )
+        })?;
+        Ok(OwnedVm::new(squib, Arc::clone(&self.cleanup)))
     }
 
-    async fn invoke_guest(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
+    async fn invoke_guest(
+        &self,
+        req: &InvokeRequest,
+        context: &InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
         #[cfg(unix)]
         {
             let mut stream = connect_stage_socket_with_retry(&self.config).await?;
-            let request = SquibInvokeRequestWire::from_request(&req)?;
+            let request = SquibInvokeRequestWire::from_request(req, context.id())?;
             let request_bytes = serde_json::to_vec(&request)
                 .map_err(|err| ExecutorError::Io(format!("encode Squib request: {err}")))?;
-            tokio::time::timeout(req.timeout, async {
+            tokio::time::timeout(req.revision.timeout, async {
                 use tokio::io::AsyncWriteExt as _;
 
                 stream
@@ -236,10 +313,10 @@ impl SquibExecutor {
                     "Squib response",
                 )
                 .await?;
-                decode_response(&line, req.qualifier.as_str())
+                decode_response(&line, req.revision.qualifier.as_str())
             })
             .await
-            .map_err(|_| ExecutorError::Timeout(req.timeout))?
+            .map_err(|_| ExecutorError::Timeout(req.revision.timeout))?
         }
 
         #[cfg(not(unix))]
@@ -250,11 +327,29 @@ impl SquibExecutor {
             ))
         }
     }
+    async fn retire_vm(&self, vm: OwnedVm<squib::Squib>) -> Result<(), ExecutorError> {
+        self.poisoned
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(vm);
+        self.wait_for_cleanup().await
+    }
+
+    async fn wait_for_cleanup(&self) -> Result<(), ExecutorError> {
+        // Only the waiter has a deadline. CleanupTask retains the VM shutdown
+        // future even when this budget expires or the caller drops the waiter.
+        tokio::time::timeout(self.config.shutdown_timeout, self.cleanup.wait())
+            .await
+            .map_err(|_| {
+                ExecutorError::CleanupFailed("Squib VM shutdown is not confirmed".into())
+            })?
+    }
 }
 
 #[async_trait]
 impl Executor for SquibExecutor {
-    fn available(&self) -> Result<(), ExecutorError> {
+    fn available(&self, request: &InvokeRequest) -> Result<(), ExecutorError> {
+        validate_request(request)?;
+        self.config.required_vsock_path()?;
         if self.poisoned.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ExecutorError::Unsupported(
                 "Squib guest execution was cancelled; restart the runtime before invoking again"
@@ -264,60 +359,70 @@ impl Executor for SquibExecutor {
         Ok(())
     }
 
-    async fn invoke(&self, req: InvokeRequest) -> Result<InvokeResponse, ExecutorError> {
-        validate_request(&req)?;
-        self.config.required_vsock_path()?;
-        let mut runtime = self.runtime.lock().await;
-        self.available()?;
+    async fn invoke(
+        &self,
+        req: InvokeRequest,
+        context: InvocationContext,
+    ) -> Result<InvokeResponse, ExecutorError> {
+        self.available(&req)?;
+        context.check()?;
+        let mut runtime = tokio::select! {
+            biased;
+            reason = context.cancelled() => return Err(reason.error()),
+            runtime = self.runtime.lock() => runtime,
+        };
+        self.available(&req)?;
+        // Squib's startup future owns unjoined VMM handles; never drop it on cancellation.
         let vm = match runtime.take() {
             Some(vm) => vm,
-            None => self.start_runtime().await?,
+            None => match self.start_runtime().await {
+                Ok(vm) => vm,
+                Err(error) => {
+                    if matches!(&error, ExecutorError::CleanupFailed(_)) {
+                        self.poisoned
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    return Err(error);
+                }
+            },
         };
         let mut lease = RuntimeLease {
             runtime: Some(vm),
             poisoned: &self.poisoned,
         };
-        let result = self.invoke_guest(req).await;
+        let mut stop = self.stop.subscribe();
+        let mut result = tokio::select! {
+            biased;
+            reason = context.cancelled() => Err(reason.error()),
+            _ = stop.wait_for(|stopped| *stopped) => Err(ExecutorError::Cancelled),
+            result = self.invoke_guest(&req, &context) => result,
+        };
+        if self.poisoned.load(std::sync::atomic::Ordering::Acquire) || *self.stop.borrow() {
+            result = Err(ExecutorError::Cancelled);
+        }
+        if result.is_ok() {
+            if let Err(error) = context.check() {
+                result = Err(error);
+            }
+        }
         if result.is_ok() {
             *runtime = lease.runtime.take();
+        } else if let Some(vm) = lease.runtime.take() {
+            self.retire_vm(vm).await?;
         }
         result
     }
 
-    async fn shutdown(&self) {
-        let mut runtime = self.runtime.lock().await.take();
-        if let Some(squib) = runtime.as_mut() {
-            #[cfg(unix)]
-            match tokio::time::timeout(
-                self.config.shutdown_timeout,
-                request_guest_shutdown(&self.config),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    warn!(error = %err, "failed to request Squib Lambda guest shutdown");
-                }
-                Err(_) => {
-                    warn!(
-                        timeout_ms = self.config.shutdown_timeout.as_millis(),
-                        "timed out requesting Squib Lambda guest shutdown"
-                    );
-                }
-            }
-            match tokio::time::timeout(self.config.shutdown_timeout, squib.shutdown()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    warn!(error = %err, "failed to shut down Squib Lambda runtime");
-                }
-                Err(_) => {
-                    warn!(
-                        timeout_ms = self.config.shutdown_timeout.as_millis(),
-                        "timed out shutting down Squib Lambda runtime"
-                    );
-                }
-            }
+    async fn shutdown(&self) -> Result<(), ExecutorError> {
+        self.poisoned
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.stop.send_replace(true);
+        let mut runtime = self.runtime.lock().await;
+        if let Some(vm) = runtime.take() {
+            self.retire_vm(vm).await?;
         }
+        drop(runtime);
+        self.wait_for_cleanup().await
     }
 }
 
@@ -342,36 +447,27 @@ struct SquibInvokeRequestWire {
     payload_base64: String,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SquibControlRequestWire {
-    protocol_version: &'static str,
-    kind: &'static str,
-}
-
 impl SquibInvokeRequestWire {
-    fn from_request(req: &InvokeRequest) -> Result<Self, ExecutorError> {
-        let code_zip = req
-            .code_zip
-            .as_ref()
-            .ok_or_else(|| ExecutorError::InvalidCode("missing code zip".to_owned()))?;
+    fn from_request(req: &InvokeRequest, request_id: Uuid) -> Result<Self, ExecutorError> {
+        let DeploymentArtifact::Zip(artifact) = &req.revision.artifact else {
+            return Err(ExecutorError::Unsupported(
+                "Squib backend only supports Zip packages".into(),
+            ));
+        };
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
-            request_id: Uuid::new_v4().to_string(),
+            request_id: request_id.to_string(),
             function_arn: req.function_arn.clone(),
-            function_name: req.function_name.clone(),
-            qualifier: req.qualifier.clone(),
-            runtime: req.runtime.clone(),
-            handler: req.handler.clone(),
-            architectures: req.architectures.clone(),
-            code_root: req
-                .code_root
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            code_zip_base64: STANDARD.encode(code_zip.as_ref()),
-            environment: req.environment.clone(),
-            timeout_ms: duration_millis(req.timeout),
-            memory_mb: req.memory_mb,
+            function_name: req.revision.function_name.clone(),
+            qualifier: req.revision.qualifier.clone(),
+            runtime: req.revision.runtime.clone(),
+            handler: req.revision.handler.clone(),
+            architectures: vec![req.revision.architecture.as_str().into()],
+            code_root: Some(artifact.code_root().display().to_string()),
+            code_zip_base64: STANDARD.encode(artifact.zip_bytes()),
+            environment: req.revision.environment.clone(),
+            timeout_ms: duration_millis(req.revision.timeout),
+            memory_mb: req.revision.memory_mb,
             capture_logs: req.capture_logs,
             payload_base64: STANDARD.encode(req.payload.as_ref()),
         })
@@ -393,18 +489,15 @@ struct SquibInvokeResponseWire {
 }
 
 fn validate_request(req: &InvokeRequest) -> Result<(), ExecutorError> {
-    if req.package_type != PackageType::Zip {
+    if !matches!(req.revision.artifact, DeploymentArtifact::Zip(_)) {
         return Err(ExecutorError::Unsupported(
             "Squib backend only supports Zip packages".to_owned(),
         ));
     }
-    if !req.architectures.iter().any(|arch| arch == "arm64") {
+    if req.revision.architecture != Architecture::Arm64 {
         return Err(ExecutorError::Unsupported(
             "Squib backend requires an arm64 Lambda function".to_owned(),
         ));
-    }
-    if req.code_zip.is_none() {
-        return Err(ExecutorError::InvalidCode("missing code zip".to_owned()));
     }
     Ok(())
 }
@@ -428,30 +521,6 @@ async fn ensure_config_file_exists(path: &Path) -> Result<(), ExecutorError> {
             path.display()
         )));
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn request_guest_shutdown(config: &SquibExecutorConfig) -> Result<(), ExecutorError> {
-    use tokio::io::AsyncWriteExt as _;
-
-    let mut stream = connect_stage_socket_with_retry(config).await?;
-    let request = SquibControlRequestWire {
-        protocol_version: PROTOCOL_VERSION,
-        kind: SHUTDOWN_REQUEST_KIND,
-    };
-    let request_bytes = serde_json::to_vec(&request)
-        .map_err(|err| ExecutorError::Io(format!("encode Squib shutdown request: {err}")))?;
-    stream
-        .write_all(&request_bytes)
-        .await
-        .map_err(|err| ExecutorError::Io(format!("write Squib shutdown request: {err}")))?;
-    stream
-        .write_all(b"\n")
-        .await
-        .map_err(|err| ExecutorError::Io(format!("write Squib shutdown newline: {err}")))?;
-    let _line =
-        read_bounded_line(&mut stream, CONTROL_RESPONSE_LIMIT_BYTES, "Squib shutdown").await?;
     Ok(())
 }
 
@@ -636,9 +705,53 @@ fn default_artifact_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use super::*;
+
+    struct ProbeVm {
+        started: Arc<tokio::sync::Semaphore>,
+        gate: Arc<tokio::sync::Semaphore>,
+        reservation: tokio::sync::OwnedSemaphorePermit,
+    }
+
+    impl VmShutdown for ProbeVm {
+        async fn shutdown(self) -> Result<(), ExecutorError> {
+            self.started.add_permits(1);
+            self.gate.acquire().await.unwrap().forget();
+            drop(self.reservation);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_transfer_idle_vm_drop_to_owned_shutdown_before_releasing_resources() {
+        let cleanup = Arc::new(CleanupTask::default());
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let owner = OwnedVm::new(
+            ProbeVm {
+                started: Arc::clone(&started),
+                gate: Arc::clone(&gate),
+                reservation: capacity.clone().acquire_owned().await.unwrap(),
+            },
+            Arc::clone(&cleanup),
+        );
+        // Drop on an ordinary thread with no entered Tokio context.
+        std::thread::spawn(move || drop(owner)).join().unwrap();
+        started.acquire().await.unwrap().forget();
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, cleanup.wait())
+                .await
+                .is_err()
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        gate.add_permits(1);
+        cleanup.wait().await.unwrap();
+        assert_eq!(capacity.available_permits(), 1);
+    }
 
     #[test]
     fn test_should_parse_squib_config_from_env_reader() {
@@ -700,29 +813,23 @@ mod tests {
 
     #[test]
     fn test_should_encode_request_payload_base64() {
-        let req = InvokeRequest {
-            function_arn: "arn:aws:lambda:us-east-1:000000000000:function:echo".to_owned(),
-            function_name: "echo".to_owned(),
-            qualifier: "$LATEST".to_owned(),
-            runtime: Some("provided.al2023".to_owned()),
-            handler: Some("bootstrap".to_owned()),
-            architectures: vec!["arm64".to_owned()],
-            package_type: PackageType::Zip,
-            code_root: Some(PathBuf::from("/tmp/code")),
-            code_zip: Some(Bytes::from_static(b"PK\x03\x04zip")),
-            image_uri: None,
-            environment: HashMap::from([("KEY".to_owned(), "VALUE".to_owned())]),
-            timeout: Duration::from_secs(3),
-            memory_mb: 128,
-            payload: Bytes::from_static(b"{}"),
-            capture_logs: true,
-        };
-
-        let wire = SquibInvokeRequestWire::from_request(&req).unwrap();
+        let mut req = InvokeRequest::fixture();
+        req.payload = Bytes::from_static(b"{}");
+        req.capture_logs = true;
+        let wire = SquibInvokeRequestWire::from_request(&req, Uuid::new_v4()).unwrap();
 
         assert_eq!(wire.protocol_version, PROTOCOL_VERSION);
-        assert_eq!(wire.code_root.as_deref(), Some("/tmp/code"));
-        assert_eq!(wire.code_zip_base64, "UEsDBHppcA==");
+        let DeploymentArtifact::Zip(artifact) = &req.revision.artifact else {
+            panic!("unit fixture is ZIP");
+        };
+        assert_eq!(
+            wire.code_root,
+            Some(artifact.code_root().display().to_string())
+        );
+        assert_eq!(
+            STANDARD.decode(&wire.code_zip_base64).unwrap(),
+            *artifact.zip_bytes()
+        );
         assert_eq!(wire.timeout_ms, 3000);
         assert_eq!(wire.payload_base64, "e30=");
     }
@@ -785,23 +892,8 @@ mod tests {
 
     #[test]
     fn test_should_reject_non_arm64_request() {
-        let req = InvokeRequest {
-            function_arn: String::new(),
-            function_name: "echo".to_owned(),
-            qualifier: "$LATEST".to_owned(),
-            runtime: None,
-            handler: None,
-            architectures: vec!["x86_64".to_owned()],
-            package_type: PackageType::Zip,
-            code_root: Some(PathBuf::from("/tmp/code")),
-            code_zip: Some(Bytes::from_static(b"PK\x03\x04zip")),
-            image_uri: None,
-            environment: HashMap::new(),
-            timeout: Duration::from_secs(1),
-            memory_mb: 128,
-            payload: Bytes::new(),
-            capture_logs: false,
-        };
+        let mut req = InvokeRequest::fixture();
+        Arc::make_mut(&mut req.revision).architecture = Architecture::X86_64;
 
         assert!(matches!(
             validate_request(&req),

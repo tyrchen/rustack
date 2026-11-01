@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "fixture": "legacy-v2-meta.ss.zst",
+  "sha256": "fdc3d7c32dc2d84cd8bc5590bce9d1e894b680380ce54aef686df0f71ebcd870",
+  "generatedWith": {
+    "zstd": "0.13.3",
+    "zstd-safe": "7.3.0",
+    "zstd-sys": "2.1.0+zstd.1.5.7",
+    "compressionLevel": 1
+  },
+  "archive": {
+    "magicHex": "5253534e41500002",
+    "kind": 2,
+    "flags": 0,
+    "headerBytes": 36,
+    "fileBytes": 88,
+    "section": {
+      "kind": 1,
+      "flags": 0,
+      "offset": 64,
+      "length": 12,
+      "rows": 7,
+      "data": "legacy-state"
+    },
+    "footer": "IEEE CRC32 and little-endian payload length"
+  },
+  "generation": "Generated before dependency migration using the original resolved Cargo.lock codec cohort; no credentials or business payloads."
+}

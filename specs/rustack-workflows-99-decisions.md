@@ -1,0 +1,835 @@
+# Workflows 99: Key Decisions and Glossary
+
+Status: accepted design decisions; implementation evidence is tracked in the phase ledger/review · Date: 2026-10-27
+
+Supersede decisions with a new ID rather than rewriting their rationale after implementation. Component documents own detailed behavior; this document owns the reasons.
+
+## D1 — Own a bounded STANDARD/JSONPath interpreter
+
+- Context: other projects need actual state transitions and fault behavior, not only API-shaped responses.
+- Alternatives: wrap Step Functions Local/LocalStack; embed a general durable-workflow product; implement every ASL dialect immediately.
+- Decision: implement typed ASL compilation and an actor-based interpreter, initially STANDARD and the documented JSONPath profile.
+- Why: Rustack owns correctness, shared-service integration and lifecycle without external emulator dependencies. Explicit limits avoid accidental JSONata or EXPRESS claims.
+- Pinned by: [PRD scope](./rustack-workflows-00-prd.md#4-release-scope), [compiler/profile](./rustack-workflows-30-asl-design.md#1-compile-before-execution).
+
+## D2 — Keep Docker Runtime API inside each execution environment
+
+- Alternatives: publish a wildcard host Runtime API; assume host.docker.internal can reach host loopback; forward invokes to RIE; rewrite user-image entrypoints with an injected launcher.
+- Decision: use a small relay plus the unchanged function image sharing a network namespace; control traffic uses framed Docker attach.
+- Why: host loopback is not container loopback; publishing Runtime API complicates isolation; RIE is unnecessary when Rustack owns the Runtime API. A relay preserves arbitrary valid RIC image entrypoints and works without host-address assumptions for control traffic.
+- Cost/evidence: two containers per environment and a versioned relay artifact. Full composition is unproven until P0; this decision does not waive that gate.
+- Pinned by: [Lambda architecture/transport](./rustack-workflows-20-lambda-runtime-design.md#1-ownership-and-execution-contract), [P0](./rustack-workflows-90-impl-plan.md#3-p0--evidence-and-risk-retirement).
+
+## D3 — Pin content at deployment, not on each invocation
+
+- Alternatives: pull by tag per invocation; freeze only published numeric versions; treat local content IDs as registry digests.
+- Decision: latest and published revisions both capture resolved image content and full execution configuration; local content identity is explicitly distinguished from registry manifest identity.
+- Why: tag movement and warm reuse must not change code silently; version tests need real immutable artifacts, including ImageConfig and architecture.
+- Pinned by: [image resolution](./rustack-workflows-20-lambda-runtime-design.md#2-image-resolution-and-deployment-lifecycle), [snapshot image references](./rustack-workflows-60-operations-design.md#3-shutdown-cancellation-and-snapshots).
+
+## D4 — Preserve one Lambda admission and execution path
+
+- Alternatives: call Docker directly from ASL; use an HTTP AWS SDK client against Rustack itself.
+- Decision: binary-owned LambdaTaskPort adapter calls the existing provider through a cancellable invocation-handle contract.
+- Why: reserved concurrency, versions, backend failures and cleanup must match ordinary Invoke; an internal port avoids protocol overhead and recursive HTTP request-permit deadlock.
+- Pinned by: [integration ports](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction).
+
+## D5 — Compile definitions and keep execution mutation in one owner
+
+- Alternatives: interpret serde_json maps each step; share mutable execution state through Mutex/RwLock; spawn one task per Map item.
+- Decision: immutable indexed IR plus one ExecutionActor with bounded frames, timers and external-call futures.
+- Why: validation happens before side effects, generations settle races consistently, and fan-out cannot become an unbounded task tree.
+- Pinned by: [ASL compiler/scheduler](./rustack-workflows-30-asl-design.md), [history](./rustack-workflows-10-api-design.md#6-history-and-pagination).
+
+## D6 — Implement `.sync` only for a real supported job integration
+
+- Alternatives: accept `.sync` on Lambda/arbitrary tasks; equate child start acceptance with child success; implement ECS-shaped responses without ECS execution.
+- Decision: ordinary Lambda invocation awaits its result; `.sync` and `.sync:2` apply to nested Step Functions in this release.
+- Why: production AWS ASL compatibility matters more than permissive local syntax. Nested child completion is a real job boundary; string-versus-JSON Output and ownership cancellation are observable contracts.
+- Pinned by: [allowlist](./rustack-workflows-40-integrations-design.md#2-integration-allowlist), [nested execution](./rustack-workflows-40-integrations-design.md#4-child-workflows-and-sync).
+
+## D7 — Expose uncertain side effects rather than replay automatically
+
+- Alternatives: retry every Docker transport failure; claim exactly-once function execution; release permits when the caller stops waiting.
+- Decision: no hidden business-call retries; explicit ASL Retry may repeat work; generation invalidation and supervised cleanup retain uncertain resources.
+- Why: a broken connection cannot establish whether user code already changed another service. Resource ownership must outlive response futures.
+- Pinned by: [Lambda cleanup](./rustack-workflows-20-lambda-runtime-design.md#4-environment-states-pooling-and-cancellation), [error mapping](./rustack-workflows-40-integrations-design.md#3-lambda-requestresponse).
+
+## D8 — Preserve snapshot semantics without claiming durable workflow recovery
+
+- Alternatives: add a new database/WAL immediately; serialize live handles/timers; replay all RUNNING tasks on restart.
+- Decision: persist definitions, terminal histories and independent name reservations; quiesce/cancel active work before normal saves; never replay imported RUNNING calls.
+- Why: existing snapshots are graceful-save archives. Exactly-once recovery requires a separate durable command/outcome protocol and external-side-effect strategy; serializing structs cannot provide it.
+- Pinned by: [snapshot contract](./rustack-workflows-60-operations-design.md#3-shutdown-cancellation-and-snapshots).
+
+## D9 — Support callbacks with scoped credentials and provisional completion
+
+- Alternatives: accept only callbacks arriving after Lambda returns; let an early callback hide Lambda failure; persist raw task tokens in diagnostics.
+- Decision: register tokens before dispatch, stage early callbacks, commit only after successful invocation, and redact injected tokens before history persistence.
+- Why: real handlers can callback immediately; old attempts must not complete new work, and task tokens authorize state transitions.
+- Pinned by: [callback protocol](./rustack-workflows-40-integrations-design.md#5-callback-and-heartbeat-m3).
+
+## D10 — Make local operational limits visible
+
+- Alternatives: inherit unlimited Docker resources; enable code execution by default; silently discard history or unsupported fields.
+- Decision: explicit Docker opt-in, startup probes, bounded quotas, local-only transport and detailed capabilities; retain existing YAML settings.
+- Why: honest local restrictions are testable. Docker permissions, tmpfs memory accounting, native-architecture coverage and non-IAM role metadata cannot be mistaken for AWS parity.
+- Pinned by: [operations](./rustack-workflows-60-operations-design.md), [security/performance gates](./rustack-workflows-70-verification-plan.md).
+
+## D11 — Apply P0 protocol evidence before implementing consumers
+
+- Context: independent review and actual transport/SDK probes exposed gaps in the original draft.
+- Decision: require BootstrapReady, default omitted Lambda architecture to x86_64, use callback TaskTimedOut for known closed tokens, generate numeric epoch-second HTTP timestamps, and decode both nested Input/Output for `.sync:2`. Optimized nested dates use epoch milliseconds. Use StdinOnce=true for the environment's single attach lifetime.
+- Why: actual EOF tests distinguish detach from process stdin closure; ordinary SDK behavior and pinned AWS-validated snapshots establish observable wire distinctions. Current official errors take precedence over older snapshots.
+- Pinned by: [runtime spike](../docs/research/spike-lambda-container-relay.md), [semantic evidence](../docs/research/spike-stepfunctions-semantic-oracle.md), [required review fixes](./rustack-workflows-93-review.md).
+- Date:2026-10-25. These amendments refine D2/D6/D9 without changing the complete M0–M4 scope.
+
+## D12 — Separate resource, resolved revision and invoked reference
+
+- Alternatives: identify warm environments by function name/alias; use configuration RevisionId as the resource lifetime; reconstruct the invoked ARN from the resolved version.
+- Decision: allocate a stable nonnil resource UUID, capture resolved execution configuration by value, and preserve the caller's qualifier separately for Runtime API metadata.
+- Why: a recreated name must never acquire a deleted resource's environment, aliases can move without rewriting handler metadata, and snapshots must preserve the same resource identity. Importing legacy snapshots assigns an identity once; invalid or duplicate saved identities reject restore.
+- Pinned by: [invocation capture](./rustack-workflows-20-lambda-runtime-design.md#24-invocation-capture-and-resource-identity).
+- Date: 2026-10-25.
+
+## D13 — Own code through staging, publication and invocation cleanup
+
+- Alternatives: pass independent ZIP paths/bytes/image options; retain every rejected staging result until shutdown; drop extracted code with its function store.
+- Decision: use a closed artifact enum, shared ZIP leases, validated immutable image metadata and a rollback guard for unpublished ZIPs. Validate normalized settings before source IO; commit new ownership only after insertion/CAS or full restore validation.
+- Why: request cancellation must not delete live code or retain rejected uploads. The archive, extracted root and hash must describe the same staged data, and restoring a candidate must not leak its new artifacts on failure. Native process supervision retains its lease through child exit.
+- Pinned by: [artifact representation and ownership sequence](./rustack-workflows-20-lambda-runtime-design.md#25-captured-artifact-representation).
+- Date: 2026-10-25.
+
+## D14 — Separate cancellation, caller response and resource settlement
+
+- Alternatives: abort backend futures at the HTTP/Task deadline; release capacity as soon as a caller returns; rely on Squib's best-effort RAII shutdown.
+- Decision: immutable Arc execution revisions, one attempt UUID/deadline, attached invocation handles and a bounded work actor. Backend cleanup survives dropped/expired waiters, and clean settlement follows resource cleanup and permit release. Idle VM Drop and Native warm-retention rejection follow the same ownership rule.
+- Why: a caller timeout does not prove a process/VM has stopped. The pinned Squib0.2.0 startup/shutdown futures temporarily own VMM join handles; its raw Drop only attempts a shutdown message. Cancelling those futures cannot establish cleanup. Capture the parent Tokio handle for retained cleanup and shut down that runtime only after service settlement.
+- Pinned by: [execution revision](./rustack-workflows-20-lambda-runtime-design.md#26-execution-revision-ownership), [cancellation and supervisor contract](./rustack-workflows-20-lambda-runtime-design.md#27-cancellable-invocation-and-supervisor-contract).
+- Date: 2026-10-25.
+
+## D15 — Confirm poll consumption before committing runtime delivery
+
+- Alternatives: treat a successful oneshot send as delivery; rely solely on biased select ordering across receipt and mailbox channels; leave an unconsumed event in Delivered until timeout.
+- Decision: retain Invocation ownership in Offering until next() consumes its reply and acknowledges a per-poll receipt. Recover the queued event if that receipt closes. Reconcile ready receipts and revalidate stop/cancellation/deadline synchronously before each command/transition.
+- Why: a sent response can be dropped without being consumed, and a receipt arriving between select branch polls can race a completion command. Explicit receipt ownership prevents lost events and false UnknownAttempt/initialization outcomes. Transport adapters still retire environments on failed HTTP delivery; session receipt is not proof of user-code execution.
+- Pinned by: [shared session ownership and state diagram](./rustack-workflows-20-lambda-runtime-design.md#32-runtime-session-ownership).
+- Date: 2026-10-25.
+
+## D16 — Enforce HTTP dependency secrecy and retain adapter retirement
+
+- Alternatives: redact only application Debug; trust RUST_LOG defaults; reject trailers after decoding without filtering the dependency; drop invalidated warm API handles without awaiting retirement.
+- Decision: task-bound Hyper/hyper_util verbosity filtering independent of the application's subscriber, no supported HTTP trailers, and explicit joined API/process retirement on revision invalidation and shutdown. Cache supervision failures and retain the complete Native cleanup future across dropped/concurrent waiters.
+- Why: pinned Hyper1.11.1 logs buffered trailer contents before application validation. Dropping a handle only signals asynchronous cleanup and cannot establish that an old listener's connections have finished. First-poll readiness, joined retirement and checked metadata let Native and the future Docker relay share one actual session engine.
+- Pinned by: [shared HTTP adapter and Native startup](./rustack-workflows-20-lambda-runtime-design.md#33-shared-http-adapter-and-native-startup), [review W20–W22](./rustack-workflows-93-review.md#p1-task12-shared-http--native-migration-review).
+- Date:2026-10-25. The separate mandatory Bollard filter W01 remains required when Docker is implemented.
+
+## D17 — Retain relay IO ownership through bounded control settlement
+
+- Alternatives: read stdin through Tokio's blocking adapter; read control frames inside a cancel-and-restart select branch; treat channel enqueue as successful emission; discard completed worker errors when priority stop wins.
+- Decision: Linux nonblocking owned pipe descriptors, dedicated supervised reader/writer tasks, bounded two-message mailboxes and explicit flush receipts. Retain attempt tickets across cancelled result polls, join the API on every exit, and preserve completed IO failures while draining aborted workers. Matching duplicate Cancel is idempotent and never refreshes retirement.
+- Why: a blocking stdin read can hold process shutdown open; restarting a partial read corrupts framing; an enqueued Ack does not prove it reached the host. Cancellation only invalidates the session, so the separate host owner must still terminate/remove the function. Real relay/RIC process tests complement the in-memory contract tests without claiming deployment/pool or SDK acceptance.
+- Pinned by: [relay control supervisor and process entry point](./rustack-workflows-20-lambda-runtime-design.md#34-relay-control-supervisor-and-process-entry-point).
+- Date:2026-10-25.
+
+## D18 — Keep host protocol state separate from retained stream parsing
+
+- Alternatives: let the Docker environment read/write raw frames directly inside cancellation selects; reconnect after attach failure; put container cleanup into the runtime library.
+- Decision: an ordered host ControlClient consumes shared supervised stream workers. Mailbox receive is cancel-safe, partial parsing never restarts, and an interrupted send poisons later business operations until joined retirement. Close preserves ordinary validation of preceding events; cancellation discards only one matching late outcome before its acknowledgement.
+- Why: Docker cancellation can race a flushed result or a partial read/write. The host must preserve framing and exact attempt identity without interpreting uncertain transport state as permission to replay or reuse. Container termination and allocation reservations remain with the environment owner that can prove them.
+- Pinned by: [host control client and shared stream ownership](./rustack-workflows-20-lambda-runtime-design.md#35-host-control-client-and-shared-stream-ownership).
+- Date:2026-10-25.
+
+## D19 — Bound Docker transport before generated-model materialization
+
+- Context: P1 consumer source review of pinned Bollard0.21.1 found whole-body collection, response-body work outside the header timeout, an attach decoder without a Rustack frame cap and console/trailing-EOF fallback.
+- Alternatives: ordinary pipe client with post-deserialization checks; a counted custom connector plus a second raw attach transport; a local forwarding proxy; duplicate Docker model definitions.
+- Decision: reuse model-only bollard-stubs1.53.1-rc.29.3.1 and implement the narrow, bounded Unix HTTP/upgrade boundary over the workspace Hyper/Tokio stack. Keep generated wire contracts, strict pre-materialization bounds, joined drivers and the mandatory dependency diagnostic filter.
+- Why: checking after collection cannot bound earlier allocation, and an outer CBOR decoder cannot validate opaque Docker buffering first. The custom transport's Response<Incoming> type does not directly accept a Limited body wrapper. Owning the small required operation set avoids a proxy/second connector while preserving explicit cleanup and no-replay semantics.
+- Supersedes: the initial recommendation to enable Bollard's ordinary pipe client in runtime §7; D2's relay architecture and the P0 feasibility evidence remain unchanged.
+- Pinned by: [bounded Docker API boundary](./rustack-workflows-20-lambda-runtime-design.md#36-bounded-docker-api-boundary), [pinned source study](../docs/research/study-bollard-docker-transport-boundaries.md).
+- Date:2026-10-25. Production acceptance still requires the specified fake-daemon and real image tests; source inspection alone closes no runtime gate.
+
+## D20 — Separate lifecycle waits from destructive cleanup capacity
+
+- Context: a Docker wait request can remain pending for an environment lifetime. Sharing two reserved management slots with waits can prevent Kill/Remove from ever reaching the daemon.
+- Alternatives: use the ordinary business lane; increase one shared queue; poll container inspection repeatedly; allocate a dedicated bounded wait lane.
+- Decision: retain six short business jobs and two reserved inspect/kill/remove/list jobs, plus a separate lane of at most32 concurrent wait jobs with an eight-command mailbox. Environment owners issue at most one wait per environment. Attach handoff releases its short management slot before warm reuse.
+- Why: waiting for external termination must not consume the capacity needed to cause that termination. Separate admission and retained supervision provide bounded ownership without cleanup starvation.
+- Pinned by: [Docker request ownership and quotas](./rustack-workflows-20-lambda-runtime-design.md#36-bounded-docker-api-boundary); executable held-wait and business-saturation regressions in the Docker wire tests.
+- Date:2026-10-25. The wire lane does not itself own container lifetime or prove successful cleanup.
+
+## D21 — Resolve the selected executable image, not its parent index
+
+- Context: the live Engine29.5.2/containerd image store returns an index Id for unqualified inspection and a child-manifest Id for platform-qualified inspection; RepoDigests may continue naming the parent index, including for unpushed BuildKit-loaded local images.
+- Alternatives: always use inspect Id without a platform; take the first RepoDigest; require a registry round trip for every local deployment; request/validate the selected platform and keep local/registry representation explicit.
+- Decision: platform-qualified read-only local resolution validates executable child identity, retains validated inherited execution defaults and derives an explicit Docker-create plan preserving empty overrides, rejects unresolved index descriptors, and derives registry child references only from matching repository evidence. Capture the addressable parent Id before platform inspection, retain the selected child descriptor independently, and create by immutable parent Id plus explicit platform; the selected child Id is not necessarily a locally addressable image object. Recompute the canonical execution fingerprint during restore. Short local names retain local://Id. Legacy descriptor-free images remain supported on older compatible APIs.
+- Why: deployment pinning must survive tag movement and daemon default-platform changes without inventing registry provenance. Inspection hashes must also be deterministic across irrelevant metadata/map ordering.
+- Pinned by: [local resolution](./rustack-workflows-20-lambda-runtime-design.md#28-local-image-resolution-and-selected-platform-identity), [live/source evidence](../docs/research/study-bollard-docker-transport-boundaries.md#platform-specific-image-identity-follow-up).
+- Date:2026-10-25. This refines D19's generated Id representation; it does not promise registry existence, cross-platform execution or completed deployment/provider integration.
+
+## D22 — Own private image aliases through deployment and invocation lifetime
+
+- Context: immutable IDs prevent tag drift but do not retain addressability when mutable image references are replaced. A prepared revision also needs unpacked-size proof rather than containerd compressed Size.
+- Alternatives: rely on an operator tag/ID remaining present; hold never-started containers per revision; create private aliases under validated owner/run/pin identities with retained lease supervision.
+- Decision: a bounded image lease actor prepares a private alias, verifies immutable identity and unpacked quota, and publishes a shared live artifact; only known private aliases can be removed. Record mutation phase before IO and retain uncertain cleanup/reservations across caller cancellation, deadlines and supervised recovery.
+- Why: published versions and captured calls must own artifact availability. Observing one absent alias after an uncertain tag does not prove that a late tag cannot appear; visible matching commit followed by removal can establish cleanliness. A root/worker failure must preserve these identities rather than merely release permits.
+- Pinned by: [owned image preparation](./rustack-workflows-20-lambda-runtime-design.md#29-owned-image-pins-and-deployment-preparation), [transport/source study](../docs/research/study-bollard-docker-transport-boundaries.md).
+- Date:2026-10-25. Provider status/CAS, allowed pulls, directory ownership and previous-run reconciliation remain separate required consumers.
+
+## D23 — Store-issued deployment generations and live captured images
+
+- **Context:** image preparation completes asynchronously while the old function may still execute, be updated, deleted or recreated. Snapshot metadata does not retain daemon availability.
+- **Alternatives considered:** independently mutable status strings allow contradictory readiness/progress; revision-only settlement cannot distinguish repeated failed attempts with the same old code; deserializing an executable image from metadata invents ownership.
+- **Decision:** use one typed DeploymentState, a module-private builder for store-issued ImageDeployment candidates, and resource UUID/original revision/generation checks in one commit transaction. ImageArtifact distinguishes unresolved/restored/live states; invocation and publication require a live PinnedImage.
+- **Why:** failed updates preserve old executable code, stale/duplicate results cannot publish, and a snapshot cannot authorize an unowned Docker execution. One canonical base64 image fingerprint and proven unpacked size bind API metadata to captured content. A fallible store mutation commits only after its closure and record validation both succeed.
+- **Migration:** snapshots retain a derived legacy state plus optional typed deployment; contradictory states reject, and abandoned in-progress work restores as a closed failure. Metadata requires exact-content availability reacquisition in P5.
+- **Pinned by:** [runtime §2.10](./rustack-workflows-20-lambda-runtime-design.md#210-deployment-state-and-atomic-settlement), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25.
+
+## D24 — Retained deployment admission with atomic response receipts
+
+- **Context:** provider requests may disappear after metadata mutation; deletion, shutdown and actor failure must not orphan Pending records or release capacity before worker join.
+- **Alternatives considered:** spawning from the request loses joins on cancellation; reserving only a mailbox does not bound accepted workers; re-reading metadata after enqueue can return a concurrently recreated resource or a falsely Active acceptance response; forwarding the total deployment budget to every RPC violates the wire's shorter IO limits.
+- **Decision:** reserve both accepted-work and owned-mailbox capacity before mutation, capture the response receipt in the same store transaction, register guards/permits above JoinSet children, and retain root/emergency joins through waiter cancellation. Store-change notifications cancel stale candidates without replaying preparation; ready results outrank unrelated notifications after deadline/cancel. Each Docker read is bounded independently of the total deployment budget.
+- **Why:** request lifetime cannot own accepted asynchronous work. Stale results remain harmless, failed updates preserve old code, and failure/Drop outside the entered runtime still settles keyed records. Executor image readiness defaults to unavailable, so qualified preparation alone cannot enable a nonexistent production backend.
+- **Compatibility:** explicit stale RevisionId/CodeSha256 preconditions return412; in-progress operations and implicit staging conflicts remain409. The Native fixture target bypasses SDK/HTTP and is provider execution evidence; separate live SDK wire tests establish protocol evidence.
+- **Pinned by:** [runtime §2.11](./rustack-workflows-20-lambda-runtime-design.md#211-retained-deployment-supervisor-and-provider-admission), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25.
+
+## D25 — Explicit DryRun and bounded deployment parsing ownership
+
+- **Context:** ignored DryRun can mutate code; blindly applying ordinary JSON string limits rejects legitimate inline ZIPs, while parsing the entire code envelope into generic values permits large metadata allocations.
+- **Alternatives considered:** permissive DTOs silently discard unsupported modes; decoding ZIPs for validation adds staging and content inspection; releasing a parse permit at CPU completion permits large ready-result backlogs; acquiring another permit inside an admitted DryRun can throttle every admitted request.
+- **Decision:** model code DryRun explicitly and validate syntax/preconditions without fetching, staging, Docker admission or publication. Reject unknown deployment fields. Borrow the sole allowed ZIP raw span, cap/validate all remaining metadata, and deserialize strict DTOs on at most four pure blocking workers. Carry permits with results through dispatch and reuse the admitted permit for inline validation.
+- **Why:** validation must not produce deployment effects, request cancellation must retain bounded CPU/memory ownership, and supported inline package sizes must not weaken metadata limits. Preserve overload429 and worker-failure500 separately from invalid-input400. This is a deployment boundary change, not a claim of a global parser rewrite or IAM parity.
+- **Pinned by:** [runtime §2.12](./rustack-workflows-20-lambda-runtime-design.md#212-side-effect-free-code-validation-and-bounded-deployment-json), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25.
+
+## D26 — Propagate cryptographic initialization errors through signing APIs
+
+- **Context:** strict production checks expose two HMAC expect calls on a formally fallible provider API; authentication is part of the Lambda gateway dependency boundary.
+- **Alternatives considered:** retaining panic/adding lint ignores violates the boundary contract; fabricating a signature or interpreting an initialization failure as a mismatch hides infrastructure failure; hand-rolling key normalization solely to obtain an infallible constructor duplicates cryptographic logic.
+- **Decision:** keep RustCrypto HMAC0.13/digest0.11 computations, return typed CryptoInitialization with its InvalidLength source, and make public derive_signing_key/compute_signature return Result. Update callers/examples directly; provide no deprecated infallible shim. Header/presigned/streaming verifiers propagate failure before comparison/fallback or chain advancement.
+- **Why:** no request/key can reach an explicit panic, source errors remain available without embedding credentials, and successful signatures retain their published-vector semantics. Existing S3-only normalized-fallback eligibility and constant-time comparison remain intact.
+- **Pinned by:** [runtime §7.1](./rustack-workflows-20-lambda-runtime-design.md#71-strict-production-boundary-closure-b03), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25. This is an internal-library API migration for direct consumers, not a new AWS wire mode or a dependency upgrade.
+
+## D27 — Align SDK signing features with the regional local compatibility profile
+
+- **Context:** B01 includes crypto-bigint0.5 through optional AWS SDK SigV4a; the latest released signer inspected (1.6.3) still directly requires0.5, while the patched bigint floor is0.7.6.
+- **Alternatives considered:** an advisory ignore leaves the security gate false; an unreviewed crypto fork adds a maintenance/supply-chain burden; removing supported regional SigV4 clients would break the workflow contract.
+- **Decision:** remove the unused explicit S3/EventBridge/STS SDK SigV4a features, retain their regional SigV4/HTTP/Tokio behavior and current model versions, and upgrade affected compatible libraries plus ZIP9.1. This selects the actual local client profile already enforced by the gateway; user-image SDKs remain independent.
+- **Why:** the existing gateway fails closed for unimplemented ECDSA signing, and workflow acceptance has no multi-region AWS signing requirement. Security closure must prove the resolved graph, not merely rename or ignore a vulnerable version. Future multi-region support requires a repaired upstream signer and its own tests.
+- **Pinned by:** [runtime §7.2](./rustack-workflows-20-lambda-runtime-design.md#72-dependency-security-closure-b01), [HTTP authentication profile](./rustack-http-hardening-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-25. SDK model versions and supported AWS wire modes are preserved.
+
+## D28 — Retain an OS directory lease in image namespace capabilities
+
+- **Context:** owner/run UUIDs alone cannot exclude another process, and a coordinator-only lock can close while retained Docker cleanup still runs.
+- **Alternatives considered:** PID files/in-process maps do not establish OS exclusion; replacing a lock file splits its inode ownership; arbitrary caller-supplied UUID scopes lose the filesystem proof; following path-based symlinks can redirect managed writes.
+- **Decision:** acquire a permanent advisory-locked descriptor in a private UID-checked directory, durably publish a bounded immutable owner record, and clone the lease through the scope/pin/job/recovery lifetime. Use safe nix0.31.3 relative-descriptor operations and standard File locking on bounded blocking workers; do not expose arbitrary production scope constructors. The [current nix openat API](https://docs.rs/nix/0.31.3/nix/fcntl/fn.openat.html) returns an OwnedFd with fs enabled; [standard File locking](https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.try_lock) supplies nonblocking advisory exclusion. Verified 2026-10-26; no new package version is required.
+- **Why:** process exclusion must last through cleanup settlement, persisted corruption must fail closed, and a failed/cancelled initialization cannot authorize Docker effects. Retaining a standard File is a deliberate lint exception because Tokio has no advisory-lock API; synchronous IO is confined to blocking workers. This capability does not prove previous-run reconciliation or backend readiness.
+- **Pinned by:** [runtime §4.1](./rustack-workflows-20-lambda-runtime-design.md#41-persistent-directory-lease-and-namespace-capability), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-26.
+
+## Glossary
+
+| Term | Meaning in this specification |
+|---|---|
+| State machine revision | Immutable ASL/config snapshot captured when an execution starts; not a public Step Functions version/alias |
+| Lambda execution revision | Resolved function code plus all execution configuration captured per invocation attempt |
+| Execution | One STANDARD state-machine run, not one Lambda invocation |
+| Frame | Engine-owned state/branch/iteration context inside an execution; not necessarily a Tokio task |
+| State entry | One visit to a state; its retries share raw input and retrier counters |
+| Attempt/generation | One dispatch and its validity epoch; stale results/timers cannot complete newer work |
+| Execution environment | One function container plus its relay/netns; processes one invocation at a time and may be warm-reused |
+| RIC / RIE | Runtime Interface Client inside the function versus Runtime Interface Emulator; Rustack needs RIC compatibility, not RIE forwarding |
+| RequestResponse / `.sync` / callback | Await API/function response versus job termination versus token-authorized completion; distinct integration patterns |
+| Owned / detached child | A `.sync` child is cancelled with its parent; start-only child remains independently supervised |
+| Quarantine | A tracked environment whose cleanup is uncertain and still consumes allocation capacity |
+| Snapshot / recovery log | A completed graceful-save archive versus a crash-consistent record of accepted commands/outcomes; only the former exists in this release |
+
+## Cross-references
+
+- ← [PRD](./rustack-workflows-00-prd.md)
+- ↔ [roadmap](./rustack-workflows-80-roadmap.md), [implementation plan](./rustack-workflows-90-impl-plan.md), [survey](../docs/research/survey-stepfunctions-lambda-container-runtime.md)
+
+## D29 — Retain function output framing independently of snapshot traffic
+
+- **Context:** real Docker handlers can produce binary/flooding stdout/stderr while the control channel carries invocation results. Log snapshots must not cancel a partially consumed outer Docker record or retain unbounded output.
+- **Alternatives considered:** ordinary buffered Docker logs can accumulate response bodies; sharing control transport introduces output backpressure into invocation delivery; cancelling next() for every snapshot poisons its partial parser; blocking consumers on a full ring can block the handler.
+- **Decision:** attach live output only before function start using the existing joined upgrade transport; one retained actor owns framing and bounded channel/tail rings, preserving its pinned read future across read-only snapshot requests and prioritizing stop. Close failed/EOF sockets immediately while retaining final snapshots and join failures.
+- **Why:** snapshot and log flooding have bounded service quanta, user bytes never enter infrastructure diagnostics, and environment cleanup can join this socket independently of function/relay termination. The capture alone does not prove container exit or exact per-invocation log attribution.
+- **Pinned by:** [runtime §3.7](./rustack-workflows-20-lambda-runtime-design.md#37-retained-function-log-capture), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-26. No new dependency or version is introduced.
+
+## D30 — Materialize one immutable, bounded environment allocation plan
+
+- **Context:** container creation must bind captured function configuration to immutable image leases, namespace ownership and operator limits before any daemon side effect. Hand-built relay/function requests otherwise drift in resource, metadata and entry semantics.
+- **Alternatives considered:** per-call tag resolution breaks captured versions; assembling separate arbitrary Docker bodies permits policy drift; concatenating Env tiers leaves duplicate names with undefined process lookup precedence; inheriting daemon logging can spill unbounded output outside Rustack rings.
+- **Decision:** EnvironmentPlan owns the captured revision/leases and preallocated identities, validates policy and serializes fixed relay/function bodies; only typed create methods issue them. Compose exactly one environment entry per key with inherited→captured→authoritative precedence and explicit deletion markers. Disable daemon logging, healthchecks, restart and extra swap while retaining independent live attach capture.
+- **Why:** one plan supplies resource admission totals and immutable allocation inputs for the future environment/pool owner. Docker create futures must be Send for supervised Tokio workers, and raw request serializers must leave scope before awaits. A plan neither reserves capacity nor proves startup/reconciliation readiness.
+- **Pinned by:** [runtime §4.2](./rustack-workflows-20-lambda-runtime-design.md#42-immutable-environment-allocation-plan), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date:** 2026-10-26. No dependency/version change is required. Network none is deliberate pure-handler opt-in; bridge and resource probes remain mandatory for production enablement.
+
+## D31 — Keep environment ownership above workers and track possible wire issuance
+
+- **Context:** cancellation, task panic or a failed HTTP reply can outlive the allocation request. Releasing a count/memory/image/directory reservation before actual cleanup permits orphaned or unaccounted execution.
+- **Alternatives considered:** worker-local quota guards disappear on panic; immediate404 cannot settle an in-flight/uncertain create; classifying every Stopped/Deadline as unissued can ignore a sent request; treating all protocol errors as uncertain supervision leaks otherwise-settled quota.
+- **Decision:** a root actor retains plans, mutation phases, reservations and IO cleanup receipts above its JoinSet. A single RAII wire mutation guard moves with the accepted request, marks possible issuance before send and proves never-issued only after final disposal. Worker guards transfer control/log/bridge ownership to retained cleanup on Drop; root recovery joins workers/IO and reconciles verified IDs. Preserve Worker failure through recovery, independently of physical quota release.
+- **Why:** every accepted effect retains an owner, while validation/connect/queue failures can settle without permanent false uncertainty. Health checks reschedule after completion to avoid backlog starvation; log EOF permits an already-observed valid result but forbids reuse. Known protocol failures remain business failures once IO joins; uncertain supervision cannot be masked by an earlier protocol error.
+- **Pinned by:** [runtime §4.3](./rustack-workflows-20-lambda-runtime-design.md#43-retained-environment-owner-and-allocation-reservations), [verification](./rustack-workflows-70-verification-plan.md), [implementation](./rustack-workflows-90-impl-plan.md).
+- **Date:** 2026-10-26. This low-level owner does not replace provider admission, warm/LRU pooling, startup reconciliation/probes or exact Lambda timeout/log integration. Production Docker stays disabled until those M0 consumers pass.
+
+## D32 — Pool dispatch retains receipt-based ownership through warm return
+
+- **Context**: §4.4 warm execution must not reuse an environment after a caller abandons a ready result or a dispatch worker fails.
+- **Alternatives considered**: transferring handles to HTTP futures loses cleanup ownership; returning to the LRU immediately after send loses result-consumption cancellation; keying by redacted Debug hides configuration differences.
+- **Decision**: retain pool tasks and environment retirement receipts above the JoinSet, require a consumption receipt before warm return and hash canonical typed allocation inputs.
+- **Why**: queue, execution, warm retention and cleanup have explicit bounded owners; underlying EnvironmentManager reservations remain authoritative through quarantine.
+- **Pinned by**: [runtime §4.4](./rustack-workflows-20-lambda-runtime-design.md#44-warm-checkout-and-retained-pool-dispatch), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26.
+
+## D33 — Arm handler timeout at consumed Runtime API delivery
+
+- **Context**: A warm RIC may not poll immediately; queue/startup time must not consume the function handler timeout or extend the caller's absolute deadline.
+- **Alternatives considered**: starting at host dispatch charges queue/transport time prematurely; starting on offer charges abandoned polls; retaining protocol v1 permits an older relay to silently omit timeout enforcement.
+- **Decision**: version2 carries a validated relative timeout; the session's consumed poll receipt arms the effective monotonic deadline and a distinct correlated timeout result forces environment retirement.
+- **Why**: HTTP metadata and actor enforcement share one delivery instant, abandoned offers remain recoverable, and handler versus outer timeout preserves error semantics without replay.
+- **Pinned by**: [runtime §3.8](./rustack-workflows-20-lambda-runtime-design.md#38-delivery-based-handler-clock-and-protocol-v2), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26.
+
+## D34 — Separate invocation log windows from environment diagnostics
+
+- **Context**: Warm reuse must not return already collected logs from an earlier call; independent stdout/control streams lack a causal flush barrier.
+- **Alternatives considered**: returning the global tail leaks prior collected bytes; clearing diagnostic rings loses health evidence; inserting sleeps or rewriting images cannot establish a reliable producer-side boundary.
+- **Decision**: use acknowledged Begin/Finish actor commands and an opaque per-attempt capability around one bounded reusable4KiB window, alongside existing diagnostic rings.
+- **Why**: current-call observed output has bounded explicit ownership, silent calls cannot inherit the cached tail, and uncertain mutations forbid reuse. The advertised stream timing limit preserves honest compatibility.
+- **Pinned by**: [runtime §3.9](./rustack-workflows-20-lambda-runtime-design.md#39-invocation-scoped-log-windows), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26.
+
+
+## D35 — Keep per-call pool cleanup settlement above dispatch workers
+
+- **Context**: the Docker Executor must retain provider invocation permits through cancellation cleanup, including response-channel closure and pool worker/root failure.
+- **Alternatives considered**: dropping an invoke future only requests cancellation; using a response-channel close as cleanup proof loses physical ownership; worker-local settlement senders disappear during panic; reusing an invocation deadline can skip cleanup once that deadline expires.
+- **Decision**: expose an exclusive PoolInvocation with cancel-safe response waiting and a separate resumable cancellation-settlement operation; retain the sender beside the environment Retirement record above JoinSet and through emergency recovery.
+- **Why**: upper-layer admission can await a positive reusable/retired proof without owning or aborting lower-layer resources. Failed supervision remains uncertain even after physical recovery; queued no-allocation rejection can settle cleanly.
+- **Pinned by**: [runtime §4.5](./rustack-workflows-20-lambda-runtime-design.md#45-supervised-pool-invocation-receipt), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. This receipt does not enable production Docker or complete Executor/provider integration.
+
+
+## D36 — Compose Docker execution through the retained pool and trusted readiness port
+
+- **Context**: the Lambda provider already captures immutable revisions and supervises invocation permits; the Docker environment/pool owners now expose reusable/retired settlement proof.
+- **Alternatives considered**: HTTP loopback invocation duplicates protocol/admission; a per-call Docker client loses bounded ownership; advertising readiness from a connected socket or a directory lease bypasses required startup qualification; rewriting handler outcomes into synthetic JSON breaks byte fidelity.
+- **Decision**: implement the existing Executor using one pool call and independent settlement, with raw outcomes/resolved-version headers and one base64 tail encoding; inject a bounded synchronous readiness port from the trusted startup coordinator.
+- **Why**: actual code execution and provider response composition can be verified independently while ordinary CLI selection remains unavailable until all production reconciliation/probes are implemented. The readiness interface shares the existing trusted Rust custom-Executor boundary and is never supplied through AWS requests. Pool/environment quota rejection is distinct from Docker wire saturation that may occur after side effects; only the former maps to429, while both retain no-replay behavior.
+- **Pinned by**: [runtime §4.6](./rustack-workflows-20-lambda-runtime-design.md#46-docker-executor-and-provider-composition), [operations](./rustack-workflows-60-operations-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. No new dependency is required; this does not close M0 startup/platform acceptance.
+
+
+## D37 — Qualify actual kernel resources through the retained environment path
+
+- **Context**: production readiness must verify the daemon's real container limits without trusting declared create fields or operator user images to attest themselves.
+- **Alternatives considered**: info/inspect-only checks do not observe process isolation; a new one-off container owner duplicates uncertain-create/cleanup semantics; shell probes require image tooling and leak text; a network name can be retargeted after inspection.
+- **Decision**: pin qualified bridge selections by full ID and execute a bounded Rust probe mode from the operator-pinned relay image as a private Lambda revision under EnvironmentManager; issue private report proof only after exact kernel validation and joined retirement.
+- **Why**: probes consume the same policy/runtime path they qualify and retain existing cleanup ownership. Resource and network proofs remain independent from historical mutation reconciliation and cannot open readiness by themselves.
+- **Pinned by**: [runtime §4.7](./rustack-workflows-20-lambda-runtime-design.md#47-startup-network-qualification-and-actual-resource-probe), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Promote the already-resolved runtime serde_json dev dependency to a normal workspace dependency for bounded typed report serialization; no new library/version is introduced.
+
+## D38 — Persist container intent before possible creation and identity before deletion
+
+- **Context**: in-memory uncertain-create receipts do not survive process death; an absent name cannot exclude a late daemon commit.
+- **Alternatives considered**: label-only scans miss pending creation; negative lookup as proof loses ownership; always rejecting dirty restarts cannot reclaim positively identified resources; an unbounded append log adds retention and replay complexity.
+- **Decision**: use a bounded atomic directory snapshot of container identities, publish before create, persist a positively verified full ID before removal, and erase only after defensible settlement. Historical unknown absence remains unresolved and blocks its relay.
+- **Why**: the same retained directory capability protects filesystem transactions and daemon ownership; interrupted recovery is repeatable without replaying create or touching foreign resources. This is a container-specific part of full reconciliation, not production readiness.
+- **Pinned by**: [runtime §4.8](./rustack-workflows-20-lambda-runtime-design.md#48-durable-container-intents-and-restart-reconciliation), [implementation plan](./rustack-workflows-90-impl-plan.md).
+- **Date**: 2026-10-26. Reuse existing nix/sha2/hex dependencies and the bounded ownership worker pool.
+
+
+## D39 — Persist private image-tag intent and commitment separately
+
+- **Context**: a nested daemon tag request can commit after a failed HTTP result; in-memory image-owner phases do not survive restart.
+- **Alternatives considered**: owner-tag scans miss pending mutations; one negative lookup cannot settle an unknown tag; reissuing tag can replay effects; duplicating directory IO creates divergent durability/cancellation rules.
+- **Decision**: share the bounded snapshot transaction implementation with container records, keep a distinct bounded versioned pin encoding, and persist intent before issuance and commitment before lease publication/deletion. Retire historical containers before aliases.
+- **Why**: durable commitment permits absent-alias settlement after interrupted cleanup, while unknown absence remains conservative. Reconstructed aliases remain confined to the exact reserved namespace and never become operator-source cleanup keys.
+- **Pinned by**: [runtime §2.13](./rustack-workflows-20-lambda-runtime-design.md#213-durable-image-pin-intents-and-historical-alias-retirement), [implementation plan](./rustack-workflows-90-impl-plan.md).
+- **Date**: 2026-10-26. No new dependency or version is needed. Startup coordinator/pulls/platform acceptance remain required.
+
+## D40 — Generate exact JSON epoch timestamps before the Step Functions API
+
+- **Context**: Step Functions uses AWS JSON1.0 numeric timestamps; default chrono serde emits strings, and the existing optional KMS float helper mishandles negative fractions.
+- **Alternatives considered**: binary f64 arithmetic introduces avoidable rounding; copying the KMS helper preserves its negative-epoch defect; workspace-wide arbitrary_precision changes unrelated payload semantics; hand-editing generated files cannot survive regeneration.
+- **Decision**: resolve timestamp-format precedence in the generator and emit a JSON-specific RawValue decimal adapter, normalized by checked bounded arithmetic to millisecond precision toward zero. Select strict model generation for Step Functions: documented/nonexhaustive DTOs, required collections, typed builders, redacted diagnostics and no blanket ignores.
+- **Why**: SDK wire dates are numeric and exact at the promised precision, including negative/exponent/range edges, while other protocols retain their bindings. Oversized exponents are classified with bounded work. Serde-disabled output gets neither duplicate Debug nor unused codec modules.
+- **Pinned by**: [API §1.1](./rustack-workflows-10-api-design.md#11-executable-timestampmodel-generation-contract), [verification](./rustack-workflows-70-verification-plan.md), [implementation plan](./rustack-workflows-90-impl-plan.md).
+- **Date**: 2026-10-26. The model reuses workspace serde/chrono/typed-builder; the excluded developer generator adds the already-workspace [Tokio1.54.1](https://docs.rs/tokio/1.54.1/tokio/attr.main.html) with explicit local-IO features and independent audit/deny. No Step Functions endpoint or engine is advertised by the model alone.
+
+## D41 — Terminate HTTP ambiguity before typed registry dispatch
+
+- **Context**: the new workflow service needs AWS JSON1.0 routing, scope/authentication and bounded typed IO before the registry/ASL engine can consume it.
+- **Alternatives considered**: raw-JSON handler ports repeat parsing/limits; a default handler creates misleading service availability; suffix-based routing can leak unknown actions to S3; serializing an unchecked handler response can return a wrong operation or unbounded history.
+- **Decision**: expose typed18-action transport ports with explicit validated scope/auth configuration, source-level budgets and operation-correlated bounded responses. Couple main-program registration to the real core adapter. Preserve accepted command ownership beyond HTTP cancellation.
+- **Why**: protocol qualification is independently testable without claiming workflow execution; core keeps domain/compiler semantics and cleanup ownership. Encoded page budgets prevent successful responses from relying on unbounded allocation.
+- **Pinned by**: [API §1.2](./rustack-workflows-10-api-design.md#12-typed-http-boundary-before-registry-wiring), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse existing HTTP/auth/JSON/Tokio/async-trait dependencies. Unknown-action404 follows the current official common-error reference; no AWS error-precedence execution is claimed.
+
+## D42 — Compile bounded paths against immutable validated payloads
+
+- **Context**: the registry/compiler and every state evaluator need shared data semantics before the execution owner exists.
+- **Alternatives considered**: a general JSONPath engine admits unsupported syntax; interpreting path strings on every transition repeats validation; arbitrary Value cloning/serialization can allocate far beyond the output quota.
+- **Decision**: compile a bounded winnow subset into private typed segments; distinguish missing/single/selection results, borrow immutable payloads and materialize through a bounded writer. Validate result-target roots and prohibit array growth. Construct from borrowed trees only after structural/encoded checks; give the internal context separate byte/depth/member headroom while retaining normal limits on selected outputs.
+- **Why**: one pure implementation pins data behavior for future compiler/engine consumers without coupling core to HTTP, an SDK or Docker. Original business input bytes survive for name idempotency.
+- **Pinned by**: [ASL§2.1.1](./rustack-workflows-30-asl-design.md#211-executable-path-and-payload-foundation), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse the already resolved winnow1.0.4 and shared JSON/bytes/serde dependencies. This is a semantic foundation, not engine acceptance.
+
+## D43 — Compile Choice predicates and bound evaluation across the whole rule
+
+- **Context**: branching semantics need validated literal/Path operands and short-circuit behavior before the execution actor interprets Choice states.
+- **Alternatives considered**: arbitrary JSON inspection on each transition repeats validation; user regexes complicate resource bounds; binary64 coercion silently aliases large integers; per-child budgets let compounds multiply work without bound.
+- **Decision**: compile a private typed predicate tree, preserve left-to-right short-circuit and missing-reference errors, normalize timestamps to instants, use a bounded Unicode glob and share one step/string-byte budget across the complete predicate.
+- **Why**: a pure reusable evaluator pins semantics and makes local limits explicit before machine compilation and scheduling. It remains separate from transition-target ownership.
+- **Pinned by**: [ASL§2.4.1](./rustack-workflows-30-asl-design.md#241-executable-choice-predicate-contract), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse existing chrono, JSON and reference paths. Numeric integers use the closed±2^53 range; floats exclude its endpoints to avoid source-rounding aliases. Enable shared serde_json float_roundtrip for correctly rounded interior numeric lexemes; no arbitrary_precision or new external version is added. Timestamp fractions retain precision beyond nanoseconds. No complete Choice state/engine acceptance is claimed.
+
+## D44 — Resolve Wait sources once before monotonic scheduling
+
+- **Context**: absolute Wait timestamps truncate target fractions, while execution deadlines and timer ownership remain monotonic.
+- **Alternatives considered**: sleeping inside a pure evaluator obscures ownership; repeatedly subtracting wall clocks follows NTP jumps; defaulting invalid dynamic values hides workflow errors.
+- **Decision**: compile exactly one typed source and resolve it against validated data/context plus one supplied wall-time sample, returning a bounded relative duration. The future actor owns checked monotonic scheduling and generations.
+- **Why**: static validation, dynamic failures and AWS whole-second target behavior can be pinned without a sleeping task or dependency on the HTTP caller lifetime.
+- **Pinned by**: [ASL§2.4.2](./rustack-workflows-30-asl-design.md#242-executable-wait-source-contract), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Use existing chrono/std/reference paths. STANDARD local wait cap is365 days; overall execution deadlines are independent. This is source evaluation, not scheduler acceptance.
+
+## D45 — Compile intrinsics with shared budgets and preserve format escape provenance
+
+- **Context**: Parameters/ResultSelector and the machine compiler need one reusable, bounded expression implementation.
+- **Alternatives considered**: host formatting/splitting gives different semantics; reparsing on every state entry repeats validation; decoding all format escapes before slot recognition reinterprets escaped braces; per-call budgets multiply work under nesting; infallible UUID helpers can panic on entropy failure.
+- **Decision**: compile the12-call allowlist into a private AST, preserve literal formatting provenance, share work/text/materialization budgets and encode borrowed collection views before owning results. Inject a typed UUID source and use fallible OS entropy in the concrete convenience adapter.
+- **Why**: fixed bounds and historical independent edge inputs make expression behavior reviewable before template/compiler consumers. Async execution owners keep entropy acquisition off the scheduler loop.
+- **Pinned by**: [ASL§2.3.1](./rustack-workflows-30-asl-design.md#231-executable-expression-contract), [semantic memo](../docs/research/spike-stepfunctions-semantic-oracle.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Add normal dependency edges to already-resolved getrandom0.4.3/uuid1.26.0 without updating external versions. Formal scalar Format is selected over the historical cloud's object formatting extension.
+
+## D46 — Compile templates and keep original state input outside resource phases
+
+- **Context**: reusable Parameters/ResultSelector expansion must share limits, and result merging must target raw state input across an external call.
+- **Alternatives considered**: per-field fresh budgets allow aggregate work amplification; building expanded Value trees before sizing defeats output quotas; merging into prepared parameters changes state semantics; owning a resource inside a data helper obscures cancellation.
+- **Decision**: compile normalized collision-free templates, encode borrowed prepared views under shared budgets, and expose pure prepare/finish phases requiring the owner to retain original input.
+- **Why**: one implementation pins exact transformation ordering before state compilation/execution; future actor ownership and callback provenance remain explicit.
+- **Pinned by**: [ASL§2.2.1](./rustack-workflows-30-asl-design.md#221-executable-templates-and-data-flow-phases), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. Reuse compiled paths/intrinsics and bounded serde output; no dependency changes. This does not close machine compilation or resource execution acceptance.
+
+## D47 — Compile sequential machines into immutable scoped indices
+
+- **Context**: the registry/execution actor needs validated state graphs and precompiled operations without runtime map/string interpretation.
+- **Alternatives considered**: a runtime ASL walker repeats validation; a DAG restriction rejects legal loops; suffix-only resource routing accepts unsupported integrations; installing partially compiled definitions breaks revision invariants.
+- **Decision**: use one bounded side-effect-free compiler, strict sequential profile, lexical scoped StateIds, typed read views and immutable original-byte artifacts. Compile all control-flow targets and policies before graph acceptance.
+- **Why**: the same artifact/error drives Create/Update/Validate; later actor work consumes validated IR and concrete adapter availability remains a composition-root decision.
+- **Pinned by**: [ASL§1.1](./rustack-workflows-30-asl-design.md#11-executable-sequential-compiler-and-indexed-ir), [API](./rustack-workflows-10-api-design.md), [verification](./rustack-workflows-70-verification-plan.md).
+- **Date**: 2026-10-26. No new external dependencies; complete M1 requires registry/actor/real Lambda evidence beyond compilation.
+
+## D48 — Drive sequential execution through explicit effects and attempt generations
+
+- **Context**: compiled sequential states need deterministic execution and deadline/recovery semantics before asynchronous resource composition.
+- **Alternatives considered**: awaiting resources inside the interpreter obscures ownership; reevaluating parked waits reacts to wall jumps; per-attempt input mutation breaks Retry; dropping futures does not prove cleanup.
+- **Decision**: one bounded synchronous driver owns frame transitions and emits explicit dispatch/timer/cancellation obligations. The outer supervisor retains resource and evaluation ownership; the driver never certifies cleanup or API/history readiness.
+- **Why**: injected clock/random/completion inputs make deadline, stale-result and recovery behavior independently testable; the same frame can later be scheduled with Parallel/Map siblings.
+- **Pinned by**: [ASL§3.1](./rustack-workflows-30-asl-design.md#31-sequential-transition-driver), [integrations§1](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction).
+- **Date**: 2026-10-26. Keep Docker-image work deferred under the user's workflow-first priority.
+
+## D49 — Retain invocation cleanup and atomically publish bounded persistent history
+
+- **Context**: the deterministic driver needs an asynchronous owner that survives caller loss, deadline races and uncertain cleanup.
+- **Decision**: use a registry-owned JoinSet supervisor, watch control/read lanes, retained bounded CPU proposals with final deadline checks, and synchronous object-safe task admission whose adapter already owns start lifetime. Keep business completion separate from cleanup and retain permits through quarantine. Publish official history and outcome as one immutable read view over shared64-event pages, with terminal capacity reserved above worker lifetime.
+- **Why**: neither dropping a waiter nor a closed response lane establishes cleanup; copied full histories scale quadratically; independent outcome/history writes expose inconsistent termination.
+- **Pinned by**: [ASL§3.2](./rustack-workflows-30-asl-design.md#32-supervised-sequential-runtime-and-history-publication), [integrations§1](./rustack-workflows-40-integrations-design.md#1-internal-ports-and-dependency-direction), [API§6](./rustack-workflows-10-api-design.md#6-history-and-pagination).
+- **Date**: 2026-10-26. Reuse resolved Tokio/model dependencies; main registration, registry, real bridge and final image acceptance remain required.
+
+## D50 — Return an owned Lambda submission before awaiting admission
+
+- **Context**: an async admission waiter may fail after queue ownership transfers; absence of a returned handle is not cleanup proof for Step Functions.
+- **Decision**: split prequeue capture/submission from admission observation, retain the invocation handle through result and settlement, and propagate external cancellation into the shared invocation context. The binary bridge queues synchronously, owns start/result/cleanup workers independently of ASL observers and preserves uncertain handles plus capacity.
+- **Why**: the bridge must distinguish prequeue errors, business completion and resource settlement without hidden retries or disabled-runtime fallbacks. Ordinary Invoke keeps its public behavior through the same receipt.
+- **Pinned by**: [integrations§1.1](./rustack-workflows-40-integrations-design.md#11-owned-admission-receipts-and-the-binary-lambda-bridge), [ASL§3.2](./rustack-workflows-30-asl-design.md#32-supervised-sequential-runtime-and-history-publication).
+- **Compatibility**: the bridge profile accepts plain names and complete same-scope ARNs; ordinary Invoke keeps same-account partial references with an explicit account guard. Cleanup observer expiry retains the same invocation handle until Clean or permanent quarantine.
+- **Date**: 2026-10-26. Qualify actual Native workflow calls before the deferred Docker image work; main registration and full milestone gates remain required.
+
+## D51 — Linearize resource revisions and execution names in one retained registry
+
+- **Context**: the execution owner and real Lambda bridge need resource identity, revision capture, idempotency and deletion semantics without coupling core to HTTP.
+- **Decision**: a bounded registry actor accepts compiled/validated domain commands, atomically registers fresh executions, retains revision/record permits through immutable snapshots and separates24h record retention from90day name tombstones. Stop observes the engine outside the registry lane. A unique controller retains shutdown and abnormal ownership.
+- **Why**: independent CRUD maps race update/start and delete/recreate; response loss is not cancellation; record expiry must not reuse an execution ARN early.
+- **Ownership refinements**: independent immutable tag-version admission prevents retained snapshots from bypassing metadata limits; pending blocking entropy and its accepted command stay in root state. Cleanup-aware TTLs retain uncertain graphs, and Stop is an owned command before its caller observes termination.
+- **Pinned by**: [API§3.1](./rustack-workflows-10-api-design.md#31-executable-registry-ownership-and-resource-lifecycle), [operations](./rustack-workflows-60-operations-design.md).
+- **Date**: 2026-10-26. Main/API pagination and the retained preparation adapter remain required before ordinary SDK service acceptance; Docker image work remains deferred.
+
+## D52 — Retain API preparation and charge shared immutable pagination captures
+
+- **Context**: typed HTTP and the real registry need one actual handler without making observer cancellation own commands or multiplying uncharged snapshot vectors.
+- **Decision**: a bounded binary-support API root retains worker admission above preparation/response CPU jobs and registry observation. Its actor-owned PageStore binds opaque256-bit handles to complete queries and shares a byte-charged immutable capture across continuation cursors. Reverse history uses the core complete-page projection.
+- **Why**: unowned spawn_blocking work outlives HTTP timeout; latest-state cursors drift; token-count limits alone permit unbounded high-water vector memory.
+- **Refinements**: count actual Vec capacity, preserve typed diagnostics and final deadline checks, and keep RegistrySupervisor alive independently of its command senders. Capture revision publication time for DescribeStateMachineForExecution. Generated common statuses preserve402/408; tag-specific errors follow the current action contract.
+- **Pinned by**: [API§1.3](./rustack-workflows-10-api-design.md#13-retained-real-api-adapter-and-preparation), [API§6.1](./rustack-workflows-10-api-design.md#61-owned-stable-pagination-and-reverse-history).
+- **Date**: 2026-10-26. Main/settings/capability composition, both ordinary SDKs and final image/platform qualification remain required; Docker image work remains deferred.
+
+## D53 — Keep composite workflow controllers unique and let transport own modeled timeouts
+
+- **Context**: gateway health shares RuntimeWorkers, while child controllers require unique mutable resumable joins and Lambda must outlive accepted workflows.
+- **Decision**: main retains WorkflowSupervisor outside the shared health view. Register the real opt-in target-family router ahead of heuristic routers, validate supported YAML quotas, and select Lambda support from an actual matching provider. Quiesce API→grace→registry→bridge before Lambda; final cleanup skips grace and signals retained controllers on observation expiry. The bounded Step Functions transport owns the request deadline and AWS timeout envelope.
+- **Why**: a mutex would obscure unique shutdown ownership; generic gateway timers can preempt modeled408 responses; historical invocation diagnostics are not supervisor failures.
+- **Pinned by**: [operations§1.6](./rustack-workflows-60-operations-design.md#16-executable-m1-gateway-composition), [shutdown](./rustack-workflows-60-operations-design.md#3-shutdown-cancellation-and-snapshots).
+- **Date**: 2026-10-26. Ordinary Rust SDK/boto3 real service acceptance and later workflow milestones remain required; Docker work remains deferred by user priority.
+
+## D54 — Qualify ordinary SDKs against the owned real binary and independent case catalog
+
+- **Context**: transport-only SDK and generic Hyper/Native fixtures cannot establish real gateway/core/SDK acceptance, and a test-process timeout must not orphan its Python runner or bootstrap children.
+- **Decision**: run ordinary Rust SDK and pinned boto3 against separate strict-auth real Rustack server processes with explicit Native execution. Both use17 source-linked literal outcome cases plus all15 M1 control actions. Retain server/process/file ownership independently; directly spawn persistent-environment Python, bound/join helpers and streams, then prove marker PID absence after coordinated shutdown. A consumed-event gate pins running idempotency and definition revision isolation without a scheduling window.
+- **Why**: independent expectations prevent the interpreter from becoming its own oracle; exact causal links, concrete revision identities and page bounds make SDK passes meaningful under slow CI and faulty responses. Latest aws-sdk-sfn requires a coherent aws-config1.13/shared runtime cohort rather than the prior incompatible protocol type.
+- **Pinned by**: [SDK contract](./rustack-workflows-70-verification-plan.md#m1-ordinary-sdk-acceptance-against-the-real-binary), [catalog](../tests/workflows/sdk-cases.json).
+- **Date**: 2026-10-26. This closes the ordinary SDK feature-acceptance gap for the selected M1 profile, not B06 security remediation, cloud differential parity, later workflow features or final Docker/platform qualification. Docker image work remains deferred by user priority.
+
+## D55 — Share compilation budgets and source bytes across lexical structured scopes
+
+- **Context**: Parallel branches and Inline Map processors must reuse compiled semantics without allowing cross-scope jumps, resetting resource ceilings or treating legacy Map Parameters as a whole-state transform.
+- **Decision**: retain nested immutable machine Arcs with lexical indexes, one root source allocation, aggregate state/unit budgets and a16-level scope ceiling. Preserve root/nested provenance and reject branch-artifact promotion at registry Create/Update admission. Normalize legacy selector/processor spellings independently, keep item selection outside ordinary Map data flow, and compile enclosing recovery targets locally. Explicit trusted Structured compilation does not enable sequential runtime or API admission.
+- **Why**: scope ownership makes frame scheduling unambiguous; a single compilation context bounds nested memory/work; staging admission preserves the current executable service contract while P3 runtime dependencies land.
+- **Pinned by**: [ASL§1.2](./rustack-workflows-30-asl-design.md#12-structured-scope-compilation-and-staged-runtime-admission), [P3](./rustack-workflows-90-impl-plan.md#6-p3--structured-fan-out-and-nested-jobs-closes-m2), [AWS Inline Map fields](https://docs.aws.amazon.com/step-functions/latest/dg/state-map-inline.html), [ASL scope semantics](https://states-language.net/spec.html#parallel-state).
+- **Date**: 2026-10-26. P3 scheduling, sibling cleanup, causal history and nested integration remain required. Docker image work remains deferred by user priority.
+
+## D56 — Interpret structured states through lazy indexed effects and explicit join recovery
+
+- **Context**: compiled branch scopes need executable input/context/result semantics before an actor may schedule them. Eager selection/spawning loses budgets, original-input merges, RetryCount context and cancellation ownership.
+- **Decision**: expose an explicit pure structured-frame constructor, immutable lazy FanoutPlans and generation-checked joins. Separate Lambda completion from round completion, bound ordered aggregation before materialization, preserve typed evaluation failures and use shared ordered recovery. Keep the existing supervisor/API admission gated until bounded concurrent ownership and causal history land.
+- **Why**: a single semantics implementation serves Parallel and Map, normalizes legacy selectors correctly and prevents a late child result from settling a retry or an elapsed execution. Effects carry the original deadline; owners remain responsible for shared transitions, result-retention charges and cancellation joins.
+- **Pinned by**: [ASL§3.3](./rustack-workflows-30-asl-design.md#33-deterministic-structured-frame-effect-protocol), [AWS item selection](https://docs.aws.amazon.com/step-functions/latest/dg/input-output-itemselector.html), [AWS Inline Map](https://docs.aws.amazon.com/step-functions/latest/dg/state-map-inline.html).
+- **Date**: 2026-10-26. The concurrent frame owner, causal history, sibling cleanup and child integrations remain required. Docker work remains deferred by user priority.
+
+## D57 — Own a bounded frame tree and separate business notification from retirement
+
+- **Context**: nested fanout needs one transition/deadline budget, failure cleanup barriers and capacity accounting that cannot deadlock or release ownership on business completion.
+- **Decision**: one synchronous frame scheduler emits typed history/resource updates, lazily seeds descendants, charges global/local frame and aggregate-slot pools, and requires explicit call retirement. Successful outputs may propagate before cleanup; failed rounds recover only after complete subtree retirement. Preserve terminal failure origin independently of historical diagnostics. Queued notifications retain their frame slots until emission; propagated evaluation failures retain their original classification/cause with the typed source.
+- **Why**: frame/attempt identities reject stale work, failed joins cannot replay uncertain siblings, and a join-only capacity cycle fails explicitly. Slot byte charges bound intermediate aggregation separately from frame payloads and official history.
+- **Pinned by**: [ASL§3.4](./rustack-workflows-30-asl-design.md#34-bounded-frame-scheduler-and-retirement-protocol), [P3](./rustack-workflows-90-impl-plan.md#6-p3--structured-fan-out-and-nested-jobs-closes-m2).
+- **Date**: 2026-10-26. Actual asynchronous task ownership, concurrent causal history and nested integrations remain required; Docker work remains deferred by user priority.
+
+## D58 — Fence asynchronous scheduler updates and retain frame lineage above accepted IO
+
+- **Context**: moving a unique scheduler into bounded CPU work must not let Stop/deadline lose to speculative success, or let a panic release accepted-call frame capacity. Concurrent history needs per-frame predecessors rather than the global last event.
+- **Decision**: an explicit structured supervisor path owns one scheduler and joined resource watchers. Fresh control checks fence each CPU update; forced control discards speculative effects and drains returned bookkeeping. Accepted calls retain immutable ancestor-frame leases in the supervisor ledger before port admission. Validate causal journal predecessors and project typed round/iteration metadata.
+- **Why**: scheduler cloning and actor mutexes are unnecessary; physical ownership remains independent of business results and CPU observation. Equal branch AttemptIds cannot collide, and a clean watcher join cannot discard its unread completion.
+- **Pinned by**: [ASL§3.5](./rustack-workflows-30-asl-design.md#35-asynchronous-structured-resource-owner-and-commit-fence), [AWS history DTO](https://docs.aws.amazon.com/step-functions/latest/apireference/API_HistoryEvent.html).
+- **Date**: 2026-10-26. Actual consuming-service Native/SDK acceptance and nested integrations remain required; Docker remains deferred by user priority.
+
+## D59 — Bind service compilation to the registry's installed execution profile
+
+- **Context**: the structured owner is qualified as an explicit library path; enabling API compilation without matching registry admission and configured shared frame budgets would advertise unusable definitions.
+- **Decision**: retain Sequential library defaults and add an immutable registry state profile read by API preparation. Main selects Structured and configures shared/global frame/result caps. Choose the structured runtime only when the captured root artifact requires it, preserving sequential event semantics. Reject unsupported artifacts before publication and roll back failed Start without name/record mutation.
+- **Why**: one trusted composition root governs Create/Update/Validate and execution; no client-supplied profile or unimplemented quota is accepted. Independent real SDK structured/lifecycle cases gate eight-state capability reporting.
+- **Pinned by**: [ASL§3.6](./rustack-workflows-30-asl-design.md#36-structured-service-composition-and-capability-binding), [operations budgets](./rustack-workflows-60-operations-design.md#12-tunable-budgets).
+- **Date**: 2026-10-26. Nested jobs/callbacks/persistence and final Docker image/platform gates remain required; Docker work remains deferred by user priority.
+
+## D60 — Atomically start and subscribe to owned child executions without a registry cycle
+
+- **Context**: nested Tasks need fast-child observation, bounded independent waiting and cancellation ownership before ASL admission can be enabled.
+- **Decision**: a Weak registry port transfers a retained child request with an exact parent-record capability. Registry commit validates lineage/cycles and publishes Start plus captured watch/owned relation atomically. An independent child-call pool mirrors the runtime open ceiling and holds no ordinary command/Task/Lambda dispatch permit. Observe business outcome and cleanup separately; detach RequestResponse at acceptance.
+- **Why**: caller loss cannot orphan accepted owned work, subscription cannot miss a fast child, and waiting parents cannot starve child dispatch or metadata/Stop admission. Explicit DAG checks reject idempotent self/ancestor cycles while preserving ordinary replay/name rules.
+- **Pinned by**: [integrations§4.1](./rustack-workflows-40-integrations-design.md#41-atomic-child-execution-registry-port), [nested semantic oracle](../docs/research/spike-stepfunctions-semantic-oracle.md), [AWS nested retry error](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-nested-workflows.html).
+- **Date**: 2026-10-26. Qualify the registry port before ASL child dispatch/history/service SDK integration. Docker remains deferred by user priority.
+
+## D61 — Bind nested ASL Tasks through registered structured owners
+
+Route child-dependent machines, including sequential machines, through the existing frame owner. A one-shot gate publishes the exact parent record only after atomic registry insertion. Retained child Task workers hold frame leases and bounded CPU receipts without acquiring Lambda/Task dispatch permits. TaskSubmitted carries actual accepted child identity; physical cleanup remains independent of business completion. See [integrations §4.2](./rustack-workflows-40-integrations-design.md#42-asl-binding-registration-gate-and-retained-child-task-worker). This reuses the reviewed atomic port rather than introducing HTTP polling or another child manager. Service capability requires Native and both SDK qualification; callback and Docker work remain separately gated.
+
+## D62 — Retain callback protocol ownership before ASL activation
+
+Implement integrations§5.1 as a separate bounded token actor: hash-only indexes, secret-wrapped256-bit tokens, one-shot invocation gate with provisional callback, independent revocation, replaceable heartbeat timers and closed-classification capacity reserved at mint admission. Capture execution/frame/generation and retain tombstones through parent execution retention. Accepted API actions and observer lifetimes remain separate. This foundation precedes ASL token injection/provenance redaction and public routing; callback capability stays false until real handler/SDK qualification. Docker remains deferred.
+
+## D63 — Track callback parameter provenance before serializing history
+
+Use one bounded template evaluation to produce actual outbound Parameters and a distinct null-redacted CallbackHistory. Classify compiled context-token paths and intrinsic dependencies, propagate sensitive InputPath into data-root selections, and never scan arbitrary business data or evaluate nondeterministic intrinsics twice. Keep injected context scoped and zeroize its token when the final sensitive context Arc drops. The official TaskScheduled schema has no truncation-details field: retain its required parameters JSON with redactions and document the local policy; mark omitted callback Lambda result data on TaskSubmitted where the model provides outputDetails. See [integrations§5.2](./rustack-workflows-40-integrations-design.md#52-single-evaluation-callback-parameters-and-history-provenance). This pure boundary precedes ASL/Lambda/API consuming integration and does not enable callback capability.
+
+## D64 — Observe Lambda business return before callback cleanup
+
+Transfer a unique scoped/frame-bound invocation reporter out of CallbackTask into an explicit optimized Lambda command. Capture the actual provider response time before mapping/cleanup; publish bounded typed metadata or failure once, while retaining physical cleanup independently. Callback-mode success ignores the synchronous business body, and heartbeat timing uses the captured return time with provisional receipt-time fencing. The current provider emits responses after backend cleanup; this observation does not claim the earlier handler Runtime API return. Preactivation heartbeats remain no-ops. Ordinary Lambda modes retain their contracts. See [integrations§5.3](./rustack-workflows-40-integrations-design.md#53-observed-synchronous-lambda-return-and-independent-cleanup). This port composition precedes actual ASL callback scheduling/public API activation; final real callback handler/SDK and Docker/image/platform gates remain.
+
+## D65 — Assign callback attempt identity before materializing credential parameters
+
+Use a distinct callback integration and pure CallbackDispatch effect, with an independent trusted compiler capability. Capture credential-free original input/context and resolve timeout/heartbeat before token registration; materialize once only after the async owner holds the exact registered token. Keep scheduled callback history typed and callback submission metadata explicitly truncated. Track callback calls through the existing frame/generation/retirement protocol; preserve sequential/runtime/registry/API admission gates until the retained async consumer is installed. See [integrations§5.4](./rustack-workflows-40-integrations-design.md#54-deferred-asl-callback-instruction-and-pure-effect-boundary). This changes effect ordering without introducing fake parameters or enabling unsupported execution.
+
+## D66 — Retain registered callback execution above token, CPU and physical-call ownership
+
+Extend the atomic parent gate to the exact ExecutionSnapshot, bind callback admission to an installed real registry, and consume deferred callback effects under the structured actor. A retained worker prepares once, waits for causal Scheduled-history acknowledgment, then invokes the observed Lambda port. Separate physical dispatch lifetime from external callback waiting; charge retained callback/preparation data to shared/local result budgets and keep unknown receipts on panic. Preserve evaluation-origin failures and typed heartbeat timeout history. See [integrations§5.5](./rustack-workflows-40-integrations-design.md#55-registered-asynchronous-callback-owner). Public API/main activation remains gated until handler/SDK acceptance.
+
+## D67 — Route public callback commands through the installed registry binding
+
+Retain the immutable CallbackRegistry in Registry shared admission and expose typed submit_callback under its captured scope. Derive API callback compiler support from that same binding; never accept an unrelated callback actor argument or a capability boolean. Reuse retained CPU/API admission and CallbackAck semantics, preserve typed static error mappings and emit the documented empty callback success body. See [API§1.4](./rustack-workflows-10-api-design.md#14-registry-bound-public-callback-adapter). Main activation and handler-originated SDK acceptance remain consuming work; Docker stays deferred.
+
+## D68 — Install the real callback root with main-service lifecycle ownership
+
+When the actual selected Lambda port exists, compose one scoped bounded callback registry before Registry/API, retain its unique controller between registry and bridge shutdown, and derive capability/health from that installed root. Enforce four validated YAML quotas and shared result-byte limits. Qualify real signed Rust SDK/boto3 callbacks from actual Native handlers, with explicit post-response gates and independent consumed-PID/history evidence; do not infer Docker/network or AWS background-execution guarantees. See [operations§1.7](./rustack-workflows-60-operations-design.md#17-executable-callback-service-composition) and [verification](./rustack-workflows-70-verification-plan.md).
+
+## D69 — Patch the complete compression graph before workflow archive import
+
+Upgrade direct snapshot zstd to the patched0.14.3 cohort and apply a provenance-checked, source-identical squib-loader0.2.0 path overlay whose only dependency change selects that cohort. Preserve upstream metadata/notice, all other Squib package identities and snapshot v2 wire semantics. Qualify old-frame compatibility, abandoned-context isolation, synthetic kernel decompression bounds and fresh audit/deny without new ignores. See [operations§4.1](./rustack-workflows-60-operations-design.md#41-patched-compression-cohort-before-workflow-persistence). No VM/Docker work or upstream publication is authorized by this dependency maintenance step.
+
+## D70 — Preflight the complete CBOR section before typed archive allocation
+
+Install one borrowed structural preflight and capped fallible encoder in the existing snapshot CBOR helpers before workflow import. Enforce the explicit v2 profile, decoded-key uniqueness, byte/depth/node/collection/scalar/key ceilings, exact single-root consumption and redacted failures. Keep existing envelope/DTO/codec semantics; workflow staging, compilation and live history quotas remain separate required work. See [operations§4.2](./rustack-workflows-60-operations-design.md#42-bounded-cbor-import-boundary).
+
+## D71 — Preserve a sealed registry cut and export durable rows after joined cleanup
+
+Move registry resources, terminal immutable views and name reservations into a single retained capture only after the root proves clean execution shutdown. Preserve their original allocation charges and one paired-clock expiry projection. Export versioned deterministic data-only rows under a conservative validated source-copy budget, with exact captured definitions/input/history and no live/token/pagination/diagnostic state. Keep main persistence unavailable until staged restore and archive registration follow. See [operations§3.1](./rustack-workflows-60-operations-design.md#31-sealed-registry-ownership-and-durable-export).
+
+## D72 — Stage charged terminal graphs behind an exclusive startup restore lease
+
+Decode bounded schema1 data, validate all references/profile/history, compile all revisions and reserve the existing registry/history quotas in a caller-owned CPU preparation phase. An exact-instance startup lease blocks business admission and reopens only after failed/dropped graph cleanup. Commit the complete graph once through the actor mailbox; restore no live deadlines/frames/tokens and convert unexpected RUNNING data to a locally interrupted terminal record without dispatch. Explicit imported retention deadlines preserve remaining reservations across configuration changes. See [operations§3.2](./rustack-workflows-60-operations-design.md#32-startup-only-atomic-registry-restore).
+
+## D73 — Consume terminal workflow snapshots through owned main archive work
+
+Split the durable registry document into strict data-only metadata and keyed history parts inside the existing v2 service meta/data archives. Keep one quota-bounded archive actor/CPU join and exact Registry commit receipt alive across observation loss, and close/join that owner during final cleanup before Registry destruction. Restore all services before binding; prove workflow/bridge/provider quiescence before publishing a generation. Drain started sibling snapshot tasks before shared staging cleanup on failure. Qualify actual named-snapshot Native process restart, fresh handle epochs and no replay before advertising resources-and-history. See [operations§3.3](./rustack-workflows-60-operations-design.md#33-main-workflow-archives-and-startupshutdown-ownership).
+
+## D74 — Measure pure workflow latency and loop responsiveness through the real binary
+
+Use the ordinary signed SDK and existing retained server owner for100 complete50-state pure executions and100 one-slot loop/Stop cycles, plus explicit history exhaustion under health probes. Include SDK/HTTP/polling overhead in the measured interval and validate exact output/history independently. Emit bounded raw samples and nearest-rank summaries only after process cleanup. Keep existing semantic fixture limits unchanged via a separate performance profile. Current-host data never substitutes for the specified Linux reference or final image/platform/IaC acceptance. See [verification§5.1](./rustack-workflows-70-verification-plan.md#51-native-host-pure-workflow-workload-and-responsiveness).
+
+## D75 — Freeze exact native resource inventories before execution and document the installed profile
+
+Bind the existing Native/SDK/HTTP SDK targets to a strict reviewed manifest and actual same-feature ignored-test listings. Reject drift before running resource cases, without executing commands from manifest text. Consume the documented pure ASL through an owned strict-auth binary with a typed Pure fixture, separate from Native bootstrap ownership. Provide an explicit serial native-workflow-only verifier and an accurate English operator guide; do not substitute it for pending image/platform/IaC/reference or final release qualification. See [verification§3.1](./rustack-workflows-70-verification-plan.md#31-exact-resource-suites-and-documented-pure-smoke).
+
+## D76 — Persist installation identity and fence each owned Docker connection
+
+A socket path can lead to another daemon after restart or while a wire is alive. Persist the validated canonical nonnil engine UUID alongside the directory owner before any runtime-owned mutation; first binding requires both journals empty, and an existing different binding never resets automatically. Return a private exact-lease-bound port and retain its lease through envelopes. Verify ID with bounded GET /info on the same fresh HTTP connection used for each requested operation, before marking mutation issuance. Refuse a closed checked connection rather than reconnecting. This consumes W217 without treating identity as authentication or replacing complete historical discovery/readiness. See [runtime§4.9](./rustack-workflows-20-lambda-runtime-design.md#49-durable-daemon-binding-and-connection-local-identity-fences). No new dependency is required; same-UID/daemon adversaries and cloned engine identities remain outside the local operator contract.
+
+## D77 — Drain recorded effects and audit complete observed namespaces without adoption
+
+Compose historical container-before-pin retirement under an exact bound lease, then require untruncated all-state owner-container lists and a bounded full image-tag prefix scan before reporting zero remaining. Existing operational limit64 listings and reference globs are not complete absence proofs. Fail closed on current-run records, unrecorded owned resources, inventory limits and late observations; never turn names/labels into authority to adopt/delete an effect without its journal. Empty observations cannot discharge unknown intents or pre-journal legacy uncertainty. This produces data-only counters for the future exclusive startup coordinator, not readiness. See [runtime§4.10](./rustack-workflows-20-lambda-runtime-design.md#410-recorded-namespace-retirement-and-complete-observed-inventories).
+
+## D78 — Isolate controlled pull streams and retain terminal ownership before pin preparation
+
+Keep never-pull as default; only a missing initial image lookup may trigger an explicitly allowlisted ifMissing pull with selected secret credentials. Use a dedicated bounded wire lane and incremental bounded NDJSON rather than ordinary response collection. Retain the accepted request through cancellation/deadline and actual driver join, then revalidate image/platform/defaults/size before private pin/publication. Remote cache effects may outlive a closed Docker request; never clean operator source tags or treat progress/cache changes as a live revision. On abrupt wire-root failure, transfer accepted exchanges to retained fallback cleanup and join them after signalling stop; never abort their exchange futures and detach HTTP drivers. Main YAML/auth-file/startup consumes these library types later. See [runtime§2.14](./rustack-workflows-20-lambda-runtime-design.md#214-controlled-if-missing-pulls-and-retained-progress-transport).
+
+
+## D79 — Validate operator Docker configuration and load explicit private YAML credentials
+
+Reuse shared settings/budgets and existing domain types; keep config parsing pure and selection gated until complete startup evidence exists. Load only an explicit private regular file under bounded retained read-only workers and no-follow descriptor traversal. Decode a fixed shallow YAML event schema directly into secret credential types, rejecting duplicates/aliases/tags/coercion. Reuse the existing yaml-rust2~0.11.1 cohort rather than adding a second parser/version; current0.13.0 was checked and its newer changes do not alter the selected event behavior. Consolidate the pull timeout default at300s. See [operations§1.8](./rustack-workflows-60-operations-design.md#18-validated-docker-settings-and-private-registry-credential-files).
+
+## D80 — Prove the configured gateway from the actual function network
+
+Add a pinned one-shot endpoint probe with independently observed gateway instance identity and a reserved fixed diagnostic response. A host connection, caller echo, cached public status or boolean does not prove function reachability. Require matching actual resource evidence, exact retained inputs and joined retirement before a private EndpointProbe receipt. Own HTTP/TLS futures under one absolute deadline and explicit aws-lc/webpki trust; do not install ambient proxies/roots or authentication bypasses. This component remains a production startup prerequisite, not ordinary Docker activation. See [runtime§4.11](./rustack-workflows-20-lambda-runtime-design.md#411-container-origin-gateway-reachability-evidence).
+
+
+## D81 — Consume startup receipts in one retained production owner
+
+Use a new immutable owner magic as a journal-before-effect provenance/downgrade barrier, never upgrade legacy uncertainty from empty inventories. Qualify the exact bound runtime graph behind a diagnostic-only same-listener phase, install private live receipts, and retain one ordered resumable cleanup owner through failure/cancellation. Main consumes fallible Lambda shutdown and advertises only actual selected-platform/image/endpoint capabilities. See [runtime§4.12](./rustack-workflows-20-lambda-runtime-design.md#412-production-startup-provenance-and-retained-owner-composition). Immutable restored-image lease reacquisition and the full platform/release gates remain mandatory consuming work.
+
+
+## D82 — Qualify custom RIC and immutable revisions through ordinary startup
+
+Use an independent bounded Rust RIC in an explicitly built test image and ordinary signed clients to consume the production runtime, preserving fixture source content IDs. Own any deliberately movable test source alias separately from runtime-private pins, refuse preexisting/conflicting tags and clean only its captured identities. Distinguish absent/empty argv and inspect actual argv/cwd/results inside the image. Real concurrent functions must reject forged/stale Runtime API completions before valid responses. These consuming semantic cases do not replace the remaining fault/admission/archive/platform matrix. See [verification D82](./rustack-workflows-70-verification-plan.md#custom-rust-ric-and-immutable-image-revision-qualification-d82).
+
+
+## D83 — Reject impossible memory charges and qualify real fault settlement
+
+Separate a permanently impossible function+relay charge from temporary environment contention. Reject the former before admission and pool queue/eviction as typed MemoryLimit mapped to429, while preserving bounded temporary waiting. Consume ordinary Docker through real failing user code and causal stage holds, not timers that infer invocation progress. Independent bounded read-only daemon observations prove physical retirement; a later PID barrier hands graceful server shutdown to its existing Rust child owner while the128 accepted-work backlog remains held. Keep global32 unit/state evidence distinct from two-container-pair functional observations. See [verification D83](./rustack-workflows-70-verification-plan.md#real-image-faults-caller-cancellation-and-public-admission-d83).
+
+
+## D84 — Control actual daemon acknowledgments, not fabricated runtime state
+
+Use a fixture-owned transparent Unix proxy to hold actual Create/private-Tag acknowledgments and pending owned DELETE requests. Preserve same-connection daemon identity, duplex attach and exact retained ownership; independently observe the real daemon. Keep the proxy alive until the exact ordinary server has stopped, including semantic-error paths. A frozen statically scoped Docker resource inventory complements the Native manifest without claiming complete release/platform acceptance. See [D84 verification](./rustack-workflows-70-verification-plan.md#management-io-faults-and-exact-docker-resource-inventory-d84).
+
+
+D84's consuming tests also require admission to cross the ownership boundary: an image actor record keeps the accepted deployment permit above worker/root failure, and a shared artifact receipt acknowledges only validated consumption or successful image CAS. A queued result is not consumption. Canceled/failed retirement and live-pin storage use their respective retained quotas. Diagnose full transport loss through readiness/business rejection; retain diagnostics and physical cleanup without adding implicit owner revival or a new health-triggered listener shutdown policy.
+
+
+## D85 — Expire actual IO and interrupt a real retained pull stream
+
+Keep caller/barrier lifetimes beyond the production IO deadline and prove physical/journal settlement. Isolate pull interruption from registry failure: truncate only the runtime-facing chunked response, retain/drain the actual daemon response and require positive completion before separately owned cache-reference cleanup. Build genuine negative image metadata/process artifacts rather than replacing daemon observations. The exact Docker functional inventory grows explicitly; it still cannot certify full release/platform acceptance. See [D85 verification](./rustack-workflows-70-verification-plan.md#io-expiration-interrupted-pulls-and-negative-images-d85).
+
+D85 execution correction: Engine1.53 returns404 for a captured image whose selected platform is absent. Translate only this direct platform-qualified operation404 to invalid image metadata; preserve initial lookup404 and typed identity/transport/other-status errors. Do not parse daemon message text. This corrects public failure provenance rather than weakening the negative artifact assertion.
+
+
+## D86 — Distinguish work throttling from bounded physical-resource waiting
+
+Prove global/default-function execution quotas using acknowledged work and positive typed rejections while physical pool capacity holds execution. Prove temporary memory/environment ceilings with one deliberately nonbinding bound and an admitted waiting caller whose reserved slot is independently observed. Hold a real exit's DELETE to demonstrate physical settlement before resource reuse. Do not substitute accepted-work saturation for active execution limits, combine both resource ceilings in one ambiguous observation, or change temporary contention into a new429 policy. Exercise actual API-profile method/header/body/trailer bounds from a real consumed RIC attempt, then require the same attempt's computed result and warm reuse. See [D86 design](./rustack-workflows-20-lambda-runtime-design.md#416-actual-runtime-http-bounds-and-independent-admission-ceilings-d86).
+
+D86 oracle correction (W271): acknowledged Event work is not positive execution admission. Extend existing read-only diagnostics with bounded actual accepted/active semaphore counts and their real limits; stable exact8/32 ownership plus upper-bound429 now qualifies the active limits. Keep the projection independent of business admission and free of names/payloads. This consumes the existing operations metrics contract without a new test hook or route.
+
+
+## D87 — Restore immutable local content through the existing pin owner
+
+Ordinary deployment and saved-image reacquisition have distinct typed sources. The latter uses only the saved parent ID, exact selected-platform fingerprint and fresh unpacked proof, with no source-tag/registry fallback or pull. Preserve informational source metadata after positive proof. Reuse existing durable pin mutation/retirement quotas and joins instead of fabricating a lease or adding another supervisor. This is the primitive for later atomic archive import; keep provider/main archive rejection and every M4 consumer gate until that publication boundary is qualified. See [runtime§2.15](./rustack-workflows-20-lambda-runtime-design.md#215-immutable-local-image-lease-reacquisition-d87).
+
+
+## D88 — Validate/reacquire an entire Image archive before startup publication
+
+Reuse existing FunctionStore preparation/validation with a private candidate, shared exact immutable pins and fresh saved-size checks; publish only after all fallible work and a final health/deadline fence. Initial failed creation is inspectable without a live image; every usable revision requires one. Bound Image metadata independently of Native ZIP archives and retain four side-effect-free CPU validators. Carry the original startup deadline through retained snapshot/service import and previous-generation retirement; observer expiry cannot extend commit authority. See [runtime§2.16](./rustack-workflows-20-lambda-runtime-design.md#216-candidate-store-image-archive-restoration-d88).
+
+
+D88 review refinements W275–W277: iterative destruction belongs to the owned dynamic policy lifetime, including unpolled API futures; infrastructure validator failures retain typed redacted provenance. Image restore preserves the installed provider account/region scope and rejects foreign saved ARNs before any pin. These are required fail-closed invariants, not relaxed archive semantics.
+
+
+W278 strengthens D88 export ownership: borrowed record projections use the same snapshot schema and are guarded while their existing map-entry read guards remain held. A bounded read-only job constructs the owned archive DTO from validated compact JSON, rather than cloning unbounded live metadata before validation. Shared store handles keep read ownership alive through observer loss; malformed export cannot replace the previous generation.
+
+W279–W280 close the bounded-work/evidence lifetime edges: share prospective ancillary traversal budgets instead of resetting them per condition/version, and retain the actual archive fixture namespace from server creation until successful joined shutdown/audit. Neither bounded serialization nor a normal-path cleanup handler alone proves those ownership contracts.
+
+
+## D89 — Transfer immutable ZIP code through a retained typed archive and local volume
+
+Use original validated ZIP bytes to create a bounded deterministic TAR with Linux ELF/bootstrap checks, never a mutable host tree bind. Keep two transfer reservations through the final queued request owner. Extend the existing same-connection-bound wire for TAR and local volumes; keep JSON/response limits unchanged. The consuming owner must journal separate local volume/never-started loader intent and retire consumers before volume and pins. Only then install ordinary ZIP runtime capability. This follows the [Docker archive API](https://docs.docker.com/reference/api/engine/version/v1.51/) read-only destination restriction and the pinned Moby check at `daemon/archive_unix.go:158–173`; an explicitly writable loader volume is required before a read-only function mount. The [tar0.4.46 builder](https://docs.rs/tar/0.4.46/tar/struct.Builder.html) supplies GNU long-name encoding without extracting TARs or following host filesystem metadata. See [runtime§6.1](./rustack-workflows-20-lambda-runtime-design.md#61-provided-runtime-zip-delivery-contract-d89).
+
+D89 refinement W282: set copyUIDGID=false; Moby archive_tarcopyoptions_unix.go:18–31 otherwise replaces TAR ownership using Config.User. Retain explicit normalized archive ownership independently of image/helper user defaults, and verify it through actual volume consumption.
+
+D89 refinement W283: bound the materialized tree, including implicit parents, to10,000 nodes. A path-length/explicit-member cap alone cannot bound filesystem work or TAR header overhead. Reject lexical absolute names before enclosed-name normalization, share checked file/directory layout, and emit normalized parent directories exactly once.
+
+D89 refinement W285: qualify code read-only behavior through observed RO volume identity and kernel chmod→EROFS, independently of normalized DAC modes. Upload only through the required RW loader; a rejected or disconnected precondition-violating large administrative request to the RO function is not the read-only oracle.
+
+## D90 — Separate code-effect provenance and recover durable states monotonically
+
+Use explicit fresh RSDKOWN3 roots for code effects, retaining Image-only RSDKOWN2 defaults and refusing automatic upgrade. Older binaries must reject the new owner magic rather than silently ignore volume obligations. Keep a separate bounded194-byte code record instead of changing the container journal's two-role format. Distinguish Planned, Uncertain, Known and Retired independently for loader/volume: unknown404 is not an absence barrier. Recover recorded consumers before code and code before image pins, with complete owner audits after recorded cleanup. Build the reader/recovery boundary before enabling its retained producer. See [runtime§6.6](./rustack-workflows-20-lambda-runtime-design.md#66-code-namespace-provenance-and-recovery-boundary-d90); all ordinary ZIP and full M4 acceptance remains required.
+
+## D91 — Retain one complete staging task above observers and require pin affiliation
+
+Use a registered retained stage for journal/create/upload/helper retirement, preserving every accepted IO call through driver join even when caller/actor worker disappears. Keep source/admission/receipts above workers and release preparation capacity only on consumed Ready handoff or physical retirement. Require the base PinnedImage's exact directory affiliation; content-ID equality alone cannot prove that this manager holds the daemon-local pin. Reuse D90 effect retirement, adding only private receipt-proven unissued transitions and an erasure witness. See [runtime§6.7](./rustack-workflows-20-lambda-runtime-design.md#67-retained-producing-code-volume-manager-d91); ordinary ZIP remains gated.
+
+D91 review refinement: exclusive producer guards require an empty joined-ledger proof before clean release. Unclean whole-runtime destruction poisons the same DirectoryLease acquisition; reconnection cannot overlap unresolved current-run effects. Recovery uses a fresh acquisition and the unchanged durable historical rules. Retirement result observation uses a post-wakeup deadline fence and retains the same receipt across observer expiry.
+
+## D92 - Reserve environments before code preparation and retain the receipt above worker failure
+
+Compose ZIP through the qualified Docker executor and environment pool. A plan's single-use code identity, registered stage and physical retirement receipt outlive worker unwind. Function absence/IO join precede code release, and environment admission survives until that same receipt proves retirement. Startup selects immutable base content and generation3 explicitly; absent sources remain unavailable. Validate candidate ZIP bytes before provider commit. Qualify identical Linux ZIP bytes through real Docker and Native paths; a host Mach-O fixture is not equal-artifact evidence. See [runtime6.8](./rustack-workflows-20-lambda-runtime-design.md#68-ordinary-provided-runtime-installation-and-environment-consumption-d92).
+
+
+D92 qualification: both final frozen63-resource functional gates and exact same-original-ZIP Linux Native consumers pass. W295–W305 refine receipt publication, conversion admission, provider publication, physical shutdown proof, fixture flush, unavailable-source mapping,128-byte handlers, terminal TCP closure and evidence normalization/citations. Task5.1 is complete; ZIP snapshot export/import remains explicitly rejected until5.2c reconciles its data budgets and candidate validation. No live code volume, process or stage receipt is archive state.
+
+
+## D93 — Separate managed ZIP data budgets from Image metadata and restore only original code
+
+Keep the16MiB Image-only contract and generic JSON/CBOR ceilings unchanged. Add an explicit configured provided-runtime archive profile with128MiB service work/payload,16MiB metadata and64MiB total decoded original ZIP bytes,50MiB per revision. Additionally bound the complete private candidate to512MiB expanded logical bytes/20,000 nodes, and enforce exact ZIP-path exemptions in raw CBOR before typed allocation. Validate a complete candidate before any Image pin mutation and publish only after the final source/backend/deadline fence. Move designated owned ZIP strings aside for unchanged metadata preflight, rather than exempt arbitrary fields or clone unbounded data. Restore original ZIP identity through the immutable artifact/converter path; allocate no Docker code resources until a later invocation. The immutable provided base remains current operator configuration and cannot be selected by saved metadata. See [runtime§6.9](./rustack-workflows-20-lambda-runtime-design.md#69-bounded-provided-runtime-zip-archives-and-mixed-candidate-restoration-d93). Both frozen65-resource functional gates and exact postconditions now pass; task5.2c is complete, with remaining M4 consumers explicitly open in the implementation ledger.
+
+## D94 — Qualify the pinned official Node runtime through ordinary consumers
+
+Reuse the already provenance-recorded Node24 manifest, adding a built-in-only handler image and independent known arithmetic/context/filesystem/error expectations. Official RIC execution, language process warm reuse, captured published/alias behavior after CMD changes and registered ASL computation must all be observed through signed ordinary clients. A successful base pull is not Node handler evidence. Preserve exact source/SDK/server ownership and freeze the additional resource before execution. Accept the official RIC's optional X-Ray error cause only through a single error-route-specific8KiB HTTP field, sharing the unchanged16KiB aggregate; keep general256-byte limits and omit this opaque metadata from diagnostics/state. Support the default RIC's thread-local keepalive clients with eight HTTP connection tasks but four independently charged POST bodies whose owned permits move into accepted session envelopes and survive HTTP observer expiry/abandonment until processing, rejection or actor drop, retaining the preceding24MiB body-work ceiling. HTTP parse rejections close only their connection. See [runtime§4.17](./rustack-workflows-20-lambda-runtime-design.md#417-official-node-image-consumption-d94). D94 qualification closes task5.3a/L02 on the recorded native-arm64 VZ and emulated-amd64 QEMU functional lanes; full M4 and the remaining SDK/platform consumers stay open.
+
+## D95 — Bind explicit local handler SDK credentials to qualified runtime scope
+
+Add an opt-in explicit Docker SDK pair and reuse the actual container-origin gateway proof, without ambient AWS/server-credential fallback. Keep secrets outside serialized ContainerPolicy/revisions/archives and issue an opaque context affiliated with the same readiness Arc, directory acquisition, bound policy, relay and environment service. A checked nonzero process-local counter separates warm contexts; the existing directory run UUID scopes restarts, and the counter grants no authority. This avoids adding an entropy dependency for an internal identity. Preserve image unsets as bare-name Env markers so Docker cannot re-inherit profile/endpoint defaults. The final SDK Env has independent320-entry/80KiB/4097-byte-entry bounds and an SDK-augmentation4KiB ceiling.
+
+Reuse the retained ordinary test owner and one centralized expanded Docker CLI feature cohort instead of duplicating its private helpers in a second integration target. Keep Docker-specific join composition in the shared image_sdk module; the lower-level Runner also serves Native targets. Only SDK fixture profiles enable S3/DynamoDB services. Actual pinned-image metadata confirms bundled S3/DynamoDB/SFN3.1105.0; both retained functional lanes now pass real positive/negative S3/DynamoDB SDK execution, full resource gates and final current-source consumer qualification. See [runtime§4.18](./rustack-workflows-20-lambda-runtime-design.md#418-explicit-local-handler-sdk-environment-d95). Task5.3b/L10 is complete; image callbacks and the remaining M4 acceptance stay open.
+
+## D96 — Use an independently active Event Lambda for post-return image callbacks
+
+Keep the observed ASL callback invocation synchronous. Dispatcher A uses the actual default-provider Lambda SDK to accept B with InvocationType Event/HTTP202; B remains in its own active image invocation while A returns. A safe local DynamoDB gate makes callback-after-Submitted causal, without a host mount/control listener or work continuing after A returns. Event B retains independent Lambda ownership through parent Stop; tests must release/join it and distinguish that work from cancellation of A. This follows the primary AWS asynchronous-acceptance and callback-timing contracts, rather than treating HTTP202 as B's completed result.
+
+Use a separate image on the existing pinned Node base, actual client-lambda/client-sfn/client-dynamodb3.1105.0 and D95's proof-affiliated SDK environment. Raw tokens travel only in authorized invocation/SDK payloads; safe control rows/reporters hold hashes and booleans. Independent history/log/archive scans compare bounded candidate hashes without revealing a token to host observers. Reuse and extend the single retained image SDK owner with an async confirmed-save audit hook. No new dependency, callback engine or public runtime setting is added. Both retained functional lanes now pass the actual nine-mode callback consumers and full70-resource gate under [integrations§5.6](./rustack-workflows-40-integrations-design.md#56-real-image-sdk-callbacks-and-independent-event-worker-d96).
+
+
+## D97 — Run the IaC toolchain inside an owned image function
+
+The pinned [Pulumi process study](../docs/research/study-pulumi-process-ownership.md) shows independent plugin process groups and context-owned cancellation/drains. A host CLI PID/group cannot represent that whole tree. Use a dedicated managed image function for the actual pinned CLI/provider and a separate real business image function; controller Stop then consumes the established container namespace/cgroup cleanup. Keep tooling read-only, local encrypted state private, supported resource lifecycle independently verified and all failure/privacy gates explicit in the [IaC design](./rustack-workflows-50-iac-design.md). This is a design decision, not actual5.3d acceptance.
+
+
+D97 actual-consumer refinements: Docker GET archive cannot see live tmpfs because Moby creates a private mount view. Use a pinned read-only observer in the same namespace with independent host decoding and same-exec successful-termination proof. The actual Pulumi provider also lists versions while reading an unpublished resource. Support an authenticated/scope-validated existing-machine empty inventory, with no publication, qualified ARN or mutation support. These are compatibility corrections required by actual consumer evidence; they do not broaden the versioning product scope.
+
+
+## D98 — Qualify a separate containerized server owner and an internal DNS gateway
+
+Use the actual Linux CLI on the same explicit user bridge as its existing function/relay pairs. Keep client Unix socket, daemon-side socket source and handler gateway origin distinct; mount the socket only into the trusted nonroot server with an explicit supplementary GID, and use its known unique DNS name at4566 for container-origin traffic. External SDK clients use an independently inspected loopback publication. A separate retained fixture owner holds server, named volume, private env file and all CLI/SDK waits; it does not reinterpret the existing host-process Child. Existing production startup/shutdown and function isolation remain authoritative.
+
+Reuse the pinned provided.al2023 base for the GNU-linked qualification CLI and the existing explicit SDK credential environment, so neither a new base nor a credential copy channel is needed. Read only bounded owner/engine records from the actual persistent volume, with the existing workspace tar crate's raw iteration and no host extraction. Treat uncertainty/forced effects as failure with retained evidence, and require clean production runtime shutdown before removing the exact stopped server/volume. See [the executable contract](./rustack-workflows-55-server-container-design.md). This design does not certify the default release Dockerfile or missing native/reference/platform lanes.
+
+
+## D99 — Qualify the actual release image without changing source defaults
+
+- Context: D98 qualifies a purpose-built GNU fixture; W371/W372/W374/W375 expose distinct release build/Action defects.
+- Decision: keep the source stepfunctions feature explicit, compile it into the normal root Docker image, preserve scratch/non-root/health behavior and all security patches, and reuse the D98 owner through an explicit Release profile. Copy only public budget YAML into the owned volume; no extra host bind or image-baked credentials/configuration. Route Action inputs through validated env values/private env files and a real monotonic readiness deadline.
+- Why: actual distribution artifacts and shell boundaries need consuming evidence; a second runtime/Runner or an alternate test image cannot establish it. Existing workspace YAML parsing is reused only for trusted Action controls.
+- Remaining: W373 promotion, Linux arm64 reference/Desktop/rootless/performance/load and complete M4 stay required. D100 removes further Linux x86_64 validation. No image publication or push is performed by local qualification.
+- Pinned by: [release image design](./rustack-workflows-56-release-image-design.md). Date:2026-10-31.
+
+- Executed evidence: [final D99 qualification](./rustack-workflows-93-review.md#d99-final-qualification-and-exact-postconditions).
+
+## D100 — Linux x86_64 validation is waived
+
+- Authority: the user's explicit2026-10-31 instruction, translated as “No need to validate Linux x86_64.” This supersedes earlier requirements for native Linux x86_64 and further emulated-amd64 validation; it is an intentional scope change, not missing evidence or a silent skip.
+- Decision: schedule no further Linux x86_64 builds/tests or native-x86 runner acquisition for this objective. Retain already completed D99 amd64/QEMU results and source artifacts as historical functional evidence; do not relabel them native/performance evidence. Existing x86_64 code/image support and existing general CI configuration are not removed; the agent will not initiate additional dedicated Linux x86_64 qualification for this objective.
+- Required platform scope: Linux arm64 and macOS arm64/Desktop, plus rootless and the recorded Linux reference/performance/load obligations. The reference machine is native Linux arm64 with4 dedicated CPUs,8GiB RAM and local Docker. Tests requiring two daemon installations may use two distinct arm64 engines; different CPU architectures are unnecessary.
+- Release consequence: native Linux x86_64 is no longer a prerequisite or blocker for5.3/5.4/M4. W373 exact-image/same-commit promotion, required arm64 platforms, reference performance and remaining load/correctness gates stay required. No new remote CI execution, publication, push, VM/context restart or unrelated cleanup is authorized by this scope change.
+- Chronology: all D99 focused/full AMD runs had completed and their original owners joined before this instruction arrived; final resource cleanup had also completed. Preserve the historical “both lanes” contracts/results. Apply this decision when interpreting their older pending native-x86 clauses.
+
+## D101 — Measure the existing pure workloads directly inside native arm64 Linux
+
+- Decision: cross-build the actual SDK harness and CLI with the existing locked GNU/Zig path, then execute both directly in an explicitly selected native arm64 Linux guest. Reuse the existing bounded Python process owner on both sides and the exact D74 workload/history/cleanup contracts. Make the performance fixture pure, removing its unnecessary bootstrap dependency.
+- Provenance: record guest resources/kernel/Python, actual binary hashes, exact inventory and ordered raw reports. Keep configured VM resources distinct from physical dedication and measured RSS distinct from configured storage quotas.
+- Scope: this closes a Linux execution/measurement dependency of5.3 only. A4-vCPU/8GiB VZ profile is useful non-emulated Linux evidence but does not prove four dedicated physical CPUs. Reference qualification remains pending; image timing/load, Desktop/rootless, W373 and complete M4 remain required. No x86 validation, existing VM restart, context activation or publication.
+- Contract: [verification§5.2](./rustack-workflows-70-verification-plan.md#52-direct-linux-arm64-pure-workflow-measurements-d101). Date:2026-10-31.
+- Executed evidence: [direct Linux measurement review](../docs/research/workflows-linux-performance-review.md). The dependency passes actual Linux/host measurements, source/artifact/postcondition checks and independent review; reference qualification remains pending.
+
+## D102 — Measure actual image invocation and initialization phases with repeated cleanup
+
+- Decision: qualify warm100/cold20/100 success-timeout cycles through the actual SDK/provider, add one bounded successful initialization diagnostic with contiguous relay and function/RIC readiness intervals, and use handler-side monotonic duration only in explicit timed fixture modes. Preserve ordinary runtime/API/wire/archive behavior.
+- Ownership: reuse the registered image SDK owner, exact daemon/owner metadata, unchanged Rust Runner and D101 bounded host/guest owner. Execute the actual Linux controller/server directly; reuse the existing pinned pure Python SDK tree without executing a host binary.
+- Scope: [image performance design](./rustack-workflows-57-image-performance-design.md) binds timings, log-flood health/accounting, inventories and full ARM gates. A VM capture remains referenceQualification=pending; dedicated-reference/Desktop/rootless/W373/full M4 remain required, with no further x86 validation.
+- Source retention: canonical fixture builds first anchor the seven existing rebuilt source aliases by captured immutable ID, under the same engine fences. Aliases absent at entry are skipped for initial or partial provisioning and are identifiable from the fixed allowlist/report difference; the independent original-ID audit detects prior loss. Conflicts or uncertain effects stop the build. W422 records an observed loss and exact history-based repair before this guard.
+- Transport: save only captured immutable IDs; after import, retain target-only content-addressed operator cache aliases and verify their mapping before/after workloads. W417 records why untagged imports cannot survive removal of the final private runtime pin.
+- Date:2026-10-31. Status: final seventh-source current-profile implementation/source/evidence review, host15/full ARM79/direct Linux3 and exact postconditions pass; reference qualification and complete M4 remain pending. See the [measurement review](../docs/research/workflows-image-performance-review.md).
+
+## D103 — Qualify an isolated rootless daemon with effective resource controls
+
+- Decision: create a separate native ARM VZ profile and install a real unprivileged systemd Docker daemon with signed, version-matched rootless extras. Preserve all existing VMs, daemons, client contexts and D102 image/evidence baselines.
+- Boundary: bootstrap attests the service process, user namespace, private socket, engine identity and delegated cgroup v2 controllers. Only the actual kernel probe plus complete resource gate can qualify the platform. Never downgrade CPU/memory/PIDs requirements to accommodate rootless defaults.
+- Contract: [rootless platform design](./rustack-workflows-58-rootless-platform-design.md). Provisioning/attestation is a dependency, not full5.3 or M4 completion. Desktop and dedicated-reference performance remain separate requirements; D100 still excludes further x86 validation.
+- Date:2026-10-31. Status: in progress.
+- Executed dependency: [bootstrap/review evidence](../docs/research/workflows-rootless-platform-review.md) records a real UID501 rootless daemon, effective user-manager delegation, namespace socket GID991,25 controls, actual TERM-ignoring root-job retirement and independent review. Bootstrap/attestation passes; the actual kernel probe, full resource inventory and rootless platform exit remain pending.
+
+## D104 — Consume the rootless daemon through owned transport and unchanged kernel probes
+
+- Decision: preserve D103 installation/receipts and use a separately owned bounded SSH Unix forward for existing native ARM test controllers. Prove the exact rootless engine before effects, import captured immutable fixture IDs with retained cache aliases, and execute the existing actual Linux Rust kernel probe without weakening policy.
+- Contract: [resource execution](./rustack-workflows-58-rootless-platform-design.md#6-rootless-resource-execution-d104). Begin with both exact kernel resources, then extend to the entire79-resource inventory, server/socket/endpoint and performance/load cases. Kernel success alone cannot close rootless or M4.
+- Date:2026-10-31. Status: in progress. No x86 validation, existing-service restart, default context change, image rebuild/deletion or publication.
+
+## D105 — Normalize CPU limits downward to a portable one-percent quantum
+
+- User decision: explicitly accepted2026-10-31 after the real rootless systemd probe observed34000/100000 for333333333 NanoCPUs. Normalize the configured maximum down to the nearest10,000,000 NanoCPUs (0.01 CPU), preserving and reporting requested/effective values. Default1 CPU is unchanged.
+- Contract: validate the original0.1..16-CPU range first, perform bounded integer normalization once in ContainerPolicy, and use only the effective amount in both containers and probe verification.333333333 becomes330000000; exact kernel quota33000/100000 must pass on both retained drivers,34000 must fail. No tolerance band, upward rounding or reduced memory/swap/PIDs/isolation requirement.
+- Diagnostics: expose the requested/effective pair from the retained qualified policy. Unit/range/floor/idempotence, actual two-kernel resources, existing functional matrices and standard/strict/security checks remain mandatory. Preserve the original failed rootless owner/independent observation as evidence, not a passed resource.
+- Status: implementation in progress.
+
+## D106 — Transfer server data through an inspected unstarted volume helper
+
+- Decision: keep the server's read-only daemon socket and use a separately owned, never-started/no-socket/no-network data-volume helper for identity archives and public release configuration on every daemon. Do not weaken socket policy or retry an ambiguous failed copy using another transport.
+- Evidence: D104's rootless server case fails on an exact EPERM remount of the read-only socket; its stderr digest matches an independently repeated archive request. An unstarted helper reads both checksummed records successfully. Exact engine/parent labels/source/record checks discharge the stopped server, helper and volume without force; original failure evidence stays retained.
+- Contract: [server data transfer](./rustack-workflows-55-server-container-design.md#71-rootless-data-volume-transfer-d106). Preserve bounded records, uncertainty, no credential inheritance, exact nonforced helper removal and complete server/release/rootless resource qualification.
+- Date:2026-10-31. Status: implementation in progress.
+
+## D107 — Complete code, then qualify exact release artifacts
+
+Finish remaining operation consumers and delivery code before starting the test stage, as explicitly requested by the user. The [delivery contract](./rustack-workflows-59-release-qualification-design.md) separates no-push candidate creation, full platform evidence assembly and explicit same-artifact promotion. D100 only waives x86 execution; missing Desktop/rootless/reference evidence must block final promotion. Historical successful receipts are preserved and do not qualify new source.
+
+## D108 — Correct bound transcript consumers and pin timed metadata observations
+
+Keep platform results bound to exact per-case intents, zero exits, original hashes, canonical non-ignored starts and clean one-case summaries despite inherited SDK output. Reference results use the canonical ordered two-plus-three producer vectors and retain every raw measurement/cleanup validator. Pin an independently negotiated and identity-verified metadata socket before each timed flood Invoke; reject reconnect, replacement, nested/concurrent use and close on exit. All existing deadlines, 100 cycles and physical cleanup remain mandatory. Preserve the original cycle-54 timeout as unexplained failed evidence. Archive rejection preserves its original primary diagnostic and retains original/mutated affiliation bytes before effects. See [image performance](./rustack-workflows-57-image-performance-design.md#7-pinned-metadata-peer-during-the-live-flood-bracket) and [bound producers](./rustack-workflows-59-release-qualification-design.md#8-bound-producer-transcript-and-archive-rejection-corrections). These are code corrections before the next reviewed execution cohort, not successful test claims.
+
+## D109 — Diagnose the intermittent flood failure without changing budgets
+
+Retain3229c2's real cycle89 end-handshake failure. Correct stale liveness observations and bracket release publication with monotonic Future-state checks, including rollback before notification. Add bounded current-cycle monotonic diagnostics and authenticated collector acceptance/write observations, bound to the original cycle even for delayed callbacks. These are oracle/diagnostic corrections, not an established production timeout fix. Use focused100-cycle diagnosis before freezing the final source cohort; keep one-second handler/100 cycles/health/physical retirement unchanged. See [the live ordering contract](./rustack-workflows-57-image-performance-design.md#8-live-observation-ordering-and-failure-localization-d109).
+
+## D110 — Prepare one authenticated flood channel during initialization
+
+Use an explicit flood initialization mode to establish the benchmark's control connection before the first Runtime next request. Require one exact socket for ready/begin/end, reject reconnects/replays and close after end. This removes connection setup from the measured one-second handler without adding invocations or changing any budget. Add strict100-channel report counters and extend controlled refresh from three production images to runtime/custom RIC A/B/server/release. The cycle84 pre-begin failure remains unexplained historical evidence. Full contract: [image performance§9](./rustack-workflows-57-image-performance-design.md#9-initialization-owned-flood-control-channel-d110).
+
+## D112 — Execute external tests with their original assertions
+
+Run pinned LocalStack pytest methods and AWS snapshots with an explicit Rustack fixture plugin and exact required node inventory. Disable upstream root conftest and automatic plugin loading; copy baseline snapshots into private evidence directories and prohibit update/raw/skip-all. Preserve upstream method bodies, parameterization, transformers and existing exclusion markers. Adapt only endpoint/authentication, role metadata, resource ownership and explicitly documented real-handler packaging. Do not transplant interpreter outputs as new expected values or silently replace ECR-only fixtures. The first batch's excluded service/API/runtime profiles remain explicit. See [external compatibility design61](./rustack-workflows-61-localstack-compatibility-design.md).
+
+
+## D113: Correct overlapping semantics using original external observations
+
+- **Evidence**: unmodified pinned LocalStack AWS snapshots, plus the [formal ASL specification](https://states-language.net/spec.html). Failed source cohorts and preflight failures remain retained; no baseline/mask rewrite is authorized.
+- **Decision**: capture revision RoleArn in ExecutionStarted, use predecessor0 for the initial root entry, correct Map admission/join and Parallel retry projection, accept INLINE ProcessorConfig under either processor spelling, decode optimized serialized-string Payload once (null/omission defaults to{}), normalize integer -0 tokens in StringToJson while preserving strings/exponents, compact function-error Cause, publish optimized service-call start before provider resolution, and omit manufactured timeout fields. See W438–W442 and design30/40. Direct and observed-callback admission retain their existing physical semantics; owned work/cleanup remain unchanged.
+- **Limits**: original Parallel normalization removes the success marker and normalizes branch IDs, so its successful exit predecessor is verified without claiming complete concurrent graph parity. Formal Format scalar/escaping and strict JSON input restrictions and static service-error causes remain visible as original failed assertions until explicitly reconciled. Redrive metadata remains unsupported and is excluded by the upstream TestTimeouts class markers; no redrive coverage is claimed. No green external-target claim follows from classifying a difference.
+
+
+## D114: Prefer explicitly authorized observed AWS behavior for the five remaining cases
+
+The user authorizes closing all five original snapshot differences after reviewing their causes. Observed AWS behavior now supersedes the earlier formal-only Format/escaping/empty-JSON restrictions and static missing-function Cause policy in D113. Follow design61 §7 without adding masks, replacing snapshots or removing nodes. Preserve all safety/ownership budgets and typed diagnostics; use fresh local service-error request UUIDs without claiming cloud execution. E05 exits only with the unchanged91+32 inventory green. This does not expand unrelated service APIs or waive M4 platform/reference gates.

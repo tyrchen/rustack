@@ -14,25 +14,42 @@ workspace = true
 rustack-core = { workspace = true }
 rustack-lambda-model = { workspace = true }
 rustack-lambda-http = { workspace = true }
+rustack-lambda-runtime = { workspace = true }
 rustack-auth = { workspace = true }
 squib = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
+bollard-stubs = { workspace = true }
+percent-encoding = { workspace = true }
+form_urlencoded = { workspace = true }
+typed-builder = { workspace = true }
+winnow = { workspace = true }
 dashmap = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+nix = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 base64 = { workspace = true }
+secrecy = { workspace = true }
+yaml-rust2 = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }
+tar = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

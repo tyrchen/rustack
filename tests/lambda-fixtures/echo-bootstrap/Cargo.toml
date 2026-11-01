@@ -15,9 +15,41 @@ workspace = true
 name = "bootstrap"
 path = "src/main.rs"
 
+[[bin]]
+name = "image-bootstrap"
+path = "src/image.rs"
+
+[[bin]]
+name = "no-runtime-bootstrap"
+path = "src/no_runtime.rs"
+
+[[bin]]
+name = "zip-code-bootstrap"
+path = "src/zip_code.rs"
+required-features = ["zip-code"]
+
+[[bin]]
+name = "callback-bootstrap"
+path = "src/callback/main.rs"
+required-features = ["sdk-callback"]
+
+[features]
+zip-code = ["dep:tokio", "tokio/io-std"]
+provided-qualification = ["dep:tokio"]
+sdk-callback = ["dep:anyhow", "dep:aws-sdk-sfn", "dep:aws-credential-types", "dep:secrecy", "dep:serde", "dep:tokio", "dep:typed-builder", "dep:url", "dep:uuid"]
+
 [dependencies]
 ureq = { version = "2", default-features = false }
 serde_json = { workspace = true }
+anyhow = { workspace = true, optional = true }
+aws-sdk-sfn = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+typed-builder = { workspace = true, optional = true }
 
 [dev-dependencies]
 rustack-lambda-core = { workspace = true }

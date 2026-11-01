@@ -3,15 +3,15 @@
 //! This module takes a `ResolvedModel` and produces Rust source code strings
 //! for types, input/output structs, operations, errors, and request types.
 
-use std::collections::BTreeMap;
-use std::fmt::Write;
+use std::{collections::BTreeMap, fmt::Write};
 
-use anyhow::Result;
-
+use anyhow::{Result, bail};
 use heck::{ToLowerCamelCase, ToPascalCase};
 
-use crate::config::ServiceConfig;
-use crate::shapes::{EnumVariantInfo, FieldInfo, HttpBinding, OperationCategories, ResolvedModel};
+use crate::{
+    config::{Protocol, ServiceConfig},
+    shapes::{EnumVariantInfo, FieldInfo, HttpBinding, OperationCategories, ResolvedModel},
+};
 
 /// Header comment placed at the top of every generated file.
 fn file_header(config: &ServiceConfig) -> String {
@@ -21,12 +21,39 @@ fn file_header(config: &ServiceConfig) -> String {
     )
 }
 
+fn json_epoch_protocol(config: &ServiceConfig) -> bool {
+    matches!(config.protocol, Protocol::AwsJson1_0 | Protocol::AwsJson1_1)
+}
+fn epoch_field(field: &FieldInfo, config: &ServiceConfig) -> bool {
+    json_epoch_protocol(config)
+        && field
+            .timestamp_format
+            .as_deref()
+            .is_some_and(|format| matches!(format, "" | "epoch-seconds"))
+}
+fn needs_epoch_module(resolved: &ResolvedModel, config: &ServiceConfig) -> bool {
+    config.uses_serde()
+        && resolved
+            .input_structs
+            .values()
+            .chain(resolved.output_structs.values())
+            .chain(resolved.shared_structs.values())
+            .flatten()
+            .any(|field| epoch_field(field, config))
+}
+
 /// Generate all source files and return them as a map of path -> content.
 pub fn generate_all(
     resolved: &ResolvedModel,
     config: &ServiceConfig,
 ) -> Result<BTreeMap<String, String>> {
     let mut files = BTreeMap::new();
+    if needs_epoch_module(resolved, config) {
+        files.insert(
+            "epoch_seconds.rs".to_owned(),
+            include_str!("../templates/epoch_seconds.rs").to_owned(),
+        );
+    }
 
     files.insert("types.rs".to_owned(), generate_types(resolved, config)?);
     files.insert("operations.rs".to_owned(), generate_operations(config)?);
@@ -113,7 +140,7 @@ fn generate_types(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<St
 
     // Generate enums
     for (name, variants) in &resolved.enums {
-        write_enum(&mut out, name, variants, display_name)?;
+        write_enum(&mut out, name, variants, display_name, config)?;
     }
 
     // Generate shared structs
@@ -130,8 +157,9 @@ fn write_enum(
     name: &str,
     variants: &[EnumVariantInfo],
     display_name: &str,
+    config: &ServiceConfig,
 ) -> Result<()> {
-    writeln!(out, "/// {display_name} {name} enum.")?;
+    writeln!(out, "/// {display_name} `{name}` enum.")?;
     writeln!(
         out,
         "#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]"
@@ -139,8 +167,12 @@ fn write_enum(
     writeln!(out, "pub enum {name} {{")?;
 
     for (i, variant) in variants.iter().enumerate() {
-        if i == 0 {
+        if config.strict_model {
+            writeln!(out, "    /// The `{}` wire variant.", variant.string_value)?;
+        } else if i == 0 {
             writeln!(out, "    /// Default variant.")?;
+        }
+        if i == 0 {
             writeln!(out, "    #[default]")?;
         }
         if variant.rust_name != variant.string_value {
@@ -229,23 +261,41 @@ fn write_struct(
     display_name: &str,
     config: &ServiceConfig,
 ) -> Result<()> {
-    writeln!(out, "/// {display_name} {name}.")?;
+    writeln!(out, "/// {display_name} `{name}`.")?;
 
     if config.uses_serde() {
-        writeln!(
-            out,
-            "#[derive(Debug, Clone, Default, Serialize, Deserialize)]"
-        )?;
+        if config.strict_model {
+            writeln!(out, "#[derive(Clone, Default, Serialize, Deserialize)]")?;
+        } else {
+            writeln!(
+                out,
+                "#[derive(Debug, Clone, Default, Serialize, Deserialize)]"
+            )?;
+        }
         if let Some(ref rename) = config.serde_rename {
             writeln!(out, "#[serde(rename_all = \"{rename}\")]")?;
         }
+    } else if config.strict_model {
+        writeln!(out, "#[derive(Clone, Default)]")?;
     } else {
         writeln!(out, "#[derive(Debug, Clone, Default)]")?;
     }
 
+    if config.strict_model {
+        writeln!(out, "#[non_exhaustive]")?;
+        if config.uses_serde() {
+            writeln!(out, "#[serde(deny_unknown_fields)]")?;
+        }
+        if fields.len() > 5 {
+            writeln!(out, "#[derive(typed_builder::TypedBuilder)]")?;
+        }
+    }
     writeln!(out, "pub struct {name} {{")?;
 
     for field in fields {
+        if config.strict_model {
+            writeln!(out, "    /// The `{}` wire member.", field.smithy_name)?;
+        }
         // Write HTTP binding comment if requested
         if include_http_comments && let Some(ref binding) = field.http_binding {
             let comment = match binding {
@@ -260,8 +310,35 @@ fn write_struct(
             writeln!(out, "{comment}")?;
         }
 
+        if config.strict_model && fields.len() > 5 && !field.required {
+            writeln!(out, "    #[builder(default)]")?;
+        }
         // Write serde field attributes when serde is enabled
         if config.uses_serde() {
+            if json_epoch_protocol(config) {
+                match field.timestamp_format.as_deref() {
+                    Some("" | "epoch-seconds") => {
+                        if field.rust_type.starts_with("Option<") {
+                            writeln!(
+                                out,
+                                "    #[serde(default, with = \"crate::epoch_seconds::option\")]"
+                            )?;
+                        } else {
+                            writeln!(out, "    #[serde(with = \"crate::epoch_seconds\")]")?;
+                        }
+                    }
+                    Some("date-time") => {}
+                    Some(_) => bail!(
+                        "unsupported JSON timestamp format for {}",
+                        field.smithy_name
+                    ),
+                    None if field.rust_type.contains("chrono::DateTime") => bail!(
+                        "timestamp collection requires an explicit adapter: {}",
+                        field.smithy_name
+                    ),
+                    None => {}
+                }
+            }
             // Explicit rename if rename_all would not produce the correct Smithy name
             if let Some(ref strategy) = config.serde_rename
                 && needs_explicit_rename(&field.rust_name, &field.smithy_name, strategy)
@@ -274,6 +351,11 @@ fn write_struct(
                     out,
                     "    #[serde(skip_serializing_if = \"Option::is_none\")]"
                 )?;
+            } else if config.strict_model
+                && field.required
+                && (field.rust_type.starts_with("Vec<") || field.rust_type.starts_with("HashMap<"))
+            {
+                // Required collections must be present, including when empty.
             } else if field.rust_type.starts_with("Vec<") {
                 if config.always_serialize_arrays {
                     writeln!(out, "    #[serde(default)]")?;
@@ -296,6 +378,18 @@ fn write_struct(
 
     writeln!(out, "}}")?;
     writeln!(out)?;
+    if config.strict_model {
+        writeln!(out, "impl std::fmt::Debug for {name} {{")?;
+        writeln!(
+            out,
+            "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+        )?;
+        writeln!(
+            out,
+            "        f.debug_struct(\"{name}\").finish_non_exhaustive()"
+        )?;
+        writeln!(out, "    }}\n}}")?;
+    }
     Ok(())
 }
 
@@ -549,12 +643,12 @@ fn generate_operations(config: &ServiceConfig) -> Result<String> {
     writeln!(out, "{header}")?;
     writeln!(out)?;
 
-    writeln!(out, "/// All supported {prefix} operations.")?;
+    writeln!(out, "/// All supported `{prefix}Operation` values.")?;
     writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
     writeln!(out, "pub enum {prefix}Operation {{")?;
 
     for op in all_operations {
-        writeln!(out, "    /// The {op} operation.")?;
+        writeln!(out, "    /// The `{op}` operation.")?;
         writeln!(out, "    {op},")?;
     }
 
@@ -577,7 +671,7 @@ fn generate_operations(config: &ServiceConfig) -> Result<String> {
     // Generate from_str
     writeln!(
         out,
-        "    /// Parse an operation name string into an {prefix}Operation."
+        "    /// Parse an operation name string into a `{prefix}Operation`."
     )?;
     writeln!(out, "    #[must_use]")?;
     writeln!(out, "    pub fn from_name(name: &str) -> Option<Self> {{")?;
@@ -668,7 +762,7 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     }
 
     for err in errors {
-        writeln!(out, "    /// {} error.", err.name)?;
+        writeln!(out, "    /// `{}` error.", err.name)?;
         if err.name == default_name {
             writeln!(out, "    #[default]")?;
         }
@@ -746,9 +840,35 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     writeln!(out, "}}")?;
     writeln!(out)?;
 
+    if config.strict_model {
+        writeln!(out, "impl {prefix}ErrorCode {{")?;
+        writeln!(out, "    /// Default bounded protocol message.")?;
+        writeln!(out, "    #[must_use]")?;
+        writeln!(out, "    pub fn default_message(&self) -> &'static str {{")?;
+        writeln!(out, "        match self {{")?;
+        for error in errors {
+            let message = config
+                .custom_errors
+                .get(&error.name)
+                .map_or(error.wire_name.as_str(), |custom| custom.message.as_str());
+            writeln!(out, "            Self::{} => {message:?},", error.name)?;
+        }
+        if errors.is_empty() {
+            writeln!(
+                out,
+                "            Self::InternalException => \"InternalException\","
+            )?;
+        }
+        writeln!(out, "        }}\n    }}\n}}")?;
+    }
+
     // Error struct (no resource/request_id for JSON services)
     writeln!(out, "/// An {display_name} error response.")?;
-    writeln!(out, "#[derive(Debug)]")?;
+    if config.strict_model {
+        writeln!(out, "#[non_exhaustive]")?;
+    } else {
+        writeln!(out, "#[derive(Debug)]")?;
+    }
     writeln!(out, "pub struct {prefix}Error {{")?;
     writeln!(out, "    /// The error code.")?;
     writeln!(out, "    pub code: {prefix}ErrorCode,")?;
@@ -764,16 +884,29 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     writeln!(out, "}}")?;
     writeln!(out)?;
 
+    if config.strict_model {
+        writeln!(out, "impl fmt::Debug for {prefix}Error {{")?;
+        writeln!(
+            out,
+            "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
+        )?;
+        writeln!(out, "        f.write_str(\"{prefix}Error(<redacted>)\")")?;
+        writeln!(out, "    }}\n}}")?;
+    }
     // Display impl
     writeln!(out, "impl fmt::Display for {prefix}Error {{")?;
     writeln!(
         out,
         "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
     )?;
-    writeln!(
-        out,
-        "        write!(f, \"{prefix}Error({{}}): {{}}\", self.code, self.message)"
-    )?;
+    if config.strict_model {
+        writeln!(out, "        f.write_str(\"{prefix}Error(<redacted>)\")")?;
+    } else {
+        writeln!(
+            out,
+            "        write!(f, \"{prefix}Error({{}}): {{}}\", self.code, self.message)"
+        )?;
+    }
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -802,7 +935,14 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     writeln!(out, "    pub fn new(code: {prefix}ErrorCode) -> Self {{")?;
     writeln!(out, "        Self {{")?;
     writeln!(out, "            status_code: code.default_status_code(),")?;
-    writeln!(out, "            message: code.as_str().to_owned(),")?;
+    if config.strict_model {
+        writeln!(
+            out,
+            "            message: code.default_message().to_owned(),"
+        )?;
+    } else {
+        writeln!(out, "            message: code.as_str().to_owned(),")?;
+    }
     writeln!(out, "            code,")?;
     writeln!(out, "            source: None,")?;
     writeln!(out, "        }}")?;
@@ -838,8 +978,8 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     writeln!(out)?;
 
     // Convenience constructors for common errors
-    // Generate validation(), internal_error(), missing_action(), unknown_operation(), not_implemented()
-    // based on which errors are present
+    // Generate validation(), internal_error(), missing_action(), unknown_operation(),
+    // not_implemented() based on which errors are present
 
     let has_error = |name: &str| errors.iter().any(|e| e.name == name);
 
@@ -936,7 +1076,15 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
     writeln!(out, "///")?;
     writeln!(out, "/// # Examples")?;
     writeln!(out, "///")?;
-    writeln!(out, "/// ```ignore")?;
+    if config.strict_model {
+        writeln!(out, "/// ```")?;
+        writeln!(
+            out,
+            "/// use rustack_{name}_model::{{{name}_error, {prefix}ErrorCode}};"
+        )?;
+    } else {
+        writeln!(out, "/// ```ignore")?;
+    }
     writeln!(out, "/// let err = {name}_error!({default_name});")?;
     writeln!(
         out,
@@ -966,6 +1114,8 @@ fn generate_error_json(resolved: &ResolvedModel, config: &ServiceConfig) -> Resu
 fn status_code_const(status: u16) -> &'static str {
     match status {
         400 => "http::StatusCode::BAD_REQUEST",
+        402 => "http::StatusCode::PAYMENT_REQUIRED",
+        408 => "http::StatusCode::REQUEST_TIMEOUT",
         401 => "http::StatusCode::UNAUTHORIZED",
         403 => "http::StatusCode::FORBIDDEN",
         404 => "http::StatusCode::NOT_FOUND",
@@ -1385,7 +1535,8 @@ fn generate_error_s3(config: &ServiceConfig) -> Result<String> {
     writeln!(out, "    #[must_use]")?;
     writeln!(
         out,
-        "    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {{"
+        "    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) \
+         -> Self {{"
     )?;
     writeln!(out, "        self.source = Some(Box::new(source));")?;
     writeln!(out, "        self")?;
@@ -1601,7 +1752,8 @@ fn generate_request(config: &ServiceConfig) -> Result<String> {
     )?;
     writeln!(
         out,
-        "            .field(\"session_token\", &self.session_token.as_ref().map(|_| \"[REDACTED]\"))"
+        "            .field(\"session_token\", &self.session_token.as_ref().map(|_| \
+         \"[REDACTED]\"))"
     )?;
     writeln!(out, "            .finish()")?;
     writeln!(out, "    }}")?;
@@ -1684,9 +1836,16 @@ fn generate_lib(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<Stri
 
     let mut out = String::with_capacity(2048);
     writeln!(out, "{header}")?;
-    writeln!(out, "#![allow(clippy::too_many_lines)]")?;
-    writeln!(out, "#![allow(clippy::struct_excessive_bools)]")?;
-    writeln!(out, "#![allow(missing_docs)]")?;
+    if config.strict_model {
+        writeln!(out, "#![forbid(unsafe_code)]")?;
+    } else {
+        writeln!(out, "#![allow(clippy::too_many_lines)]")?;
+        writeln!(out, "#![allow(clippy::struct_excessive_bools)]")?;
+        writeln!(out, "#![allow(missing_docs)]")?;
+    }
+    if needs_epoch_module(resolved, config) {
+        writeln!(out, "pub(crate) mod epoch_seconds;")?;
+    }
     writeln!(out)?;
 
     writeln!(out, "pub mod error;")?;
@@ -1697,6 +1856,30 @@ fn generate_lib(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<Stri
         writeln!(out, "pub mod request;")?;
     }
     writeln!(out, "pub mod types;")?;
+    for module in &config.overlay_extra_modules {
+        if module.is_empty()
+            || !module
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            bail!("invalid extra module identifier");
+        }
+        writeln!(out, "pub mod {module};")?;
+    }
+    if let Some(prefix) = &config.target_prefix {
+        writeln!(out, "/// JSON protocol target prefix.")?;
+        writeln!(out, "pub const TARGET_PREFIX: &str = {prefix:?};")?;
+    }
+    writeln!(
+        out,
+        "/// Whether the service config requests AWS Query-compatible errors."
+    )?;
+    writeln!(
+        out,
+        "pub const AWS_QUERY_COMPATIBLE: bool = {};",
+        config.aws_query_compatible
+    )?;
+
     writeln!(out)?;
 
     // Re-exports
@@ -1719,7 +1902,8 @@ fn generate_lib(resolved: &ResolvedModel, config: &ServiceConfig) -> Result<Stri
 
     writeln!(
         out,
-        "// Generated: {n_ops} operations, {n_enums} enums, {n_shared} shared structs, {n_inputs} input structs, {n_outputs} output structs"
+        "// Generated: {n_ops} operations, {n_enums} enums, {n_shared} shared structs, {n_inputs} \
+         input structs, {n_outputs} output structs"
     )?;
 
     Ok(out)
