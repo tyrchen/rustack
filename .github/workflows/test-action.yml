@@ -291,7 +291,7 @@ jobs:
           jq -e '
             (has("nextToken") | not) and
             [.events[].type] == ["ExecutionStarted","PassStateEntered","PassStateExited","ExecutionSucceeded"] and
-            [.events[].id] == [1,2,3,4] and [.events[].previousEventId] == [0,1,2,3] and
+            [.events[].id] == [1,2,3,4] and [.events[].previousEventId] == [0,0,2,3] and
             (.events[0].executionStartedEventDetails.input | fromjson) == {n:21} and
             .events[1].stateEnteredEventDetails.name == "Double" and
             (.events[2].stateExitedEventDetails.output | fromjson) == {result:42} and

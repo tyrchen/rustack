@@ -114,11 +114,8 @@ async fn test_should_join_stale_revision_api_connections_before_invoking_replace
     );
     provider.create_function(create("old")).await.unwrap();
     let old = invoke(&provider, None).await;
-    let address = old["runtimeApi"].as_str().unwrap();
-    let mut held = tokio::net::TcpStream::connect(address).await.unwrap();
-    held.write_all(b"POST /2018-06-01/runtime/init/error HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 1\r\n\r\n").await.unwrap();
-    // Keep the old API's body collector active while the revision is replaced.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Finish ZIP compression, extraction and publication before starting the
+    // held request's deadline. That work can take seconds on a busy CI runner.
     provider
         .update_function_code(
             "revision-test",
@@ -129,18 +126,41 @@ async fn test_should_join_stale_revision_api_connections_before_invoking_replace
         )
         .await
         .unwrap();
-    let started = tokio::time::Instant::now();
-    assert_eq!(invoke(&provider, None).await["codeMarker"], "new");
+    let address = old["runtimeApi"].as_str().unwrap();
+    let mut held = tokio::net::TcpStream::connect(address).await.unwrap();
+    held.write_all(b"POST /2018-06-01/runtime/init/error HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n").await.unwrap();
+    // The interim response proves the server is collecting the withheld body;
+    // a sleep after writing headers does not establish that ordering.
+    let mut acknowledgement = [0; 25];
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        held.read_exact(&mut acknowledgement),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&acknowledgement, b"HTTP/1.1 100 Continue\r\n\r\n");
+    let replacement = invoke(&provider, None);
+    tokio::pin!(replacement);
     assert!(
-        started.elapsed() >= Duration::from_secs(4),
-        "replacement must await the old API connection deadline and join"
+        tokio::time::timeout(Duration::from_millis(100), replacement.as_mut())
+            .await
+            .is_err(),
+        "replacement must remain pending while the old API body is withheld"
     );
+    // Release the body before the independent five-second drain deadline.
+    // A peer that withholds it through that deadline correctly fails shutdown.
+    held.write_all(b"0").await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(10), replacement)
+        .await
+        .unwrap();
+    assert_eq!(response["codeMarker"], "new");
     let mut reply = Vec::new();
     tokio::time::timeout(Duration::from_secs(1), held.read_to_end(&mut reply))
         .await
         .unwrap()
         .unwrap();
-    assert!(reply.starts_with(b"HTTP/1.1 408"));
+    assert!(reply.starts_with(b"HTTP/1.1 503"));
     let status = tokio::process::Command::new("kill")
         .arg("-0")
         .arg(old["pid"].as_u64().unwrap().to_string())

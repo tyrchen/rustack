@@ -4,6 +4,8 @@
 
 ## Step Functions and Lambda Runtime — new specification set
 
+PR76 CI corrections are tracked in [the review ledger](./rustack-workflows-93-review.md#pr76-ci-regression-corrections): exact D113 Action history, synchronized Native cleanup observation, and shared stable/nightly format checks.
+
 D101 adds [direct Linux arm64 measurement](./rustack-workflows-70-verification-plan.md#52-direct-linux-arm64-pure-workflow-measurements-d101) with the actual SDK/CLI in a native4-vCPU/8GiB VZ guest:100×50-state p95=10.791ms and100 single-slot live-loop/Stop cycles pass, with exact histories and physical group cleanup. [Raw evidence](../docs/research/workflows-linux-performance-review.md) retains all ordered samples and pending reference qualification; virtual allocation does not prove physical CPU dedication. Full5.3/5.4/M4, dedicated-reference, remaining load/correctness, Desktop/rootless and W373 remain open. D100 continues to waive further x86 validation.
 
 D102 qualifies [actual Image Lambda performance and repeated cleanup](./rustack-workflows-57-image-performance-design.md): final Linux warm/cold p95=3.196/165.350ms,100 causal log-flood timeout cycles with exact task-baseline recovery, full ARM79 and host15 pass. [Raw evidence and audit history](../docs/research/workflows-image-performance-review.md) retain the unexplained pre-final failure, exact source-cache repair and48 successful zero-remnant/source-preservation/owned-bridge postconditions. This VM capture does not close the dedicated reference, Desktop/rootless, remaining load/correctness, W373 or complete M4.

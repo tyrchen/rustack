@@ -67,6 +67,12 @@ test:
 fmt:
 	@cargo +nightly fmt
 
+fmt-check:
+	@cargo fmt --all -- --check
+	@cargo +nightly fmt --all -- --check
+
+.PHONY: fmt-check
+
 clippy:
 	@cargo clippy --all-targets --all-features -- -D warnings
 

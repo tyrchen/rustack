@@ -19,7 +19,7 @@ GATES = (
     ("feature-test", ["cargo", "test", "--locked", "--workspace", "--all-targets", "--features", "stepfunctions"]),
     ("doctest", ["cargo", "test", "--locked", "--workspace", "--doc"]),
     ("feature-doctest", ["cargo", "test", "--locked", "--workspace", "--features", "stepfunctions", "--doc"]),
-    ("fmt", ["cargo", "+nightly", "fmt", "--", "--check"]),
+    ("fmt", ["make", "fmt-check"]),
     ("clippy", ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"]),
     ("feature-clippy", ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--features", "stepfunctions", "--", "-D", "warnings"]),
     ("rustdoc", ["cargo", "doc", "--locked", "--workspace", "--no-deps"]),

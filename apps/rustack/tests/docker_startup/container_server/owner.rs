@@ -450,17 +450,38 @@ impl Owner {
     async fn write_environment(&self, mode: Mode, cutoff: Instant) -> Result<()> {
         let relay = self.source(&self.inputs.relay)?;
         let configuration = self.profile.configuration();
-        let text = format!("SERVICES=lambda,stepfunctions,s3,dynamodb\nGATEWAY_LISTEN=0.0.0.0:4566\n\
-            RUSTACK_CONFIG={configuration}\nDATA_DIR=/data/state\nLAMBDA_EXECUTOR=docker\n\
-            LAMBDA_DOCKER_SOCKET=unix:///run/rustack/docker.sock\nLAMBDA_DOCKER_RELAY_IMAGE={relay}\n\
-            LAMBDA_DOCKER_NETWORK={}\nLAMBDA_DOCKER_GATEWAY_ENDPOINT=http://{}:{}/\n\
-            LAMBDA_DOCKER_CROSS_ARCHITECTURE=false\nLAMBDA_INIT_TIMEOUT_SECS=20\nLOG_LEVEL=error\n\
-            LAMBDA_SKIP_SIGNATURE_VALIDATION=false\nSTEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION=false\n\
-            S3_SKIP_SIGNATURE_VALIDATION=false\nDYNAMODB_SKIP_SIGNATURE_VALIDATION=false\n\
-            ACCESS_KEY=local-key\nSECRET_KEY=local-secret\nAWS_ACCESS_KEY_ID=local-key\n\
-            AWS_SECRET_ACCESS_KEY=local-secret\nAWS_EC2_METADATA_DISABLED=true\n\
-            LAMBDA_DOCKER_SDK_ACCESS_KEY_ID=local-key\nLAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY=local-secret\n",
-            self.expected.network, self.expected.name, mode.gateway_port());
+        let text = format!(
+            concat!(
+                "SERVICES=lambda,stepfunctions,s3,dynamodb\n",
+                "GATEWAY_LISTEN=0.0.0.0:4566\n",
+                "RUSTACK_CONFIG={configuration}\n",
+                "DATA_DIR=/data/state\n",
+                "LAMBDA_EXECUTOR=docker\n",
+                "LAMBDA_DOCKER_SOCKET=unix:///run/rustack/docker.sock\n",
+                "LAMBDA_DOCKER_RELAY_IMAGE={relay}\n",
+                "LAMBDA_DOCKER_NETWORK={network}\n",
+                "LAMBDA_DOCKER_GATEWAY_ENDPOINT=http://{server}:{port}/\n",
+                "LAMBDA_DOCKER_CROSS_ARCHITECTURE=false\n",
+                "LAMBDA_INIT_TIMEOUT_SECS=20\n",
+                "LOG_LEVEL=error\n",
+                "LAMBDA_SKIP_SIGNATURE_VALIDATION=false\n",
+                "STEPFUNCTIONS_SKIP_SIGNATURE_VALIDATION=false\n",
+                "S3_SKIP_SIGNATURE_VALIDATION=false\n",
+                "DYNAMODB_SKIP_SIGNATURE_VALIDATION=false\n",
+                "ACCESS_KEY=local-key\n",
+                "SECRET_KEY=local-secret\n",
+                "AWS_ACCESS_KEY_ID=local-key\n",
+                "AWS_SECRET_ACCESS_KEY=local-secret\n",
+                "AWS_EC2_METADATA_DISABLED=true\n",
+                "LAMBDA_DOCKER_SDK_ACCESS_KEY_ID=local-key\n",
+                "LAMBDA_DOCKER_SDK_SECRET_ACCESS_KEY=local-secret\n",
+            ),
+            configuration = configuration,
+            relay = relay,
+            network = self.expected.network,
+            server = self.expected.name,
+            port = mode.gateway_port(),
+        );
         self.write("server.env", text.as_bytes(), cutoff).await
     }
 }
