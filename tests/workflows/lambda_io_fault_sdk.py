@@ -18,7 +18,7 @@ from docker_io_proxy import Proxy
 from lambda_fault_sdk import Faults
 from lambda_fault_support import Hold, Metadata
 from provided_zip_io import ProvidedIo
-from lambda_admission_sdk import execution_pressure, resource_pressure, runtime_bounds
+from lambda_admission_sdk import execution_pressure, resource_pressure, runtime_bounds, composite_pressure
 from required_suites import read_regular
 
 
@@ -334,6 +334,8 @@ def main():
             cases = matrix.negative_images(config["fixtures"])
         elif phase == "pull":
             cases = matrix.interrupted_update(config["fixtures"])
+        elif phase == "composite_pressure":
+            cases = composite_pressure(matrix, host)
         elif phase == "runtime_bounds":
             cases = runtime_bounds(matrix)
         elif phase in ("memory_limit", "environment_limit"):

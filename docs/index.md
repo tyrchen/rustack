@@ -10,6 +10,8 @@
 
 ## Research
 
+- [Workflow final consumers and delivery review](research/workflows-final-consumers-review.md) — D104–D108 code review, source cohort, retained failures and current verification.
+
 - [Image Lambda Performance and Repeated Cleanup Review](./research/workflows-image-performance-review.md) - Direct Linux warm100/cold20 and100 causal log-flood timeout cycles, actual initialization/task/resource observations and explicit reference qualification limits.
 
 - [Direct Linux arm64 Workflows Performance Review](./research/workflows-linux-performance-review.md) - Actual Linux SDK/CLI50-state latency and100 live-loop/Stop cycles, bounded artifact/process evidence and raw VM measurements; dedicated-reference qualification remains pending.

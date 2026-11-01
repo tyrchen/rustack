@@ -344,3 +344,7 @@ async fn compute_image(
 #[path = "sdk/archive.rs"]
 mod archive;
 pub(super) use archive::{checkpoint as archive_checkpoint, verify as verify_archive};
+
+#[path = "sdk/recovery.rs"]
+mod recovery;
+pub(super) use recovery::{Witness, containers as owned_containers};

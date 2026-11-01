@@ -14,6 +14,7 @@ use tokio::{
 use super::{
     super::{cli::arguments, records},
     Owner, Resources,
+    data::{DataOperation, DataOutput},
 };
 
 const CONFIGURATION: &[u8] = include_bytes!(concat!(
@@ -53,18 +54,13 @@ impl Owner {
         let source = path
             .to_str()
             .context("public configuration path encoding")?;
-        let target = format!("{id}:/data/qualification.yaml");
-        self.uncertain = true;
-        drop(
-            self.cli
-                .run(&copy_arguments(source, &target), cutoff)
-                .await?,
-        );
+        let DataOutput::Configuration(observed) = self
+            .transfer_data(DataOperation::Configuration(source), cutoff)
+            .await?
+        else {
+            anyhow::bail!("incorrect data-volume configuration operation");
+        };
         self.inspect_server(cutoff).await?;
-        let observed = self
-            .cli
-            .run(&arguments(&["cp", &target, "-"]), cutoff)
-            .await?;
         records::configuration(&observed, CONFIGURATION)?;
         self.write(
             "configuration.json",
@@ -81,7 +77,7 @@ impl Owner {
     }
 }
 
-fn copy_arguments(source: &str, target: &str) -> Vec<String> {
+pub(super) fn copy_arguments(source: &str, target: &str) -> Vec<String> {
     // Moby's explicit CopyUIDGID branch binds extraction to Config.User.
     // The default branch can preserve the host archive's UID/GID instead.
     arguments(&["cp", "--archive", source, target])

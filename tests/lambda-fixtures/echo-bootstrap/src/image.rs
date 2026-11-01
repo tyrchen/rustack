@@ -136,6 +136,7 @@ fn initialize(agent: &Agent, root: &str) -> Result<()> {
             Err("stalled-init fixture was not retired")
         }
         "hold" => hold("initializing", None),
+        "flood" => timing::prepare(agent),
         _ => Err("unsupported fixture init mode"),
     }
 }

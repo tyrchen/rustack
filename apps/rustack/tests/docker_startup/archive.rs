@@ -8,10 +8,14 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rustack_lambda_core::provider::LambdaSnapshot;
+use rustack_lambda_core::{
+    artifact::{ImageMetadata, ResolvedImage},
+    provider::LambdaSnapshot,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, task::spawn_blocking, time::timeout};
+use uuid::Uuid;
 
 const PLAIN_LIMIT: usize = 16 * 1024 * 1024;
 const COMPRESSED_LIMIT: u64 = 4 * 1024 * 1024;
@@ -189,6 +193,48 @@ pub(super) async fn corrupt_zip(root: &Path) -> Result<()> {
     let corrupted = timeout(Duration::from_secs(30), &mut job).await???;
     fs::write(path, corrupted).await?;
     Ok(())
+}
+
+pub(super) async fn missing_image(root: &Path) -> Result<String> {
+    let path = metadata(root);
+    let original = bytes(&path).await?;
+    let mut job = spawn_blocking(move || {
+        let mut snapshot = decode(&original)?;
+        let version = &mut snapshot
+            .functions
+            .functions
+            .iter_mut()
+            .find(|function| function.latest.resolved_image.is_some())
+            .context("saved image")?
+            .latest;
+        let mut metadata: ImageMetadata = version
+            .resolved_image
+            .take()
+            .context("saved resolved image")?
+            .into();
+        let absent = format!(
+            "sha256:{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        metadata.image_id = absent.parse()?;
+        metadata.selected_manifest = None;
+        metadata.registry_manifest = None;
+        metadata.inspection_hash = ImageMetadata::execution_fingerprint(
+            &metadata.image_id,
+            None,
+            metadata.architecture,
+            metadata.size_bytes,
+            &metadata.execution,
+        )?;
+        let resolved = ResolvedImage::try_from(metadata)?;
+        version.code_sha256 = resolved.code_sha256()?;
+        version.resolved_image = Some(resolved);
+        Ok::<_, anyhow::Error>((encode(&snapshot)?, absent))
+    });
+    let (corrupted, absent) = timeout(Duration::from_secs(30), &mut job).await???;
+    fs::write(path, corrupted).await?;
+    Ok(absent)
 }
 
 #[cfg(test)]

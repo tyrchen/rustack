@@ -1,0 +1,36 @@
+name: workflows-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Candidate run whose exact archives were qualified on every required lane
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  retain:
+    # Operators stage the complete same-source receipts on this dedicated runner.
+    # Missing Desktop/reference/rootless receipts fail; this never waives a lane.
+    runs-on: [self-hosted, rustack-qualification]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pack only fully verified evidence
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          WORKFLOWS_EVIDENCE_ROOT: ${{ vars.WORKFLOWS_EVIDENCE_ROOT }}
+          WORKFLOWS_EVIDENCE_OUTPUT: ${{ runner.temp }}/workflows-evidence
+        run: make workflows-release-evidence
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workflows-evidence
+          path: ${{ runner.temp }}/workflows-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

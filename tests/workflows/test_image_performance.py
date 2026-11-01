@@ -7,7 +7,7 @@ import sys
 import unittest
 import uuid
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from image_performance_report import validate
 from image_performance_support import cold_stages, decode, exact_samples, live, overhead, samples, verify_stages, wait_task_baseline
@@ -125,6 +125,96 @@ class ImagePerformanceControls(unittest.TestCase):
         self.assertEqual((report["phase"], report["expected"], report["outcome"]), ("begin", 94, "pending"))
         self.assertGreaterEqual(report["elapsedMicros"], 0)
         self.assertLess(len(output.getvalue()), 512)
+
+    def test_should_refuse_a_pair_lookup_that_outlives_the_live_observation(self):
+        import threading
+        from image_performance_sdk import release_flood
+        active, calls = [1], []
+        def ready(path="/_rustack/capabilities"):
+            calls.append("health" if path == "/_health/ready" else "capabilities")
+            return {"workers":{"lambdaAdmission":{"activeExecutions":active[0]}}}, 10
+        def pair():
+            calls.append("pair")
+            active[0] = 0
+            return {"same-container"}, "environment"
+        collector = SimpleNamespace(condition=threading.Condition(), released=set(), stamp=Mock())
+        with self.assertRaisesRegex(ValueError, "health-not-during"):
+            release_flood(collector, SimpleNamespace(done=lambda:False), "request", {"same-container"}, pair, ready)
+        self.assertEqual(calls, ["capabilities", "health", "pair", "capabilities"])
+        self.assertEqual(collector.released, set())
+
+    def test_should_recheck_completion_under_the_release_condition(self):
+        import threading
+        from image_performance_sdk import release_flood
+        collector = SimpleNamespace(condition=threading.Condition(), released=set(), stamp=Mock())
+        future = SimpleNamespace(done=Mock(side_effect=[False, True]))
+        ready = lambda *_args: ({"workers":{"lambdaAdmission":{"activeExecutions":1}}}, 10)
+        with self.assertRaisesRegex(ValueError, "completed-before-release"):
+            release_flood(collector, future, "request", {"container"}, lambda:({"container"}, "environment"), ready)
+        self.assertEqual(collector.released, set())
+        self.assertEqual(future.done.call_count, 2)
+        self.assertNotIn("released", [call.args[0] for call in collector.stamp.call_args_list])
+
+    def test_should_withdraw_release_if_the_future_finishes_during_flag_publication(self):
+        import concurrent.futures
+        import threading
+        from image_performance_sdk import release_flood
+        future = concurrent.futures.Future()
+        class FinishOnInsert(set):
+            def add(self, value):
+                super().add(value)
+                future.set_result(None)
+        condition = threading.Condition()
+        collector = SimpleNamespace(condition=condition, released=FinishOnInsert(), stamp=Mock())
+        ready = lambda *_args: ({"workers":{"lambdaAdmission":{"activeExecutions":1}}}, 10)
+        with patch.object(condition, "notify_all", wraps=condition.notify_all) as notify:
+            with self.assertRaisesRegex(ValueError, "completed-during-release"):
+                release_flood(collector, future, "request", {"container"}, lambda:({"container"}, "environment"), ready)
+            notify.assert_not_called()
+        self.assertEqual(collector.released, set())
+        stamps = [call.args[0] for call in collector.stamp.call_args_list]
+        self.assertEqual(stamps[-2:], ["releaseInserted", "releaseRejected"])
+        self.assertNotIn("released", stamps)
+
+    def test_should_release_only_after_current_pair_capability_and_completion_proofs(self):
+        import threading
+        from image_performance_sdk import release_flood
+        collector = SimpleNamespace(condition=threading.Condition(), released=set(), stamp=Mock())
+        future = SimpleNamespace(done=Mock(side_effect=[False, False, False]))
+        ready = lambda *_args: ({"workers":{"lambdaAdmission":{"activeExecutions":1}}}, 10)
+        before, after, health, completed = release_flood(collector, future, "request", {"container"},
+            lambda:({"container"}, "environment"), ready)
+        self.assertEqual((before, after), (ready()[0], ready()[0]))
+        self.assertEqual((health, completed, collector.released), (10, False, {"request"}))
+        self.assertEqual([call.args[0] for call in collector.stamp.call_args_list][-3:], ["releaseChecked", "releaseInserted", "released"])
+
+    def test_should_bound_timeline_fields_and_publish_only_fixed_current_cycle_timings(self):
+        import concurrent.futures
+        import threading
+        from image_performance_sdk import FloodTimeline, flood_failure
+        trace = FloodTimeline(89, 1000000)
+        trace.stamp("pairStarted", clock=lambda:1001000)
+        trace.stamp("pairFinished", clock=lambda:2100000)
+        for phase in ("pairStarted", "private-secret"):
+            with self.assertRaises(ValueError): trace.stamp(phase, clock=lambda:2200000)
+        with self.assertRaises(ValueError): trace.stamp("released", clock=lambda:999999)
+        collector = SimpleNamespace(condition=threading.Condition(), started={}, released=set(), ended={}, timeline=trace)
+        report = flood_failure(collector, "live", 89, concurrent.futures.Future())
+        self.assertEqual(report["cycle"], 89)
+        self.assertEqual(report["timingsMicros"], {"submitted":0, "pairStarted":1, "pairFinished":1100})
+        self.assertNotIn("private-secret", json.dumps(report))
+
+    def test_should_not_observe_or_accept_a_channel_after_its_original_cutoff(self):
+        import threading
+        from image_performance_sdk import wait_flood_channel
+        collector = SimpleNamespace(condition=threading.Condition(), aborted=False)
+        read = Mock(return_value=True)
+        with self.assertRaisesRegex(ValueError, "observation-expired"):
+            wait_flood_channel(collector, read, 10, clock=lambda:10)
+        read.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "observation-expired"):
+            wait_flood_channel(collector, read, 10, clock=Mock(side_effect=[1, 10]))
+        read.assert_called_once()
 
     def test_should_retain_fixed_flood_phase_counts_and_completed_invocation_outcome(self):
         import concurrent.futures
@@ -328,9 +418,10 @@ class ImagePerformanceControls(unittest.TestCase):
             "processStats": [{"rssKiB": 10000, "tasks": 8, "runtimeTasks": 15} for _ in range(100)],
             "completedCycles": 100, "containerHighWater": 2, "emptyAfterEachTimeout": True,
             "runtimeTaskBaseline": 15, "taskQuiescence": samples([100] * 100, 100),
-            "liveBrackets": [[1, 1, False] for _ in range(100)], "primingInvocations": 1, "primingCleanupConfirmed": True}
+            "liveBrackets": [[1, 1, False] for _ in range(100)], "primingInvocations": 1, "primingCleanupConfirmed": True,
+            "controlChannels": {"prepared":100,"readyBeforeInvoke":100,"sameConnection":100,"closed":100}}
         validate(value, "cycles")
-        for mutation in ("growth", "bracket", "priming", "timeout-count", "quiescence", "request-reuse"):
+        for mutation in ("growth", "bracket", "priming", "timeout-count", "quiescence", "request-reuse", "channel-count", "channel-shape"):
             broken = copy.deepcopy(value)
             measured = broken["measurement"]
             if mutation == "growth": measured["processStats"][-1]["runtimeTasks"] = 16
@@ -338,6 +429,8 @@ class ImagePerformanceControls(unittest.TestCase):
             elif mutation == "priming": measured["primingCleanupConfirmed"] = False
             elif mutation == "timeout-count": measured["timeout"]["observedMicros"].pop()
             elif mutation == "request-reuse": measured["floods"][-1] = measured["floods"][0]
+            elif mutation == "channel-count": measured["controlChannels"]["sameConnection"] = 99
+            elif mutation == "channel-shape": measured["controlChannels"]["extra"] = 100
             else: measured["taskQuiescence"] = samples([2000000] * 100, 100)
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 validate(broken, "cycles")

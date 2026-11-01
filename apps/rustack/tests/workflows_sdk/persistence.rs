@@ -21,7 +21,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     task::JoinHandle,
-    time::{Instant, timeout_at},
+    time::{Instant, sleep, timeout_at},
 };
 
 use super::{
@@ -131,7 +131,8 @@ async fn deploy(server: &Server, root: &Path, collector: &Collector) -> Result<(
     let zip = tokio::task::spawn_blocking(move || archive(&bytes)).await??;
     fs::create_dir_all(root.join("invocations")).await?;
     let client: Lambda = lambda(server);
-    for callback in [false, true] {
+    for name in ["RestartCompute", "RestartToken", "RestartRetry"] {
+        let callback = name == "RestartToken";
         let mut environment = Environment::builder()
             .variables("WORKFLOW_MODE", "1")
             .variables(
@@ -148,13 +149,12 @@ async fn deploy(server: &Server, root: &Path, collector: &Collector) -> Result<(
                     .context("invocation marker path")?,
             );
         }
+        if name == "RestartRetry" {
+            environment = environment.variables("WORKFLOW_FAIL_ONCE", "1");
+        }
         client
             .create_function()
-            .function_name(if callback {
-                "RestartToken"
-            } else {
-                "RestartCompute"
-            })
+            .function_name(name)
             .role(ROLE)
             .runtime(Runtime::Providedal2023)
             .handler("bootstrap")
@@ -196,6 +196,7 @@ struct Saved {
     compute_run: String,
     waiting: String,
     callback: String,
+    interrupted: Vec<String>,
     old_page: String,
     token: CallbackToken,
     output: String,
@@ -247,11 +248,12 @@ async fn seed(server: &Server, root: &Path, collector: &mut Collector) -> Result
     let wait = create(
         &client,
         "RestartWait",
-        &json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":600,"End":true}}}),
+        &json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":600,"Next":"After"},"After":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Parameters":{"FunctionName":"RestartCompute","Payload":{"n":999}},"End":true}}}),
     )
     .await?;
     let waiting = start(&client, &wait, "pending", "{}").await?;
-    let callback_machine = create(&client, "RestartCallback", &json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke.waitForTaskToken","Parameters":{"FunctionName":"RestartToken","Payload":{"token.$":"$$.Task.Token","n":21}},"End":true}}})).await?;
+    entered(&client, &waiting, "WaitStateEntered").await?;
+    let callback_machine = create(&client, "RestartCallback", &json!({"StartAt":"T","States":{"T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke.waitForTaskToken","Parameters":{"FunctionName":"RestartToken","Payload":{"token.$":"$$.Task.Token","n":21}},"Next":"After"},"After":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Parameters":{"FunctionName":"RestartCompute","Payload":{"n":999}},"End":true}}})).await?;
     let callback = start(&client, &callback_machine, "pending", "{}").await?;
     let token = collector.token().await?;
     client
@@ -259,6 +261,7 @@ async fn seed(server: &Server, root: &Path, collector: &mut Collector) -> Result
         .task_token(token.expose())
         .send()
         .await?;
+    let interrupted = structured_pending(&client, &wait, &waiting).await?;
     let page = client.list_state_machines().max_results(1).send().await?;
     let old_page = page
         .next_token()
@@ -271,6 +274,7 @@ async fn seed(server: &Server, root: &Path, collector: &mut Collector) -> Result
         compute_run,
         waiting,
         callback,
+        interrupted,
         old_page,
         token,
         output,
@@ -278,6 +282,70 @@ async fn seed(server: &Server, root: &Path, collector: &mut Collector) -> Result
         definition,
         current_definition,
     })
+}
+async fn structured_pending(client: &Client, wait: &str, waiting: &str) -> Result<Vec<String>> {
+    let retry = create(client, "RestartRetry", &json!({"StartAt":"T","States":{
+        "T":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke",
+             "Parameters":{"FunctionName":"RestartRetry","Payload":{"n":21}},
+             "Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":600,"MaxAttempts":2}],"Next":"After"},"After":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Parameters":{"FunctionName":"RestartCompute","Payload":{"n":999}},"End":true}}})).await?;
+    let retry_run = start(client, &retry, "pending", "{}").await?;
+    entered(client, &retry_run, "TaskFailed").await?;
+    let map = create(client, "RestartMap", &json!({"StartAt":"M","States":{
+        "M":{"Type":"Map","ItemsPath":"$","Iterator":{"StartAt":"W","States":{
+            "W":{"Type":"Wait","Seconds":600,"Next":"After"},"After":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Parameters":{"FunctionName":"RestartCompute","Payload":{"n":999}},"End":true}}},"End":true}}})).await?;
+    let map_run = start(client, &map, "pending", "[1,2]").await?;
+    entered(client, &map_run, "MapIterationStarted").await?;
+    entered(client, &map_run, "WaitStateEntered").await?;
+    let nested = create(client, "RestartSync", &json!({"StartAt":"T","States":{
+        "T":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
+             "Parameters":{"StateMachineArn":wait,"Input":{}},"Next":"After"},"After":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Parameters":{"FunctionName":"RestartCompute","Payload":{"n":999}},"End":true}}})).await?;
+    let nested_run = start(client, &nested, "pending", "{}").await?;
+    // The child registry, not a timer, proves the owned child was created.
+    let child_run = timeout_at(deadline(), async {
+        loop {
+            let children = client
+                .list_executions()
+                .state_machine_arn(wait)
+                .send()
+                .await?;
+            if let Some(child) = children
+                .executions()
+                .iter()
+                .find(|entry| entry.execution_arn() != waiting)
+            {
+                let arn = child.execution_arn().to_owned();
+                entered(client, &arn, "WaitStateEntered").await?;
+                return Ok::<_, anyhow::Error>(arn);
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("owned nested child did not enter")??;
+    Ok(vec![retry_run, map_run, nested_run, child_run])
+}
+async fn entered(client: &Client, arn: &str, kind: &str) -> Result<()> {
+    timeout_at(deadline(), async {
+        loop {
+            let events = history(client, arn, false, true).await?;
+            if events.iter().any(|event| event.r#type().as_str() == kind) {
+                return Ok::<(), anyhow::Error>(());
+            }
+            ensure!(
+                events.last().is_none_or(|event| !matches!(
+                    event.r#type().as_str(),
+                    "ExecutionSucceeded"
+                        | "ExecutionFailed"
+                        | "ExecutionAborted"
+                        | "ExecutionTimedOut"
+                )),
+                "execution terminated before entering {kind}"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("pending shutdown state did not enter")?
 }
 async fn markers(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut entries = fs::read_dir(root.join("invocations")).await?;
@@ -349,7 +417,10 @@ async fn old_state(server: &Server, saved: &Saved) -> Result<()> {
             .any(|tag| tag.key() == Some("purpose") && tag.value() == Some("snapshot")),
         "tags not restored"
     );
-    for arn in [&saved.waiting, &saved.callback] {
+    for arn in [&saved.waiting, &saved.callback]
+        .into_iter()
+        .chain(saved.interrupted.iter())
+    {
         let stopped = client
             .describe_execution()
             .execution_arn(arn)
@@ -455,6 +526,34 @@ async fn reject_corruption(root: &Path, saved: &Saved) -> Result<()> {
     Ok(())
 }
 
+async fn graceful_snapshot(
+    source: &mut Server,
+    root: &Path,
+    saved: &Saved,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let client = sfn(source, SECRET);
+    for arn in [&saved.waiting, &saved.callback]
+        .into_iter()
+        .chain(saved.interrupted.iter())
+    {
+        ensure!(
+            client
+                .describe_execution()
+                .execution_arn(arn)
+                .send()
+                .await?
+                .status()
+                == &ExecutionStatus::Running,
+            "shutdown fixture advanced before cutoff"
+        );
+    }
+    source.shutdown(deadline()).await?;
+    assert_no_token_archive(root, saved).await?;
+    let before = markers(root).await?;
+    ensure!(before.len() == 2, "source invocation marker count");
+    Ok(before)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires actual host bootstrap; run make test-workflows-persistence"]
 async fn test_should_restart_named_native_snapshots_without_replay_and_lose_only_unsaved_work()
@@ -470,10 +569,7 @@ async fn test_should_restart_named_native_snapshots_without_replay_and_lose_only
     let mut final_server = None;
     let result = async {
         let saved = seed(&source, &root, &mut collector).await?;
-        source.shutdown(deadline()).await?;
-        assert_no_token_archive(&root, &saved).await?;
-        let before = markers(&root).await?;
-        ensure!(before.len() == 1, "source invocation marker count");
+        let before = graceful_snapshot(&mut source, &root, &saved).await?;
         target = Some(Server::start_named(&root).await?);
         let active = target.as_mut().context("missing restored server")?;
         old_state(active, &saved).await?;
@@ -491,7 +587,7 @@ async fn test_should_restart_named_native_snapshots_without_replay_and_lose_only
             "new restored Lambda execution failed"
         );
         ensure!(
-            markers(&root).await?.len() == 2,
+            markers(&root).await?.len() == before.len() + 1,
             "new Lambda invocation was not observed"
         );
         active.shutdown(deadline()).await?;
@@ -524,7 +620,7 @@ async fn test_should_restart_named_native_snapshots_without_replay_and_lose_only
             "wrong unsaved resource error"
         );
         ensure!(
-            markers(&root).await?.len() == 2,
+            markers(&root).await?.len() == before.len() + 1,
             "restart replayed Lambda work"
         );
         active.shutdown(deadline()).await?;

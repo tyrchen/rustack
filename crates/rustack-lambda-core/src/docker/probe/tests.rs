@@ -94,8 +94,16 @@ fn test_should_verify_exact_attempt_and_checked_cpu_rounding_and_bound_reports()
         RelayBudgets::default(),
     )
     .unwrap();
-    observed.cpu_quota = Some(33_333);
+    observed.cpu_quota = Some(33_000);
     verify(&observed, attempt, Architecture::Arm64, &policy).unwrap();
+    for quota in [33_333, 34_000] {
+        observed.cpu_quota = Some(quota);
+        assert_eq!(
+            verify(&observed, attempt, Architecture::Arm64, &policy),
+            Err(ProbeFailure::Cpu)
+        );
+    }
+    observed.cpu_quota = Some(33_000);
     assert!(decode_report(&vec![b' '; REPORT_BYTES + 1]).is_err());
     let mut raw = serde_json::to_value(&observed).unwrap();
     raw["unknown"] = json!(true);

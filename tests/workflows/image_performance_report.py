@@ -47,13 +47,16 @@ def validate(value, phase, log=None, baseline=b""):
     else:
         require(phase == "cycles" and set(measured) == {"readiness", "timeout", "floods", "processStats",
             "completedCycles", "containerHighWater", "emptyAfterEachTimeout", "runtimeTaskBaseline",
-            "taskQuiescence", "liveBrackets", "primingInvocations", "primingCleanupConfirmed"}, "cycle-shape")
+            "taskQuiescence", "liveBrackets", "primingInvocations", "primingCleanupConfirmed", "controlChannels"}, "cycle-shape")
         require(type(measured["completedCycles"]) is int and measured["completedCycles"] == 100
                 and type(measured["containerHighWater"]) is int and measured["containerHighWater"] == 2
                 and measured["emptyAfterEachTimeout"] is True
                 and type(measured["primingInvocations"]) is int and measured["primingInvocations"] == 1
                 and measured["primingCleanupConfirmed"] is True
                 and integer(measured["runtimeTaskBaseline"], 1, 4096), "cycle-cleanup")
+        channels = measured["controlChannels"]
+        require(isinstance(channels, dict) and set(channels) == {"prepared", "readyBeforeInvoke", "sameConnection", "closed"}
+                and all(integer(value, 100, 100) for value in channels.values()), "cycle-control-channels")
         for key in ("readiness", "timeout", "taskQuiescence"):
             exact_samples(measured[key], 100)
         require(measured["taskQuiescence"]["maxMicros"] < 2000000, "task-quiescence-budget")

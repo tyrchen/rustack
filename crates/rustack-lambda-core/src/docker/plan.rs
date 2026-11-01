@@ -36,6 +36,7 @@ use crate::{
 
 const MIB: u64 = 1024 * 1024;
 const RELAY_MEMORY: u64 = 64 * MIB;
+const CPU_QUANTUM: u64 = 10_000_000;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ContainerRole {
@@ -121,6 +122,7 @@ pub struct ContainerPolicy {
     pub(super) network: NetworkSelection,
     uid: u32,
     gid: u32,
+    requested_nano_cpus: u64,
     pub(super) nano_cpus: i64,
     relay: RelayBudgets,
 }
@@ -128,7 +130,23 @@ impl ContainerPolicy {
     pub(super) fn idle(&self) -> Duration {
         self.relay.idle
     }
-    /// Validate nonzero signed32-bit UID/GID and0.1..16 CPU allocation.
+    /// Return the requested maximum and its downward-normalized CPU allocation.
+    ///
+    /// ```
+    /// use rustack_lambda_core::docker::{ContainerPolicy, RelayBudgets};
+    /// let policy = ContainerPolicy::new("none".parse()?, 1000, 1000,
+    ///     333_333_333, RelayBudgets::default())?;
+    /// assert_eq!(policy.cpu_allocation().effective_nano_cpus, 330_000_000);
+    /// # Ok::<(), rustack_lambda_core::docker::DockerError>(())
+    /// ```
+    #[must_use]
+    pub fn cpu_allocation(&self) -> DockerCpuAllocation {
+        DockerCpuAllocation {
+            requested_nano_cpus: self.requested_nano_cpus,
+            effective_nano_cpus: self.nano_cpus.unsigned_abs(),
+        }
+    }
+    /// Validate UID/GID and0.1..16 CPUs, rounding CPU down to0.01 increments.
     ///
     /// # Errors
     /// Rejects invalid IDs or CPU values, preserving bounded operator policy.
@@ -156,10 +174,23 @@ impl ContainerPolicy {
             network,
             uid,
             gid,
-            nano_cpus: i64::try_from(nano_cpus).map_err(|_| DockerError::Configuration)?,
+            requested_nano_cpus: nano_cpus,
+            nano_cpus: i64::try_from(nano_cpus - nano_cpus % CPU_QUANTUM)
+                .map_err(|_| DockerError::Configuration)?,
             relay,
         })
     }
+}
+
+/// Captured CPU maximum and the portable allocation actually sent to Docker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DockerCpuAllocation {
+    /// Original validated operator maximum, in billionths of one CPU.
+    pub requested_nano_cpus: u64,
+    /// Maximum rounded down to one-percent CPU increments, never upward.
+    pub effective_nano_cpus: u64,
 }
 
 struct Identity {

@@ -26,6 +26,68 @@ pub(in crate::docker) fn policy() -> ContainerPolicy {
     )
     .unwrap()
 }
+
+#[rstest::rstest]
+#[case(100_000_000, 100_000_000)]
+#[case(109_999_999, 100_000_000)]
+#[case(333_333_333, 330_000_000)]
+#[case(1_000_000_000, 1_000_000_000)]
+#[case(15_999_999_999, 15_990_000_000)]
+#[case(16_000_000_000, 16_000_000_000)]
+fn test_should_capture_requested_cpu_and_normalize_without_exceeding_it(
+    #[case] requested: u64,
+    #[case] effective: u64,
+) -> anyhow::Result<()> {
+    let policy = ContainerPolicy::new(
+        "none".parse()?,
+        1000,
+        1000,
+        requested,
+        RelayBudgets::default(),
+    )?;
+    let allocation = policy.cpu_allocation();
+    assert_eq!(allocation.requested_nano_cpus, requested);
+    assert_eq!(allocation.effective_nano_cpus, effective);
+    assert_eq!(u64::try_from(policy.nano_cpus)?, effective);
+    assert_eq!(
+        serde_json::to_value(allocation)?,
+        serde_json::json!({
+            "requestedNanoCpus": requested, "effectiveNanoCpus": effective,
+        })
+    );
+    Ok(())
+}
+
+proptest::proptest! {
+    #[test]
+    fn test_should_keep_normalization_bounded_and_idempotent(requested in 100_000_000_u64..=16_000_000_000_u64) {
+        let first = ContainerPolicy::new("none".parse()?, 1000, 1000, requested, RelayBudgets::default())?;
+        let allocation = first.cpu_allocation();
+        proptest::prop_assert!(allocation.effective_nano_cpus <= requested);
+        proptest::prop_assert!(requested - allocation.effective_nano_cpus < CPU_QUANTUM);
+        proptest::prop_assert_eq!(allocation.effective_nano_cpus % CPU_QUANTUM, 0);
+        let second = ContainerPolicy::new(first.network.clone(), 1000, 1000,
+            allocation.effective_nano_cpus, RelayBudgets::default())?;
+        proptest::prop_assert_eq!(first.nano_cpus, second.nano_cpus);
+    }
+}
+
+#[rstest::rstest]
+#[case(0)]
+#[case(99_999_999)]
+#[case(16_000_000_001)]
+fn test_should_reject_requested_cpu_outside_the_original_range(#[case] requested: u64) {
+    assert!(
+        ContainerPolicy::new(
+            "none".parse().unwrap(),
+            1000,
+            1000,
+            requested,
+            RelayBudgets::default()
+        )
+        .is_err()
+    );
+}
 pub(in crate::docker) fn image_with(user: &str, environment: Vec<String>) -> PinnedImage {
     let mut metadata = ResolvedImage::fixture(Architecture::Arm64)
         .metadata()

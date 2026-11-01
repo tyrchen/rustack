@@ -4,8 +4,15 @@
 mod cleanup;
 #[path = "owner/configuration.rs"]
 mod configuration;
+#[path = "owner/data.rs"]
+mod data;
 
-use std::{fs::Permissions, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use rustack_lambda_core::docker::models::{ContainerInspectResponse, NetworkInspect, Volume};
@@ -14,15 +21,16 @@ use serde_json::json;
 use tempfile::TempDir;
 use tokio::{
     fs,
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     time::{Instant, sleep, timeout_at},
 };
 
+use self::data::{DataOperation, DataOutput, commit_identity};
 use super::{
     ImageProfile, Mode,
     cli::{self, Cli, arguments},
     policy::{self, Expected, Inputs},
-    records::{self, Identity},
+    records::Identity,
 };
 
 const INSPECT: &str = r#"{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},"State":{{json .State}},"Config":{"Image":{{json .Config.Image}},"User":{{json .Config.User}},"WorkingDir":{{json .Config.WorkingDir}},"Entrypoint":{{json .Config.Entrypoint}},"Cmd":{{json .Config.Cmd}},"Labels":{{json .Config.Labels}},"Healthcheck":{{json .Config.Healthcheck}}},"HostConfig":{{json .HostConfig}},"NetworkSettings":{{json .NetworkSettings}},"Mounts":{{json .Mounts}}}"#;
@@ -352,6 +360,27 @@ impl Owner {
             .map(|(_, id)| id.as_str())
             .context("captured source ID")
     }
+    pub async fn publication_receipt(&self, mode: &str) -> Result<serde_json::Value> {
+        let at = Instant::now() + Duration::from_secs(10);
+        let mut documents = Vec::new();
+        for name in ["server.json", "shutdown.json", "cleanup.json"] {
+            let value = timeout_at(at, async {
+                let file = fs::File::open(self.path.join(name)).await?;
+                let mut bytes = Vec::new();
+                file.take(8193).read_to_end(&mut bytes).await?;
+                ensure!(bytes.len() <= 8192, "publication receipt bound");
+                cli::decode::<serde_json::Value>(&bytes)
+            })
+            .await??;
+            documents.push(value);
+        }
+        let mut documents = documents.into_iter();
+        let server = documents.next().context("server receipt")?;
+        let shutdown = documents.next().context("shutdown receipt")?;
+        let cleanup = documents.next().context("cleanup receipt")?;
+        Ok(json!({"schemaVersion":1,"profile":"release","mode":mode,
+            "architecture":self.inputs.architecture,"server":server,"shutdown":shutdown,"cleanup":cleanup}))
+    }
     pub fn release(&mut self) {
         self.root.disable_cleanup(false);
     }
@@ -388,33 +417,22 @@ impl Owner {
     }
     async fn capture_identity(&mut self, cutoff: Instant) -> Result<()> {
         self.inspect_server(cutoff).await?;
-        let Resources::Server { id, .. } = &self.resources else {
-            anyhow::bail!("server identity without container");
+        let archives = match self.transfer_data(DataOperation::Identity, cutoff).await {
+            Ok(DataOutput::Identity(archives)) => Ok(archives),
+            Ok(DataOutput::Configuration(_)) => {
+                Err(anyhow::anyhow!("incorrect data-volume identity operation"))
+            }
+            Err(error) => Err(error),
         };
-        let mut archives = Vec::new();
-        for name in ["owner.v1", "daemon.v1"] {
-            let source = format!("{id}:/data/state/.rustack-lambda-docker/{name}");
-            archives.push(
-                self.cli
-                    .run(&arguments(&["cp", &source, "-"]), cutoff)
-                    .await?,
-            );
-        }
-        let identity = records::identity(
-            archives.first().context("owner archive")?,
-            archives.get(1).context("daemon archive")?,
+        commit_identity(
+            &mut self.uncertain,
+            &mut self.identity,
+            archives,
             self.cli.engine,
-        )?;
-        self.write(
-            "identity.json",
-            &serde_json::to_vec(
-                &json!({"owner":identity.owner.to_string(),"engine":identity.engine.to_string()}),
-            )?,
+            &self.path,
             cutoff,
         )
-        .await?;
-        self.identity = Some(identity);
-        Ok(())
+        .await
     }
     async fn logs(&self, cutoff: Instant) -> Result<Vec<u8>> {
         let Resources::Server { id, .. } = &self.resources else {
@@ -427,14 +445,7 @@ impl Owner {
         Ok(bytes)
     }
     async fn write(&self, name: &str, bytes: &[u8], cutoff: Instant) -> Result<()> {
-        let at = cutoff.min(Instant::now() + Duration::from_secs(10));
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true).mode(0o600);
-        let mut file = timeout_at(at, options.open(self.path.join(name))).await??;
-        timeout_at(at, file.write_all(bytes)).await??;
-        timeout_at(at, file.sync_all()).await??;
-        ensure!(Instant::now() < at, "private server evidence write expired");
-        Ok(())
+        write_private(&self.path, name, bytes, cutoff).await
     }
     async fn write_environment(&self, mode: Mode, cutoff: Instant) -> Result<()> {
         let relay = self.source(&self.inputs.relay)?;
@@ -452,4 +463,15 @@ impl Owner {
             self.expected.network, self.expected.name, mode.gateway_port());
         self.write("server.env", text.as_bytes(), cutoff).await
     }
+}
+
+async fn write_private(directory: &Path, name: &str, bytes: &[u8], cutoff: Instant) -> Result<()> {
+    let at = cutoff.min(Instant::now() + Duration::from_secs(10));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = timeout_at(at, options.open(directory.join(name))).await??;
+    timeout_at(at, file.write_all(bytes)).await??;
+    timeout_at(at, file.sync_all()).await??;
+    ensure!(Instant::now() < at, "private server evidence write expired");
+    Ok(())
 }

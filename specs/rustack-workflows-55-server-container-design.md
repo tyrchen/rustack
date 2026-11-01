@@ -91,6 +91,28 @@ The independent container metadata reader compares each container's actual Image
 6. Run complete standard/strict/Native/security/text gates and independent source/evidence review. Prove zero all-state containers/volumes/private/test/pull references, all fourteen source IDs preserved and removal of only the two exact task-owned empty bridges.
 7. Reconcile English guide/index/roadmap/capabilities and commit task5.3e. It closes server-in-container functional acceptance on the recorded lanes only. Native-x86, reference image/pure performance, Desktop/rootless and complete5.4 stay required.
 
+## 7.1. Rootless data-volume transfer (D106)
+
+The D104 rootless diagnostic exposes a Docker archive limitation: `docker cp` against the actual server tries to remount its read-only daemon socket and fails EPERM. The main server and socket policy must remain unchanged. An independently inspected, never-started data-transfer container provides archive access to the same exact named data volume without a socket mount. The actual experiment reads both checksummed identity records with UID/GID65532/mode0600; the exact stopped server/helper/volume are subsequently removed without force after engine/label/source/record affiliation checks. Preserve this as a failed original resource plus explicit recovery, not a successful server case.
+
+```text
+ retained Owner → validated exact server-data volume
+       │                      │
+       ├─ actual server       └─ temporary data-transfer container
+       │  read-only socket       created only; NEVER start/exec
+       │  unchanged lifecycle    no socket / no network / nonroot
+       │                         archive GET identity or PUT/GET config
+       └─ retained intent ← exact inspected helper removal + absence
+```
+
+Use this transport consistently on both supported daemon drivers, avoiding a failed-copy fallback that could hide an ambiguous write. Each operation creates an exclusive generated helper name and durable parent-nonce/engine/source/volume/purpose intent before IO. Capture the full returned container ID separately. Inspect exact ID/name/source, UID/GID65532, the three parent ownership labels with role=data-transfer, created/nonrunning/PID0 state, read-only root, no privilege/capability additions, no-new-privileges, no restart/healthcheck, network none, no ports/binds/devices/volumes-from, and exactly one read/write named-volume mount at/data. No socket or credentials are passed. Bound metadata to the existing strict CLI decoder and all IO to the retained absolute operation cutoff. Resource metadata uses32MiB/no swap,0.1 CPU and16 PIDs; the helper never executes.
+
+Identity reads are the two fixed existing owner.v1/daemon.v1 paths, preserving the existing bounded tar/checksum/UID/GID/mode/engine oracle. Release configuration uses the existing fixed public bytes and explicit CopyUIDGID behavior, then independently reads/validates the resulting UID/GID/mode/content. No shell, arbitrary path or mount access is accepted.
+
+After the archive operation, inspect the same never-started helper again, remove only its captured ID without force and prove absence before returning. Attempt exact cleanup on an operation error as well. If create/delete reply, inspection, identity or cleanup is uncertain, retain the intent/ID and parent uncertainty; do not start the server, delete its data volume or claim clean qualification. Configuration writes remain uncertain until their complete existing content/metadata oracle and evidence receipt commit. The original server shutdown/namespace/source audit remains unchanged and runs only after helper settlement.
+
+Controls must reject substituted helper ID/image/name/labels/user/state, extra socket/bind/network/mount/port/device/privilege and incorrect volume flags; actual server/release positive and unreachable-gateway cases must pass on rootless and the retained rootful lane. This changes test/qualification transport only, not the production Lambda archive or user API. D105's CPU normalization and the full rootless79-resource exit remain independent requirements.
+
 ## 8. Sources
 
 - Docker [container run options](https://docs.docker.com/reference/cli/docker/container/run/) for explicit env files, supplemental groups, resource/security/network policy and publishing.

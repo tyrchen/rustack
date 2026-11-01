@@ -14,6 +14,7 @@ import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from image_performance_channel import FloodChannels
 from image_performance_support import MeasurementError, canonical, encode, integer, live, micros, overhead, require, samples, wait_task_baseline
 
 
@@ -46,10 +47,85 @@ def capability(endpoint, connection=None, path="/_rustack/capabilities"):
             connection.close()
 
 
+FLOOD_PHASES = frozenset(("beginAccepted", "beginObserved", "beginResponseWritten", "endAccepted",
+    "endObserved", "endResponseWritten", "beforeStarted", "beforeFinished", "healthStarted", "healthFinished",
+    "pairStarted", "pairFinished", "afterStarted", "afterFinished", "releaseChecked", "releaseInserted", "releaseRejected", "released", "completionCallbackObserved"))
+
+
+class FloodTimeline:
+    """One bounded current-cycle clock, serialized by its collector condition."""
+    def __init__(self, cycle, started):
+        require(integer(cycle, 1, 100) and type(started) is int and started > 0, "flood-timeline-origin")
+        self.cycle, self.started, self.events = cycle, started, {"submitted": 0}
+
+    def stamp(self, phase, clock=time.monotonic_ns):
+        require(phase in FLOOD_PHASES and phase not in self.events, "flood-timeline-phase")
+        self.events[phase] = micros(clock() - self.started)
+
+    def snapshot(self):
+        return {"cycle": self.cycle, "timingsMicros": dict(self.events)}
+
+
+def admission(value):
+    return value["workers"]["lambdaAdmission"]["activeExecutions"]
+
+
+def wait_flood_channel(collector, accepted, cutoff, clock=time.monotonic_ns):
+    """Observe collector completion under an existing absolute phase cutoff."""
+    with collector.condition:
+        while True:
+            require(clock() < cutoff, "flood-channel-observation-expired")
+            require(not collector.aborted, "flood-channel-observation-aborted")
+            if accepted():
+                require(clock() < cutoff, "flood-channel-observation-expired")
+                return
+            remaining = cutoff - clock()
+            require(remaining > 0, "flood-channel-observation-expired")
+            collector.condition.wait(min(0.01, remaining / 1000000000))
+
+
+def release_flood(collector, future, request, selected, pair, ready):
+    """Observe the live pair before final liveness checks and release atomically."""
+    collector.stamp("beforeStarted")
+    before, _ = ready()
+    collector.stamp("beforeFinished")
+    collector.stamp("healthStarted")
+    _, observed = ready("/_health/ready")
+    collector.stamp("healthFinished")
+    collector.stamp("pairStarted")
+    current, _ = pair()
+    collector.stamp("pairFinished")
+    collector.stamp("afterStarted")
+    after, _ = ready()
+    collector.stamp("afterFinished")
+    completed = future.done()
+    require(admission(before) == admission(after) == 1 and not completed
+            and current == selected, "health-not-during-live-flood")
+    with collector.condition:
+        collector.stamp("releaseChecked")
+        require(not future.done(), "flood-completed-before-release")
+        collector.released.add(request)
+        collector.stamp("releaseInserted")
+        if future.done():
+            collector.released.remove(request)
+            collector.stamp("releaseRejected")
+            raise MeasurementError("flood-completed-during-release")
+        collector.stamp("released")
+        collector.condition.notify_all()
+    return before, after, observed, completed
+
+
 def flood_failure(collector, phase, expected, future):
     with collector.condition:
         result = {"phase": phase, "expected": expected, "begun": len(collector.started),
                   "released": len(collector.released), "ended": len(collector.ended), "outcome": "pending"}
+        timeline = getattr(collector, "timeline", None)
+        if timeline is not None:
+            result.update(timeline.snapshot())
+        channels = getattr(collector, "channels", None)
+        if channels is not None:
+            result["controlChannelPhase"] = channels.current.phase if channels.current is not None else "absent"
+            result["controlPrepared"] = channels.prepared
     if future.done():
         try:
             future.result(timeout=0)
@@ -100,19 +176,53 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
     class Flood(Collector):
         def __init__(self):
             self.started, self.ended, self.released = {}, {}, set()
+            self.timeline = None
+            self.channels = FloodChannels()
             super().__init__()
             self.deadline = time.monotonic() + 400
 
+        def stamp(self, phase, timeline=None):
+            with self.condition:
+                selected = self.timeline if timeline is None else timeline
+                require(selected is not None, "flood-timeline-missing")
+                selected.stamp(phase)
+
+        def transport_policy(self, connection, path, event):
+            with self.condition:
+                keep_alive, complete = self.channels.accept(connection, path, event)
+            def written():
+                with self.condition:
+                    complete()
+                    self.condition.notify_all()
+            return keep_alive, written
+
+        def observe_transport(self, path, phase, timeline=None):
+            if path == "/flood-ready":
+                return None
+            key = {("/flood-begin", "accepted"): "beginAccepted",
+                   ("/flood-begin", "written"): "beginResponseWritten",
+                   ("/flood-end", "accepted"): "endAccepted",
+                   ("/flood-end", "written"): "endResponseWritten"}.get((path, phase))
+            require(key is not None, "flood-transport-phase")
+            with self.condition:
+                selected = self.timeline if timeline is None else timeline
+                self.stamp(key, selected)
+                return selected
+
         def exchange(self, path, event):
             with self.condition:
-                request = canonical(event["requestId"])
                 require(not self.aborted and time.monotonic() < self.deadline, "flood-expired")
                 require(isinstance(event["functionName"], str) and len(event["functionName"]) <= 64,
                         "flood-function")
+                if path == "/flood-ready":
+                    require(set(event) == {"functionName"}, "flood-ready")
+                    return {"ready": True}
+                request = canonical(event["requestId"])
                 if path == "/flood-begin":
                     require(set(event) == {"functionName", "requestId", "beforeBytes"}
                             and request not in self.started and len(self.started) < 100
                             and integer(event["beforeBytes"], 1, 1048575), "flood-begin")
+                    self.stamp("beginObserved")
                     self.started[request] = event
                     self.condition.notify_all()
                     cutoff = min(self.deadline, time.monotonic() + 2)
@@ -128,6 +238,7 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
                         and event["beforeBytes"] == self.started[request]["beforeBytes"], "flood-end")
                 result = {key: event[key] for key in ("requestId", "beforeBytes", "afterBytes")}
                 live(1, 1, 1, False, result)
+                self.stamp("endObserved")
                 self.ended[request] = result
                 self.condition.notify_all()
                 return {"recorded": True}
@@ -150,7 +261,8 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
 
     def pair():
         rows = metadata.rows()
-        require(len(rows) == 2 and {row["Labels"]["rustack.lambda.role"] for row in rows}
+        require(len(rows) == 2 and all(row.get("State") == "running" for row in rows)
+                and {row["Labels"]["rustack.lambda.role"] for row in rows}
                 == {"function", "relay"}, "environment-pair")
         identities = {row["Labels"]["rustack.lambda.environmentId"] for row in rows}
         require(len(identities) == 1, "pair-affiliation")
@@ -186,9 +298,6 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
             if capacity["allocated"] == capacity["memoryBytes"] == capacity["quarantined"] == 0:
                 break
             time.sleep(0.01)
-
-    def admission(value):
-        return value["workers"]["lambdaAdmission"]["activeExecutions"]
 
     def ready(path="/_rustack/capabilities"):
         return capability(endpoint, health_connection, path)
@@ -240,28 +349,34 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
                 delete(priming)
                 name = create(Timeout=1, Environment={"Variables": {
                     "IMAGE_FIXTURE_COLLECTOR": gateway + ":" + str(collector.server_port),
-                    "IMAGE_FIXTURE_TOKEN": collector.token}})
+                    "IMAGE_FIXTURE_TOKEN": collector.token, "IMAGE_FIXTURE_INIT_MODE": "flood"}})
                 initial, _ = ready()
                 task_baseline = initial["workers"]["runtimeTasks"]
                 for index in range(100):
+                    initialization_cutoff = time.monotonic_ns() + 20000000000
                     invoke(name, 1)
-                    selected, _ = pair()
-                    started = time.monotonic_ns()
-                    future = workers.submit(matrix.invoke, name, {"mode": "timed-log-flood", "delayMillis": 5000})
-                    request = observe_flood(collector, collector.started, index + 1, "begin", future)
-                    before, _ = ready()
-                    _, observed = ready("/_health/ready")
-                    after, _ = ready()
-                    completed = future.done()
-                    require(admission(before) == admission(after) == 1 and not completed
-                            and pair()[0] == selected, "health-not-during-live-flood")
-                    with collector.condition:
-                        collector.released.add(request)
-                        collector.condition.notify_all()
-                    observe_flood(collector, collector.ended, index + 1, "end", future)
-                    flood = collector.ended[request]
-                    live(admission(before), admission(after), observed, completed, flood)
-                    brackets.append([admission(before), admission(after), completed])
+                    wait_flood_channel(collector, lambda: collector.channels.ready(index + 1), initialization_cutoff)
+                    with metadata.pinned():
+                        selected, _ = pair()
+                        with collector.condition:
+                            started = time.monotonic_ns()
+                            channel = collector.channels.submit(index + 1, started)
+                            timeline = FloodTimeline(index + 1, started)
+                            collector.timeline = timeline
+                        future = workers.submit(matrix.invoke, name, {"mode": "timed-log-flood", "delayMillis": 5000})
+                        future.add_done_callback(lambda _done, selected=timeline: collector.stamp("completionCallbackObserved", selected))
+                        request = observe_flood(collector, collector.started, index + 1, "begin", future)
+                        try:
+                            before, after, observed, completed = release_flood(
+                                collector, future, request, selected, pair, ready)
+                        except (MeasurementError, OSError, http.client.HTTPException):
+                            diagnostic = flood_failure(collector, "live", index + 1, future)
+                            print("image-performance-flood-failure " + encode(diagnostic).decode(), file=sys.stderr, flush=True)
+                            raise
+                        observe_flood(collector, collector.ended, index + 1, "end", future)
+                        flood = collector.ended[request]
+                        live(admission(before), admission(after), observed, completed, flood)
+                        brackets.append([admission(before), admission(after), completed])
                     try:
                         future.result(timeout=65)
                     except ClientError as error:
@@ -273,6 +388,10 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
                         raise MeasurementError("timeout-returned-success")
                     timeouts.append(micros(returned - started)); health.append(observed); floods.append(flood)
                     require(not metadata.ids(), "timeout-returned-before-retirement")
+                    wait_flood_channel(collector, lambda: channel.phase == "complete" and channel.connection.fileno() < 0,
+                                       returned + 2000000000)
+                    with collector.condition:
+                        collector.channels.finish(channel, request)
                     elapsed, tasks = wait_task_baseline(settled_tasks, task_baseline, returned)
                     quiescence.append(elapsed)
                     current = process_stats(pid)
@@ -283,7 +402,8 @@ def exercise(endpoint, image, architecture, phase, socket, owner, engine, gatewa
                         "floods": floods, "processStats": stats, "completedCycles": 100,
                         "containerHighWater": 2, "emptyAfterEachTimeout": True,
                         "runtimeTaskBaseline": task_baseline, "taskQuiescence": samples(quiescence, 100),
-                        "liveBrackets": brackets, "primingInvocations": 1, "primingCleanupConfirmed": True}
+                        "liveBrackets": brackets, "primingInvocations": 1, "primingCleanupConfirmed": True,
+                        "controlChannels": collector.channels.summary()}
         return {"schemaVersion": 1, "phase": phase, "referenceQualification": "pending",
                 "os": sys.platform, "architecture": platform.machine(), "python": platform.python_version(),
                 "sdkVersion": importlib.metadata.version("boto3"), "baselineProcess": baseline,

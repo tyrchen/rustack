@@ -312,3 +312,84 @@ def execution_pressure(matrix, host, global_limit):
     phase = "global_limit" if global_limit else "default_limit"
     return [phase + "-positive-capacity-proof", "held-delete-retains-charge",
             "physical-retirement-before-recovery", "computed-recovery"]
+
+
+def composite_pressure(matrix, host):
+    """Large nested frames and actual malformed Runtime IO while Stop is live."""
+    settings = dict(endpoint_url=matrix.endpoint, region_name="us-east-1", aws_access_key_id="local-key",
+                    aws_secret_access_key="local-secret", config=Config(retries={"max_attempts": 0},
+                    connect_timeout=2, read_timeout=5))
+    with contextlib.closing(boto3.client("stepfunctions", **settings)) as states, collecting(lambda: Hold("busy")) as hold:
+        variables = {"IMAGE_FIXTURE_COLLECTOR":f"{host}:{hold.server_port}", "IMAGE_FIXTURE_TOKEN":hold.token}
+        blocked = matrix.create(Timeout=120, Environment={"Variables":variables})
+        framing = matrix.create()
+        hold.targets([blocked])
+        suffix = uuid.uuid4().hex
+        machines, executions = [], []
+        role = "arn:aws:iam::000000000000:role/Docker"
+        def create(name, definition):
+            arn = states.create_state_machine(name=name + suffix, roleArn=role,
+                    definition=json.dumps(definition, separators=(",", ":")))["stateMachineArn"]
+            machines.append(arn)
+            return arn
+        try:
+            child = create("PressureChild", {"StartAt":"M", "States":{"M":{"Type":"Map", "ItemsPath":"$.items",
+                "MaxConcurrency":1, "Iterator":{"StartAt":"T", "States":{"T":{"Type":"Task",
+                    "Resource":"arn:aws:states:::lambda:invoke", "Parameters":{"FunctionName":blocked,"Payload":{"mode.$":"$.mode","value.$":"$.value"}},
+                    "End":True}}}, "End":True}}})
+            parent = create("PressureParent", {"StartAt":"C", "States":{"C":{"Type":"Task",
+                "Resource":"arn:aws:states:::states:startExecution.sync:2",
+                "Parameters":{"StateMachineArn":child,"Input.$":"$"}, "End":True}}})
+            event = {"items":[{"mode":"hold", "value":8, "nested":{"padding":"x" * (128 * 1024)}}]}
+            execution = states.start_execution(stateMachineArn=parent, input=json.dumps(event))["executionArn"]
+            executions.append(execution)
+            hold.wait_seen(1, time.monotonic() + 30)
+            held = pair(matrix)
+            # Independent runtime slot hits real oversized HTTP frame limits while
+            # the parent/Map/child and its handler still own the large input.
+            output, _ = matrix.invoke(framing, {"mode":"framing", "value":8})
+            assert output["computed"] == 15 and output["forgedStatuses"] == [405,431,413,413,400]
+            assert held <= matrix.metadata.ids() and len(matrix.metadata.ids()) == 4
+            for _ in range(3):
+                began = time.monotonic()
+                matrix.ready()
+                assert states.describe_execution(executionArn=execution)["status"] == "RUNNING"
+                assert time.monotonic() - began < 2, "control plane starved by nested payload/frame pressure"
+            began = time.monotonic()
+            states.stop_execution(executionArn=execution, error="PressureStop", cause="bounded control")
+            assert time.monotonic() - began < 2, "Stop starved under pressure"
+            cutoff = time.monotonic() + 20
+            while states.describe_execution(executionArn=execution)["status"] == "RUNNING":
+                assert time.monotonic() < cutoff
+                time.sleep(0.025)
+            assert states.describe_execution(executionArn=execution)["status"] == "ABORTED"
+            wait_absent(matrix, held, cutoff)
+            retire(matrix, framing)
+            matrix.metadata.wait_ids(set(), time.monotonic() + 15)
+            quota = create("PressureQuota", {"StartAt":"P", "States":{"P":{"Type":"Pass", "Parameters":{
+                "a.$":"$.padding", "b.$":"$.padding", "c.$":"$.padding"}, "End":True}}})
+            failed = states.start_execution(stateMachineArn=quota, input=json.dumps({"padding":"q" * (100 * 1024)}))["executionArn"]
+            executions.append(failed)
+            cutoff = time.monotonic() + 10
+            while True:
+                result = states.describe_execution(executionArn=failed)
+                if result["status"] != "RUNNING":
+                    assert result["status"] == "FAILED" and result["error"] == "States.DataLimitExceeded"
+                    break
+                assert time.monotonic() < cutoff
+                time.sleep(0.025)
+            matrix.ready()
+            fresh, _ = matrix.invoke(framing, {"value":8})
+            assert fresh["computed"] == 15 and fresh["counter"] == 1
+            retire(matrix, framing)
+            matrix.metadata.wait_ids(set(), time.monotonic() + 15)
+        finally:
+            for arn in executions:
+                if states.describe_execution(executionArn=arn)["status"] == "RUNNING":
+                    states.stop_execution(executionArn=arn)
+            for arn in reversed(machines):
+                states.delete_state_machine(stateMachineArn=arn)
+        matrix.delete(blocked)
+        matrix.delete(framing)
+    return ["large-nested-map-owned-child", "oversized-runtime-frame-under-load", "live-ready-and-stop",
+            "physical-pair-retirement", "typed-payload-quota", "cold-slot-recovery"]

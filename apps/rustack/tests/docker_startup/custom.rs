@@ -50,6 +50,9 @@ impl Drop for Alias {
     }
 }
 impl Alias {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
     pub(super) async fn for_pull(server: &Server, name: String, id: String) -> Result<Self> {
         ensure!(
             name.starts_with("public.ecr.aws:443/lambda/nodejs@sha256:") && name.len() == 104,
@@ -82,7 +85,7 @@ impl Alias {
         confirm_pull_receipt(&bytes, &self.name, &self.ids)?;
         self.cleanup().await
     }
-    async fn new(server: &Server, ids: [String; 2]) -> Result<Self> {
+    pub(super) async fn new(server: &Server, ids: [String; 2]) -> Result<Self> {
         let executable =
             PathBuf::from(env::var_os("RUSTACK_DOCKER_BIN").context("explicit Docker CLI")?);
         ensure!(executable.is_absolute(), "Docker CLI must be absolute");
@@ -150,7 +153,7 @@ impl Alias {
         );
         Ok(())
     }
-    async fn select(&mut self, target: usize) -> Result<()> {
+    pub(super) async fn select(&mut self, target: usize) -> Result<()> {
         let id = self.ids.get(target).context("source image index")?.clone();
         let current = self.inspect().await?;
         if target == 0 {
@@ -172,7 +175,7 @@ impl Alias {
         self.pending = None;
         self.save().await
     }
-    async fn cleanup(&mut self) -> Result<()> {
+    pub(super) async fn cleanup(&mut self) -> Result<()> {
         let current = self.inspect().await?;
         if let Some(pending) = &self.pending {
             ensure!(

@@ -13,8 +13,9 @@ independent Rust RIC have functional evidence on the retained lanes. Explicit
 local SDK access to S3/DynamoDB, real image callbacks and managed Pulumi IaC
 consumers and the separate Linux server-container topology are qualified below.
 The actual root release image and composite Action are qualified through D99.
-W373 promotion, required arm64/reference/Desktop/rootless, remaining performance/load
-and complete release qualification remain unfinished. The user has waived
+The immutable candidate/qualification/promotion pipeline is implemented.
+Complete release acceptance still requires all current-source platform and
+dedicated ARM reference evidence; local checks do not publish images. The user has waived
 further Linux x86_64 validation; recorded amd64/QEMU results are historical
 functional evidence, with no native-x86 performance claim.
 
@@ -430,7 +431,7 @@ Readiness uses elapsed time, exact container/image/daemon identity and structure
 health. A healthy full container ID is handed to the caller for cleanup.
 `make test-workflows-action-fixture` runs26 actual-body adversarial/process
 controls under an independent Rust process owner and an exact one-resource
-Action manifest. This Action profile is separate from Native26 and Docker76.
+Action manifest. This Action profile is separate from Native26 and the current Docker83 inventory.
 The default Action CI consumer also checks pure ASL21→42 and its exact history;
 local YAML/control verification is not a remote CI result.
 
@@ -442,6 +443,30 @@ source identities preserved per engine. See [final D99 evidence](../specs/rustac
 [D100](../specs/rustack-workflows-99-decisions.md#d100--linux-x86_64-validation-is-waived) waives further Linux x86_64 validation.
 Existing both-lane commands/results describe completed evidence; future required
 platform work uses arm64 and the remaining Desktop/rootless/reference gates.
+
+The current release pipeline builds immutable candidates without login or push in
+`release-docker.yml`. `workflows-evidence.yml` uploads a deliberately staged,
+source-bound bundle from a configured qualification runner. `qualify-workflows.yml`
+checks same-repository, successful, same-commit candidate/evidence runs and reruns
+`make verify-workflows`; `promote-docker.yml` alone holds package-write permission
+and publishes the exact qualified archives. Local work does not trigger publication.
+See the [qualification contract](../specs/rustack-workflows-59-release-qualification-design.md)
+for the bounded bundle schema, seven required lanes and selective evidence packing.
+Missing Desktop or dedicated ARM reference evidence prevents qualification.
+
+For a local bundle, run:
+
+```bash
+make verify-workflows \
+  WORKFLOWS_RELEASE_BUNDLE=/absolute/private/bundle \
+  WORKFLOWS_RELEASE_REPORT=/absolute/private/report.json
+```
+
+`verify-workflows-rust` and `verify-workflows-native-recorded` record the fixed
+Rust and Native command catalogs. `test-workflows-docker-functional` consumes an
+explicit rootful/Desktop topology JSON; `test-workflows-rootless-functional`
+consumes the retained attestation, immutable preparation and bounded SSH forward.
+Both execute the same exact83-resource manifest without rebuilding fixtures.
 
 `make test-lambda-faults-docker` runs that complete startup suite plus real
 initialization/error/exit/OOM/timeout, signed initializing/busy caller

@@ -1,8 +1,10 @@
 """Bounded causal holds and independent read-only actual-daemon observations."""
+import contextlib
 import http.client
 import json
 import socket
 import time
+import threading
 import urllib.parse
 import uuid
 
@@ -131,6 +133,8 @@ class Metadata:
         assert isinstance(path, str) and path.startswith("/") and len(path.encode()) <= 4096
         assert "\x00" not in path
         self.path, self.owner, self.engine, self.api = path, identity(owner), identity(engine), None
+        self._lock = threading.RLock()
+        self._pinned = None
 
     @staticmethod
     def read(connection, path):
@@ -141,30 +145,73 @@ class Metadata:
         assert len(raw) <= 1024 * 1024, "independent metadata body cap"
         return json.loads(raw, object_pairs_hook=unique_object)
 
-    def get(self, path):
-        connection = UnixHTTP(self.path)
+    def _fence(self, connection):
+        connection.connect()
+        peer = connection.sock
+        assert peer is not None, "metadata connection missing"
+        connection.auto_open = False
+        if self.api is None:
+            version = self._read_peer(connection, peer, "/version")
+            def minor(value):
+                assert isinstance(value, str) and 4 <= len(value) <= 6 and value.startswith("1.")
+                number = value[2:]
+                assert number.isascii() and number.isdigit() and str(int(number)) == number
+                return int(number)
+            maximum = min(53, minor(version["ApiVersion"]))
+            assert 44 <= maximum and minor(version["MinAPIVersion"]) <= maximum
+            self.api = "1." + str(maximum)
+        current = identity(self._read_peer(connection, peer, "/v" + self.api + "/info")["ID"])
+        assert self.engine == current, "independent metadata daemon changed"
+        return peer
+
+    @classmethod
+    def _read_peer(cls, connection, peer, path):
         try:
-            if self.api is None:
-                version = self.read(connection, "/version")
-                def minor(value):
-                    assert isinstance(value, str) and 4 <= len(value) <= 6 and value.startswith("1.")
-                    number = value[2:]
-                    assert number.isascii() and number.isdigit() and str(int(number)) == number
-                    return int(number)
-                maximum = min(53, minor(version["ApiVersion"]))
-                assert 44 <= maximum and minor(version["MinAPIVersion"]) <= maximum
-                self.api = "1." + str(maximum)
-                assert connection.sock is not None, "metadata version negotiation lost its connection"
-            current = identity(self.read(connection, "/v" + self.api + "/info")["ID"])
-            assert self.engine == current, "independent metadata daemon changed"
-            assert connection.sock is not None, "metadata identity fence lost its connection"
+            assert connection.sock is peer and peer.fileno() >= 0, "metadata peer lost or replaced"
+            value = cls.read(connection, path)
+            assert connection.sock is peer and peer.fileno() >= 0, "metadata peer lost or replaced"
+            return value
+        finally:
+            if connection.sock is not peer:
+                peer.close()
+
+    @contextlib.contextmanager
+    def pinned(self):
+        """Fence once before a timed bracket; never reconnect inside that bracket."""
+        assert self._lock.acquire(blocking=False), "concurrent metadata use"
+        connection = None
+        try:
+            assert self._pinned is None, "nested metadata pin"
+            connection = UnixHTTP(self.path)
+            peer = self._fence(connection)
+            self._pinned = (connection, peer)
+            try:
+                yield self
+            finally:
+                self._pinned = None
+        finally:
+            if connection is not None:
+                connection.close()
+            self._lock.release()
+
+    def get(self, path):
+        assert self._lock.acquire(blocking=False), "concurrent metadata use"
+        connection = None
+        try:
             assert path.startswith(("/containers/", "/images/")) and len(path) <= 2048
             if path.startswith("/images/"):
                 alias = urllib.parse.unquote(path[len("/images/"):-len("/json")])
                 assert path.endswith("/json") and alias.startswith("rustack-internal/lambda-" + uuid.UUID(self.owner).hex + "/")
-            return self.read(connection, "/v" + self.api + path)
+            if self._pinned is not None:
+                current, peer = self._pinned
+            else:
+                connection = UnixHTTP(self.path)
+                current, peer = connection, self._fence(connection)
+            return self._read_peer(current, peer, "/v" + self.api + path)
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
+            self._lock.release()
 
     def image_id(self, alias):
         assert isinstance(alias, str) and len(alias) <= 256

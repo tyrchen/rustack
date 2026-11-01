@@ -27,6 +27,15 @@ use super::{
 
 const PROGRESS_WINDOW: Duration = Duration::from_secs(1);
 
+pub(super) fn prepare(agent: &Agent) -> Result<()> {
+    let name = variable("AWS_LAMBDA_FUNCTION_NAME")?;
+    let response = barrier(agent, "flood-ready", &json!({"functionName": name}))?;
+    if response.get("ready") != Some(&json!(true)) {
+        return Err("fixture flood channel was not prepared");
+    }
+    Ok(())
+}
+
 pub(super) fn flood(agent: &Agent, request: &str) -> Result<()> {
     let cutoff = Instant::now() + PROGRESS_WINDOW;
     let stop = Arc::new(AtomicBool::new(false));

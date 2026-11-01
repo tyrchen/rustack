@@ -49,9 +49,13 @@ class Collector(http.server.ThreadingHTTPServer):
         return connection, address
 
     def shutdown_request(self, request):
-        with self.condition:
-            self.connections.discard(request)
-        super().shutdown_request(request)
+        try:
+            super().shutdown_request(request)
+        finally:
+            with self.condition:
+                if request.fileno() < 0:
+                    self.connections.discard(request)
+                self.condition.notify_all()
 
     def process_request(self, request, address):
         if not self.slots.acquire(blocking=False):
@@ -140,6 +144,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.connection.settimeout(15)
+        observer = None
+        keep_alive, reply_written = False, None
         try:
             assert len(self.headers.get_all("x-fixture-token", [])) == 1
             assert hmac.compare_digest(self.headers["x-fixture-token"], self.server.token)
@@ -149,17 +155,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             assert 0 < length <= 2048
             raw = self.rfile.read(length)
             assert len(raw) == length
-            result = self.server.exchange(self.path, json.loads(raw, object_pairs_hook=unique_object))
+            event = json.loads(raw, object_pairs_hook=unique_object)
+            policy = getattr(self.server, "transport_policy", None)
+            if policy is not None:
+                keep_alive, reply_written = policy(self.connection, self.path, event)
+                assert type(keep_alive) is bool and callable(reply_written)
+            observer = getattr(self.server, "observe_transport", None)
+            if observer is not None:
+                observer_context = observer(self.path, "accepted")
+            result = self.server.exchange(self.path, event)
             data, code = json.dumps(result).encode(), 200
         except BaseException:
             self.server.abort(close_connections=False)
             data, code = b'{}', 400
         self.send_response(code)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Connection", "close")
+        self.send_header("Connection", "keep-alive" if code == 200 and keep_alive else "close")
         self.end_headers()
         self.wfile.write(data)
-        self.close_connection = True
+        self.close_connection = not (code == 200 and keep_alive)
+        if code == 200 and reply_written is not None:
+            reply_written()
+        if code == 200 and observer is not None:
+            observer(self.path, "written", observer_context)
 
 
 @contextlib.contextmanager

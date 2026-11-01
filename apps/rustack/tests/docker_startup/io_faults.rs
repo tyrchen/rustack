@@ -30,6 +30,7 @@ pub(super) enum Case {
     Pull,
     Negative,
     RuntimeBounds,
+    CompositePressure,
     GlobalLimit,
     DefaultLimit,
     MemoryLimit,
@@ -65,6 +66,7 @@ impl Case {
             Self::Pull => "pull",
             Self::Negative => "negative",
             Self::RuntimeBounds => "runtime_bounds",
+            Self::CompositePressure => "composite_pressure",
             Self::GlobalLimit => "global_limit",
             Self::DefaultLimit => "default_limit",
             Self::MemoryLimit => "memory_limit",
@@ -108,6 +110,14 @@ impl Case {
                 "failed-update-preserves-active-A",
                 "backend-pull-positively-drained",
                 "recovered-B-computation"
+            ]),
+            Self::CompositePressure => json!([
+                "large-nested-map-owned-child",
+                "oversized-runtime-frame-under-load",
+                "live-ready-and-stop",
+                "physical-pair-retirement",
+                "typed-payload-quota",
+                "cold-slot-recovery"
             ]),
             Self::RuntimeBounds => json!([
                 "runtime-http-405-431-413-413-400",

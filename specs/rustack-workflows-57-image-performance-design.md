@@ -67,7 +67,7 @@ Provision the relay, ordinary handler and updated custom-RIC images on the selec
 
 The guest uses its actual Python3.12 interpreter and the existing pinned pure-Python boto3/botocore1.43.118 package tree mounted read-only from the host SDK cache. Pass that explicit SDK root as a validated argument, verify actual distribution versions and record interpreter/package provenance. Do not execute the host Python binary or use ambient AWS credentials/proxies. Existing host executions keep the established pinned Python3.13 environment. This introduces no package/version change or network install into the guest.
 
-Both actual-resource Make entrypoints require the existing same-feature79-resource manifest preflight. The direct guest owner additionally requires exact equality between its46 ignored ordinary test names and the frozen manifest, then runs exactly the three named ignored performance resources once. Verify guest Python3.12 before dispatch and in each resulting report. Each normal Rust control and each required Python control must run explicitly; no exit0/zero-test success is accepted. The guest original cutoff is1500s, each resource group≤480s and its existing retirement allowance; the host SSH cutoff1600s stays within an original1650s host observation. Metadata/hash/report IO is covered, with the D101 interruption/retirement-safe guard. No user request/token/env dump is allowed. Preserve bounded raw child reports only after successful physical cleanup.
+Both actual-resource Make entrypoints require the current same-feature Docker manifest preflight (83 resources after D107). The direct guest owner additionally requires exact equality between its ignored ordinary test names derived from the canonical manifest (50 after D107) and the frozen manifest, then runs exactly the three named ignored performance resources once. Verify guest Python3.12 before dispatch and in each resulting report. Each normal Rust control and each required Python control must run explicitly; no exit0/zero-test success is accepted. The guest original cutoff is1500s, each resource group≤480s and its existing retirement allowance; the host SSH cutoff1600s stays within an original1650s host observation. Metadata/hash/report IO is covered, with the D101 interruption/retirement-safe guard. No user request/token/env dump is allowed. Preserve bounded raw child reports only after successful physical cleanup.
 
 ```text
 ┌─ one owned paced writer ──────────────┐
@@ -93,3 +93,76 @@ Freeze the following three ordinary-startup resources before first execution:
 They extend43 ordinary/76 total Docker resources to46/79 across the existing eight suites; Native26 remains unchanged. Focused and complete functional gates must use the same final sources. Only ARM qualification is scheduled under D100. The second ARM engine may satisfy existing two-engine correctness preconditions; both architectures are not required. Retain original Runner/image SDK lifecycle semantics and failure evidence.
 
 Normal controls cover exact sample count/order/ranks, subtract-before-rounding, budget boundaries, invalid handler time, cold identity/event duplication/mismatch/missing rows, non-live health evidence, timeout classification, accounting growth and malformed/oversized reports. Run focused Linux resources and complete ARM functional inventory, required build/test/fmt/Clippy/rustdoc/strict/Native/security/text gates, independent source/evidence review and exact namespace/source-preservation postconditions. A successful local VM capture closes this workload dependency only: dedicated-reference, Desktop/rootless, W373 and complete M4 remain required.
+
+## 7. Pinned metadata peer during the live flood bracket
+
+Before each timed invocation, connect, negotiate the API and verify the engine on one independent metadata socket. Retain that exact socket with implicit reconnect disabled until the live pair comparison and authenticated end observation finish. Reject socket closure/replacement and nested/concurrent use; close on every exit. Outside this scope, each ordinary observation still verifies its own connection.
+
+```text
+┌─ before timed Invoke ───────────────────────────────────────┐
+│ connect → negotiate API → verify engine → pin exact socket   │
+└────────────────────────────┬───────────────────────────────┘
+                             ▼ no reconnect or new identity setup
+┌─ existing live bracket, original deadlines ─────────────────┐
+│ begin → readiness/health → same pair → release → end         │
+│ socket loss/replacement → fail → finally close owned socket  │
+└────────────────────────────┬───────────────────────────────┘
+                             ▼ normal per-operation fencing resumes
+```
+
+Keep the one-second handler/handshake budget, 100 cycles, health budget, physical retirement proof and resource limits unchanged. The previous rootless run's cycle-54 end-handshake timeout remains failed evidence with an unproven root cause. Removing repeated connection/identity setup from the live bracket does not retrospectively explain that failure.
+
+## 8. Live observation ordering and failure localization (D109)
+
+The second D108 source cohort fails cycle89 at end observation after begin89/release89/end88; handler outcome is the actual one-second timeout. The earlier complete83/83 run remains valid historical evidence, but cannot establish that the intermittent issue is fixed. Source review identifies a concrete oracle defect: the final capabilities/completion samples precede the potentially slow live Docker GET. Move that GET before the final capabilities sample, then sample completion last. Under the collector condition, check completion, insert the release flag, and check completion again before notifying: a completed future requires withdrawing the flag and rejecting the cycle. Future completion is monotonic, so the last negative sample brackets the inserted flag without treating the collector lock as a lock on Future state. Require running rows for both observed roles. This strengthens the existing live proof without changing deadlines.
+
+```text
+┌─ before Invoke ─────────────────────────────────────────────────┐
+│ verified pinned metadata peer → actual running warm pair          │
+└──────────────────────────────┬───────────────────────────────────┘
+                               ▼ original submission clock
+┌─ one-second handler live bracket ────────────────────────────────┐
+│ begin → before capabilities → health → live pair GET               │
+│       → after capabilities → completion sample                     │
+│       → collector lock: completion recheck → release → end         │
+└──────────────────────────────┬───────────────────────────────────┘
+                               ▼ existing timeout/retirement/accounting
+```
+
+Retain bounded monotonic phase diagnostics on any failed cycle: submit, collector acceptance, begin receipt, before-capability/health/pair/after-capability boundaries, release insertion/withdrawal/commit, begin-response-written, end acceptance and completion-callback observation. Use fixed field names, nonnegative elapsed microseconds and current-cycle counters only; never emit tokens, event bodies, function names or credentials. Each timestamp is a local observation; the callback observation can lag the actual Future transition, and a successful server write does not prove client receipt. Bind the accepted/written transport hooks and completion callback to their original cycle object so delayed callbacks cannot contaminate a later cycle. A missing phase remains missing rather than being inferred. The existing healthy report schema and all100-cycle/one-second/health/retirement budgets remain unchanged. Normal controls must expose a delayed pair lookup and completion at the release boundary.
+
+The previous logs cannot distinguish a delayed controller observation, begin-response transport, writer join or end connection. The production log ring overwrites capped data while continuing to drain; no cap-stop fault has been established. Diagnose the focused100-cycle resource first; only after concrete code corrections stabilize should the final complete source cohort be frozen and requalified. A retry alone must not relabel the failed cohort as passed.
+
+## 9. Initialization-owned flood control channel (D110)
+
+Focused D109 diagnostics retain a failure at cycle84 before any authenticated begin was accepted: only submitted=0 and completionCallbackObserved=1176836µs, with83 complete prior cycles. This proves late controller release is not the sole failure mode. It does not identify whether first writer progress, scheduling or request transport caused that historical timeout.
+
+Remove connection establishment from the one-second measured handler window. The opt-in IMAGE_FIXTURE_INIT_MODE=flood branch prepares the collector channel through the existing RIC Agent before its first Runtime next request. This uses the existing20s initialization budget, adds no invocation and leaves warm-counter semantics, handlerTimeout=1s,100 cycles,2s health, physical retirement, process limits and report-size bounds unchanged. All other initialization modes retain their behavior. The existing ureq2.12.1 Agent pools fully consumed, length-delimited responses by scheme/host/port/proxy; Runtime API traffic therefore uses a separate pool key. Pool reuse alone is insufficient because it may reconnect: the collector enforces socket identity independently. See the [versioned upstream source](https://docs.rs/crate/ureq/2.12.1/source/README.md) and local registry response.rs/pool.rs/unit.rs.
+
+```text
+┌─ existing initialization owner (before first next) ───────────────┐
+│ explicit flood mode → authenticated POST /flood-ready              │
+│ full response read → same Agent retains this connection           │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 ▼ one actual socket object
+┌─ collector channel: exactly three authenticated exchanges ────────┐
+│ new → ready reply → ready                                         │
+│ ready → begin reply held for live health proof → begin            │
+│ begin → end reply with positive writer-span proof → complete       │
+│ mismatch/replay/new socket/invalid fields → reject + close         │
+│ end response → close; next environment requires a fresh channel    │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 ▼ existing handler timeout + pair retirement
+```
+
+The pure channel state owns a strong reference to the accepted socket object; never authorize by reused descriptor number or peer port. Bind function name and the canonical invocation UUID, require exactly ready→begin→end, and commit each phase only after its successful response write. Ready accepts exactly functionName; existing begin/end body validation remains mandatory. A new ready channel requires the previous one complete and physically closed. Reject begin/end on a replacement connection, including a client library's implicit reconnect. The generic collector keeps its existing close-per-response behavior unless an explicit bounded flood transport policy opts in; keep4 connection slots,4KiB cumulative headers,2KiB request bodies, existing socket/collector deadlines and joined shutdown. Close on rejection and after end. Delayed transport hooks retain the original channel and timeline objects.
+
+Before timed submission, wait for authenticated ready plus its response-write commit under the collector condition. Charge this wait to the original20s preparation cutoff captured before the warm invocation; never reset it after receiving a response. Choose the timed submission clock only after that observation and under the same lock as submit, so a delayed callback cannot acquire a later timestamp than an already-chosen start. After timeout and physical environment retirement, wait for the end-write commit and actual socket close, then prove the request UUID and same-socket phases. This wait and runtime-task quiescence share the original timeout-return+2s cutoff and elapsed accounting; never create a new close budget. Notify observers after actual collector socket closure. SDK response completion/Docker retirement alone is not a synchronization event for collector threads. The successful cycles measurement adds controlChannels with exactly four integer counters: prepared, readyBeforeInvoke, sameConnection and closed, each exactly100. The existing unique100 request UUIDs and finite state transitions prevent replay; do not enlarge the32KiB report or weaken existing validators. Record current-cycle channel stage in bounded failure diagnostics without addresses, tokens or function names.
+
+Normal controls cover strict phase order, mismatched/reused socket objects, closed sockets, wrong function/request identity, premature replacement, response-write ordering, authentication before transport hooks, exactly three persistent exchanges and close after end, and missing/wrong channel counters in retained reports. Focused actual rootless cycles must prove the protocol before final qualification. Keep every prior failure unchanged; describe this as removing a setup hazard, not proving the historical cause.
+
+The controlled execution-image refresh now covers five sources: runtime, custom RIC A/B, server and release, through four fixed Make targets (runtime/custom-RIC/server/release). Retain all old IDs before any build. Both explicit functional controllers and rootless import require the exact five-image source-sealed producer; only those five canonical aliases may advance with preceding receipt/cache-anchor proof. The full catalog remains15 images within the existing archive bounds. No x86 build/validation, daemon restart, image deletion or publication is introduced.
+
+### D110 executable artifact correction
+
+The first real D110 run fails before the flood protocol because the rebuilt RIC layer preserves a host0700 bootstrap owned by root. The build owner inherited umask077 to protect private diagnostics; relying on COPY's source mode made both entrypoints unexecutable by UID1000/65532. The retained actual image-2.tar independently proves both root-owned0700 entries; this is a confirmed artifact defect, separate from earlier intermittent handshakes. Set explicit COPY --chmod=0555 for /image-bootstrap and /alternate-bootstrap. Keep the non-root user/read-only policy, retain the bad image IDs and raw failure records, rebuild through the existing guarded five-image producer, inspect the new immutable layer permissions and execute the real non-root resource. No budget or protocol waiver is permitted.

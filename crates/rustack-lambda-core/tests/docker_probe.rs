@@ -75,7 +75,7 @@ async fn test_should_qualify_actual_kernel_limits_and_join_probe_retirement(
             "kernel limits differ"
         );
         ensure!(
-            report.cpu_quota == Some(33_333) && report.cpu_period == 100_000,
+            report.cpu_quota == Some(33_000) && report.cpu_period == 100_000,
             "CPU rounding differs"
         );
         ensure!(

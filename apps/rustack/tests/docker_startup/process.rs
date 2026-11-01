@@ -3,7 +3,8 @@
 use std::{
     env,
     fs::Permissions,
-    os::unix::fs::PermissionsExt,
+    io::SeekFrom,
+    os::unix::{fs::PermissionsExt, process::ExitStatusExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     time::Duration,
@@ -23,7 +24,7 @@ use sha2::{Digest, Sha256};
 use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     process::{Child, Command},
     time::{Instant, sleep, timeout},
@@ -153,6 +154,7 @@ pub(super) struct Server {
     profile: Profile,
     sources: Vec<(ImageReference, String)>,
     socket_override: Option<PathBuf>,
+    log_start: u64,
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
@@ -267,25 +269,7 @@ impl Server {
             fs::write(&file, &bytes).await?;
             fs::write(root.path().join("legacy.expected"), bytes).await?;
         }
-        let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
-        let result = async {
-            let mut sources = Vec::new();
-            for reference in [image()?, handler()?] {
-                let reference: ImageReference = reference.parse()?;
-                let id = wire
-                    .port()
-                    .inspect_image(&reference, deadline())
-                    .await?
-                    .id
-                    .context("source image identity")?;
-                sources.push((reference, id));
-            }
-            Ok::<_, anyhow::Error>(sources)
-        }
-        .await;
-        let stopped = wire.shutdown().await;
-        stopped?;
-        let sources = result?;
+        let sources = fixture_sources().await?;
         fs::copy(env!("CARGO_BIN_EXE_rustack"), root.path().join("rustack")).await?;
         let child = launch(root.path(), profile, port, socket_override).await?;
         Ok(Self {
@@ -295,6 +279,7 @@ impl Server {
             profile,
             sources,
             socket_override: socket_override.map(Path::to_path_buf),
+            log_start: 0,
         })
     }
     pub async fn track_image(&mut self, source: &str) -> Result<String> {
@@ -393,17 +378,24 @@ impl Server {
         }
     }
     pub async fn failure(&mut self) -> Result<()> {
+        self.failure_with(None).await
+    }
+    pub async fn failure_with(&mut self, expected: Option<&str>) -> Result<()> {
         let at = Instant::now() + Duration::from_secs(180);
         loop {
             if let Some(status) = self.child.try_wait()? {
                 ensure!(!status.success(), "negative startup exited successfully");
-                let file = fs::File::open(self.path()?.join("server.log")).await?;
+                let mut file = fs::File::open(self.path()?.join("server.log")).await?;
+                file.seek(SeekFrom::Start(self.log_start)).await?;
                 let mut bytes = Vec::new();
                 file.take(32769).read_to_end(&mut bytes).await?;
                 ensure!(bytes.len() <= 32768, "negative startup log cap");
                 let text = std::str::from_utf8(&bytes)?;
                 ensure!(
-                    self.profile.matches_failure(text),
+                    expected.map_or_else(
+                        || self.profile.matches_failure(text),
+                        |expected| text.contains(expected)
+                    ),
                     "startup failed at an unrelated prerequisite: {text}"
                 );
                 return Ok(());
@@ -424,6 +416,10 @@ impl Server {
             status.success() == success,
             "unexpected ordinary server exit status"
         );
+        Ok(())
+    }
+    pub async fn reap(&mut self) -> Result<()> {
+        self.stop_status().await?;
         Ok(())
     }
     pub async fn stop_after_transport_loss(&mut self) -> Result<()> {
@@ -457,6 +453,19 @@ impl Server {
         };
         Ok(status)
     }
+    pub async fn crash(&mut self) -> Result<()> {
+        ensure!(
+            self.child.try_wait()?.is_none(),
+            "crash target already exited"
+        );
+        self.child.start_kill()?;
+        let status = timeout(Duration::from_secs(10), self.child.wait()).await??;
+        ensure!(
+            status.signal() == Some(Signal::SIGKILL as i32),
+            "crash did not join SIGKILL"
+        );
+        Ok(())
+    }
     pub async fn restart(&mut self) -> Result<()> {
         let port = self
             .endpoint
@@ -464,6 +473,7 @@ impl Server {
             .next()
             .context("owned endpoint port")?
             .parse()?;
+        self.log_start = fs::metadata(self.path()?.join("server.log")).await?.len();
         self.child = launch(
             self.path()?,
             self.profile,
@@ -544,6 +554,27 @@ impl Server {
             eprintln!("retained startup evidence: {}", root.keep().display());
         }
     }
+}
+async fn fixture_sources() -> Result<Vec<(ImageReference, String)>> {
+    let mut wire = DockerWire::connect(socket()?.parse()?, deadline()).await?;
+    let result = async {
+        let mut sources = Vec::new();
+        for reference in [image()?, handler()?] {
+            let reference: ImageReference = reference.parse()?;
+            let id = wire
+                .port()
+                .inspect_image(&reference, deadline())
+                .await?
+                .id
+                .context("source image identity")?;
+            sources.push((reference, id));
+        }
+        Ok::<_, anyhow::Error>(sources)
+    }
+    .await;
+    let stopped = wire.shutdown().await;
+    stopped?;
+    result
 }
 async fn observation_record(path: PathBuf, length: usize, magic: &[u8; 8]) -> Result<Vec<u8>> {
     ensure!((32..=72).contains(&length), "invalid fixture record cap");

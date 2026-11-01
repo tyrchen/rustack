@@ -2,71 +2,63 @@ name: release-docker
 
 on:
   push:
-    tags:
-      - v*
+    tags: [v*]
   workflow_dispatch:
 
+# Candidates are local Docker archives. Publication belongs to promote-docker.
 permissions:
   contents: read
-  packages: write
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/rustack
 
 jobs:
-  # Wait for the build workflow to pass before pushing the Docker image.
-  wait-for-build:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+          - architecture: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
-      - name: Wait for build workflow
-        uses: lewagon/wait-on-check-action@v1.3.4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          check-name: build-rust (ubuntu-latest)
-          wait-interval: 15
-          allowed-conclusions: success
-
-  build-and-push:
-    needs: [wait-for-build]
-    if: always() && (needs.wait-for-build.result == 'success' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Set up QEMU (for multi-arch builds)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata
-        id: docker-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=latest
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Allocate candidate directory
+        run: mkdir -m 700 "${{ runner.temp }}/candidate"
+      - name: Build without publication
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.docker-meta.outputs.tags }}
-          labels: ${{ steps.docker-meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/${{ matrix.architecture }}
+          push: false
+          provenance: false
+          tags: rustack/workflows-release:integration-${{ matrix.architecture }}
+          outputs: type=docker,dest=${{ runner.temp }}/candidate/release-${{ matrix.architecture }}.tar
+          cache-from: type=gha,scope=release-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.architecture }}
+      - name: Load and seal exact archive
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          CANDIDATE: ${{ runner.temp }}/candidate
+        run: |
+          docker image load --input "$CANDIDATE/release-$ARCHITECTURE.tar"
+          make workflows-release-seal WORKFLOWS_ARCH="$ARCHITECTURE" WORKFLOWS_RELEASE_BUNDLE="$CANDIDATE"
+      - name: Record execution scope
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          if [ "$ARCHITECTURE" = amd64 ]; then
+            echo 'D100: distribution build only; Linux x86_64 execution is waived.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Candidate awaits complete exact-image platform qualification; no promotion occurred.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

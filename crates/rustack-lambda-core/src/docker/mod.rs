@@ -75,7 +75,9 @@ pub use network::QualifiedNetwork;
 pub use ownership::{DirectoryLease, DirectoryLeaseError};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub use pin::{ImagePin, ImagePinScope};
-pub use plan::{ContainerPolicy, EnvironmentPlan, NetworkSelection, RelayBudgets};
+pub use plan::{
+    ContainerPolicy, DockerCpuAllocation, EnvironmentPlan, NetworkSelection, RelayBudgets,
+};
 pub use pool::{EnvironmentPool, PoolConfig, PoolInvocation, PoolPort, PoolSettings, PoolStatus};
 pub use probe::{
     EndpointProbe, EndpointProbeConfig, EnvironmentProbe, EnvironmentProbeConfig,

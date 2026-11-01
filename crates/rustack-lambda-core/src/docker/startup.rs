@@ -22,11 +22,12 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    CodeVolumeManager, DirectoryLease, DirectoryLeaseError, DockerError, DockerExecutor,
-    DockerExecutorError, DockerPort, DockerReadiness, DockerRuntimeSettings, DockerSdkEnvironment,
-    DockerWire, DockerZipRuntime, EndpointProbe, EndpointProbeConfig, EnvironmentCapacity,
-    EnvironmentError, EnvironmentManager, EnvironmentProbe, EnvironmentProbeConfig,
-    EnvironmentProbeError, GatewayInstanceId, ImageLeaseManager, ImageLeasePort, RegistryAuthError,
+    CodeVolumeManager, DirectoryLease, DirectoryLeaseError, DockerCpuAllocation, DockerError,
+    DockerExecutor, DockerExecutorError, DockerPort, DockerReadiness, DockerRuntimeSettings,
+    DockerSdkEnvironment, DockerWire, DockerZipRuntime, EndpointProbe, EndpointProbeConfig,
+    EnvironmentCapacity, EnvironmentError, EnvironmentManager, EnvironmentProbe,
+    EnvironmentProbeConfig, EnvironmentProbeError, GatewayInstanceId, ImageLeaseManager,
+    ImageLeasePort, RegistryAuthError,
     ownership::{DataDirectory, DirectoryAcquisition},
     sdk::{LocalSdkCredentials, SdkAffiliation},
 };
@@ -247,6 +248,9 @@ pub struct DockerRuntimeStatus(Arc<Qualification>);
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct DockerCapabilities {
+    /// Requested/effective CPU pair from retained kernel-qualified policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<DockerCpuAllocation>,
     /// Actual retained allocation/memory charges, absent before qualification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<EnvironmentCapacity>,
@@ -268,6 +272,7 @@ impl DockerRuntimeStatus {
     pub fn capabilities(&self) -> DockerCapabilities {
         let evidence = self.0.evidence.get();
         DockerCapabilities {
+            cpu: evidence.map(|evidence| evidence.base.policy.cpu_allocation()),
             capacity: evidence.map(|evidence| evidence.base.environments.status()),
             ready: self.0.installed.load(Ordering::Acquire) && self.0.check().is_ok(),
             platform: evidence.map(|e| match e.architecture {

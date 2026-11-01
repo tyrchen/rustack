@@ -4,6 +4,8 @@
 
 #[path = "docker_startup/archive.rs"]
 mod archive;
+#[path = "docker_startup/archive_rejection.rs"]
+mod archive_rejection;
 #[path = "docker_startup/callback.rs"]
 mod callback;
 #[path = "docker_startup/container_server.rs"]
@@ -30,6 +32,8 @@ mod process;
 mod provided;
 #[path = "docker_startup/provided_archive.rs"]
 mod provided_archive;
+#[path = "docker_startup/recovery_gate.rs"]
+mod recovery_gate;
 #[path = "workflows_sdk/runner.rs"]
 mod runner;
 #[path = "docker_startup/sdk.rs"]
@@ -37,6 +41,7 @@ mod sdk;
 
 use std::{
     collections::BTreeMap,
+    env,
     ffi::OsString,
     path::{Path, PathBuf},
     time::Duration,
@@ -423,6 +428,7 @@ async fn test_should_settle_real_image_faults_and_public_cancellation_admission(
 #[case::independent_environment_limit(io_faults::Case::EnvironmentLimit)]
 #[case::zip_allocating(io_faults::Case::ZipCreate)]
 #[case::zip_cleanup(io_faults::Case::ZipDelete)]
+#[case::composite_pressure(io_faults::Case::CompositePressure)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires explicit real-daemon IO proxy fixtures; run make test-lambda-io-faults-docker"]
 async fn test_should_retain_actual_management_io_through_cancellation_and_deployment_faults(
@@ -531,4 +537,162 @@ async fn test_should_measure_twenty_preloaded_cold_image_environments() -> Resul
 #[ignore = "actual log-flood/timeout cleanup; run make test-workflows-image-performance"]
 async fn test_should_reuse_one_image_slot_after_one_hundred_log_flood_timeouts() -> Result<()> {
     performance::exercise("cycles").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires two actual binaries on one explicit daemon; run make \
+            test-lambda-startup-docker"]
+async fn test_should_preserve_live_warm_instance_during_other_owner_crash_recovery() -> Result<()> {
+    let mut gate =
+        recovery_gate::Gate::start(&PathBuf::from(env::var("RUSTACK_RUNTIME_DOCKER_SOCKET")?))?;
+    let mut survivor = Server::spawn(Profile::Connected).await?;
+    let mut owned_crashed = None;
+    let result = timeout(Duration::from_secs(360), async {
+        owned_crashed =
+            Some(Server::spawn_with_socket(Profile::Connected, Some(&gate.socket)).await?);
+        let crashed = owned_crashed.as_mut().context("second owned binary")?;
+        survivor.ready().await?;
+        crashed.ready().await?;
+        ensure!(
+            survivor.observation_identity().await?.0 != crashed.observation_identity().await?.0,
+            "two live binaries shared installation identity"
+        );
+        let mut warm = sdk::Witness::start(&survivor).await?;
+        let mut abandoned = sdk::Witness::start(crashed).await?;
+        let stable = sdk::owned_containers(&survivor).await?;
+        let old = sdk::owned_containers(crashed).await?;
+        ensure!(
+            stable.len() == 2 && old.len() == 2 && stable.is_disjoint(&old),
+            "live owner scopes differ"
+        );
+        abandoned.advance().await?;
+        crashed.crash().await?;
+        warm.advance().await?;
+        gate.arm();
+        crashed.restart().await?;
+        gate.blocked().await?;
+        let witness = async {
+            for _ in 0..3 {
+                warm.advance().await?;
+                let (status, value) =
+                    process::get(&survivor.endpoint, "/_rustack/capabilities").await?;
+                ensure!(
+                    status == 200 && value["ready"] == true,
+                    "survivor lost readiness during recovery"
+                );
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        witness.await?;
+        gate.release();
+        crashed.ready().await?;
+        ensure!(
+            sdk::owned_containers(&survivor).await? == stable
+                && sdk::owned_containers(crashed).await?.is_disjoint(&old),
+            "recovery retired foreign containers or retained abandoned containers"
+        );
+        warm.advance().await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("two-instance crash recovery observer expired")
+    .and_then(|value| value);
+    gate.release();
+    let first = if let Some(crashed) = &mut owned_crashed {
+        crashed.stop(true).await
+    } else {
+        Ok(())
+    };
+    let second = survivor.stop(true).await;
+    let first_audit = if let Some(crashed) = &owned_crashed {
+        crashed.audit().await
+    } else {
+        Ok(())
+    };
+    let second_audit = survivor.audit().await;
+    if result.is_err()
+        || first.is_err()
+        || second.is_err()
+        || first_audit.is_err()
+        || second_audit.is_err()
+    {
+        if let Some(crashed) = &mut owned_crashed {
+            crashed.retain_on_error().await;
+        }
+        survivor.retain_on_error().await;
+    }
+    let proxy = gate.close().await;
+    first?;
+    second?;
+    first_audit?;
+    second_audit?;
+    proxy?;
+    result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real saved images and affiliations; run make test-lambda-startup-docker"]
+async fn test_should_restore_saved_image_after_tag_move_and_reject_absent_or_foreign_candidates()
+-> Result<()> {
+    archive_rejection::exercise().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real cleanup failure and snapshot recovery; run make \
+            test-lambda-startup-docker"]
+async fn test_should_preserve_previous_snapshot_when_docker_cleanup_cannot_be_confirmed()
+-> Result<()> {
+    let mut gate =
+        recovery_gate::Gate::start(&PathBuf::from(env::var("RUSTACK_RUNTIME_DOCKER_SOCKET")?))?;
+    let mut server = Server::spawn_with_socket(Profile::Archive, Some(&gate.socket)).await?;
+    let result = timeout(Duration::from_secs(480), async {
+        server.ready().await?;
+        let _committed = sdk::Witness::start(&server).await?;
+        server.stop(true).await?;
+        server.audit().await?;
+        let snapshots = server.path()?.join("snapshots");
+        let saved = fingerprint(&snapshots).await?;
+        server.restart().await?;
+        server.ready().await?;
+        let unsaved = sdk::Witness::start(&server).await?;
+        let old = sdk::owned_containers(&server).await?;
+        ensure!(
+            old.len() == 2,
+            "cleanup-failure fixture lacked live containers"
+        );
+        gate.disconnect().await?;
+        server.stop(false).await?;
+        ensure!(
+            fingerprint(&snapshots).await? == saved,
+            "unconfirmed cleanup published a snapshot generation"
+        );
+        gate.resume().await?;
+        server.restart().await?;
+        server.ready().await?;
+        unsaved.missing().await?;
+        ensure!(
+            sdk::owned_containers(&server).await?.is_disjoint(&old),
+            "restart retained abandoned owned containers"
+        );
+        server.stop(true).await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("failed-cleanup snapshot observer expired")
+    .and_then(|value| value);
+    gate.release();
+    let stopped = server.stop_after_transport_loss().await;
+    let audit = if result.is_ok() {
+        server.audit().await
+    } else {
+        Ok(())
+    };
+    if result.is_err() || stopped.is_err() || audit.is_err() {
+        server.retain_on_error().await;
+    }
+    let proxy = gate.close().await;
+    stopped?;
+    audit?;
+    proxy?;
+    result
 }

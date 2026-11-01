@@ -84,9 +84,9 @@ def guest(binary, server, sdk, prepared, owner, deadline):
     names = [line[:-6] for line in listing if line.endswith(": test")]
     from docker_required_suites import parse_manifest
     required = parse_manifest(bounded_read(Path(__file__).with_name("docker-required-suites.json"), 32768))
-    require(len(names) == len(set(names)) == 46 and set(names) == set(required["ordinary-startup"])
+    require(len(names) == len(set(names)) == len(required["ordinary-startup"]) and set(names) == set(required["ordinary-startup"])
             and set(CASES) <= set(names), "linux-performance-inventory")
-    # The complete79-resource manifest is checked by the required host preflight;
+    # The complete canonical resource manifest is checked by the required host preflight;
     # the guest selects these same three exact cases from the actual ELF listing.
     root = Path(tempfile.mkdtemp(prefix="rustack-d102-linux-"))
     reports = []

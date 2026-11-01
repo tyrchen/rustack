@@ -298,6 +298,7 @@ test-workflows-performance-linux: workflows-performance-linux-build
 # D102: actual image samples and causal log-flood/timeout cleanup.
 test-workflows-image-performance-controls:
 	@python3 -I -B -m unittest discover -s tests/workflows -p test_image_performance.py -v
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_image_performance_channel.py -v
 	@$(MAKE) --no-print-directory test-workflows-performance-linux-controls
 
 test-workflows-image-performance: test-workflows-image-performance-controls test-lambda-docker-manifest
@@ -341,6 +342,40 @@ workflows-rootless-recover-attestation: test-workflows-rootless-controls
 	@python3 -I -B tests/workflows/rootless_platform.py recover-attest "$(WORKFLOWS_ROOTLESS_PROFILE)" "$(WORKFLOWS_ROOTLESS_PREVIOUS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)"
 
 .PHONY: test-workflows-rootless-controls workflows-rootless-provision workflows-rootless-attest workflows-rootless-resume-setup workflows-rootless-recover-attestation
+
+# D104: explicit preloaded rootless resource consumers, preserving D103 installation.
+WORKFLOWS_ROOTLESS_FORWARD_DIR ?= /tmp/rustack-rootless-forward-d104
+WORKFLOWS_ROOTLESS_RESOURCE_DIR ?= $(shell cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-rootless-resources-d104
+
+test-workflows-rootless-resource-controls:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_rootless_resources.py -v
+
+workflows-rootless-forward: test-workflows-rootless-resource-controls
+	@python3 -I -B tests/workflows/rootless_resources.py forward "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)"
+
+workflows-rootless-kernel-images: test-workflows-rootless-resource-controls
+	@python3 -I -B tests/workflows/rootless_resources.py prepare "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)" "$(WORKFLOWS_ROOTLESS_RESOURCE_DIR)"
+
+workflows-rootless-functional-images: test-workflows-rootless-resource-controls
+	@python3 -I -B tests/workflows/rootless_resources.py prepare-full "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)" "$(WORKFLOWS_ROOTLESS_RESOURCE_DIR)"
+
+test-workflows-rootless-kernel: test-workflows-rootless-resource-controls
+	@python3 -I -B tests/workflows/rootless_resources.py kernel "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)" "$(WORKFLOWS_ROOTLESS_RESOURCE_DIR)" "$(WORKFLOWS_DOCKER_TARGET_DIR)"
+
+test-workflows-rootless-functional: test-workflows-rootless-resource-controls
+	@python3 -I -B tests/workflows/rootless_functional.py "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)" "$(WORKFLOWS_ROOTLESS_RESOURCE_DIR)" "$(WORKFLOWS_DOCKER_TARGET_DIR)" "$(LAMBDA_IMAGE_FIXTURE_DIR)/arm64" "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" "$(WORKFLOWS_OTHER_DOCKER_SOCKET)"
+
+test-workflows-rootless-server: test-workflows-rootless-resource-controls
+	@python3 -I -B tests/workflows/rootless_functional.py --server-focus "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)" "$(WORKFLOWS_ROOTLESS_RESOURCE_DIR)" "$(WORKFLOWS_DOCKER_TARGET_DIR)" "$(LAMBDA_IMAGE_FIXTURE_DIR)/arm64" "$$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-sdk-python/bin/python" "$(WORKFLOWS_OTHER_DOCKER_SOCKET)"
+
+.PHONY: test-workflows-rootless-resource-controls workflows-rootless-forward workflows-rootless-kernel-images workflows-rootless-functional-images test-workflows-rootless-kernel test-workflows-rootless-functional test-workflows-rootless-server
+
+WORKFLOWS_RUST_EVIDENCE_DIR ?= $(shell cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/workflows-rust-verification
+
+verify-workflows-rust:
+	@python3 -I -B tests/workflows/rust_gates.py "$(WORKFLOWS_RUST_EVIDENCE_DIR)"
+
+.PHONY: verify-workflows-rust
 
 # D75: exact same-feature resource inventories, before any resource execution.
 test-workflows-manifest:
@@ -1678,3 +1713,79 @@ test-workflows-release-docker:
 	done
 
 .PHONY: test-workflows-release-fixture test-workflows-release-docker
+
+# Final M4 evidence gate. Missing platforms/reference receipts are hard failures.
+WORKFLOWS_RELEASE_BUNDLE ?=
+WORKFLOWS_RELEASE_REPORT ?=
+verify-workflows:
+	@test -n "$(WORKFLOWS_RELEASE_BUNDLE)" && test -n "$(WORKFLOWS_RELEASE_REPORT)"
+	@python3 -I -B tests/workflows/release_qualification.py "$(WORKFLOWS_RELEASE_BUNDLE)" "$(WORKFLOWS_RELEASE_REPORT)"
+
+.PHONY: verify-workflows
+
+WORKFLOWS_IMAGE_REFRESH_BUILD_DIR ?=
+WORKFLOWS_ROOTLESS_PREVIOUS_RESOURCE_DIR ?=
+workflows-refresh-production-images:
+	@test -n "$(WORKFLOWS_IMAGE_REFRESH_BUILD_DIR)"
+	@python3 -I -B tests/workflows/image_refresh_build.py "$(WORKFLOWS_IMAGE_REFRESH_BUILD_DIR)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_IMAGE_BUILDER)"
+
+workflows-rootless-refresh-images:
+	@test -n "$(WORKFLOWS_ROOTLESS_PREVIOUS_RESOURCE_DIR)" && test -n "$(WORKFLOWS_IMAGE_REFRESH_BUILD_DIR)"
+	@python3 -I -B tests/workflows/rootless_resources.py refresh-full "$(WORKFLOWS_ROOTLESS_EVIDENCE_DIR)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_ROOTLESS_FORWARD_DIR)" "$(WORKFLOWS_ROOTLESS_RESOURCE_DIR)" "$(WORKFLOWS_ROOTLESS_PREVIOUS_RESOURCE_DIR)" "$(WORKFLOWS_IMAGE_REFRESH_BUILD_DIR)"
+
+.PHONY: workflows-refresh-production-images workflows-rootless-refresh-images
+
+workflows-release-seal:
+	@test -n "$(WORKFLOWS_RELEASE_BUNDLE)"
+	@python3 -I -B tests/workflows/release_delivery.py seal "$(WORKFLOWS_RELEASE_BUNDLE)" "$(WORKFLOWS_ARCH)"
+
+workflows-release-preflight:
+	@test -n "$(WORKFLOWS_RELEASE_BUNDLE)"
+	@python3 -I -B tests/workflows/release_delivery.py verify "$(WORKFLOWS_RELEASE_BUNDLE)"
+
+# Explicit publication entry point; never a prerequisite of a local test/build.
+workflows-release-promote:
+	@test -n "$(WORKFLOWS_RELEASE_BUNDLE)"
+	@python3 -I -B tests/workflows/release_delivery.py promote "$(WORKFLOWS_RELEASE_BUNDLE)"
+
+.PHONY: workflows-release-seal workflows-release-preflight workflows-release-promote
+
+workflows-release-input-runs:
+	@python3 -I -B tests/workflows/release_delivery.py input-runs
+
+.PHONY: workflows-release-input-runs
+
+WORKFLOWS_PLATFORM_REPORT ?=
+workflows-platform-receipt:
+	@test -n "$(WORKFLOWS_PLATFORM_REPORT)"
+	@python3 -I -B tests/workflows/platform_receipt.py "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_PLATFORM_REPORT)"
+
+.PHONY: workflows-platform-receipt
+
+WORKFLOWS_EVIDENCE_ROOT ?=
+WORKFLOWS_EVIDENCE_OUTPUT ?=
+workflows-release-evidence:
+	@test -n "$(WORKFLOWS_EVIDENCE_ROOT)" && test -n "$(WORKFLOWS_EVIDENCE_OUTPUT)"
+	@python3 -I -B tests/workflows/release_bundle.py "$(WORKFLOWS_EVIDENCE_ROOT)" "$(WORKFLOWS_EVIDENCE_OUTPUT)"
+
+.PHONY: workflows-release-evidence
+
+test-workflows-release-qualification-controls:
+	@python3 -I -B -m unittest discover -s tests/workflows -p test_release_qualification.py -v
+
+.PHONY: test-workflows-release-qualification-controls
+
+WORKFLOWS_FUNCTIONAL_CONFIG ?=
+WORKFLOWS_FUNCTIONAL_EVIDENCE ?=
+test-workflows-docker-functional:
+	@test -n "$(WORKFLOWS_FUNCTIONAL_CONFIG)" && test -n "$(WORKFLOWS_FUNCTIONAL_EVIDENCE)"
+	@python3 -I -B tests/workflows/docker_functional.py "$(WORKFLOWS_FUNCTIONAL_CONFIG)" "$(WORKFLOWS_FUNCTIONAL_EVIDENCE)"
+
+.PHONY: test-workflows-docker-functional
+
+WORKFLOWS_NATIVE_EVIDENCE_DIR ?=
+verify-workflows-native-recorded:
+	@test -n "$(WORKFLOWS_NATIVE_EVIDENCE_DIR)"
+	@python3 -I -B tests/workflows/native_gates.py "$(WORKFLOWS_NATIVE_EVIDENCE_DIR)"
+
+.PHONY: verify-workflows-native-recorded

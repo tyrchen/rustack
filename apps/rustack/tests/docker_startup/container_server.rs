@@ -95,11 +95,16 @@ pub(super) async fn exercise(mode: Mode, profile: ImageProfile) -> Result<()> {
     .await;
     // No outer timeout drops a live CLI wait or the root's cleanup authority.
     let cleaned = owner.cleanup().await;
-    if observed.is_ok() && cleaned.is_ok() {
-        owner.release();
-    }
     observed?;
     cleaned?;
+    if profile == ImageProfile::Release {
+        let receipt = owner.publication_receipt(mode.name()).await?;
+        println!(
+            "WORKFLOWS_RELEASE_RESOURCE {}",
+            serde_json::to_string(&receipt)?
+        );
+    }
+    owner.release();
     let topology = if profile == ImageProfile::Release {
         "release-image server-container"
     } else {

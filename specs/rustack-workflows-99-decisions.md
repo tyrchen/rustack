@@ -781,3 +781,39 @@ Reuse the pinned provided.al2023 base for the GNU-linked qualification CLI and t
 - Contract: [rootless platform design](./rustack-workflows-58-rootless-platform-design.md). Provisioning/attestation is a dependency, not full5.3 or M4 completion. Desktop and dedicated-reference performance remain separate requirements; D100 still excludes further x86 validation.
 - Date:2026-10-31. Status: in progress.
 - Executed dependency: [bootstrap/review evidence](../docs/research/workflows-rootless-platform-review.md) records a real UID501 rootless daemon, effective user-manager delegation, namespace socket GID991,25 controls, actual TERM-ignoring root-job retirement and independent review. Bootstrap/attestation passes; the actual kernel probe, full resource inventory and rootless platform exit remain pending.
+
+## D104 — Consume the rootless daemon through owned transport and unchanged kernel probes
+
+- Decision: preserve D103 installation/receipts and use a separately owned bounded SSH Unix forward for existing native ARM test controllers. Prove the exact rootless engine before effects, import captured immutable fixture IDs with retained cache aliases, and execute the existing actual Linux Rust kernel probe without weakening policy.
+- Contract: [resource execution](./rustack-workflows-58-rootless-platform-design.md#6-rootless-resource-execution-d104). Begin with both exact kernel resources, then extend to the entire79-resource inventory, server/socket/endpoint and performance/load cases. Kernel success alone cannot close rootless or M4.
+- Date:2026-10-31. Status: in progress. No x86 validation, existing-service restart, default context change, image rebuild/deletion or publication.
+
+## D105 — Normalize CPU limits downward to a portable one-percent quantum
+
+- User decision: explicitly accepted2026-10-31 after the real rootless systemd probe observed34000/100000 for333333333 NanoCPUs. Normalize the configured maximum down to the nearest10,000,000 NanoCPUs (0.01 CPU), preserving and reporting requested/effective values. Default1 CPU is unchanged.
+- Contract: validate the original0.1..16-CPU range first, perform bounded integer normalization once in ContainerPolicy, and use only the effective amount in both containers and probe verification.333333333 becomes330000000; exact kernel quota33000/100000 must pass on both retained drivers,34000 must fail. No tolerance band, upward rounding or reduced memory/swap/PIDs/isolation requirement.
+- Diagnostics: expose the requested/effective pair from the retained qualified policy. Unit/range/floor/idempotence, actual two-kernel resources, existing functional matrices and standard/strict/security checks remain mandatory. Preserve the original failed rootless owner/independent observation as evidence, not a passed resource.
+- Status: implementation in progress.
+
+## D106 — Transfer server data through an inspected unstarted volume helper
+
+- Decision: keep the server's read-only daemon socket and use a separately owned, never-started/no-socket/no-network data-volume helper for identity archives and public release configuration on every daemon. Do not weaken socket policy or retry an ambiguous failed copy using another transport.
+- Evidence: D104's rootless server case fails on an exact EPERM remount of the read-only socket; its stderr digest matches an independently repeated archive request. An unstarted helper reads both checksummed records successfully. Exact engine/parent labels/source/record checks discharge the stopped server, helper and volume without force; original failure evidence stays retained.
+- Contract: [server data transfer](./rustack-workflows-55-server-container-design.md#71-rootless-data-volume-transfer-d106). Preserve bounded records, uncertainty, no credential inheritance, exact nonforced helper removal and complete server/release/rootless resource qualification.
+- Date:2026-10-31. Status: implementation in progress.
+
+## D107 — Complete code, then qualify exact release artifacts
+
+Finish remaining operation consumers and delivery code before starting the test stage, as explicitly requested by the user. The [delivery contract](./rustack-workflows-59-release-qualification-design.md) separates no-push candidate creation, full platform evidence assembly and explicit same-artifact promotion. D100 only waives x86 execution; missing Desktop/rootless/reference evidence must block final promotion. Historical successful receipts are preserved and do not qualify new source.
+
+## D108 — Correct bound transcript consumers and pin timed metadata observations
+
+Keep platform results bound to exact per-case intents, zero exits, original hashes, canonical non-ignored starts and clean one-case summaries despite inherited SDK output. Reference results use the canonical ordered two-plus-three producer vectors and retain every raw measurement/cleanup validator. Pin an independently negotiated and identity-verified metadata socket before each timed flood Invoke; reject reconnect, replacement, nested/concurrent use and close on exit. All existing deadlines, 100 cycles and physical cleanup remain mandatory. Preserve the original cycle-54 timeout as unexplained failed evidence. Archive rejection preserves its original primary diagnostic and retains original/mutated affiliation bytes before effects. See [image performance](./rustack-workflows-57-image-performance-design.md#7-pinned-metadata-peer-during-the-live-flood-bracket) and [bound producers](./rustack-workflows-59-release-qualification-design.md#8-bound-producer-transcript-and-archive-rejection-corrections). These are code corrections before the next reviewed execution cohort, not successful test claims.
+
+## D109 — Diagnose the intermittent flood failure without changing budgets
+
+Retain3229c2's real cycle89 end-handshake failure. Correct stale liveness observations and bracket release publication with monotonic Future-state checks, including rollback before notification. Add bounded current-cycle monotonic diagnostics and authenticated collector acceptance/write observations, bound to the original cycle even for delayed callbacks. These are oracle/diagnostic corrections, not an established production timeout fix. Use focused100-cycle diagnosis before freezing the final source cohort; keep one-second handler/100 cycles/health/physical retirement unchanged. See [the live ordering contract](./rustack-workflows-57-image-performance-design.md#8-live-observation-ordering-and-failure-localization-d109).
+
+## D110 — Prepare one authenticated flood channel during initialization
+
+Use an explicit flood initialization mode to establish the benchmark's control connection before the first Runtime next request. Require one exact socket for ready/begin/end, reject reconnects/replays and close after end. This removes connection setup from the measured one-second handler without adding invocations or changing any budget. Add strict100-channel report counters and extend controlled refresh from three production images to runtime/custom RIC A/B/server/release. The cycle84 pre-begin failure remains unexplained historical evidence. Full contract: [image performance§9](./rustack-workflows-57-image-performance-design.md#9-initialization-owned-flood-control-channel-d110).
