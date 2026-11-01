@@ -3,6 +3,7 @@
 use std::{error::Error, time::Duration};
 
 use chrono::Utc;
+use rustack_stepfunctions_model::types::HistoryEventType;
 use serde_json::{Value, json};
 use tokio::time::{Instant, timeout};
 
@@ -380,5 +381,169 @@ async fn test_should_retain_ancestor_frame_capacity_after_actor_abort_with_accep
     assert!(*second.cancellation().borrow());
     first.finish(Err(TaskFailure::new("Cancelled", None)?));
     second.finish(Err(TaskFailure::new("Cancelled", None)?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_link_serial_map_admission_and_success_exit_to_aws_predecessors() -> TestResult
+{
+    let (mut owner, _, _) = fixture(1, 1, crate::HistoryLimits::default());
+    let value = json!({"StartAt":"M","States":{"M":{"Type":"Map","MaxConcurrency":1,
+        "Iterator":{"ProcessorConfig":{"Mode":"INLINE"},"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},"End":true}}});
+    let mut handle = owner.start_structured(driver(&value, &json!([1, 2]))?)?;
+    let view = handle.wait(deadline()).await?;
+    let page = view.history().page(1, 100, true)?;
+    let links = page
+        .events()
+        .iter()
+        .map(|event| (event.r#type.as_str(), event.previous_event_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        links,
+        vec![
+            ("ExecutionStarted", Some(0)),
+            ("MapStateEntered", Some(0)),
+            ("MapStateStarted", Some(2)),
+            ("MapIterationStarted", Some(3)),
+            ("PassStateEntered", Some(4)),
+            ("PassStateExited", Some(5)),
+            ("MapIterationSucceeded", Some(6)),
+            ("MapIterationStarted", Some(6)),
+            ("PassStateEntered", Some(8)),
+            ("PassStateExited", Some(9)),
+            ("MapIterationSucceeded", Some(10)),
+            ("MapStateSucceeded", Some(11)),
+            ("MapStateExited", Some(11)),
+            ("ExecutionSucceeded", Some(13)),
+        ]
+    );
+    owner.drain(deadline()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_publish_only_the_exhausted_parallel_failure_during_retry() -> TestResult {
+    let (mut owner, _, _) = fixture(1, 1, crate::HistoryLimits::default());
+    let value = json!({"StartAt":"P","States":{"P":{"Type":"Parallel","Branches":[
+        {"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Oops"}}}
+        ],"Retry":[{"ErrorEquals":["Oops"],"MaxAttempts":2,"IntervalSeconds":1,"BackoffRate":1}],"End":true}}});
+    let mut handle = owner.start_structured(driver(&value, &json!({}))?)?;
+    let view = handle.wait(deadline()).await?;
+    let page = view.history().page(1, 100, true)?;
+    let links = page
+        .events()
+        .iter()
+        .map(|event| (event.r#type.as_str(), event.previous_event_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        links,
+        vec![
+            ("ExecutionStarted", Some(0)),
+            ("ParallelStateEntered", Some(0)),
+            ("ParallelStateStarted", Some(2)),
+            ("FailStateEntered", Some(3)),
+            ("ParallelStateStarted", Some(4)),
+            ("FailStateEntered", Some(5)),
+            ("ParallelStateStarted", Some(6)),
+            ("FailStateEntered", Some(7)),
+            ("ParallelStateFailed", Some(8)),
+            ("ExecutionFailed", Some(9)),
+        ]
+    );
+    owner.drain(deadline()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_link_new_map_admission_to_completed_processor_without_chaining_live_siblings()
+-> TestResult {
+    let (mut owner, mut calls, _) = fixture(1, 2, crate::HistoryLimits::default());
+    let value = json!({"StartAt":"M","States":{"M":{"Type":"Map","MaxConcurrency":2,"ItemProcessor":task(),"End":true}}});
+    let mut handle = owner.start_structured(driver(&value, &json!([1, 2, 3]))?)?;
+    let (_, mut first) = next(&mut calls).await;
+    let (_, mut second) = next(&mut calls).await;
+    first.started()?;
+    second.started()?;
+    second.finish(Ok(Payload::parse(b"2")?));
+    let (_, mut third) = next(&mut calls).await;
+    third.started()?;
+    third.finish(Ok(Payload::parse(b"3")?));
+    first.finish(Ok(Payload::parse(b"1")?));
+    let view = handle.wait(deadline()).await?;
+    let page = view.history().page(1, 100, true)?;
+    let events = page.events();
+    let starts = events
+        .iter()
+        .filter(|event| event.map_iteration_started_event_details.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 3);
+    assert_eq!(
+        starts.first().ok_or("first start")?.previous_event_id,
+        Some(3)
+    );
+    assert_eq!(
+        starts.get(1).ok_or("second start")?.previous_event_id,
+        Some(3)
+    );
+    let completed = events
+        .iter()
+        .find(|event| {
+            event
+                .map_iteration_succeeded_event_details
+                .as_ref()
+                .is_some_and(|details| details.index == Some(1))
+        })
+        .ok_or("completed iteration")?;
+    assert_eq!(
+        starts.get(2).ok_or("third start")?.previous_event_id,
+        completed.previous_event_id
+    );
+    let success = events
+        .iter()
+        .find(|event| event.r#type == HistoryEventType::MapStateSucceeded)
+        .ok_or("Map success")?;
+    let exit = events
+        .iter()
+        .find(|event| event.r#type == HistoryEventType::MapStateExited)
+        .ok_or("Map exit")?;
+    assert_eq!(success.previous_event_id, exit.previous_event_id);
+    assert!(
+        matches!(view.outcome().map(AsRef::as_ref),Some(ExecutionOutcome::Succeeded(output)) if output.value() == &json!([1,2,3]))
+    );
+    owner.drain(deadline()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_retain_round_success_when_result_selection_fails_without_state_exit()
+-> TestResult {
+    for kind in ["Map", "Parallel"] {
+        let (mut owner, _, _) = fixture(1, 1, crate::HistoryLimits::default());
+        let leaf = json!({"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}});
+        let mut state = json!({"Type":kind,"End":true,"ResultSelector":{"missing.$":"$.absent"}});
+        if kind == "Map" {
+            state["ItemProcessor"] = leaf;
+        } else {
+            state["Branches"] = json!([leaf]);
+        }
+        let value = json!({"StartAt":"R","States":{"R":state}});
+        let mut handle = owner.start_structured(driver(&value, &json!([1]))?)?;
+        let view = handle.wait(deadline()).await?;
+        let page = view.history().page(1, 100, true)?;
+        let events = page.events();
+        let terminal = events.last().ok_or("terminal")?;
+        assert_eq!(terminal.r#type, HistoryEventType::ExecutionFailed);
+        let predecessor = events
+            .iter()
+            .find(|event| Some(event.id) == terminal.previous_event_id)
+            .ok_or("terminal predecessor")?;
+        assert_eq!(predecessor.r#type.as_str(), format!("{kind}StateSucceeded"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.r#type.as_str() == format!("{kind}StateExited"))
+        );
+        owner.drain(deadline()).await?;
+    }
     Ok(())
 }

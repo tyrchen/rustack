@@ -651,3 +651,113 @@ fn test_should_ignore_callback_success_body_but_preserve_function_failures_and_a
     assert!(mapped.diagnostic.is_some());
     assert!(metadata.is_none());
 }
+
+#[rstest::rstest]
+#[case(Value::Null, json!({}))]
+#[case(json!("null"), Value::Null)]
+#[case(json!("42"), json!(42))]
+#[case(json!("\"hello\""), json!("hello"))]
+#[case(json!("[1,true]"), json!([1,true]))]
+#[case(json!({"number":7}), json!({"number":7}))]
+#[tokio::test]
+async fn test_should_decode_optimized_serialized_payload_without_double_encoding(
+    #[case] payload: Value,
+    #[case] expected: Value,
+) {
+    let exec = executor();
+    let (provider, _directory) = provider(exec.clone());
+    provider
+        .create_function(create(&zip(b"fixture", "v1"), &[]))
+        .await
+        .unwrap();
+    let (port, mut bridge) = StepFunctionsLambdaBridge::new(
+        provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let mut owner = executions(port);
+    let def = definition(
+        "arn:aws:states:::lambda:invoke",
+        Some(json!({"FunctionName":"Worker","Payload":payload})),
+    );
+    let mut handle = owner.start(driver(&def, &json!({}))).unwrap();
+    let result = handle.wait(deadline()).await;
+    clean(&mut owner, &mut bridge, &provider).await;
+    assert_eq!(
+        output(result.unwrap().outcome().unwrap()).get("Payload"),
+        Some(&expected)
+    );
+    assert_eq!(exec.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_should_report_missing_optimized_function_as_started_service_failure() {
+    let exec = executor();
+    let (provider, _directory) = provider(exec.clone());
+    let (port, mut bridge) = StepFunctionsLambdaBridge::new(
+        provider.clone(),
+        TenantScope::default(),
+        BridgeLimits::default(),
+    )
+    .unwrap();
+    let mut owner = executions(port);
+    let def = definition(
+        "arn:aws:states:::lambda:invoke",
+        Some(json!({"FunctionName":"Worker"})),
+    );
+    let mut handle = owner.start(driver(&def, &json!({}))).unwrap();
+    let result = handle.wait(deadline()).await;
+    clean(&mut owner, &mut bridge, &provider).await;
+    let result = result.unwrap();
+    let page = result.history().page(1, 100, true).unwrap();
+    assert_eq!(
+        page.events()
+            .iter()
+            .map(|e| e.r#type.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "ExecutionStarted",
+            "TaskStateEntered",
+            "TaskScheduled",
+            "TaskStarted",
+            "TaskFailed",
+            "ExecutionFailed"
+        ]
+    );
+    assert_eq!(exec.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_should_compact_function_error_cause_without_changing_its_values() {
+    let mut response = InvokeResponse::success(
+        Bytes::from_static(br#"{ "errorType" : "Oops", "errorMessage" : "line\nvalue" }"#),
+        "$LATEST".into(),
+    );
+    response.function_error = Some("Unhandled".into());
+    let mapped = mapping::response(&response, false, "id").unwrap();
+    let failure = mapped.result.unwrap_err();
+    assert_eq!(
+        failure.details().cause(),
+        Some(r#"{"errorMessage":"line\nvalue","errorType":"Oops"}"#)
+    );
+}
+
+#[test]
+fn test_should_preserve_function_error_when_compact_numeric_cause_expands_past_payload_limit() {
+    let mut raw = String::from(r#"{"errorType":"Oops","items":["#);
+    raw.push_str(&vec!["1e9"; 40_000].join(","));
+    raw.push_str("]}");
+    assert!(raw.len() < 262_144);
+    let mut response = InvokeResponse::success(Bytes::from(raw), "$LATEST".into());
+    response.function_error = Some("Unhandled".into());
+    let failure = mapping::response(&response, false, "id")
+        .unwrap()
+        .result
+        .unwrap_err();
+    assert_eq!(failure.details().error(), Some("Oops"));
+    let cause = failure.details().cause().unwrap();
+    assert_eq!(cause.len(), 32_768);
+    assert!(cause.ends_with(" [truncated]"));
+    assert!(cause.starts_with(r#"{"errorType":"Oops","items":[1000000000.0"#));
+}

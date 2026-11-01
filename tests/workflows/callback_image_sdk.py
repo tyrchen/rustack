@@ -197,7 +197,7 @@ class Driver:
         events = self.history(arn)
         submitted = []
         for index, event in enumerate(events, start=1):
-            assert event["id"] == index and event.get("previousEventId", 0) == index - 1
+            assert event["id"] == index and event.get("previousEventId", 0) == (0 if index == 2 else index - 1)
             if event["type"] == "TaskScheduled":
                 parameters = json.loads(event["taskScheduledEventDetails"]["parameters"])
                 assert parameters["Payload"]["token"] is None

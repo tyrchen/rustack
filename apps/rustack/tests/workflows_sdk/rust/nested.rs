@@ -51,7 +51,7 @@ async fn check_history(client: &Client, arn: &str, suffix: &str, child: &str) ->
     for (index, event) in events.iter().enumerate() {
         ensure!(
             event.id() == i64::try_from(index + 1)?
-                && event.previous_event_id() == i64::try_from(index)?,
+                && event.previous_event_id() == sequential_predecessor(index)?,
             "invalid nested predecessor"
         );
         if let Some(details) = event.task_submitted_event_details() {

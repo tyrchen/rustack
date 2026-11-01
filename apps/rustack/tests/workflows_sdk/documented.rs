@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use super::{
     process::{SECRET, Server},
-    rust::{history, sfn, terminal},
+    rust::{history, sequential_predecessor, sfn, terminal},
 };
 
 const DEFINITION: &str = include_str!("../../../../examples/workflows/pure.asl.json");
@@ -60,7 +60,7 @@ async fn run(client: &Client, machine: &str, positive: bool) -> Result<()> {
         let previous = i64::try_from(index)?;
         ensure!(
             event.id() == previous.checked_add(1).context("event ID overflow")?
-                && event.previous_event_id() == previous,
+                && event.previous_event_id() == sequential_predecessor(index)?,
             "invalid example causal history"
         );
     }

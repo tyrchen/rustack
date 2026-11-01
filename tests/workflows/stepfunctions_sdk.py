@@ -161,13 +161,16 @@ def catalog(sfn):
             assert output["SdkResponseMetadata"]["RequestId"] == output["Payload"]["request_id"]
             uuid.UUID(output["Payload"]["request_id"])
         if "expectedError" in case:
-            assert result["error"] == case["expectedError"], (case["id"], result)
+            if case["expectedError"] is None:
+                assert "error" not in result and "cause" not in result and "output" not in result, (case["id"], result)
+            else:
+                assert result["error"] == case["expectedError"], (case["id"], result)
         if "expectedCause" in case:
             assert result["cause"] == case["expectedCause"]
         events = history(sfn, started["executionArn"])
         assert events
         for index, event in enumerate(events, 1):
-            assert event["id"] == index and event.get("previousEventId", 0) == index - 1
+            assert event["id"] == index and event.get("previousEventId", 0) == (0 if index == 2 else index - 1)
             assert isinstance(event["timestamp"], datetime) and event["timestamp"] >= result["startDate"]
         expected_terminal = {"SUCCEEDED": "ExecutionSucceeded", "FAILED": "ExecutionFailed", "TIMED_OUT": "ExecutionTimedOut"}
         assert events[-1]["type"] == expected_terminal[result["status"]]

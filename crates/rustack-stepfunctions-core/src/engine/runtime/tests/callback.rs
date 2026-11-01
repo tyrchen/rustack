@@ -255,7 +255,12 @@ async fn test_should_execute_registered_callback_before_or_after_real_report_and
     assert!(
         events
             .windows(2)
+            .skip(1)
             .all(|pair| pair[1].previous_event_id == Some(pair[0].id))
+    );
+    assert_eq!(
+        events.get(1).and_then(|event| event.previous_event_id),
+        Some(0)
     );
     assert_eq!(
         events[4]

@@ -47,15 +47,10 @@ pub(super) fn compile(
     let processor_pos = location.field("ItemProcessor")?;
     let (key, value) = exclusive(object, "ItemProcessor", "Iterator", location)?
         .ok_or_else(|| processor_pos.error(Code::MissingField, "Map requires a processor"))?;
-    let processor_kind = if key == "ItemProcessor" {
-        Kind::Processor
-    } else {
-        Kind::Branch
-    };
     let processor = context.compile(
         value,
         &location.field(key)?,
-        processor_kind,
+        Kind::Processor,
         depth.saturating_add(1),
     )?;
     let selector = exclusive(object, "ItemSelector", "Parameters", location)?

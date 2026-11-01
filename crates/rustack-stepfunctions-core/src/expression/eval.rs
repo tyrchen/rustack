@@ -52,6 +52,47 @@ fn output<T: Serialize + ?Sized>(value: &T) -> Result<Payload, AslError> {
     Payload::from_bytes(encode(value)?)
 }
 
+fn parse_json(text: &str, budget: &mut Budget) -> Result<Payload, AslError> {
+    budget.text(text.len())?;
+    let parsed = Payload::parse(text.as_bytes())?;
+    budget.text(text.len())?;
+    let bytes = text.as_bytes();
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        } else if byte == b'-'
+            && (index == 0
+                || bytes.get(index.saturating_sub(1)).is_some_and(|previous| {
+                    matches!(previous, b' ' | b'\t' | b'\r' | b'\n' | b',' | b'[' | b':')
+                }))
+            && bytes.get(index.saturating_add(1)) == Some(&b'0')
+            && bytes.get(index.saturating_add(2)).is_none_or(|next| {
+                matches!(next, b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}')
+            })
+        {
+            continue;
+        }
+        normalized.push(byte);
+    }
+    if normalized.len() == bytes.len() {
+        return Ok(parsed);
+    }
+    drop(parsed);
+    budget.text(normalized.len())?;
+    Payload::parse(&normalized)
+}
+
 fn call<S: UuidSource + ?Sized>(
     function: Function,
     args: &[Payload],
@@ -74,8 +115,7 @@ fn call<S: UuidSource + ?Sized>(
         }
         Function::StringToJson => {
             let text = arg(args, 0)?.as_str().ok_or(AslError::IntrinsicValue)?;
-            budget.text(text.len())?;
-            Payload::parse(text.as_bytes())
+            parse_json(text, budget)
         }
         Function::JsonToString => {
             let encoded = encode(arg(args, 0)?)?;

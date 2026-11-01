@@ -635,6 +635,7 @@ impl State {
             driver,
             structured,
             super::child::port(&self.children.registry),
+            machine.revision.role(),
         )?;
         let handle = registered.handle;
         let view = handle.snapshot();

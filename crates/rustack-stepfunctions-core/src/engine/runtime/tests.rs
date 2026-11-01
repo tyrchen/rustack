@@ -139,7 +139,12 @@ async fn test_should_execute_pure_states_and_publish_terminal_history_atomically
     let events = view.history().page(1, 100, true).unwrap();
     for (index, event) in events.events().iter().enumerate() {
         assert_eq!(event.id, i64::try_from(index + 1).unwrap());
-        assert_eq!(event.previous_event_id, Some(i64::try_from(index).unwrap()));
+        let previous = if index == 1 {
+            0
+        } else {
+            i64::try_from(index).unwrap()
+        };
+        assert_eq!(event.previous_event_id, Some(previous));
     }
     assert_eq!(initial.history().len(), 1);
     owner.drain(deadline()).await.unwrap();
@@ -341,6 +346,18 @@ async fn test_should_catch_task_timeout_and_keep_cancelled_call_until_clean() {
         ExecutionOutcome::Succeeded(_)
     ));
     assert!(kinds(&view).iter().any(|k| k == "LambdaFunctionTimedOut"));
+    let page = view.history().page(1, 100, true).unwrap();
+    let details = page
+        .events()
+        .iter()
+        .find_map(|event| event.lambda_function_timed_out_event_details.as_ref())
+        .unwrap();
+    assert_eq!(details.error.as_deref(), Some("States.Timeout"));
+    assert!(details.cause.is_none());
+    let ExecutionOutcome::Succeeded(output) = view.outcome().unwrap().as_ref() else {
+        panic!("expected caught timeout");
+    };
+    assert_eq!(output.value(), &json!({"Error":"States.Timeout"}));
     assert!(*response.cancellation().borrow());
     response.finish(Ok(Payload::parse(b"true").unwrap()));
     owner.drain(deadline()).await.unwrap();

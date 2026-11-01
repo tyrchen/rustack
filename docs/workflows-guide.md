@@ -667,6 +667,12 @@ See the [API](../specs/rustack-workflows-10-api-design.md),
 [configuration](../specs/rustack-workflows-60-operations-design.md#12-tunable-budgets)
 contracts for exact grammar and ranges.
 
+Optimized `lambda:invoke` treats a string `Payload` as serialized JSON. Omitted
+or null `Payload` sends `{}`; supply the serialized spelling `"null"` to send a
+JSON null, or `"\"hello\""` to send a JSON string. Direct Lambda tasks preserve
+their ordinary JSON input. Task deadline errors retain `States.Timeout` without
+a manufactured Cause; overall TIMED_OUT responses omit error/cause fields.
+
 Definition updates affect new executions; existing ones keep their captured
 revision. A RUNNING execution accepts a replay only with the same name and exact
 original input. Closed names remain reserved for 90 days, even after shorter
@@ -696,6 +702,44 @@ domain/policy failure preserves both generations rather than silently rolling ba
 Snapshot coverage is per service. Workflow resources/history and qualified Lambda
 metadata/code are persisted; SQS messages and arbitrary external effects are not.
 Image availability and cross-platform code execution remain separate requirements.
+
+## Run original LocalStack compatibility probes
+
+The opt-in probes execute pinned LocalStack pytest bodies and original AWS
+snapshots against an owned Rustack process. They preserve upstream handlers and
+assertions; they do not start LocalStack. Read the [study and evidence ledger](./research/study-localstack-workflow-tests.md)
+for the91-node pure and32-node real Docker inventories, original upstream masks,
+profile differences and failed runs. These counts are pytest nodes, not all AWS
+behaviors or a project completion percentage.
+
+```bash
+make workflows-localstack-python
+make check-workflows-localstack
+make test-workflows-localstack-pure \
+  WORKFLOWS_LOCALSTACK_EVIDENCE="$HOME/.target/localstack-pure-new"
+
+make workflows-localstack-images \
+  WORKFLOWS_LOCALSTACK_IMAGES="$HOME/.target/localstack-images-new" \
+  WORKFLOWS_LOCALSTACK_BUILDER=/absolute/path/to/docker-buildx \
+  WORKFLOWS_DOCKER_SOCKET=/absolute/path/to/docker.sock
+make test-workflows-localstack-docker \
+  WORKFLOWS_LOCALSTACK_EVIDENCE="$HOME/.target/localstack-docker-new" \
+  WORKFLOWS_LOCALSTACK_IMAGES="$HOME/.target/localstack-images-new" \
+  WORKFLOWS_DOCKER_SOCKET=/absolute/path/to/docker.sock \
+  LAMBDA_RUNTIME_IMAGE=rustack/lambda-runtime:integration-arm64
+```
+
+Use new absolute evidence directories with canonical parents, an explicitly
+selected native ARM64 Docker daemon and an existing qualified runtime relay.
+Image creation packages each original Python3.12 handler separately; it does not
+qualify managed ZIP deployment or ECR lifecycle APIs. Ambient AWS profiles and
+pytest selection/snapshot-update settings are rejected. Clients use unique local
+credentials and the owned loopback endpoint; there is no live AWS fallback.
+
+Every mismatch retains a nonzero exit and private observations, assertions,
+JUnit and cleanup receipts. The current strict inventories still have documented
+profile differences, so they must not be represented as green required CI gates.
+No new mask, xfail or case removal turns those differences into passes.
 
 ## Health, capabilities and qualification
 

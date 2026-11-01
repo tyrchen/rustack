@@ -199,9 +199,9 @@ impl Actor {
                     let deadline = *deadline;
                     if Instant::now().into_std() >= deadline {
                         if Instant::now().into_std() < self.driver.deadline {
-                            let failure = TaskFailure(ExecutionFailure::named(
-                                "States.Timeout",
-                                "Task deadline exceeded",
+                            let failure = TaskFailure(ExecutionFailure::fields(
+                                Some("States.Timeout".into()),
+                                None,
                             ));
                             if !self.record(events::task_failure(
                                 self.driver.machine(),

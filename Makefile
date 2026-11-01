@@ -1789,3 +1789,37 @@ verify-workflows-native-recorded:
 	@python3 -I -B tests/workflows/native_gates.py "$(WORKFLOWS_NATIVE_EVIDENCE_DIR)"
 
 .PHONY: verify-workflows-native-recorded
+
+# Original pinned LocalStack pytest tests; no baseline updates or cloud execution.
+WORKFLOWS_LOCALSTACK_PYTHON_DIR ?= $(HOME)/.target/workflows-localstack-python
+WORKFLOWS_LOCALSTACK_PYTHON ?= $(WORKFLOWS_LOCALSTACK_PYTHON_DIR)/bin/python
+WORKFLOWS_LOCALSTACK_EVIDENCE ?=
+WORKFLOWS_LOCALSTACK_IMAGES ?=
+WORKFLOWS_LOCALSTACK_BUILDER ?=
+
+workflows-localstack-python:
+	@test -x "$(WORKFLOWS_LOCALSTACK_PYTHON)" || uv venv --python 3.13 "$(WORKFLOWS_LOCALSTACK_PYTHON_DIR)"
+	@uv pip sync --python "$(WORKFLOWS_LOCALSTACK_PYTHON)" tests/workflows/localstack-requirements.txt
+	@uv pip install --python "$(WORKFLOWS_LOCALSTACK_PYTHON)" --no-deps -e vendors/localstack
+
+workflows-localstack-images:
+	@test -n "$(WORKFLOWS_LOCALSTACK_IMAGES)" && test -n "$(WORKFLOWS_LOCALSTACK_BUILDER)"
+	@python3 -I -B tests/workflows/localstack_images.py "$(WORKFLOWS_LOCALSTACK_IMAGES)" "$(WORKFLOWS_DOCKER_SOCKET)" "$(WORKFLOWS_LOCALSTACK_BUILDER)"
+
+test-workflows-localstack-controls:
+	@"$(WORKFLOWS_LOCALSTACK_PYTHON)" -I -B -m unittest discover -s tests/workflows -p test_localstack_policy.py -v
+
+check-workflows-localstack: test-workflows-localstack-controls
+	@cargo clippy --locked -p rustack-cli --lib --test localstack_compat --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) --no-deps -- -D warnings -W clippy::pedantic
+
+test-workflows-localstack-pure:
+	@test -n "$(WORKFLOWS_LOCALSTACK_EVIDENCE)"
+	@RUSTACK_WORKFLOWS_PYTHON="$(WORKFLOWS_LOCALSTACK_PYTHON)" RUSTACK_LOCALSTACK_EVIDENCE="$(WORKFLOWS_LOCALSTACK_EVIDENCE)" cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test localstack_compat --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) test_should_execute_original_localstack_pure_cases -- --ignored --exact --nocapture --test-threads=1
+
+test-workflows-localstack-docker:
+	@test -n "$(WORKFLOWS_LOCALSTACK_EVIDENCE)" && test -n "$(WORKFLOWS_LOCALSTACK_IMAGES)"
+	@RUSTACK_WORKFLOWS_PYTHON="$(WORKFLOWS_LOCALSTACK_PYTHON)" RUSTACK_LOCALSTACK_EVIDENCE="$(WORKFLOWS_LOCALSTACK_EVIDENCE)" RUSTACK_LOCALSTACK_IMAGES="$(WORKFLOWS_LOCALSTACK_IMAGES)/images.json" RUSTACK_RUNTIME_DOCKER_SOCKET="$(WORKFLOWS_DOCKER_SOCKET)" RUSTACK_RUNTIME_IMAGE="$(LAMBDA_RUNTIME_IMAGE)" cargo test --locked --target-dir "$(WORKFLOWS_DOCKER_TARGET_DIR)" -p rustack-cli --test localstack_compat --no-default-features --features $(WORKFLOWS_DOCKER_CLI_FEATURES) test_should_execute_original_localstack_image_cases -- --ignored --exact --nocapture --test-threads=1
+
+.PHONY: workflows-localstack-python workflows-localstack-images test-workflows-localstack-controls test-workflows-localstack-pure test-workflows-localstack-docker
+
+.PHONY: check-workflows-localstack

@@ -42,6 +42,11 @@ mod structured;
 
 const ROLE: &str = "arn:aws:iam::000000000000:role/Workflows";
 const PREFIX: &str = "arn:aws:states:us-east-1:000000000000:";
+/// Initial root entry has an independent predecessor; later sequential events chain.
+pub(super) fn sequential_predecessor(offset: usize) -> Result<i64> {
+    i64::try_from(if offset == 1 { 0 } else { offset }).context("history predecessor overflow")
+}
+
 fn credentials() -> Credentials {
     Credentials::new(ACCESS, SECRET, None, None, "workflow-local")
 }
@@ -324,7 +329,13 @@ fn validated_catalog() -> Result<Value> {
         }
         for key in ["uuidField", "expectedError", "expectedCause"] {
             if let Some(value) = case.get(key) {
-                ensure!(value.is_string(), "invalid string expectation");
+                ensure!(
+                    value.is_string()
+                        || (key == "expectedError"
+                            && value.is_null()
+                            && case["expectedStatus"] == "TIMED_OUT"),
+                    "invalid string expectation"
+                );
             }
         }
         if let Some(size) = case.get("largeInputBytes") {
@@ -395,7 +406,7 @@ async fn catalog(client: &Client) -> Result<()> {
         for (offset, event) in events.iter().enumerate() {
             ensure!(
                 event.id() == i64::try_from(offset + 1)?
-                    && event.previous_event_id() == event.id() - 1
+                    && event.previous_event_id() == sequential_predecessor(offset)?
                     && event.timestamp() >= result.start_date(),
                 "case {id}: broken causal history"
             );
@@ -474,6 +485,12 @@ fn verify_output(case: &Value, result: &DescribeExecutionOutput) -> Result<()> {
             result.error() == Some(error),
             "case {id}: wrong error {:?}",
             result.error()
+        );
+    }
+    if case.get("expectedError") == Some(&Value::Null) {
+        ensure!(
+            result.error().is_none() && result.cause().is_none() && result.output().is_none(),
+            "case {id}: overall timeout manufactured outcome fields"
         );
     }
     if let Some(cause) = case["expectedCause"].as_str() {

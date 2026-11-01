@@ -412,7 +412,12 @@ impl Journal {
         event: HistoryEvent,
         terminal: bool,
     ) -> Result<(), ExecutionError> {
-        self.append_causal(event, self.view.count, terminal)
+        let previous = if self.view.count == 1 && event.state_entered_event_details.is_some() {
+            0
+        } else {
+            self.view.count
+        };
+        self.append_causal(event, previous, terminal)
     }
     pub(super) fn append_causal(
         &mut self,

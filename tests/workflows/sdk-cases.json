@@ -523,7 +523,7 @@
       },
       "input": {},
       "expectedStatus": "TIMED_OUT",
-      "expectedError": "States.Timeout",
+      "expectedError": null,
       "evidence": {
         "kind": "documentDerived",
         "sources": [

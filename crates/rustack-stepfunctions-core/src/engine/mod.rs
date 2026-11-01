@@ -215,7 +215,7 @@ impl ExecutionDriver {
             Phase::Calling { attempt, deadline } => {
                 if now.monotonic >= deadline {
                     let step = self.recover(
-                        ExecutionFailure::named("States.Timeout", "Task deadline exceeded"),
+                        ExecutionFailure::fields(Some("States.Timeout".into()), None),
                         now,
                         source,
                     );

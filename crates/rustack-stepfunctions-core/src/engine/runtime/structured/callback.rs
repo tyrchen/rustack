@@ -142,9 +142,9 @@ fn callback_limit_failure() -> TaskFailure {
     )
 }
 fn timeout_failure() -> TaskFailure {
-    TaskFailure(ExecutionFailure::named(
-        "States.Timeout",
-        "Callback Task deadline or cancellation exceeded",
+    TaskFailure(ExecutionFailure::fields(
+        Some("States.Timeout".into()),
+        None,
     ))
 }
 

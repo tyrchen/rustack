@@ -400,11 +400,12 @@ async fn native_e2e_should_cancel_actual_process_on_stop_and_task_timeout() {
 async fn native_e2e_should_preserve_optimized_payload_json_types_and_default() {
     let mut fixture = NativeFixture::new(&[], false).await;
     let mut results = Vec::new();
-    for payload in [
-        None,
-        Some(Value::Null),
-        Some(json!("json-string")),
-        Some(json!([1, 2])),
+    for (payload, expected) in [
+        (None, json!({})),
+        (Some(Value::Null), json!({})),
+        (Some(json!(r#""json-string""#)), json!("json-string")),
+        (Some(json!([1, 2])), json!([1, 2])),
+        (Some(json!("null")), Value::Null),
     ] {
         let mut params = json!({"FunctionName":"Worker"});
         if let Some(payload) = &payload {
@@ -419,18 +420,18 @@ async fn native_e2e_should_preserve_optimized_payload_json_types_and_default() {
             Err(error) => Err(error),
         };
         let failed = result.is_err();
-        results.push((payload, result));
+        results.push((expected, result));
         if failed {
             break;
         }
     }
     fixture.cleanup().await;
-    assert_eq!(results.len(), 4);
-    for (payload, result) in results {
+    assert_eq!(results.len(), 5);
+    for (expected, result) in results {
         let view = result.unwrap();
         assert_eq!(
             output(view.outcome().unwrap()).pointer("/Payload/echo"),
-            Some(&payload.unwrap_or_else(|| json!({})))
+            Some(&expected)
         );
     }
 }

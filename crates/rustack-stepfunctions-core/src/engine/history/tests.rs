@@ -1,7 +1,9 @@
 //! Persistent-view/quota/accounting boundaries, independent of execution scheduling.
 
 use chrono::Utc;
-use rustack_stepfunctions_model::types::{HistoryEvent, HistoryEventType};
+use rustack_stepfunctions_model::types::{
+    HistoryEvent, HistoryEventType, StateEnteredEventDetails,
+};
 
 use super::*;
 use crate::{ExecutionOutcome, Payload};
@@ -18,6 +20,30 @@ fn journal(events: u32, bytes: usize) -> (Journal, Arc<HistoryCapacity>) {
     let capacity = HistoryCapacity::new(256 * 1024 * 1024, limits).unwrap();
     let reserve = TerminalReserve::new(&capacity).unwrap();
     (Journal::new(limits, capacity.clone(), reserve), capacity)
+}
+
+#[test]
+fn test_should_preserve_aws_root_entry_zero_without_resetting_later_predecessors() {
+    let (mut journal, _) = journal(10, 1024 * 1024);
+    let payload = Payload::parse(b"{}").unwrap();
+    journal
+        .append(events::started(&payload, Utc::now()).unwrap(), false)
+        .unwrap();
+    for name in ["first", "second"] {
+        let mut entered = event();
+        let mut details = StateEnteredEventDetails::default();
+        details.name = name.into();
+        entered.state_entered_event_details = Some(details);
+        journal.append(entered, false).unwrap();
+    }
+    let page = journal.view.page(1, 100, true).unwrap();
+    assert_eq!(
+        page.events()
+            .iter()
+            .map(|event| (event.id, event.previous_event_id))
+            .collect::<Vec<_>>(),
+        [(1, Some(0)), (2, Some(0)), (3, Some(2))]
+    );
 }
 #[test]
 fn test_should_bound_history_configuration_and_page_arguments() {

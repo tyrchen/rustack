@@ -13,8 +13,8 @@ use tokio::{
 use super::history::{HistoryCapacity, HistoryLimits, Journal, TerminalReserve, events};
 use crate::{
     CallbackRegistry, ChildExecutionPort, ExecutionDriver, ExecutionFailure, ExecutionSnapshot,
-    FrameCapacity, FrameLease, FrameLimits, FrameScheduler, LambdaTaskPort, TaskFailure,
-    TenantScope,
+    FrameCapacity, FrameLease, FrameLimits, FrameScheduler, LambdaTaskPort, Payload, RoleArn,
+    TaskFailure, TenantScope,
 };
 
 mod actor;
@@ -241,7 +241,7 @@ impl ExecutionSupervisor {
     /// # }
     /// ```
     pub fn start(&mut self, driver: ExecutionDriver) -> Result<ExecutionHandle, ExecutionError> {
-        self.start_owned(driver, false, None)
+        self.start_owned(driver, false, None, None)
             .map(|registered| registered.handle)
     }
     /// Start an execution with the installed structured frame/resource owner.
@@ -258,22 +258,25 @@ impl ExecutionSupervisor {
         &mut self,
         driver: ExecutionDriver,
     ) -> Result<ExecutionHandle, ExecutionError> {
-        self.start_owned(driver, true, None)
+        self.start_owned(driver, true, None, None)
             .map(|registered| registered.handle)
     }
+    /// Capture registry role metadata before publishing the initial history view.
     pub(crate) fn start_registered(
         &mut self,
         driver: ExecutionDriver,
         structured: bool,
         port: ChildExecutionPort,
+        role: &RoleArn,
     ) -> Result<Registered, ExecutionError> {
-        self.start_owned(driver, structured, Some(port))
+        self.start_owned(driver, structured, Some(port), Some(role))
     }
     fn start_owned(
         &mut self,
         driver: ExecutionDriver,
         structured: bool,
         child_port: Option<ChildExecutionPort>,
+        role: Option<&RoleArn>,
     ) -> Result<Registered, ExecutionError> {
         if !self.state.accepting || Handle::try_current().is_err() {
             return Err(ExecutionError::Unavailable);
@@ -303,16 +306,7 @@ impl ExecutionSupervisor {
             FrameLease::root(&self.shared.frames.capacity, self.shared.frames.limits)
                 .map_err(|_| ExecutionError::Capacity)?
         };
-        let reserve = TerminalReserve::new(&self.shared.history.capacity)?;
-        let mut journal = Journal::new(
-            self.shared.history.limits,
-            self.shared.history.capacity.clone(),
-            reserve.clone(),
-        );
-        journal.append(
-            events::started(driver.input(), Utc::now()).map_err(ExecutionError::from)?,
-            false,
-        )?;
+        let (journal, reserve) = self.initial_history(driver.input(), role)?;
         let (view, reader) = watch::channel(Arc::new(ExecutionView {
             history: journal.view.clone(),
             outcome: None,
@@ -372,6 +366,26 @@ impl ExecutionSupervisor {
             handle: ExecutionHandle { stop, view: reader },
             parent,
         })
+    }
+    fn initial_history(
+        &self,
+        input: &Payload,
+        role: Option<&RoleArn>,
+    ) -> Result<(Journal, Arc<TerminalReserve>), ExecutionError> {
+        let reserve = TerminalReserve::new(&self.shared.history.capacity)?;
+        let mut journal = Journal::new(
+            self.shared.history.limits,
+            self.shared.history.capacity.clone(),
+            reserve.clone(),
+        );
+        let mut started = events::started(input, Utc::now()).map_err(ExecutionError::from)?;
+        if let (Some(role), Some(details)) =
+            (role, started.execution_started_event_details.as_mut())
+        {
+            details.role_arn = Some(role.as_str().to_owned());
+        }
+        journal.append(started, false)?;
+        Ok((journal, reserve))
     }
     fn graph(
         &self,

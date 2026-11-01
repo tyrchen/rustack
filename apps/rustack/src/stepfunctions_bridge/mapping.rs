@@ -1,6 +1,11 @@
 //! Validated per-attempt plans and bounded direct/optimized result mapping.
 
-use std::{fmt, str, sync::Arc};
+use std::{
+    fmt,
+    io::{Error as IoError, Result as IoResult, Write},
+    str,
+    sync::Arc,
+};
 
 use rustack_core::json::JsonError;
 use rustack_lambda_core::{
@@ -15,6 +20,36 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::BridgeError;
+
+const CAUSE_LIMIT: usize = 32_768;
+const TRUNCATION_MARKER: &str = " [truncated]";
+
+struct CauseWriter {
+    prefix: Vec<u8>,
+    truncated: bool,
+}
+impl fmt::Debug for CauseWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LambdaCauseWriter(<redacted>)")
+    }
+}
+impl Write for CauseWriter {
+    fn write(&mut self, bytes: &[u8]) -> IoResult<usize> {
+        let count = CAUSE_LIMIT
+            .saturating_sub(self.prefix.len())
+            .min(bytes.len());
+        self.prefix.extend_from_slice(
+            bytes
+                .get(..count)
+                .ok_or_else(|| IoError::other("invalid Cause prefix"))?,
+        );
+        self.truncated |= count < bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> IoResult<()> {
+        Ok(())
+    }
+}
 
 pub(super) struct CallPlan {
     pub(super) function: String,
@@ -90,11 +125,11 @@ impl CallPlan {
                 {
                     return Err(BridgeError::Parameters);
                 }
-                let payload = object
-                    .get("Payload")
-                    .map(Payload::from_value)
-                    .transpose()?
-                    .unwrap_or(Payload::parse(b"{}")?);
+                let payload = match object.get("Payload") {
+                    None | Some(Value::Null) => Payload::parse(b"{}")?,
+                    Some(Value::String(text)) => Payload::parse(text.as_bytes())?,
+                    Some(value) => Payload::from_value(value)?,
+                };
                 (function, qualifier, payload, true)
             }
             _ => return Err(BridgeError::Parameters),
@@ -208,8 +243,7 @@ pub(super) fn response(
                     && !name.chars().any(char::is_control)
             })
             .unwrap_or("Lambda.Unknown");
-        let cause = str::from_utf8(&response.payload).map_err(|_| BridgeError::Parameters)?;
-        return failure(error, &bounded_cause(cause)?);
+        return failure(error, &bounded_cause(payload.value())?);
     }
     if !optimized {
         return Ok(Mapped {
@@ -282,19 +316,33 @@ pub(super) fn observed_response(
         Some(metadata),
     ))
 }
-fn bounded_cause(cause: &str) -> Result<String, BridgeError> {
-    const MARKER: &str = " [truncated]";
-    const MAX: usize = 32_768;
-    if cause.len() <= MAX {
-        return Ok(cause.into());
+fn bounded_cause(value: &Value) -> Result<String, BridgeError> {
+    let mut writer = CauseWriter {
+        prefix: Vec::with_capacity(CAUSE_LIMIT),
+        truncated: false,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(AslError::Encoding)?;
+    if writer.truncated {
+        writer
+            .prefix
+            .truncate(CAUSE_LIMIT.saturating_sub(TRUNCATION_MARKER.len()));
     }
-    let mut end = MAX.saturating_sub(MARKER.len());
-    while !cause.is_char_boundary(end) {
-        end = end.saturating_sub(1);
+    let prefix = match str::from_utf8(&writer.prefix) {
+        Ok(prefix) => prefix,
+        Err(error) if writer.truncated && error.error_len().is_none() => str::from_utf8(
+            writer
+                .prefix
+                .get(..error.valid_up_to())
+                .ok_or(BridgeError::Parameters)?,
+        )
+        .map_err(|_| BridgeError::Parameters)?,
+        Err(_) => return Err(BridgeError::Parameters),
+    };
+    let mut cause = prefix.to_owned();
+    if writer.truncated {
+        cause.push_str(TRUNCATION_MARKER);
     }
-    let mut output = cause.get(..end).ok_or(BridgeError::Parameters)?.to_owned();
-    output.push_str(MARKER);
-    Ok(output)
+    Ok(cause)
 }
 pub(super) fn service(error: LambdaServiceError) -> Result<Mapped, BridgeError> {
     let name = match &error {

@@ -151,7 +151,11 @@ async fn test_should_execute_nested_asl_and_project_actual_causal_history(
     assert_eq!(kinds, expected);
     for (index, event) in page.events().iter().enumerate() {
         assert_eq!(event.id, i64::try_from(index + 1)?);
-        assert_eq!(event.previous_event_id, Some(i64::try_from(index)?));
+        let previous = if index == 1 { 0 } else { i64::try_from(index)? };
+        assert_eq!(event.previous_event_id, Some(previous));
+        if let Some(details) = &event.execution_started_event_details {
+            assert_eq!(details.role_arn.as_deref(), Some(role().as_str()));
+        }
         if let Some(d) = &event.task_submitted_event_details {
             assert_eq!(d.resource_type, "states");
             assert_eq!(d.resource, format!("startExecution{suffix}"));

@@ -69,8 +69,17 @@ async fn check_history(client: &Client, arn: &str, round: &str) -> Result<Vec<Hi
                 events
                     .iter()
                     .find(|parent| parent.id() == event.previous_event_id())
-                    .is_some_and(|parent| parent.r#type().as_str() == "MapStateStarted"),
-                "Map iteration did not link to its actual round start"
+                    .is_some_and(|parent| matches!(
+                        parent.r#type().as_str(),
+                        "MapStateStarted"
+                            | "PassStateExited"
+                            | "WaitStateExited"
+                            | "TaskStateExited"
+                            | "ParallelStateExited"
+                            | "MapStateExited"
+                            | "SucceedStateExited"
+                    )),
+                "Map iteration did not link to its round or completed processor"
             );
         }
     }

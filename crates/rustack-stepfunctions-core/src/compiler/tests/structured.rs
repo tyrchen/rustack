@@ -324,9 +324,16 @@ fn test_should_compile_dynamic_concurrency_without_evaluating_definition_data() 
 fn test_should_validate_inline_processor_configuration(
     #[case] config: Value,
     #[case] accepted: bool,
+    #[values("ItemProcessor", "Iterator")] spelling: &str,
 ) {
     let mut value = map();
-    value["States"]["Run"]["ItemProcessor"]["ProcessorConfig"] = config;
+    let mut processor = value["States"]["Run"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ItemProcessor")
+        .unwrap();
+    processor["ProcessorConfig"] = config;
+    value["States"]["Run"][spelling] = processor;
     assert_eq!(compile(&value).is_ok(), accepted);
 }
 

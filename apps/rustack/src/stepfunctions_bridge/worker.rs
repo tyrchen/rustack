@@ -77,6 +77,10 @@ pub(super) async fn invoke(
             };
         }
     };
+    let integration_started = matches!(plan.mode, ResponseMode::Optimized);
+    if integration_started && responder.started().is_err() {
+        relay.send_replace(true);
+    }
     let start = shared.context.provider.start_invocation_owned(
         &plan.function,
         plan.qualifier.as_deref(),
@@ -105,7 +109,7 @@ pub(super) async fn invoke(
     }
     let (mut mapped, metadata, observed) = match admitted {
         Ok(()) => {
-            if responder.started().is_err() {
+            if !integration_started && responder.started().is_err() {
                 relay.send_replace(true);
             }
             match observe(handle.wait_response(), &mut core, &mut manager, &relay).await {

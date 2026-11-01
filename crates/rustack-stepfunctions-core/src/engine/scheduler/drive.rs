@@ -8,7 +8,8 @@ use super::{
 };
 use crate::{
     AttemptId, ClockSample, DriverStep, ExecutionOutcome, ExecutionSource, FanoutFailure, Payload,
-    StateView, TaskFailure, engine::Phase,
+    StateView, TaskFailure,
+    engine::{Continuation, Phase},
 };
 
 #[derive(Debug)]
@@ -214,6 +215,16 @@ impl FrameScheduler {
             Some(false)
         } else {
             None
+        });
+        let round_finished = round_finished.filter(|success| {
+            *success
+                || !matches!(
+                    frame.driver.phase,
+                    Phase::Waiting {
+                        continuation: Continuation::Retry,
+                        ..
+                    }
+                )
         });
         let exited = match &frame.driver.phase {
             Phase::Ready { entry: true } => Some(frame.driver.input.clone()),

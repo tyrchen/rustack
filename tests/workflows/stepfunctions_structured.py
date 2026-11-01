@@ -21,7 +21,7 @@ def check_history(sfn, arn, round_kind, history):
     by_id = {event["id"]: event for event in events}
     for event in events:
         if event["type"] == "MapIterationStarted":
-            assert by_id[event["previousEventId"]]["type"] == "MapStateStarted"
+            assert by_id[event["previousEventId"]]["type"] in ("MapStateStarted", "PassStateExited", "WaitStateExited", "TaskStateExited", "ParallelStateExited", "MapStateExited", "SucceedStateExited")
     return events
 
 

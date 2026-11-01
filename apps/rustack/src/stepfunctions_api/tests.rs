@@ -842,11 +842,11 @@ async fn test_should_map_execution_timeout_consistently_after_start_request_has_
         )
         .await;
     assert_eq!(description["status"], "TIMED_OUT");
-    assert_eq!(description["error"], "States.Timeout");
-    assert_eq!(
-        description["cause"],
-        history["events"][0]["executionTimedOutEventDetails"]["cause"]
-    );
+    assert!(description.get("error").is_none());
+    assert!(description.get("cause").is_none());
+    let details = &history["events"][0]["executionTimedOutEventDetails"];
+    assert!(details.get("error").is_none());
+    assert!(details.get("cause").is_none());
     assert_eq!(history["events"][0]["type"], "ExecutionTimedOut");
     f.close().await;
 }

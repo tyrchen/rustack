@@ -45,6 +45,7 @@ D89/5.1a is implemented and independently reviewed: [provided-runtime ZIP delive
 | 58 | [Rootless platform](./rustack-workflows-58-rootless-platform-design.md) | Isolated user daemon, effective cgroup attestation and complete resource qualification |
 | 59 | [Final consumers and release qualification](./rustack-workflows-59-release-qualification-design.md) | Code-first acceptance completion, immutable candidates and non-skipping publication gate |
 | 60 | [Operations](./rustack-workflows-60-operations-design.md) | YAML configuration, budgets, topology, shutdown and snapshots |
+| 61 | [External LocalStack compatibility](./rustack-workflows-61-localstack-compatibility-design.md) | Original upstream pytest cases, AWS snapshots, bounded adapters and exact coverage evidence |
 | 70 | [Verification plan](./rustack-workflows-70-verification-plan.md) | Acceptance matrix, security boundaries, SDK/platform coverage and performance budgets |
 | 80 | [Roadmap](./rustack-workflows-80-roadmap.md) | User-visible M0–M4 outcomes and calendar assumptions |
 | 90 | [Implementation plan](./rustack-workflows-90-impl-plan.md) | P0 evidence gate and dependency-ordered P1–P5 tasks/exit criteria |

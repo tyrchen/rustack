@@ -347,10 +347,7 @@ pub(crate) fn terminal(
         }
         ExecutionOutcome::TimedOut => {
             let mut e = event(HistoryEventType::ExecutionTimedOut, wall);
-            let mut d = ExecutionTimedOutEventDetails::default();
-            d.error = Some("States.Timeout".into());
-            d.cause = Some("Execution deadline exceeded".into());
-            e.execution_timed_out_event_details = Some(d);
+            e.execution_timed_out_event_details = Some(ExecutionTimedOutEventDetails::default());
             e
         }
     };

@@ -198,14 +198,14 @@ async fn test_should_preserve_create_idempotency_role_tags_and_update_revision_i
     let (reg, mut owner) = registry(RegistryLimits::default(), None);
     let first = machine(&reg, 1, true).await;
     let mut execution = start(&reg, "run", " {\"n\":1} ").await.unwrap();
-    let other_role = "arn:aws:iam::000000000000:role/Other".parse().unwrap();
+    let other_role: RoleArn = "arn:aws:iam::000000000000:role/Other".parse().unwrap();
     let tags = Tags::new(vec![("key".into(), "ignored".into())]).unwrap();
     let RegistryResult::Machine(repeated) = result(
         &reg,
         RegistryCommand::Create(
             "Machine".parse().unwrap(),
             definition(1, true),
-            other_role,
+            other_role.clone(),
             tags,
         ),
     )
@@ -234,7 +234,7 @@ async fn test_should_preserve_create_idempotency_role_tags_and_update_revision_i
     ));
     let RegistryResult::Machine(second) = result(
         &reg,
-        RegistryCommand::Update(arn(), Some(definition(2, false)), None),
+        RegistryCommand::Update(arn(), Some(definition(2, false)), Some(other_role.clone())),
     )
     .await
     .unwrap() else {
@@ -253,6 +253,16 @@ async fn test_should_preserve_create_idempotency_role_tags_and_update_revision_i
     assert!(
         matches!(new.view().outcome().map(Arc::as_ref),Some(ExecutionOutcome::Succeeded(p)) if p.value()==&json!(2))
     );
+    for (record, expected_role) in [(&execution, role()), (&new, other_role)] {
+        let page = record.view().history().page(1, 100, true).unwrap();
+        assert_eq!(
+            page.events()
+                .first()
+                .and_then(|event| event.execution_started_event_details.as_ref())
+                .and_then(|details| details.role_arn.as_deref()),
+            Some(expected_role.as_str())
+        );
+    }
     execution.view = reg
         .stop(execution.arn().clone(), None, None, deadline())
         .await

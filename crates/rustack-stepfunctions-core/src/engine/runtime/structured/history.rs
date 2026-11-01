@@ -30,6 +30,7 @@ struct Cursor {
     state: StateId,
     last: u32,
     round: Option<u32>,
+    next_iteration: Option<u32>,
     kind: Kind,
     active: bool,
     parent: Option<FrameParent>,
@@ -50,8 +51,16 @@ impl CausalHistory {
     }
     fn append(&mut self, id: FrameId, event: HistoryEvent) -> Result<(), ExecutionError> {
         let previous = self.frames.get(&id).ok_or(ExecutionError::Invalid)?.last;
-        self.journal.append_causal(event, previous, false)?;
+        self.append_from(id, event, previous)
+    }
+    fn append_from(
+        &mut self,
+        id: FrameId,
+        event: HistoryEvent,
+        previous: u32,
+    ) -> Result<(), ExecutionError> {
         let cursor = self.frames.get_mut(&id).ok_or(ExecutionError::Invalid)?;
+        self.journal.append_causal(event, previous, false)?;
         cursor.last = self.journal.view.len();
         Ok(())
     }
@@ -77,8 +86,9 @@ impl CausalHistory {
                 Cursor {
                     machine: t.machine().clone(),
                     state: t.state(),
-                    last: self.journal.view.len(),
+                    last: 0,
                     round: None,
+                    next_iteration: None,
                     kind: Kind::Plain,
                     active: false,
                     parent: None,
@@ -93,6 +103,7 @@ impl CausalHistory {
             cursor.machine = t.machine().clone();
             cursor.state = t.state();
             cursor.round = None;
+            cursor.next_iteration = None;
             cursor.active = true;
             cursor.kind = match t.machine().state(t.state())? {
                 StateView::Map { .. } => Kind::Map,
@@ -107,7 +118,7 @@ impl CausalHistory {
             )?;
         }
         if let Some(call) = t.timed_out_call() {
-            let failure = TaskFailure::new("States.Timeout", Some("Task deadline exceeded"))?;
+            let failure = TaskFailure::new("States.Timeout", None)?;
             self.event(
                 call.frame(),
                 events::task_failure(
@@ -122,6 +133,7 @@ impl CausalHistory {
         if let Some(count) = t.fanout_started {
             self.round_started(t.frame(), count, wall)?;
         }
+        let mut successful_round_predecessor = None;
         if let Some(success) = t.round_finished {
             let kind = self
                 .frames
@@ -135,13 +147,23 @@ impl CausalHistory {
                 (Kind::Parallel, false) => HistoryEventType::ParallelStateFailed,
                 _ => return Err(ExecutionError::Invalid),
             };
+            if success {
+                successful_round_predecessor = Some(
+                    self.frames
+                        .get(&t.frame())
+                        .ok_or(ExecutionError::Invalid)?
+                        .last,
+                );
+            }
             self.append(t.frame(), events::event(event, wall))?;
         }
         if let Some(output) = t.exited() {
-            self.event(
-                t.frame(),
-                events::exited(t.machine(), t.state(), output, wall),
-            )?;
+            let event = events::exited(t.machine(), t.state(), output, wall)?;
+            if let Some(previous) = successful_round_predecessor {
+                self.append_from(t.frame(), event, previous)?;
+            } else {
+                self.append(t.frame(), event)?;
+            }
         }
         if t.exited().is_some() {
             if let Some(cursor) = self.frames.get_mut(&t.frame()) {
@@ -173,6 +195,7 @@ impl CausalHistory {
         self.append(id, event)?;
         let cursor = self.frames.get_mut(&id).ok_or(ExecutionError::Invalid)?;
         cursor.round = Some(cursor.last);
+        cursor.next_iteration = Some(cursor.last);
         Ok(())
     }
     pub(super) fn child_started(
@@ -186,8 +209,13 @@ impl CausalHistory {
             .frames
             .get(&parent.frame())
             .ok_or(ExecutionError::Invalid)?;
-        let previous = parent_cursor.round.ok_or(ExecutionError::Invalid)?;
         let map = parent_cursor.kind == Kind::Map;
+        let previous = if map {
+            parent_cursor.next_iteration
+        } else {
+            parent_cursor.round
+        }
+        .ok_or(ExecutionError::Invalid)?;
         let name = parent_cursor
             .machine
             .state_name(parent_cursor.state)?
@@ -200,6 +228,7 @@ impl CausalHistory {
                 state: child.state(),
                 last: previous,
                 round: None,
+                next_iteration: None,
                 kind: Kind::Plain,
                 active: false,
                 parent: Some(parent),
@@ -237,6 +266,7 @@ impl CausalHistory {
             .ok_or(ExecutionError::Invalid)?;
         let kind = owner.kind;
         let name = owner.machine.state_name(owner.state)?.to_owned();
+        let processor_last = self.frames.get(&id).ok_or(ExecutionError::Invalid)?.last;
         if kind == Kind::Map {
             let event = match outcome {
                 ExecutionOutcome::Succeeded(_) => HistoryEventType::MapIterationSucceeded,
@@ -251,6 +281,9 @@ impl CausalHistory {
             .get_mut(&parent.frame())
             .ok_or(ExecutionError::Invalid)?;
         owner.last = child.last;
+        if kind == Kind::Map {
+            owner.next_iteration = Some(processor_last);
+        }
         Ok(())
     }
     fn abort_state(&mut self, id: FrameId, wall: DateTime<Utc>) -> Result<(), ExecutionError> {

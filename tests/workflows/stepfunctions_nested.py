@@ -25,7 +25,7 @@ def check_history(sfn, arn, suffix, child, history, omitted):
         expected += ["TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"]
         assert kinds == expected, kinds
     for index, event in enumerate(events):
-        assert event["id"] == index + 1 and event.get("previousEventId", 0) == index
+        assert event["id"] == index + 1 and event.get("previousEventId", 0) == (0 if index == 1 else index)
         if event["type"] == "TaskSubmitted":
             details = event["taskSubmittedEventDetails"]
             assert details["resourceType"] == "states" and details["resource"] == "startExecution" + suffix

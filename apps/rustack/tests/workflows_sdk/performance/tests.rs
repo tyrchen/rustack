@@ -81,7 +81,7 @@ fn event(kind: HistoryEventType, history: &[HistoryEvent]) -> Result<HistoryEven
         .timestamp(DateTime::from_secs(0))
         .r#type(kind)
         .id(previous.checked_add(1).context("event ID overflow")?)
-        .previous_event_id(previous))
+        .previous_event_id(if history.len() == 1 { 0 } else { previous }))
 }
 fn complete_history() -> Result<Vec<HistoryEvent>> {
     let mut events = Vec::new();
@@ -118,6 +118,7 @@ fn test_should_reject_broken_predecessors_and_wrong_or_missing_state_exits() -> 
     validate_history(&complete)?;
     for mutation in [
         "predecessor",
+        "root-predecessor",
         "missing-exit",
         "exit-kind",
         "exit-name",
@@ -126,6 +127,12 @@ fn test_should_reject_broken_predecessors_and_wrong_or_missing_state_exits() -> 
     ] {
         let mut broken = complete.clone();
         match mutation {
+            "root-predecessor" => {
+                broken
+                    .get_mut(1)
+                    .context("missing first state entry")?
+                    .previous_event_id = 1;
+            }
             "predecessor" => {
                 broken
                     .get_mut(50)

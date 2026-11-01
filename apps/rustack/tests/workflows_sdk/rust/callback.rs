@@ -306,7 +306,8 @@ async fn verify(client: &Client, execution: &str, case: &Case, events: &[Evidenc
     let mut submitted_count = 0;
     for (offset, event) in history.iter().enumerate() {
         ensure!(
-            event.id() == i64::try_from(offset + 1)? && event.previous_event_id() == event.id() - 1,
+            event.id() == i64::try_from(offset + 1)?
+                && event.previous_event_id() == sequential_predecessor(offset)?,
             "broken callback causal history"
         );
         if let Some(details) = event.task_scheduled_event_details() {

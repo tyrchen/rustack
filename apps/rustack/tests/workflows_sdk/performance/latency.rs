@@ -67,9 +67,10 @@ async fn check_history(client: &Client, arn: &str) -> Result<()> {
 pub(super) fn validate_history(events: &[HistoryEvent]) -> Result<()> {
     ensure!(events.len() == 102, "wrong pure history event count");
     for (index, event) in events.iter().enumerate() {
-        let previous = i64::try_from(index)?;
+        let number = i64::try_from(index)?;
+        let previous = if index == 1 { 0 } else { number };
         ensure!(
-            event.id() == previous.checked_add(1).context("event ID overflow")?
+            event.id() == number.checked_add(1).context("event ID overflow")?
                 && event.previous_event_id() == previous,
             "invalid sequential causal history"
         );

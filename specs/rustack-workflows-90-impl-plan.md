@@ -453,3 +453,16 @@ D108 corrects the remaining archive consumer, bound transcript parsing, canonica
 D109's focused diagnostic reaches a pre-begin cycle84 failure. Complete [D110's initialization-owned channel](./rustack-workflows-57-image-performance-design.md#9-initialization-owned-flood-control-channel-d110), five-source controlled refresh and report/negative controls before restarting execution. Independently review code, then run normal controls and focused actual rootless100-cycle diagnosis; only stable corrected code enters the final full Rust/Native/rootless/rootful cohort. Preserve previous83/83 rootful,82/83 rootless and focused failures under their original seals.
 
 The corrected83b2571 source cohort completes code-first independent review,245 Python controls, all15 Rust gates, Native/Action, focused100-cycle rootless diagnosis and complete83/83 rootless execution. Isolated rootful execution subsequently passes83/83 after15 hash-checked imports and an actual same-engine five-image rebuild; all raw platform and release receipts validate. Foreign resources are preserved, exact owned empty networks retire non-forcibly, and original commit/source/artifact bindings remain intact. See [current-source execution and cleanup evidence](../docs/research/workflows-final-consumers-review.md#isolated-rootful-continuation). Docker Desktop, dedicated physical ARM reference and complete same-commit final release qualification remain open; no final M4 or publication is claimed. D100 remains binding.
+
+### P5 external compatibility continuation
+
+The user requests executing the overlapping LocalStack test inventory. Follow [external compatibility design61](./rustack-workflows-61-localstack-compatibility-design.md); do not weaken original upstream assertions or infer broad AWS parity. TaskCreate is unavailable, so this dependency-ordered table records the work.
+
+| Task | Deliverable | State |
+|---|---|---|
+| E01 | Pinned upstream fixture/snapshot study and executable boundary | Complete |
+| E02 | Exact selected inventory, dependency/source seals and private snapshot plugin | Complete: 91 pure / 32 Docker nodes; obsolete snapshot IDs retained as exclusions |
+| E03 | Owned actual Rustack launcher, pure and real-image Make targets | Complete: actual server and six original Python3.12 handlers |
+| E04 | Adapter negative controls and independent code-first review | Complete: 13 integrity controls, independent adapter/W438–W446 review and strict new-owner Clippy |
+| E05 | Run selected external cases; correct in-profile bugs and retain failures | Execution/corrections delivered: pure88/91 and Docker30/32 under c16d68e; strict compatibility exit remains open on five retained profile/diagnostic differences |
+| E06 | Standard gates, independent evidence review and documented coverage | Complete: 15 Rust gates, 3121 Native passes, 26 Action controls, 13 adapter controls, joined cleanup and independent final evidence review |

@@ -130,7 +130,7 @@ def exercise(endpoint, image, architecture, socket, owner, engine, gateway, sdk_
         assert [event["type"] for event in child_events] == ["ExecutionStarted", "TaskStateEntered",
             "TaskScheduled", "TaskStarted", "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"]
         for index, child_event in enumerate(child_events):
-            assert child_event["id"] == index + 1 and child_event.get("previousEventId", 0) == index
+            assert child_event["id"] == index + 1 and child_event.get("previousEventId", 0) == (0 if index == 1 else index)
         pair = environment(metadata, gateway, pair, name, sdk_source, relay_source, network)
         progress["stage"] = "delete-data"
         configuration_omits_sdk(function.get_function_configuration(FunctionName=name))

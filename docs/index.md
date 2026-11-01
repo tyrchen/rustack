@@ -10,6 +10,8 @@
 
 ## Research
 
+- [LocalStack workflow test integration](./research/study-localstack-workflow-tests.md) — Pinned original pytest/snapshot execution, allowed fixture adaptations and external compatibility evidence boundaries.
+
 - [Workflow final consumers and delivery review](research/workflows-final-consumers-review.md) — D104–D108 code review, source cohort, retained failures and current verification.
 
 - [Image Lambda Performance and Repeated Cleanup Review](./research/workflows-image-performance-review.md) - Direct Linux warm100/cold20 and100 causal log-flood timeout cycles, actual initialization/task/resource observations and explicit reference qualification limits.

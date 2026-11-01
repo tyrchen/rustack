@@ -6,6 +6,7 @@ use rustack_core::json::JsonError;
 use serde_json::{Map, Value, json};
 use uuid::{Builder, Uuid, Variant, Version};
 
+use super::Budget;
 use crate::{AslError, EvaluationContext, Expression, Payload, SystemUuidSource, UuidSource};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -438,4 +439,71 @@ proptest! {
         let result=evaluate("States.MathAdd($.a,$.b)",&json!({"a":a,"b":b})).map_err(|e|TestCaseError::fail(e.to_string()))?;
         prop_assert_eq!(result.value(),&json!(a+b));
     }
+}
+
+#[rstest]
+#[case("-0", json!(0))]
+#[case(" [ -0, {\"x\": -0, \"-0\": \"-0\"} ] ", json!([0,{"x":0,"-0":"-0"}]))]
+#[case(r#"{"escaped":"\\\"-0","unicode":"🙂-0","n":-0}"#, json!({"escaped":"\\\"-0","unicode":"🙂-0","n":0}))]
+#[case("[-0.0,-0e0,-1,0]", json!([-0.0,-0.0,-1,0]))]
+fn test_should_normalize_only_complete_unquoted_negative_integer_zero_tokens(
+    #[case] source: &str,
+    #[case] expected: Value,
+) -> TestResult {
+    let result = evaluate("States.StringToJson($.text)", &json!({"text":source}))?;
+    assert_eq!(result.value(), &expected);
+    Ok(())
+}
+
+#[rstest]
+#[case("-00")]
+#[case("[-0,]")]
+#[case("{\"x\":-0,\"x\":0}")]
+#[case(" ")]
+fn test_should_reject_invalid_json_before_negative_zero_normalization(#[case] source: &str) {
+    assert!(evaluate("States.StringToJson($.text)", &json!({"text":source})).is_err());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+    #[test]
+    fn test_should_preserve_arbitrary_quoted_text_while_normalizing_integer_zero(text in ".{0,128}") {
+        let quoted = serde_json::to_string(&text).map_err(|error|TestCaseError::fail(error.to_string()))?;
+        let source = format!("[{quoted},-0,-0.0]");
+        let result = evaluate("States.StringToJson($.text)",&json!({"text":source})).map_err(|error|TestCaseError::fail(error.to_string()))?;
+        prop_assert_eq!(result.value(),&json!([text,0,-0.0]));
+    }
+}
+
+#[rstest]
+#[case("1e-0")]
+#[case("-0e-0")]
+#[case("[-0.0,1e-0,\"-0\"]")]
+fn test_should_preserve_original_zero_exponent_and_string_spellings(
+    #[case] source: &str,
+) -> TestResult {
+    let result = evaluate("States.StringToJson($.text)", &json!({"text":source}))?;
+    assert_eq!(result.original_bytes(), source.as_bytes());
+    Ok(())
+}
+
+#[test]
+fn test_should_charge_the_conditional_normalized_json_reparse() -> TestResult {
+    let expression: Expression = "States.StringToJson($.text)".parse()?;
+    let data = Payload::from_value(&json!({"text":"-0"}))?;
+    let context = EvaluationContext::from(&data);
+    for (text, accepted) in [(4, false), (5, true)] {
+        let mut budget = Budget {
+            text,
+            ..Budget::new()
+        };
+        let result =
+            expression.evaluate_scoped(&data, &context, &mut Fixed::default(), &mut budget);
+        if accepted {
+            assert_eq!(result?.value(), &json!(0));
+        } else {
+            assert!(matches!(result, Err(AslError::WorkLimit)));
+        }
+    }
+    Ok(())
 }

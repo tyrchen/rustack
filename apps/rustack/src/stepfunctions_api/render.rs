@@ -181,10 +181,6 @@ fn describe_execution(e: &ExecutionSnapshot) -> Result<Response, StepFunctionsEr
             out.error = f.details().error().map(str::to_owned);
             out.cause = f.details().cause().map(str::to_owned);
         }
-        Some(ExecutionOutcome::TimedOut) => {
-            out.error = Some("States.Timeout".into());
-            out.cause = Some("Execution deadline exceeded".into());
-        }
         _ => {}
     }
     Ok(out.into())
