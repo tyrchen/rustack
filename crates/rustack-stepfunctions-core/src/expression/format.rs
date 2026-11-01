@@ -1,4 +1,4 @@
-//! Escape-aware scalar formatting, independent of host formatting expressions.
+//! Escape-aware bounded AWS value formatting, independent of host formatters.
 
 use std::{mem::take, str::from_utf8};
 
@@ -69,18 +69,7 @@ impl Format {
                 }
                 Part::Slot => {
                     let value = args.next().ok_or(AslError::IntrinsicValue)?.value();
-                    match value {
-                        Value::String(text) => {
-                            budget.text(text.len())?;
-                            append(&mut output, text)?;
-                        }
-                        Value::Null | Value::Bool(_) | Value::Number(_) => {
-                            let encoded = encode(value)?;
-                            let text = from_utf8(&encoded).map_err(|_| AslError::IntrinsicValue)?;
-                            append(&mut output, text)?;
-                        }
-                        _ => return Err(AslError::IntrinsicValue),
-                    }
+                    render_value(&mut output, value, budget)?;
                 }
             }
         }
@@ -89,6 +78,50 @@ impl Format {
         }
         Payload::from_value(&Value::String(output))
     }
+}
+
+fn render_value(output: &mut String, value: &Value, budget: &mut Budget) -> Result<(), AslError> {
+    budget.work(1)?;
+    match value {
+        Value::String(text) => emit(output, text, budget),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {
+            let encoded = encode(value)?;
+            emit(
+                output,
+                from_utf8(&encoded).map_err(|_| AslError::IntrinsicValue)?,
+                budget,
+            )
+        }
+        Value::Array(values) => {
+            emit(output, "[", budget)?;
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    emit(output, ", ", budget)?;
+                }
+                render_value(output, value, budget)?;
+            }
+            emit(output, "]", budget)
+        }
+        Value::Object(values) => {
+            budget.work(values.len())?;
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            emit(output, "{", budget)?;
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index != 0 {
+                    emit(output, ", ", budget)?;
+                }
+                emit(output, key, budget)?;
+                emit(output, "=", budget)?;
+                render_value(output, value, budget)?;
+            }
+            emit(output, "}", budget)
+        }
+    }
+}
+fn emit(output: &mut String, text: &str, budget: &mut Budget) -> Result<(), AslError> {
+    budget.text(text.len())?;
+    append(output, text)
 }
 
 fn append(output: &mut String, text: &str) -> Result<(), AslError> {

@@ -464,5 +464,15 @@ The user requests executing the overlapping LocalStack test inventory. Follow [e
 | E02 | Exact selected inventory, dependency/source seals and private snapshot plugin | Complete: 91 pure / 32 Docker nodes; obsolete snapshot IDs retained as exclusions |
 | E03 | Owned actual Rustack launcher, pure and real-image Make targets | Complete: actual server and six original Python3.12 handlers |
 | E04 | Adapter negative controls and independent code-first review | Complete: 13 integrity controls, independent adapter/W438–W446 review and strict new-owner Clippy |
-| E05 | Run selected external cases; correct in-profile bugs and retain failures | Execution/corrections delivered: pure88/91 and Docker30/32 under c16d68e; strict compatibility exit remains open on five retained profile/diagnostic differences |
-| E06 | Standard gates, independent evidence review and documented coverage | Complete: 15 Rust gates, 3121 Native passes, 26 Action controls, 13 adapter controls, joined cleanup and independent final evidence review |
+| E05 | Run selected external cases; correct in-profile bugs and retain failures | Complete under D114: unchanged91/91 pure and32/32 actual Docker; original failed cohorts retained |
+| E06 | Standard gates, independent evidence review and documented coverage | Complete: 15 Rust gates, 3231 Native passes, 26 Action controls, 13 adapter controls, joined cleanup and independent saved-evidence review |
+
+
+### E05 observed-AWS closure (D114)
+
+| Task | Dependency | Deliverable | State |
+|---|---|---|---|
+| E07 | User scope decision | Design61 §7 and D114 supersede the five earlier local restrictions | Complete |
+| E08 | E07 | Bounded collection Format, relaxed ordinary literal braces, empty JSON handling and scoped missing-function Cause | Complete |
+| E09 | E08 | Regression coverage and independent code-first review | Complete: 944 core / 30 bridge / 96 preserve-order expression checks and strict boundaries; W447–W449 resolved |
+| E10 | E09 | Exact91/91 +32/32, Rust/Native/Action checks, cleanup/evidence review and PR update | Complete: unchanged123/123, all current-source gates and independent evidence review; delivered through PR76 |

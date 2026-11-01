@@ -62,7 +62,7 @@ fn call(input: &mut &str, depth: usize, remaining: &mut usize) -> Result<Node, A
                 return Err(AslError::InvalidExpression);
             }
             let is_format = function == Function::Format && args.is_empty();
-            let (arg, raw) = argument(input, depth.saturating_add(1), remaining, is_format)?;
+            let (arg, raw) = argument(input, depth.saturating_add(1), remaining)?;
             if is_format {
                 format_text = raw;
             }
@@ -100,14 +100,13 @@ fn argument(
     input: &mut &str,
     depth: usize,
     remaining: &mut usize,
-    is_format: bool,
 ) -> Result<(Node, Option<String>), AslError> {
     if input.starts_with("States.") {
         return call(input, depth, remaining).map(|node| (node, None));
     }
     unit(remaining)?;
     if input.starts_with('\'') {
-        let (value, raw) = string(input, is_format)?;
+        let (value, raw) = string(input)?;
         return Ok((
             Node::Literal(Payload::from_value(&Value::String(value))?),
             Some(raw),
@@ -163,7 +162,7 @@ fn argument_token<'a>(input: &mut &'a str) -> Result<&'a str, AslError> {
     Ok(token.trim_end_matches([' ', '\t', '\r', '\n']))
 }
 
-fn string(input: &mut &str, is_format: bool) -> Result<(String, String), AslError> {
+fn string(input: &mut &str) -> Result<(String, String), AslError> {
     consume(input, "'")?;
     let mut value = String::new();
     let mut raw = String::new();
@@ -181,7 +180,6 @@ fn string(input: &mut &str, is_format: bool) -> Result<(String, String), AslErro
                 raw.push(ch);
                 value.push(ch);
             }
-            '{' | '}' if !is_format => return Err(AslError::InvalidExpression),
             ch => {
                 raw.push(ch);
                 value.push(ch);

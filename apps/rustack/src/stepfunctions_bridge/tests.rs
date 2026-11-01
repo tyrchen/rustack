@@ -1,7 +1,7 @@
 //! Controlled provider tests plus separately gated actual Native process fixtures.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     io::{Cursor, Write},
     sync::{
         Arc,
@@ -15,6 +15,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use rustack_lambda_core::{
     config::LambdaConfig,
+    error::LambdaServiceError,
     executor::{Executor, ExecutorBackend, ExecutorError, InvokeRequest, InvokeResponse},
     invocation::InvocationContext,
     provider::RustackLambda,
@@ -25,9 +26,9 @@ use rustack_lambda_model::{
     types::{Environment, FunctionCode},
 };
 use rustack_stepfunctions_core::{
-    AslCompiler, ClockSample, EvaluationContext, ExecutionDriver, ExecutionLimits,
-    ExecutionOutcome, ExecutionSupervisor, HistoryLimits, Payload, RuntimeLimits, TaskSupport,
-    TenantScope,
+    AslCompiler, AslError, ClockSample, EvaluationContext, ExecutionDriver, ExecutionLimits,
+    ExecutionOutcome, ExecutionSupervisor, HistoryLimits, Payload, RuntimeLimits, SystemUuidSource,
+    TaskSupport, TenantScope, UuidSource,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -35,6 +36,7 @@ use tokio::{
     sync::Semaphore,
     time::{Instant, timeout},
 };
+use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::*;
@@ -760,4 +762,189 @@ fn test_should_preserve_function_error_when_compact_numeric_cause_expands_past_p
     assert_eq!(cause.len(), 32_768);
     assert!(cause.ends_with(" [truncated]"));
     assert!(cause.starts_with(r#"{"errorType":"Oops","items":[1000000000.0"#));
+}
+
+#[derive(Debug)]
+struct FixedServiceId(Uuid);
+impl UuidSource for FixedServiceId {
+    fn next_uuid(&mut self) -> Result<Uuid, AslError> {
+        Ok(self.0)
+    }
+}
+#[derive(Debug)]
+struct FailedServiceId;
+impl UuidSource for FailedServiceId {
+    fn next_uuid(&mut self) -> Result<Uuid, AslError> {
+        Err(AslError::IntrinsicValue)
+    }
+}
+fn service_plan(function: &str, qualifier: Option<&str>) -> mapping::CallPlan {
+    mapping::CallPlan {
+        function: function.into(),
+        qualifier: qualifier.map(str::to_owned),
+        payload: Payload::parse(b"{}").unwrap(),
+        mode: mapping::ResponseMode::Optimized,
+        deadline: deadline(),
+    }
+}
+
+#[rstest::rstest]
+#[case("Worker", None, "$LATEST")]
+#[case("Worker", Some("alias"), "alias")]
+#[case(
+    "arn:aws-cn:lambda:cn-north-1:123456789012:function:Worker:2",
+    None,
+    "2"
+)]
+#[case(
+    "arn:aws-cn:lambda:cn-north-1:123456789012:function:Worker:alias",
+    Some("alias"),
+    "alias"
+)]
+#[case(
+    "arn:aws-cn:lambda:cn-north-1:123456789012:function:Worker",
+    None,
+    "$LATEST"
+)]
+fn test_should_render_missing_function_cause_from_validated_target_and_scope(
+    #[case] function: &str,
+    #[case] qualifier: Option<&str>,
+    #[case] expected: &str,
+) {
+    let scope = TenantScope::new("aws-cn", "cn-north-1", "123456789012").unwrap();
+    let target = mapping::ServiceTarget::new(&service_plan(function, qualifier), &scope);
+    let id = Uuid::parse_str("5a09f4e4-fbdc-49eb-9a92-9194264473cf").unwrap();
+    let mapped = mapping::service(
+        LambdaServiceError::FunctionNotFound {
+            name: "private-provider-name\n/host/path".into(),
+        },
+        &target,
+        &mut FixedServiceId(id),
+    )
+    .unwrap();
+    assert!(!format!("{target:?} {mapped:?}").contains("Worker"));
+    let failure = mapped.result.unwrap_err();
+    assert_eq!(
+        failure.details().error(),
+        Some("Lambda.ResourceNotFoundException")
+    );
+    assert_eq!(
+        failure.details().cause(),
+        Some(
+            format!(
+                "Function not found: \
+                 arn:aws-cn:lambda:cn-north-1:123456789012:function:Worker:{expected} (Service: \
+                 AWSLambda; Status Code: 404; Error Code: ResourceNotFoundException; Request ID: \
+                 {id}; Proxy: null)"
+            )
+            .as_str()
+        )
+    );
+}
+
+#[test]
+fn test_should_preserve_missing_version_alias_and_unrelated_service_error_categories() {
+    let target = mapping::ServiceTarget::new(
+        &service_plan("Worker", Some("missing")),
+        &TenantScope::default(),
+    );
+    for error in [
+        LambdaServiceError::VersionNotFound {
+            function_name: "private".into(),
+            version: "123".into(),
+        },
+        LambdaServiceError::AliasNotFound {
+            function_name: "private".into(),
+            alias: "private".into(),
+        },
+    ] {
+        let failure = mapping::service(error, &target, &mut SystemUuidSource::default())
+            .unwrap()
+            .result
+            .unwrap_err();
+        assert!(failure.details().cause().unwrap().starts_with(
+            "Function not found: arn:aws:lambda:us-east-1:000000000000:function:Worker:missing "
+        ));
+    }
+    let mapped = mapping::service(
+        LambdaServiceError::TooManyRequests,
+        &target,
+        &mut FailedServiceId,
+    )
+    .unwrap();
+    assert!(
+        matches!(mapped.result,Err(f) if f.details().error()==Some("Lambda.TooManyRequestsException") && f.details().cause()==Some("Lambda invocation admission failed"))
+    );
+}
+
+#[test]
+fn test_should_reject_invalid_service_targets_and_failed_or_invalid_identity_sources() {
+    let id = Uuid::parse_str("5a09f4e4-fbdc-49eb-9a92-9194264473cf").unwrap();
+    for (function, qualifier) in [
+        (
+            "arn:aws:lambda:us-west-2:000000000000:function:Worker",
+            None,
+        ),
+        ("Worker", Some("bad\nqualifier")),
+        (
+            "arn:aws:lambda:us-east-1:000000000000:function:Worker:1",
+            Some("2"),
+        ),
+    ] {
+        let target = mapping::ServiceTarget::new(
+            &service_plan(function, qualifier),
+            &TenantScope::default(),
+        );
+        assert!(
+            mapping::service(
+                LambdaServiceError::FunctionNotFound {
+                    name: "ignored".into()
+                },
+                &target,
+                &mut FixedServiceId(id)
+            )
+            .is_err()
+        );
+    }
+    let target =
+        mapping::ServiceTarget::new(&service_plan("Worker", None), &TenantScope::default());
+    assert!(
+        mapping::service(
+            LambdaServiceError::FunctionNotFound {
+                name: "ignored".into()
+            },
+            &target,
+            &mut FailedServiceId
+        )
+        .is_err()
+    );
+    for id in [
+        Uuid::nil(),
+        Uuid::from_u128(0x0000_0000_0000_4000_c000_0000_0000_0000),
+    ] {
+        assert!(
+            mapping::service(
+                LambdaServiceError::FunctionNotFound {
+                    name: "ignored".into()
+                },
+                &target,
+                &mut FixedServiceId(id)
+            )
+            .is_err()
+        );
+    }
+    let mut causes = BTreeSet::new();
+    for _ in 0..2 {
+        let failure = mapping::service(
+            LambdaServiceError::FunctionNotFound {
+                name: "ignored".into(),
+            },
+            &target,
+            &mut SystemUuidSource::default(),
+        )
+        .unwrap()
+        .result
+        .unwrap_err();
+        assert!(causes.insert(failure.details().cause().unwrap().to_owned()));
+    }
 }

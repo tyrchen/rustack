@@ -3,18 +3,19 @@
 use std::{future::Future, pin::pin, sync::Arc};
 
 use rustack_lambda_core::{
+    error::LambdaServiceError,
     executor::{ExecutorError, InvokeResponse},
     invocation::InvocationHandle,
 };
 use rustack_stepfunctions_core::{
     CallbackError, CallbackInvocationMetadata, CallbackInvocationReporter, LambdaTaskCommand,
-    TaskFailure, TaskResponder,
+    SystemUuidSource, TaskFailure, TaskResponder,
 };
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 
 use super::{
     BridgeError, Shared, Uncertain, WorkerExit,
-    mapping::{self, CallPlan, Mapped, ResponseMode},
+    mapping::{self, CallPlan, Mapped, ResponseMode, ServiceTarget},
     signal,
 };
 
@@ -68,13 +69,11 @@ pub(super) async fn invoke(
     let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
-            let mut mapped = checked(mapping::parameters(error));
-            report(&mut reporter, &mut mapped, None, Instant::now());
-            responder.finish(mapped.result);
-            return WorkerExit {
-                uncertain: None,
-                diagnostic: mapped.diagnostic.map(Arc::new),
-            };
+            return finish_unsubmitted(
+                checked(mapping::parameters(error)),
+                &mut reporter,
+                responder,
+            );
         }
     };
     let integration_started = matches!(plan.mode, ResponseMode::Optimized);
@@ -92,13 +91,15 @@ pub(super) async fn invoke(
     let mut submission = match submission {
         Ok(submission) => submission,
         Err(error) => {
-            let mut mapped = checked(mapping::service(error));
-            report(&mut reporter, &mut mapped, None, Instant::now());
-            responder.finish(mapped.result);
-            return WorkerExit {
-                uncertain: None,
-                diagnostic: mapped.diagnostic.map(Arc::new),
-            };
+            let mapped = map_service(
+                error,
+                ServiceTarget::new(&plan, command.machine().scope()),
+                &mut core,
+                &mut manager,
+                &relay,
+            )
+            .await;
+            return finish_unsubmitted(mapped, &mut reporter, responder);
         }
     };
     let admitted = observe(submission.admitted(), &mut core, &mut manager, &relay).await;
@@ -112,26 +113,20 @@ pub(super) async fn invoke(
             if !integration_started && responder.started().is_err() {
                 relay.send_replace(true);
             }
-            match observe(handle.wait_response(), &mut core, &mut manager, &relay).await {
-                Ok(response) => {
-                    let observed = Instant::now();
-                    let request_id = handle.id();
-                    let (mapped, metadata) = map_response(
-                        CallbackInvocationMetadata::new(request_id, &response.executed_version),
-                        response,
-                        plan.mode,
-                        request_id.to_string(),
-                        &mut core,
-                        &mut manager,
-                        &relay,
-                    )
-                    .await;
-                    (mapped, metadata, observed)
-                }
-                Err(error) => (checked(mapping::executor(error)), None, Instant::now()),
-            }
+            receive_response(&mut handle, plan.mode, &mut core, &mut manager, &relay).await
         }
-        Err(error) => (checked(mapping::service(error)), None, Instant::now()),
+        Err(error) => (
+            map_service(
+                error,
+                ServiceTarget::new(&plan, command.machine().scope()),
+                &mut core,
+                &mut manager,
+                &relay,
+            )
+            .await,
+            None,
+            Instant::now(),
+        ),
     };
     report(&mut reporter, &mut mapped, metadata, observed);
     let exit = cleanup(
@@ -147,6 +142,63 @@ pub(super) async fn invoke(
     // Keep the external cancellation relay alive through the owned cleanup join.
     drop(relay);
     exit
+}
+
+fn finish_unsubmitted(
+    mut mapped: Mapped,
+    reporter: &mut Option<CallbackInvocationReporter>,
+    responder: TaskResponder,
+) -> WorkerExit {
+    report(reporter, &mut mapped, None, Instant::now());
+    responder.finish(mapped.result);
+    WorkerExit {
+        uncertain: None,
+        diagnostic: mapped.diagnostic.map(Arc::new),
+    }
+}
+
+async fn map_service(
+    error: LambdaServiceError,
+    target: ServiceTarget,
+    core: &mut watch::Receiver<bool>,
+    manager: &mut watch::Receiver<bool>,
+    relay: &watch::Sender<bool>,
+) -> Mapped {
+    let mut workers = JoinSet::new();
+    workers
+        .spawn_blocking(move || mapping::service(error, &target, &mut SystemUuidSource::default()));
+    match observe(workers.join_next(), core, manager, relay).await {
+        Some(Ok(mapped)) => checked(mapped),
+        Some(Err(error)) => checked(Err(BridgeError::Worker(error))),
+        None => checked(Err(BridgeError::Unavailable)),
+    }
+}
+
+async fn receive_response(
+    handle: &mut InvocationHandle,
+    mode: ResponseMode,
+    core: &mut watch::Receiver<bool>,
+    manager: &mut watch::Receiver<bool>,
+    relay: &watch::Sender<bool>,
+) -> (Mapped, Option<CallbackInvocationMetadata>, Instant) {
+    match observe(handle.wait_response(), core, manager, relay).await {
+        Ok(response) => {
+            let observed = Instant::now();
+            let request_id = handle.id();
+            let (mapped, metadata) = map_response(
+                CallbackInvocationMetadata::new(request_id, &response.executed_version),
+                response,
+                mode,
+                request_id.to_string(),
+                core,
+                manager,
+                relay,
+            )
+            .await;
+            (mapped, metadata, observed)
+        }
+        Err(error) => (checked(mapping::executor(error)), None, Instant::now()),
+    }
 }
 
 async fn map_response(

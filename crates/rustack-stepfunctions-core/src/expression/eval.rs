@@ -54,6 +54,13 @@ fn output<T: Serialize + ?Sized>(value: &T) -> Result<Payload, AslError> {
 
 fn parse_json(text: &str, budget: &mut Budget) -> Result<Payload, AslError> {
     budget.text(text.len())?;
+    if text
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    {
+        return Payload::parse(b"null");
+    }
+    budget.text(text.len())?;
     let parsed = Payload::parse(text.as_bytes())?;
     budget.text(text.len())?;
     let bytes = text.as_bytes();

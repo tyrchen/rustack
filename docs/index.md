@@ -10,7 +10,7 @@
 
 ## Research
 
-- [LocalStack workflow test integration](./research/study-localstack-workflow-tests.md) — Pinned original pytest/snapshot execution, allowed fixture adaptations and external compatibility evidence boundaries.
+- [LocalStack workflow test integration](./research/study-localstack-workflow-tests.md) — Pinned original pytest/snapshot execution, observed AWS semantics, exact123-node qualification and explicit packaging/coverage limits.
 
 - [Workflow final consumers and delivery review](research/workflows-final-consumers-review.md) — D104–D108 code review, source cohort, retained failures and current verification.
 

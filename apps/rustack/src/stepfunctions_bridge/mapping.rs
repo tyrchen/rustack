@@ -14,7 +14,7 @@ use rustack_lambda_core::{
 };
 use rustack_stepfunctions_core::{
     AslError, CallbackError, CallbackInvocationMetadata, Integration, LambdaTaskCommand,
-    MAX_PAYLOAD_BYTES, Payload, StateView, TaskFailure,
+    MAX_PAYLOAD_BYTES, Payload, StateView, TaskFailure, TenantScope, UuidSource,
 };
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -109,7 +109,7 @@ impl CallPlan {
                     .filter(|v| !v.is_empty() && v.len() <= 256)
                     .ok_or(BridgeError::Parameters)?
                     .to_owned();
-                validate_reference(&function, command)?;
+                validate_reference(&function, command.machine().scope())?;
                 let qualifier = object
                     .get("Qualifier")
                     .map(|v| {
@@ -152,7 +152,64 @@ impl CallPlan {
         })
     }
 }
-fn validate_reference(reference: &str, command: &LambdaTaskCommand) -> Result<(), BridgeError> {
+pub(super) struct ServiceTarget {
+    function: String,
+    qualifier: Option<String>,
+    scope: TenantScope,
+}
+impl fmt::Debug for ServiceTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LambdaServiceTarget(<redacted>)")
+    }
+}
+impl ServiceTarget {
+    pub(super) fn new(plan: &CallPlan, scope: &TenantScope) -> Self {
+        Self {
+            function: plan.function.clone(),
+            qualifier: plan.qualifier.clone(),
+            scope: scope.clone(),
+        }
+    }
+    fn qualified_arn(&self) -> Result<String, BridgeError> {
+        validate_reference(&self.function, &self.scope)?;
+        let prefix = format!(
+            "arn:{}:lambda:{}:{}:function:",
+            self.scope.partition(),
+            self.scope.region(),
+            self.scope.account()
+        );
+        let reference = self
+            .function
+            .strip_prefix(&prefix)
+            .unwrap_or(&self.function);
+        let mut parts = reference.split(':');
+        let name = parts.next().ok_or(BridgeError::Parameters)?;
+        let embedded = parts.next();
+        if parts.next().is_some()
+            || embedded
+                .zip(self.qualifier.as_deref())
+                .is_some_and(|(left, right)| left != right)
+        {
+            return Err(BridgeError::Parameters);
+        }
+        let qualifier = embedded.or(self.qualifier.as_deref()).unwrap_or("$LATEST");
+        if qualifier.is_empty()
+            || qualifier.len() > 128
+            || !qualifier
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'$'))
+        {
+            return Err(BridgeError::Parameters);
+        }
+        let arn = format!("{prefix}{name}:{qualifier}");
+        if arn.len() > 512 {
+            return Err(BridgeError::Parameters);
+        }
+        Ok(arn)
+    }
+}
+
+fn validate_reference(reference: &str, scope: &TenantScope) -> Result<(), BridgeError> {
     let valid_name = |name: &str| {
         !name.is_empty()
             && name.len() <= 64
@@ -161,7 +218,6 @@ fn validate_reference(reference: &str, command: &LambdaTaskCommand) -> Result<()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     };
     if reference.starts_with("arn:") {
-        let scope = command.machine().scope();
         let prefix = format!(
             "arn:{}:lambda:{}:{}:function:",
             scope.partition(),
@@ -344,7 +400,11 @@ fn bounded_cause(value: &Value) -> Result<String, BridgeError> {
     }
     Ok(cause)
 }
-pub(super) fn service(error: LambdaServiceError) -> Result<Mapped, BridgeError> {
+pub(super) fn service<S: UuidSource + ?Sized>(
+    error: LambdaServiceError,
+    target: &ServiceTarget,
+    source: &mut S,
+) -> Result<Mapped, BridgeError> {
     let name = match &error {
         #[cfg(unix)]
         LambdaServiceError::ImageRestore { .. } | LambdaServiceError::ImageRestoreWorker { .. } => {
@@ -370,7 +430,29 @@ pub(super) fn service(error: LambdaServiceError) -> Result<Mapped, BridgeError> 
         | LambdaServiceError::DockerNotAvailable
         | LambdaServiceError::Internal { .. } => "Lambda.ServiceException",
     };
-    let mut mapped = failure(name, "Lambda invocation admission failed")?;
+    let mut mapped = if matches!(
+        &error,
+        LambdaServiceError::FunctionNotFound { .. }
+            | LambdaServiceError::VersionNotFound { .. }
+            | LambdaServiceError::AliasNotFound { .. }
+    ) {
+        let arn = target.qualified_arn()?;
+        let id = source.next_uuid()?;
+        // The RFC 4122/9562 variant has leading bits 10 in the ninth byte.
+        if id.get_version_num() != 4 || id.as_bytes().get(8).is_none_or(|byte| byte & 0xc0 != 0x80)
+        {
+            return Err(BridgeError::Parameters);
+        }
+        failure(
+            name,
+            &format!(
+                "Function not found: {arn} (Service: AWSLambda; Status Code: 404; Error Code: \
+                 ResourceNotFoundException; Request ID: {id}; Proxy: null)"
+            ),
+        )?
+    } else {
+        failure(name, "Lambda invocation admission failed")?
+    };
     mapped.diagnostic = Some(BridgeError::Service(Arc::new(error)));
     Ok(mapped)
 }

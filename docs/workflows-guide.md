@@ -667,6 +667,14 @@ See the [API](../specs/rustack-workflows-10-api-design.md),
 [configuration](../specs/rustack-workflows-60-operations-design.md#12-tunable-budgets)
 contracts for exact grammar and ranges.
 
+The observed AWS intrinsic profile accepts objects/lists in `States.Format`,
+using `{key=value}` / `[value, value]` text with bounded recursive rendering.
+Ordinary intrinsic string arguments accept literal braces; Format templates
+still validate placeholders and escaping. `States.StringToJson` maps empty or
+ASCII-JSON-whitespace-only text to null and rejects other malformed JSON. Missing
+Lambda targets produce scoped, qualified AWS-style causes with a fresh local
+service-error request ID. See [D114's exact contract](../specs/rustack-workflows-61-localstack-compatibility-design.md#7-authorized-observed-aws-compatibility-continuation-d114).
+
 Optimized `lambda:invoke` treats a string `Payload` as serialized JSON. Omitted
 or null `Payload` sends `{}`; supply the serialized spelling `"null"` to send a
 JSON null, or `"\"hello\""` to send a JSON string. Direct Lambda tasks preserve
@@ -737,9 +745,11 @@ pytest selection/snapshot-update settings are rejected. Clients use unique local
 credentials and the owned loopback endpoint; there is no live AWS fallback.
 
 Every mismatch retains a nonzero exit and private observations, assertions,
-JUnit and cleanup receipts. The current strict inventories still have documented
-profile differences, so they must not be represented as green required CI gates.
-No new mask, xfail or case removal turns those differences into passes.
+JUnit and cleanup receipts. D114 qualifies the unchanged inventories at91/91 and
+32/32 by implementing the observed AWS behavior. No new mask, xfail or case
+removal makes them green; these opt-in targets still require the explicit
+runtime/image prerequisites above. This covers the selected original nodes and
+their retained upstream exclusions, not the full upstream suite or full AWS parity.
 
 ## Health, capabilities and qualification
 

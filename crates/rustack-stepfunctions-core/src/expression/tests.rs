@@ -164,7 +164,6 @@ fn test_should_pin_historical_aws_half_rounding_and_split_edges() -> TestResult 
 #[case("States.Array(1e999)")]
 #[case(r"States.Array('\n')")]
 #[case("States.Array('unterminated)")]
-#[case(r"States.Array('unescaped{')")]
 #[case("States.ArrayLength()")]
 #[case("States.MathAdd(1)")]
 #[case("States.UUID(1)")]
@@ -192,7 +191,6 @@ fn test_should_reject_malformed_unsupported_or_ambiguous_expression_syntax(#[cas
 #[case("States.MathAdd(-2147483648, -1)")]
 #[case("States.MathAdd(2147483648, 0)")]
 #[case("States.StringSplit(1, ',')")]
-#[case("States.Format('{}', $.a)")]
 #[case("States.JsonMerge($.a, $.a, false)")]
 fn test_should_return_typed_intrinsic_value_failures(#[case] text: &str) {
     assert!(
@@ -459,7 +457,8 @@ fn test_should_normalize_only_complete_unquoted_negative_integer_zero_tokens(
 #[case("-00")]
 #[case("[-0,]")]
 #[case("{\"x\":-0,\"x\":0}")]
-#[case(" ")]
+#[case("\u{00a0}")]
+#[case("\u{2003}")]
 fn test_should_reject_invalid_json_before_negative_zero_normalization(#[case] source: &str) {
     assert!(evaluate("States.StringToJson($.text)", &json!({"text":source})).is_err());
 }
@@ -492,7 +491,7 @@ fn test_should_charge_the_conditional_normalized_json_reparse() -> TestResult {
     let expression: Expression = "States.StringToJson($.text)".parse()?;
     let data = Payload::from_value(&json!({"text":"-0"}))?;
     let context = EvaluationContext::from(&data);
-    for (text, accepted) in [(4, false), (5, true)] {
+    for (text, accepted) in [(6, false), (7, true)] {
         let mut budget = Budget {
             text,
             ..Budget::new()
@@ -505,5 +504,84 @@ fn test_should_charge_the_conditional_normalized_json_reparse() -> TestResult {
             assert!(matches!(result, Err(AslError::WorkLimit)));
         }
     }
+    Ok(())
+}
+
+#[rstest]
+#[case("", Value::Null)]
+#[case(" \t\r\n", Value::Null)]
+#[case("{\"a\":1}", json!({"a":1}))]
+fn test_should_accept_observed_empty_json_inputs_and_normal_documents(
+    #[case] source: &str,
+    #[case] expected: Value,
+) -> TestResult {
+    assert_eq!(
+        evaluate("States.StringToJson($.text)", &json!({"text":source}))?.value(),
+        &expected
+    );
+    Ok(())
+}
+
+#[rstest]
+#[case(json!({"z":[true,null,{"name":"hello"}],"a":"🙂"}),"{a=🙂, z=[true, null, {name=hello}]}")]
+#[case(json!([1,"a",{},[]]),"[1, a, {}, []]")]
+#[case(json!({"quoted key":"\"x\""}),"{quoted key=\"x\"}")]
+fn test_should_format_observed_recursive_map_and_array_values(
+    #[case] value: Value,
+    #[case] expected: &str,
+) -> TestResult {
+    assert_eq!(
+        evaluate("States.Format('{}', $.value)", &json!({"value":value}))?.value(),
+        &json!(expected)
+    );
+    Ok(())
+}
+
+#[test]
+fn test_should_allow_literal_braces_without_reinterpreting_format_template_escapes() -> TestResult {
+    assert_eq!(
+        evaluate(r#"States.StringToJson('{"a":1}')"#, &json!({}))?.value(),
+        &json!({"a":1})
+    );
+    assert_eq!(
+        evaluate("States.Array('unescaped{')", &json!({}))?.value(),
+        &json!(["unescaped{"])
+    );
+    assert_eq!(
+        evaluate(r"States.Format('\{ {} \}', 'value}')", &json!({}))?.value(),
+        &json!("{ value} }")
+    );
+    Ok(())
+}
+
+#[test]
+fn test_should_bound_collection_format_work_and_expanded_output() -> TestResult {
+    assert!(matches!(
+        evaluate(
+            "States.Format('{}', $.value)",
+            &json!({"value":vec![0;10_000]})
+        ),
+        Err(AslError::WorkLimit)
+    ));
+    let value = json!({"value":"x".repeat(140_000)});
+    assert!(matches!(
+        evaluate("States.Format('{}{}', $.value, $.value)", &value),
+        Err(AslError::DataLimit)
+    ));
+    let expression: Expression = "States.StringToJson($.text)".parse()?;
+    let data = Payload::from_value(&json!({"text":" \n"}))?;
+    let mut budget = Budget {
+        text: 1,
+        ..Budget::new()
+    };
+    assert!(matches!(
+        expression.evaluate_scoped(
+            &data,
+            &EvaluationContext::from(&data),
+            &mut Fixed::default(),
+            &mut budget
+        ),
+        Err(AslError::WorkLimit)
+    ));
     Ok(())
 }

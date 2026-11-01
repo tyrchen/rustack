@@ -76,6 +76,8 @@ The original `TestTimeouts` class excludes `$..redriveCount` and `$..redriveStat
 
 ## Final source-cohort verification
 
+This section preserves the pre-D114 baseline; [the qualified D114 continuation](#d114-qualified-source-cohort) supersedes its compatibility status without changing its receipts.
+
 Frozen source `c16d68e41d4ee7177adcf895fec201f3d0269d796a17058aae026fa7778aa282` covers1232 execution/tooling files. The actual standalone server binary is SHA256 `88f70bace2a1acb2c0927a3f0b36f53265901f742dc27620d57faae87c387ae8`. The manifest SHA256 is `b4d9750a9fe868cb60c1f6ebb696405b3976ff05214872a56044af36bf3d6fdb`, binding42 selected upstream files plus the unchanged vendor commit.
 
 | Lane | Result | Retained evidence below `/Users/tchen/.target/` | Report SHA256 |
@@ -110,3 +112,32 @@ All earlier directories and raw logs retain their original contents. Pure-first 
 Rust-first and second deliberately retire after six passing gates to finish independent-review/strict-lint corrections; Rust-third through fifth pass all15 under their original source seals. Native-first fails the expanded start function's strict length lint; Native-second finds the superseded optimized Payload oracle; Native-third finds stale root-entry/timeout SDK oracles; Native-fourth reaches a strict documentation lint in the new helper comment. W438–W446 and the comment are corrected before the final frozen rerun. Direct broad Python discovery reports284 cases with17 missing-Action-fixture setup errors; the actual Action owner subsequently runs and passes all26 controls with its required fixture wiring. An exploratory extra-boundary SDK Clippy invocation exposes existing fixture indexing lints; the repository's required pedantic SDK gate passes without adding suppressions.
 
 Earlier complete83/83 rootful/rootless matrices belong to the previously recorded implementation source and remain historical component qualification. They were not rerun as current-source full matrices here. Docker Desktop, dedicated physical ARM reference and complete same-commit M4 release acceptance remain open; D100's further-x86-execution waiver remains binding. No live AWS execution, remote CI result, release publication or merge is claimed.
+
+
+## D114 observed-behavior follow-up
+
+The user explicitly selects compatibility with the saved AWS observations over the earlier local restrictions. Original `test_generic.snapshot.json` records context maps as `{Id=..., Name=...}` and `test_format_2` records `{Arg1=1, Arg2=[]}`; the latter remains outside the frozen inventory but is corroborating evidence, not a newly claimed suite pass. LocalStack's `vendors/localstack/localstack-core/localstack/services/stepfunctions/asl/component/intrinsic/function/statesfunction/generic/string_format.py:81–106` recursively uses unquoted map/list values and comma-space delimiters. Java's [AbstractMap representation](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/AbstractMap.html) corroborates the delimiter style but does not establish all AWS key ordering. Explicit lexicographic ordering is the bounded deterministic local choice for unobserved maps.
+
+The [current AWS intrinsic guide](https://docs.aws.amazon.com/step-functions/latest/dg/intrinsic-functions.html), consulted2026-11-01, still documents reserved-brace escaping. D114 intentionally chooses the original successful AWS execution for ordinary string arguments while preserving Format-template placeholder validation. Empty/ASCII-whitespace JSON and missing Lambda Cause details come from the original selected snapshots. Design61 §7 defines the implementation and unchanged exact123-node acceptance; no new live AWS observation or baseline rewrite is implied.
+
+
+## D114 qualified source cohort
+
+The user explicitly authorized matching the five saved AWS behaviors. The same123 original nodes now pass:91/91 pure and32/32 actual Docker, without updating expectations, adding masks, skipping/xfailing nodes or deleting failed cases. Ordinary literal-brace acceptance, recursive collection Format, empty/ASCII-whitespace StringToJson and scoped missing-target Cause are production behavior. Format key order is explicitly deterministic; no unobserved JVM-map-ordering parity is claimed.
+
+Frozen source: `3207a320a329820fa1d0890145c9518b3be6488a3ef402c684667d700e34b226`,1232 files. Actual tested server SHA256: `739d037a172787b8fc3ab37dc7e17bd3e5fc990287780deeafa58df01577dccb`. Original vendor commit and42 pinned upstream files remain unchanged. Manifest SHA256 `539de57601b5c52e3beeff8e0f9c030825f097b9e58287622af65a85344c7b3f` differs only in clarifying that Format2's earlier exclusion was historical selection, not a currently unsupported feature; original group node values are unchanged.
+
+| Lane | Actual final result | Evidence below `/Users/tchen/.target/` | Report SHA256 |
+|---|---|---|---|
+| Rust |15/15 gates pass; all groups joined | `workflows-d114-rust-second` | `5cfecabc520e8c5c196b14db590fcc55d566cded7028349d04af4ffdf83e181b` |
+| Native / Action |3231 Rust passes across42 summaries,19 gated resources;26 actual Action controls pass; both commands joined | `workflows-d114-native-second` | `4cba17cba8b9d60907128370378da144713812d794b5a592f792569acb0fb78c` |
+| Original pure |91/91, pytest0, successful=true | `workflows-d114-pure-second` | `a0eea02455043919aff3a150be9692d2455e3d8540c3cf49ecfc20b1024aada4` |
+| Original Docker |32/32, pytest0, successful=true | `workflows-d114-docker-second` | `3374d81ca7e452351700bd3eb342ade77e2fb76984ce8f0ebb97e4d7f0cf36fc` |
+
+All four reports share the source seal. Both external cleanup receipts confirm server/capture joins, successful exit, unchanged binary and absent owned resources; Docker's actual namespace audit is performed. Every setup/call/teardown and original snapshot session passes. Each original expected key is compared, and baseline copies/vendored bytes remain unchanged. The previously failing Cause appears consistently in failed-task and Catch history, with a fresh local RFC/version4 service request identity; successful invocation IDs still come from the real provider.
+
+The same task-owned engine575aa85f-ebb2-4150-a089-201e40f4d035 and explicit socket are used. Six original Python3.12 handlers are genuinely rebuilt from cached immutable inputs under the new manifest into `workflows-d114-images-first`; its image receipt SHA256 is `e25fd654b112bd3ff9f8697cec503772a1297d3a9c7c708715409ced0de70e33`. Source/recipe/metadata/stdout/result/live-image affiliations and joined owners are retained. No old receipt is relabeled; images and evidence remain available, while task containers/volumes/private aliases retire through their original owners. Foreign resources, other VMs and the default context are preserved.
+
+Focused verification passes944 core,30 bridge and96 preserve-order intrinsic tests plus strict production core/library boundaries. `make check-workflows-localstack` passes13 integrity controls and strict owner Clippy; its final raw output is `/tmp/rustack-d114-adapter-controls-final.log`. The first original D114 pure/Docker runs also pass123/123 under their own source. Their paired full gates fail only on an unreadable hexadecimal test literal, subsequently corrected with separators before the final frozen rerun. The earlier targeted sort-style rejection and code-first ownership/dependency findings are fixed without suppressions; no compatibility error is hidden.
+
+The pre-D114118/123 and all earlier failed attempts remain unchanged above. This meets the selected strict design61 acceptance, while preserving the original scope limits: no fresh live AWS execution, whole-upstream-suite claim, managed ZIP/ECR API equivalence, current full83-case rerun, Docker Desktop/dedicated ARM qualification or final M4/release-promotion claim. D100's further-x86-execution waiver remains binding.

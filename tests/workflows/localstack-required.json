@@ -197,7 +197,7 @@
     },
     {
       "scope": "Format2 object substitutions, IsTimestamp upstream skip, EventBridge/logging",
-      "reason": "profile restriction or upstream skipped scenario"
+      "reason": "Initial selection excluded Format2 under the scalar-only profile, superseded by D114; it remains unexecuted in this unchanged inventory. IsTimestamp has an upstream skip; EventBridge/logging remain unsupported."
     },
     {
       "scope": "tests/aws/services/stepfunctions/v2/base/test_base.py::TestSnfBase::test_state_pass_regex_json_path_base",
