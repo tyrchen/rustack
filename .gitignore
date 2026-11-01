@@ -3,3 +3,4 @@
 node_modules/
 .pulumi/
 .pulumi-home/
+.DS_Store
