@@ -5,7 +5,7 @@ on:
     branches:
       - master
     tags:
-      - v*
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   pull_request:
     branches:
       - master
@@ -33,6 +33,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check code format
         run: cargo fmt --all -- --check
+      - name: Check release dependency closure and publication controls
+        run: make release-check test-release
       - name: Check the package for errors
         run: cargo check --all
       - name: Lint rust sources

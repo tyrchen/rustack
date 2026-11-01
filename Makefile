@@ -85,24 +85,59 @@ deny:
 run:
 	@cargo run -p rustack-cli --bin rustack
 
-# Set PUBLISH_PACKAGES to a space-separated release set; defaults to the workspace.
-# Package the set together so unpublished internal dependencies are verified locally.
-PUBLISH_PACKAGES ?=
+# Publish the reviewed dependency closure, including the registry-safe Squib loader.
+PUBLISH_PACKAGES ?= $(shell cat release-packages.txt)
 
-publish-dry-run:
+release-check:
+	@python3 -B tools/release.py check
+
+publish-dry-run: release-check
 	@cargo publish --dry-run --allow-dirty --locked --all-features \
-		$(if $(strip $(PUBLISH_PACKAGES)),$(foreach package,$(PUBLISH_PACKAGES),-p $(package)),--workspace)
+		$(if $(strip $(PUBLISH_PACKAGES)),$(foreach package,$(PUBLISH_PACKAGES),-p '$(package)'),$(error PUBLISH_PACKAGES cannot be empty))
+	@$(if $(filter rustack-cli,$(PUBLISH_PACKAGES)),$(MAKE) --no-print-directory verify-release-package)
 
-publish:
+verify-release-package:
+	@python3 -B tools/release.py package-audit
+
+publish: publish-dry-run
 	@cargo publish --locked --all-features \
-		$(if $(strip $(PUBLISH_PACKAGES)),$(foreach package,$(PUBLISH_PACKAGES),-p $(package)),$(error Set PUBLISH_PACKAGES to the crates to publish))
+		$(if $(strip $(PUBLISH_PACKAGES)),$(foreach package,$(PUBLISH_PACKAGES),-p '$(package)'),$(error PUBLISH_PACKAGES cannot be empty))
 
-release:
-	@cargo release tag --execute
-	@git cliff -o CHANGELOG.md
-	@git commit -a -n -m "Update CHANGELOG.md" || true
-	@git push origin master
-	@cargo release push --execute
+# Commit the version, lockfile and changelog first. Tag that exact source commit.
+release: release-check
+	@python3 -B tools/release.py tag
+	@git push --atomic origin HEAD:refs/heads/master "refs/tags/v$$(python3 -B tools/release.py version)"
+
+release-action-aliases: release-check
+	@python3 -B tools/release.py action-aliases
+
+release-promotion-check: release-check
+	@python3 -B tools/release.py promotion-check
+
+release-promoted-image: release-check
+	@python3 -B tools/release.py promoted-image
+
+test-release:
+	@python3 -B -m unittest discover -s tests -p test_release.py -v
+
+verify-release: release-check test-release
+	@cargo build --locked
+	@cargo test --locked
+	@cargo +nightly fmt
+	@$(MAKE) --no-print-directory release-clippy
+	@$(MAKE) --no-print-directory verify-workflows-compression audit deny fmt-check
+	@python3 -B -m unittest discover -s tests/workflows -p test_release_qualification.py -v
+	@$(MAKE) --no-print-directory publish-dry-run
+
+# Command-line lint groups override Cargo.toml's four existing workspace exemptions.
+# Reapply that same policy explicitly; generated model prose is intentionally exempt.
+release-clippy:
+	@cargo clippy --locked -- -D warnings
+	@cargo clippy --locked -- -D warnings -W clippy::pedantic \
+		-A clippy::doc_markdown -A clippy::module_name_repetitions \
+		-A clippy::missing_errors_doc -A clippy::missing_panics_doc
+
+.PHONY: release-check publish-dry-run publish verify-release-package release release-action-aliases release-promotion-check release-promoted-image test-release verify-release release-clippy
 
 codegen-s3:
 	@cd codegen && cargo run -- --config services/s3.toml --model smithy-model/s3.json --output ../crates/rustack-s3-model/src
@@ -230,7 +265,7 @@ audit-codegen:
 
 # D69: source-preserving loader overlay and the complete patched codec graph.
 verify-workflows-compression:
-	@python3 -I -c 'import hashlib,json,pathlib; p=pathlib.Path("patches/squib-loader"); v=json.loads((p/"provenance.json").read_text()); names={"src/lib.rs","Cargo.toml.registry","Cargo.toml.orig",".cargo_vcs_info.json","LICENSE.md"}; assert v["schemaVersion"]==1 and v["package"]=="squib-loader" and v["version"]=="0.2.0"; assert set(v["sha256"])==names; assert all(hashlib.sha256((p/n).read_bytes()).hexdigest()==h for n,h in v["sha256"].items()); original=(p/"Cargo.toml.registry").read_text(); before="[dependencies.zstd]\nversion = \"0.13\""; after="[dependencies.zstd]\nversion = \"0.14.3\""; assert original.count(before)==1 and (p/"Cargo.toml").read_text()==original.replace(before,after); f=pathlib.Path("apps/rustack/src/snapshot/fixtures"); a=json.loads((f/"legacy-v2-meta-provenance.json").read_text()); assert hashlib.sha256((f/a["fixture"]).read_bytes()).hexdigest()==a["sha256"]'
+	@python3 -I -c 'import hashlib,json,pathlib; p=pathlib.Path("patches/squib-loader"); v=json.loads((p/"provenance.json").read_text()); names={"src/lib.rs","Cargo.toml.registry","Cargo.toml.orig",".cargo_vcs_info.json","LICENSE.md"}; assert v["schemaVersion"]==1 and v["package"]=="squib-loader" and v["version"]=="0.2.0"; assert set(v["sha256"])==names; assert all(hashlib.sha256((p/n).read_bytes()).hexdigest()==h for n,h in v["sha256"].items()); original=(p/"Cargo.toml.registry").read_text(); before="[dependencies.zstd]\nversion = \"0.13\""; after="[dependencies.zstd]\nversion = \"0.14.3\""; assert original.count(before)==1 and (p/"Cargo.toml").read_text()==original.replace(before,after).replace("version = \"0.2.0\"", "version = \"0.2.1\"", 1).replace("build = false\n", "build = false\nexclude = [\".cargo_vcs_info.json\", \"Cargo.toml.orig\"]\n"); f=pathlib.Path("apps/rustack/src/snapshot/fixtures"); a=json.loads((f/"legacy-v2-meta-provenance.json").read_text()); assert hashlib.sha256((f/a["fixture"]).read_bytes()).hexdigest()==a["sha256"]'
 	@cargo metadata --locked --format-version 1 | python3 -I -c 'import json,pathlib,sys; data=json.load(sys.stdin); minimum={"zstd":(0,14,3),"zstd-safe":(8,2,0),"zstd-sys":(2,1,2)}; codecs=[p for p in data["packages"] if p["name"] in minimum]; assert len(codecs)==3 and {p["name"] for p in codecs}==set(minimum); assert all(tuple(map(int,p["version"].split("+")[0].split(".")))>=minimum[p["name"]] for p in codecs); loader=[p for p in data["packages"] if p["name"]=="squib-loader"]; assert len(loader)==1 and loader[0]["source"] is None and pathlib.Path(loader[0]["manifest_path"]).resolve()==pathlib.Path("patches/squib-loader/Cargo.toml").resolve()'
 
 test-workflows-compression: verify-workflows-compression

@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## [0.12.0](https://github.com/tyrchen/rustack/compare/v0.10.0...v0.12.0) - 2026-11-01
+
+### Features
+
+- Add opt-in Step Functions STANDARD workflows, bounded JSONPath ASL execution,
+  nested workflows, Lambda integration and task-token callbacks (#76).
+- Execute real Docker image and provided-runtime ZIP Lambda handlers with bounded
+  runtime resources, cancellation, recovery and validated snapshots (#76).
+- Add KMS ECC_SECG_P256K1 keys (#55).
+
+### Fixes
+
+- Accept SigV4-normalized canonical query strings (#54).
+- Decode CloudFront query names strictly, preserve XML entities and fix smoke
+  cleanup (#56, #65).
+- Return KMS ValidationException for wrong-length DIGEST input to Sign (#58).
+
+### Breaking changes
+
+- Auth signing-key derivation and signature computation now return `Result`.
+- Lambda request models reject unknown fields. Shared runtime budgets gain
+  workflow and Docker execution controls.
+
+### Release delivery
+
+- Republish the CloudFront model with patched quick-xml constraints so registry
+  consumers retain the XML security fixes.
+
+- Publish the 47-package dependency closure in `release-packages.txt`, including
+  the source-preserving `squib-loader 0.2.1` compression security update.
+- Build immutable Docker candidates, require complete same-source qualification,
+  then explicitly promote exact archives to GHCR.
+- Update Action aliases only after promotion and actual Action verification;
+  full-version tags identify the committed version, lockfile and changelog.
+
 ---
 ## [rustack-sts-model-v0.9.0](https://github.com/compare/v0.9.1..rustack-sts-model-v0.9.0) - 2026-09-07
 

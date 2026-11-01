@@ -13,9 +13,10 @@
 edition = "2024"
 rust-version = "1.95"
 name = "squib-loader"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 build = false
+exclude = [".cargo_vcs_info.json", "Cargo.toml.orig"]
 autolib = false
 autobins = false
 autoexamples = false

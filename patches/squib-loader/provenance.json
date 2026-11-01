@@ -20,5 +20,10 @@
     "Cargo.toml.orig": "5d8ae47853e907f9551d8e3ac66fc20243d6ec9f44b532a45631e590935ac7df",
     ".cargo_vcs_info.json": "791431ffe0e76481f4934c01035a9680193b624ac00e954f7e233321112af889",
     "LICENSE.md": "9276b15bf68cefab4696c3c286883f44ec327ac50b4a2690f80d0c09b5108450"
-  }
+  },
+  "releaseVersion": "0.2.1",
+  "packagingExclusions": [
+    ".cargo_vcs_info.json",
+    "Cargo.toml.orig"
+  ]
 }

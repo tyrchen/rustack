@@ -2,7 +2,7 @@ name: release-docker
 
 on:
   push:
-    tags: [v*]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 # Candidates are local Docker archives. Publication belongs to promote-docker.

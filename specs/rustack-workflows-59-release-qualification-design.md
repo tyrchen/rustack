@@ -47,6 +47,26 @@ Each lane envelope carries schemaVersion=1, lane, commit, sourceSealSha256, stat
 
 Candidate creation never logs in or pushes. Promotion accepts candidate and qualification run IDs, verifies both successful same-repository workflow runs and same head commit, downloads immutable artifacts, and executes the assembler again. No source rebuild occurs after qualification. Only after all checks succeed may registry credentials enter the distinct promotion job. Publication is not run locally. Invalid/missing evidence must prevent login and push, including manual dispatch. Actions are pinned by full commit SHA to current official releases.
 
+The release version must match the CLI manifest, checkout SHA and immutable
+full-version tag before registry login. Workflow tag filters and changelog
+discovery accept only numeric full-version tags. After exact-image promotion, a
+separate contents-write job runs the actual composite Action against that
+versioned image and binds the actual running image ID to the same run's promotion
+receipt; only a successful bound smoke may update the major/minor Action
+aliases on the same source commit. One workflow concurrency group serializes the
+whole promotion/alias sequence. Complete release tags are never retargeted.
+
+Crate publication uses the explicit dependency set in `release-packages.txt`.
+The preserved Squib loader overlay is also a publishable workspace package at
+0.2.1, and Lambda core constrains `squib-loader ~0.2.1` directly so registry
+consumers retain the security fix after root patches are removed by packaging.
+The upstream source/provenance remains unchanged; package-version and reserved
+VCS-file exclusion changes accompany the reviewed zstd dependency update. The
+full set must pass Cargo's registry-normalized multi-package dry run and the
+packaged CLI lockfile audit before upload. The CloudFront model is republished
+at 0.10.0 to retain the patched XML dependency in registry consumers. See the
+[operator release guide](../docs/releasing.md).
+
 ## 5. Code-first / verification boundary
 
 Finish consumers, manifests, receipt validation, controlled import, Make targets, CI and their normal negative controls first. Obtain an independent read-only code review and fix valid findings. Then freeze source and run normal controls, full Rust gates, Native, focused rootless/server consumers and complete required resource matrices. Every code correction invalidates the affected source cohort and requires appropriate reruns. Historical D102/D103 passes remain historical; none qualify modified code automatically. Required unavailable platform/reference evidence keeps final qualification incomplete with a concrete missing-lane error.

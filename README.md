@@ -315,19 +315,31 @@ SERVICES=s3,dynamodb,sqs rustack
 cargo build -p rustack-cli --bin rustack --no-default-features --features s3,dynamodb
 ```
 
-Available features: `s3`, `dynamodb`, `dynamodbstreams`, `sqs`, `ssm`, `sns`, `lambda`, `events`, `logs`, `kms`, `kinesis`, `secretsmanager`, `ses`, `apigatewayv2`, `cloudfront`, `cloudfront-dataplane`, `cloudwatch`, `iam`, `sts`
+Available features: `s3`, `dynamodb`, `dynamodbstreams`, `sqs`, `ssm`, `sns`, `lambda`, `stepfunctions`, `events`, `logs`, `kms`, `kinesis`, `secretsmanager`, `ses`, `apigatewayv2`, `cloudfront`, `cloudfront-dataplane`, `cloudwatch`, `iam`, `sts`. Step Functions requires the explicit `stepfunctions` feature in source builds; the release Docker image includes it.
 
 ## GitHub Action
 
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  - uses: tyrchen/rustack@v0
+  - uses: tyrchen/rustack@v0.12.0
+    with:
+      image-tag: "0.12.0"
 ```
 
 The action starts the server, waits for healthy, and exports `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`. All subsequent AWS CLI/SDK calls use Rustack automatically.
 
 See [action.yml](action.yml) for all inputs and outputs.
+
+Use this version after the corresponding image has been promoted. Action code and
+Docker image versions are independent: pin both for repeatable CI. The `v0` and
+`v0.12` aliases are updated only after image promotion and a successful run of the
+actual Action against that image. Docker Lambda execution additionally requires
+the explicit operator configuration in the [workflow guide](docs/workflows-guide.md);
+the Action does not mount a host Docker socket or enable that executor.
+
+See the [release guide](docs/releasing.md) for crate publication, image
+qualification/promotion and Action updates.
 
 ## Pulumi
 
