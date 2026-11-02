@@ -28,7 +28,7 @@ pub struct QueueMessage {
     pub approximate_first_receive_timestamp: Option<u64>,
     /// FIFO-only: sequence number.
     pub sequence_number: Option<String>,
-    /// FIFO-only: message group ID.
+    /// Message group ID: required on FIFO queues, optional on standard (fair) queues.
     pub message_group_id: Option<String>,
     /// FIFO-only: message deduplication ID.
     pub message_deduplication_id: Option<String>,
