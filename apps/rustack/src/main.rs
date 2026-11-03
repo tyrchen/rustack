@@ -33,6 +33,7 @@
 
 #[cfg(feature = "events")]
 mod events_bridge;
+mod expect_continue;
 mod gateway;
 #[cfg(feature = "s3")]
 mod handler;
@@ -51,6 +52,7 @@ mod workflows;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use expect_continue::ExpectContinueIo;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto::Builder as HttpConnBuilder,
@@ -711,7 +713,7 @@ async fn serve(
                     drop(stream);
                     continue;
                 };
-                let conn = graceful.watch(http.serve_connection(TokioIo::new(stream), svc).into_owned());
+                let conn = graceful.watch(http.serve_connection(TokioIo::new(ExpectContinueIo::new(stream)), svc).into_owned());
                 tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = conn.await { warn!(%peer_addr, error = %error, "connection error"); }
