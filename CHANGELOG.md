@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## [0.12.1](https://github.com/tyrchen/rustack/compare/v0.12.0...v0.12.1) - 2026-11-13
+
+### Fixes
+
+- DynamoDB remembers up to 65,536 `TransactWriteItems` client request tokens
+  within the 10-minute idempotency window instead of 1,024, and
+  `DYNAMODB_MAX_TRANSACTION_TOKENS` sets the limit. AWS SDKs send a fresh token
+  with every transaction, so a long-lived emulator rejected every transaction
+  with `RequestLimitExceededException` after 1,024 of them in ten minutes.
+
 ## [0.12.0](https://github.com/tyrchen/rustack/compare/v0.10.0...v0.12.0) - 2026-11-01
 
 ### Features
