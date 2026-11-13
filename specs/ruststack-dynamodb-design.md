@@ -1593,6 +1593,7 @@ impl DynamoDBConfig {
 | `GATEWAY_LISTEN` | `0.0.0.0:4566` | Bind address (shared with S3) |
 | `DYNAMODB_SKIP_SIGNATURE_VALIDATION` | `true` | Skip SigV4 verification |
 | `DEFAULT_REGION` | `us-east-1` | Default AWS region |
+| `DYNAMODB_MAX_TRANSACTION_TOKENS` | `65536` | `TransactWriteItems` client request tokens remembered within the 10-minute idempotency window; a new token beyond it gets `RequestLimitExceededException` |
 | `S3_SKIP_SIGNATURE_VALIDATION` | `true` | Existing S3 config |
 | `ACCESS_KEY` / `SECRET_KEY` | *(unset)* | Existing auth config |
 

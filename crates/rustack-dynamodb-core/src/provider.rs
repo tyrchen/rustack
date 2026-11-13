@@ -501,7 +501,6 @@ pub struct RustackDynamoDB {
     pub(crate) requests: RequestTracker,
     /// Completed tokens; admission and mutation are protected by operation_gate.
     pub(crate) tokens: DashMap<String, CompletedTransaction>,
-    token_capacity: usize,
     /// Configuration.
     pub config: Arc<DynamoDBConfig>,
     /// Stream emitter for change data capture.
@@ -528,7 +527,6 @@ impl RustackDynamoDB {
             operation_gate: Arc::new(Mutex::new(())),
             requests: RequestTracker::default(),
             tokens: DashMap::new(),
-            token_capacity: 1024,
             config: Arc::new(config),
             emitter: Arc::new(NoopStreamEmitter),
             lifecycle: Arc::new(NoopStreamLifecycle),
@@ -2756,10 +2754,11 @@ impl RustackDynamoDB {
                     "ClientRequestToken was already used with different parameters",
                 ));
             }
-        } else if self.tokens.len() >= self.token_capacity {
+        } else if self.tokens.len() >= self.config.max_transaction_tokens {
             return Err(DynamoDBError::with_message(
                 DynamoDBErrorCode::RequestLimitExceeded,
-                "Transaction token capacity is full; retry after the idempotency window expires",
+                "Transaction token capacity is full; retry after the idempotency window expires \
+                 or raise DYNAMODB_MAX_TRANSACTION_TOKENS",
             ));
         }
         Ok(Some(fingerprint))

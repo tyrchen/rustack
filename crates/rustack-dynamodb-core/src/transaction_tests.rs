@@ -15,7 +15,19 @@ impl crate::stream::StreamEmitter for CountingEmitter {
 }
 
 fn provider() -> (RustackDynamoDB, Arc<CountingEmitter>) {
-    let mut provider = RustackDynamoDB::new(DynamoDBConfig::default());
+    provider_with(DynamoDBConfig::default())
+}
+
+/// A provider that remembers at most one transaction token.
+fn single_token_provider() -> (RustackDynamoDB, Arc<CountingEmitter>) {
+    provider_with(DynamoDBConfig {
+        max_transaction_tokens: 1,
+        ..DynamoDBConfig::default()
+    })
+}
+
+fn provider_with(config: DynamoDBConfig) -> (RustackDynamoDB, Arc<CountingEmitter>) {
+    let mut provider = RustackDynamoDB::new(config);
     let emitter = Arc::new(CountingEmitter::default());
     provider.set_emitter(emitter.clone());
     provider
@@ -47,8 +59,7 @@ fn test_should_reserve_token_capacity_through_inflight_commit_and_replay() {
             }
         }
     }
-    let (mut provider, _) = provider();
-    provider.token_capacity = 1;
+    let (mut provider, _) = single_token_provider();
     let emitter = Arc::new(PausedEmitter {
         entered: Barrier::new(2),
         release: Barrier::new(2),
@@ -239,8 +250,7 @@ fn test_should_discard_all_prepared_writes_and_streams_on_late_errors() {
 
 #[test]
 fn test_should_preserve_successful_tokens_at_capacity_until_full_window_expires() {
-    let (mut provider, emitter) = provider();
-    provider.token_capacity = 1;
+    let (provider, emitter) = single_token_provider();
     provider
         .handle_transact_write_items(increment("first"))
         .unwrap();
@@ -379,4 +389,19 @@ fn test_should_never_observe_torn_transaction_reads() {
             }
         });
     });
+}
+
+#[test]
+fn test_should_accept_more_than_a_thousand_tokens_within_the_window_by_default() {
+    let (provider, emitter) = provider();
+    for token in 0..=1024 {
+        provider
+            .handle_transact_write_items(increment(&token.to_string()))
+            .unwrap();
+    }
+    assert_eq!(emitter.0.load(Ordering::Relaxed), 1025);
+    assert_eq!(
+        get(&provider, "counter").get("n"),
+        Some(&AttributeValue::N("1025".into()))
+    );
 }
