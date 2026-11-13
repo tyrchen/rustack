@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file. See [conven
   `DYNAMODB_MAX_TRANSACTION_TOKENS` sets the limit. AWS SDKs send a fresh token
   with every transaction, so a long-lived emulator rejected every transaction
   with `RequestLimitExceededException` after 1,024 of them in ten minutes.
+- Update quinn-udp to 0.5.16 for RUSTSEC-2026-0538.
 
 ## [0.12.0](https://github.com/tyrchen/rustack/compare/v0.10.0...v0.12.0) - 2026-11-01
 
