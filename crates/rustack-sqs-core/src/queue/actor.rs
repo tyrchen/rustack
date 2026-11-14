@@ -55,7 +55,13 @@ struct PendingTransfer {
 }
 
 impl RedriveManager {
-    fn handoff(&mut self, message: &QueueMessage, target_arn: &str, source_arn: &str) -> bool {
+    fn handoff(
+        &mut self,
+        message: &QueueMessage,
+        target_arn: &str,
+        source_arn: &str,
+        source_is_fifo: bool,
+    ) -> bool {
         if self.quiescing || self.pending.len() >= 128 || source_arn == target_arn {
             return false;
         }
@@ -78,6 +84,7 @@ impl RedriveManager {
             .try_send(QueueCommand::Transfer {
                 message: message.clone(),
                 source_arn: source_arn.to_owned(),
+                source_is_fifo,
                 reply,
             })
             .is_err()
@@ -127,6 +134,8 @@ pub enum QueueCommand {
         message: QueueMessage,
         /// Exact source queue ARN.
         source_arn: String,
+        /// Whether the source is a FIFO queue; a dead-letter queue must be the same type.
+        source_is_fifo: bool,
         /// Confirms successful enqueue or rejection before mutation.
         reply: oneshot::Sender<Result<(), SqsError>>,
     },
@@ -411,12 +420,13 @@ impl QueueActor {
             QueueCommand::Transfer {
                 message,
                 source_arn,
+                source_is_fifo,
                 reply,
             } => {
                 if reply.is_closed() {
                     return false;
                 }
-                let result = self.accept_transfer(message, &source_arn);
+                let result = self.accept_transfer(message, &source_arn, source_is_fifo);
                 let accepted = result.is_ok();
                 let _ = reply.send(result);
                 accepted
@@ -525,8 +535,9 @@ impl QueueActor {
         &mut self,
         mut message: QueueMessage,
         source_arn: &str,
+        source_is_fifo: bool,
     ) -> Result<(), SqsError> {
-        if self.stopping || self.is_fifo != message.message_group_id.is_some() {
+        if self.stopping || self.is_fifo != source_is_fifo {
             return Err(SqsError::invalid_parameter_value(
                 "DLQ unavailable or queue type mismatch",
             ));
@@ -650,6 +661,10 @@ impl QueueActor {
             ));
         }
 
+        if let Some(group_id) = &input.message_group_id {
+            validate_message_group_id(group_id)?;
+        }
+
         if self.is_fifo {
             self.handle_send_message_fifo(input)
         } else {
@@ -663,13 +678,8 @@ impl QueueActor {
         &mut self,
         input: SendMessageInput,
     ) -> Result<(SendMessageOutput, bool), SqsError> {
-        // Reject FIFO-only fields on standard queues.
-        if input.message_group_id.is_some() {
-            return Err(SqsError::invalid_parameter_value(
-                "Value for parameter MessageGroupId is invalid. Reason: The request includes a \
-                 parameter that is not valid for this queue type.",
-            ));
-        }
+        // Standard queues take a MessageGroupId since SQS fair queues. It steers delivery
+        // fairness, which this emulator does not model, but is still returned on receive.
         if input.message_deduplication_id.is_some() {
             return Err(SqsError::invalid_parameter_value(
                 "Value for parameter MessageDeduplicationId is invalid. Reason: The request \
@@ -704,7 +714,7 @@ impl QueueActor {
             approximate_receive_count: 0,
             approximate_first_receive_timestamp: None,
             sequence_number: None,
-            message_group_id: None,
+            message_group_id: input.message_group_id,
             message_deduplication_id: None,
             available_at,
             delay_seconds,
@@ -903,6 +913,7 @@ impl QueueActor {
             manager: &mut self.redrive,
             attributes: &self.attributes,
             source_arn: &self.arn,
+            source_is_fifo: self.is_fifo,
         };
         match &mut self.storage {
             QueueStorage::Standard(storage) => try_receive_standard(
@@ -1081,6 +1092,19 @@ struct RedriveRequest<'a> {
     manager: &'a mut RedriveManager,
     attributes: &'a QueueAttributes,
     source_arn: &'a str,
+    source_is_fifo: bool,
+}
+
+/// SQS accepts 1 to 128 letters, digits and punctuation, that is printable ASCII without space,
+/// as a MessageGroupId on either queue type.
+fn validate_message_group_id(group_id: &str) -> Result<(), SqsError> {
+    if (1..=128).contains(&group_id.len()) && group_id.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Ok(());
+    }
+    Err(SqsError::invalid_parameter_value(format!(
+        "Value {group_id} for parameter MessageGroupId is invalid. Reason: MessageGroupId can \
+         only include alphanumeric and punctuation characters. 1 to 128 in length."
+    )))
 }
 
 impl RedriveRequest<'_> {
@@ -1116,7 +1140,12 @@ fn try_receive_standard(
         match storage.available.pop_front() {
             Some(mut msg) => {
                 if let Some(target) = redrive.target(&msg) {
-                    if !redrive.manager.handoff(&msg, &target, redrive.source_arn) {
+                    if !redrive.manager.handoff(
+                        &msg,
+                        &target,
+                        redrive.source_arn,
+                        redrive.source_is_fifo,
+                    ) {
                         // Standard queues have no group ordering constraint: retain
                         // the poison message without starving healthy messages.
                         storage.available.push_back(msg);
@@ -1166,7 +1195,10 @@ fn try_receive_fifo(
 
     for (mut msg, group_id) in received {
         if let Some(target) = redrive.target(&msg) {
-            if !redrive.manager.handoff(&msg, &target, redrive.source_arn) {
+            if !redrive
+                .manager
+                .handoff(&msg, &target, redrive.source_arn, redrive.source_is_fifo)
+            {
                 storage.finish_redrive(&group_id, Some(msg));
             }
             continue;
@@ -1498,7 +1530,10 @@ fn merge_attribute_names(old: &[String], new: &[String]) -> Vec<String> {
 mod tests {
     use std::collections::HashMap;
 
-    use rustack_sqs_model::input::{ReceiveMessageInput, SendMessageInput};
+    use rustack_sqs_model::{
+        error::SqsErrorCode,
+        input::{ReceiveMessageInput, SendMessageInput},
+    };
     use tokio::sync::{mpsc, oneshot};
 
     use super::{QueueActor, QueueCommand};
@@ -1581,6 +1616,100 @@ mod tests {
                 .expect("delayed send command should reply")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_should_keep_message_group_id_on_standard_queue_for_receive() {
+        let mut actor = test_actor();
+        let (reply, mut response) = oneshot::channel();
+
+        actor.handle_command(QueueCommand::SendMessage {
+            input: SendMessageInput {
+                message_group_id: Some("tenant-a".to_owned()),
+                ..send_input(None)
+            },
+            reply,
+        });
+        assert!(
+            response
+                .try_recv()
+                .expect("send command should reply")
+                .is_ok()
+        );
+
+        let (reply, mut response) = oneshot::channel();
+        actor.handle_command(QueueCommand::ReceiveMessage {
+            input: ReceiveMessageInput {
+                message_system_attribute_names: vec!["MessageGroupId".to_owned()],
+                ..receive_input(0)
+            },
+            reply,
+        });
+
+        let output = response
+            .try_recv()
+            .expect("receive command should reply")
+            .expect("receive should succeed");
+        assert_eq!(output.messages.len(), 1);
+        assert_eq!(
+            output.messages[0]
+                .attributes
+                .get("MessageGroupId")
+                .map(String::as_str),
+            Some("tenant-a")
+        );
+    }
+
+    #[test]
+    fn test_should_check_message_group_id_format_on_standard_and_fifo_queues() {
+        let (_sender, receiver) = mpsc::channel(8);
+        let fifo = QueueActor::new(
+            "test-queue.fifo".to_owned(),
+            "arn:aws:sqs:us-east-1:000000000000:test-queue.fifo".to_owned(),
+            true,
+            QueueAttributes {
+                content_based_deduplication: true,
+                ..QueueAttributes::default()
+            },
+            receiver,
+            HashMap::new(),
+            "000000000000".to_owned(),
+            0,
+        );
+        let longest = "a".repeat(128);
+        let too_long = "a".repeat(129);
+        let cases = [
+            ("tenant-a", true),
+            ("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", true),
+            (longest.as_str(), true),
+            ("", false),
+            (too_long.as_str(), false),
+            ("has space", false),
+            ("caf\u{e9}", false),
+            ("tab\t", false),
+        ];
+
+        for mut actor in [test_actor(), fifo] {
+            for (group_id, valid) in cases {
+                let (reply, mut response) = oneshot::channel();
+                actor.handle_command(QueueCommand::SendMessage {
+                    input: SendMessageInput {
+                        message_group_id: Some(group_id.to_owned()),
+                        message_body: format!("{group_id} body"),
+                        ..send_input(None)
+                    },
+                    reply,
+                });
+                let result = response.try_recv().expect("send command should reply");
+                match result {
+                    Ok(_) => assert!(valid, "accepted {group_id:?} on fifo={}", actor.is_fifo),
+                    Err(error) => {
+                        assert!(!valid, "rejected {group_id:?}: {error:?}");
+                        assert_eq!(error.code, SqsErrorCode::InvalidParameterValue);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -834,20 +834,57 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires running server"]
-    async fn test_should_reject_fifo_fields_on_standard_queue() {
+    async fn test_should_reject_deduplication_id_on_standard_queue() {
         let client = sqs_client();
         let (_, url) = create_test_queue(&client, "no-fifo").await;
 
-        // Sending with MessageGroupId on a standard queue should fail.
         let err = client
             .send_message()
             .queue_url(&url)
             .message_body("test")
-            .message_group_id("group-a")
+            .message_deduplication_id("dedup-a")
             .send()
             .await;
 
         assert!(err.is_err());
+
+        delete_test_queue(&client, &url).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running server"]
+    async fn test_should_accept_message_group_id_on_standard_queue() {
+        let client = sqs_client();
+        let (_, url) = create_test_queue(&client, "fair-queue").await;
+
+        // Fair queues: a standard queue takes a MessageGroupId and returns it on receive.
+        client
+            .send_message()
+            .queue_url(&url)
+            .message_body("test")
+            .message_group_id("tenant-a")
+            .send()
+            .await
+            .expect("send with MessageGroupId to a standard queue");
+
+        let received = client
+            .receive_message()
+            .queue_url(&url)
+            .message_system_attribute_names(
+                aws_sdk_sqs::types::MessageSystemAttributeName::MessageGroupId,
+            )
+            .send()
+            .await
+            .expect("receive");
+        let message = &received.messages()[0];
+        assert_eq!(
+            message
+                .attributes()
+                .and_then(|attributes| attributes
+                    .get(&aws_sdk_sqs::types::MessageSystemAttributeName::MessageGroupId))
+                .map(String::as_str),
+            Some("tenant-a"),
+        );
 
         delete_test_queue(&client, &url).await;
     }
