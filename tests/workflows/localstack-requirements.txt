@@ -16,7 +16,7 @@ decorator==5.3.1
 deepdiff==9.1.0
 dill==0.3.6
 dnslib==0.9.26
-dnspython==2.9.1
+dnspython==2.9.2
 docker==7.2.0
 h11==0.16.0
 idna==3.20
