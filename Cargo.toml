@@ -121,6 +121,7 @@ hyper-util = { version = "0.1", features = [
 http = "1.5"
 http-body = "1.1"
 http-body-util = "0.1"
+httparse = "1.10"
 
 # Validated runtime configuration (YAML only).
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }

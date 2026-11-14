@@ -132,6 +132,7 @@ hyper = { workspace = true, features = ["client"] }
 hyper-util = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
+httparse = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

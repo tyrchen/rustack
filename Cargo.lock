@@ -3242,6 +3242,7 @@ dependencies = [
  "getrandom 0.4.3",
  "http 1.5.0",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "nix",
