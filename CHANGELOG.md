@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## [0.12.2](https://github.com/tyrchen/rustack/compare/v0.12.1...v0.12.2) - 2026-11-20
+
+### Fixes
+
+- Honor S3 `PutObject` preconditions at commit time. A failed conditional
+  write leaves the current object intact, and concurrent conditional writes
+  cannot both commit against the same object version (#87).
+
 ## [0.12.1](https://github.com/tyrchen/rustack/compare/v0.12.0...v0.12.1) - 2026-11-13
 
 ### Fixes
