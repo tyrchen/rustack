@@ -34,8 +34,8 @@ collapsible_if = "allow"
 # Internal crates
 rustack-core = { version = "0.11.1", path = "crates/rustack-core" }
 rustack-auth = { version = "0.12.1", path = "crates/rustack-auth" }
-rustack-s3-core = { version = "0.12.1", path = "crates/rustack-s3-core" }
-rustack-s3-http = { version = "0.12.1", path = "crates/rustack-s3-http" }
+rustack-s3-core = { version = "0.12.2", path = "crates/rustack-s3-core" }
+rustack-s3-http = { version = "0.12.2", path = "crates/rustack-s3-http" }
 rustack-s3-model = { version = "0.10.0", path = "crates/rustack-s3-model" }
 rustack-s3-xml = { version = "0.10.0", path = "crates/rustack-s3-xml" }
 rustack-dynamodb-model = { version = "0.9.0", path = "crates/rustack-dynamodb-model" }
@@ -93,7 +93,7 @@ rustack-sts-core = { version = "0.12.1", path = "crates/rustack-sts-core" }
 rustack-cloudfront-model = { version = "0.10.0", path = "crates/rustack-cloudfront-model" }
 rustack-cloudfront-http = { version = "0.12.1", path = "crates/rustack-cloudfront-http" }
 rustack-cloudfront-core = { version = "0.11.1", path = "crates/rustack-cloudfront-core" }
-rustack-cloudfront-dataplane = { version = "0.12.1", path = "crates/rustack-cloudfront-dataplane" }
+rustack-cloudfront-dataplane = { version = "0.12.2", path = "crates/rustack-cloudfront-dataplane" }
 squib = "0.2.0"
 # Registry consumers must also select the reviewed compression security update.
 squib-loader = { version = "~0.2.1", path = "patches/squib-loader" }

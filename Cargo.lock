@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cli"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3328,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-cloudfront-dataplane"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "bytes",
  "dashmap",
@@ -4048,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-core"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "rustack-s3-http"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "bytes",
  "chrono",
