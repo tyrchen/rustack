@@ -33,6 +33,7 @@ use crate::{
         keystore::ObjectStore,
         object::{CannedAcl, ChecksumData, ObjectMetadata, Owner as InternalOwner, S3Object},
     },
+    storage::{PreparedObject, StagedUpload},
     utils::{is_valid_if_match, is_valid_if_none_match, parse_copy_source, parse_range_header},
     validation::{validate_content_md5, validate_metadata, validate_object_key},
 };
@@ -80,6 +81,33 @@ fn lookup_object<'a>(
             .into_s3_error()
         }
     })
+}
+
+/// Evaluate write preconditions against the current version while holding the object lock.
+fn check_put_preconditions(
+    store: &ObjectStore,
+    key: &str,
+    if_match: Option<&str>,
+    if_none_match: Option<&str>,
+) -> Result<(), S3Error> {
+    let current = store.get(key);
+    if let Some(if_match) = if_match {
+        let object = current.ok_or_else(|| {
+            S3ServiceError::NoSuchKey {
+                key: key.to_owned(),
+            }
+            .into_s3_error()
+        })?;
+        if !is_valid_if_match(&object.etag, if_match) {
+            return Err(S3ServiceError::PreconditionFailed.into_s3_error());
+        }
+    }
+    if let Some(if_none_match) = if_none_match
+        && current.is_some_and(|object| !is_valid_if_none_match(&object.etag, if_none_match))
+    {
+        return Err(S3ServiceError::PreconditionFailed.into_s3_error());
+    }
+    Ok(())
 }
 
 /// Check whether Object Lock (legal hold or retention) prevents deletion of a
@@ -204,40 +232,14 @@ impl RustackS3 {
             "null".to_owned()
         };
 
-        // Extract checksum from the request, or compute CRC32 by default.
-        let client_checksum =
-            extract_checksum_from_put(&input).map_err(S3ServiceError::into_s3_error)?;
-        let is_client_provided = client_checksum.is_some();
+        let checksum = resolve_put_checksum(&input, upload.as_deref(), &body_data)
+            .map_err(S3ServiceError::into_s3_error)?;
 
-        let compute = |algorithm| -> Result<String, S3ServiceError> {
-            match &upload {
-                Some(upload) => upload.checksum(algorithm).map(str::to_owned),
-                None => Ok(compute_checksum(algorithm, &body_data)),
-            }
-        };
-        let checksum = match client_checksum {
-            Some(checksum) => checksum,
-            None => ChecksumData {
-                algorithm: "CRC32".to_owned(),
-                value: compute(ChecksumAlgorithm::Crc32).map_err(S3ServiceError::into_s3_error)?,
-                checksum_type: "FULL_OBJECT".to_owned(),
-            },
-        };
-        if is_client_provided {
-            let algo = ChecksumAlgorithm::from_str(&checksum.algorithm)
-                .map_err(|_| S3ServiceError::BadDigest.into_s3_error())?;
-            if checksum.value != compute(algo).map_err(S3ServiceError::into_s3_error)? {
-                return Err(S3ServiceError::BadDigest.into_s3_error());
-            }
-        }
-
-        // Publish only after every checksum has passed. Failed uploads preserve old data.
-        let write_result = if let Some(upload) = upload {
-            self.storage
-                .write_staged_object(&bucket_name, &key, &version_id, upload)
+        let prepared = if let Some(upload) = upload {
+            PreparedObject::staged(upload)
         } else {
             self.storage
-                .write_object(&bucket_name, &key, &version_id, body_data)
+                .prepare_object(body_data)
                 .await
                 .map_err(S3ServiceError::into_s3_error)?
         };
@@ -247,8 +249,8 @@ impl RustackS3 {
         let obj = S3Object {
             key: key.clone(),
             version_id: version_id.clone(),
-            etag: write_result.etag.clone(),
-            size: write_result.size,
+            etag: prepared.result.etag.clone(),
+            size: prepared.result.size,
             last_modified: Utc::now(),
             storage_class: input
                 .storage_class
@@ -261,11 +263,21 @@ impl RustackS3 {
             part_etags: Vec::new(),
         };
 
-        // Store the object metadata.
-        {
+        // Check preconditions and publish the prepared body and metadata under one lock.
+        let write_result = {
             let mut store = bucket.objects.write();
+            check_put_preconditions(
+                &store,
+                &key,
+                input.if_match.as_deref(),
+                input.if_none_match.as_deref(),
+            )?;
+            let result = self
+                .storage
+                .publish_object(&bucket_name, &key, &version_id, prepared);
             store.put(obj);
-        }
+            result
+        };
 
         debug!(bucket = %bucket_name, key = %key, version_id = %version_id, "put_object completed");
 
@@ -791,17 +803,9 @@ impl RustackS3 {
         // Drop the bucket ref before await to avoid holding it across await points.
         drop(dst_bucket_ref);
 
-        // Copy storage data.
-        let write_result = self
+        let prepared = self
             .storage
-            .copy_object(
-                &src_bucket,
-                &src_key,
-                &src_version_for_storage,
-                &dst_bucket,
-                &dst_key,
-                &dst_version_id,
-            )
+            .prepare_copy(&src_bucket, &src_key, &src_version_for_storage)
             .await
             .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
 
@@ -825,8 +829,8 @@ impl RustackS3 {
         let dst_obj = S3Object {
             key: dst_key.clone(),
             version_id: dst_version_id.clone(),
-            etag: write_result.etag.clone(),
-            size: write_result.size,
+            etag: prepared.result.etag.clone(),
+            size: prepared.result.size,
             last_modified: now,
             storage_class,
             metadata,
@@ -841,10 +845,14 @@ impl RustackS3 {
             .state
             .get_bucket(&dst_bucket)
             .map_err(S3ServiceError::into_s3_error)?;
-        {
+        let write_result = {
             let mut store = dst_bucket_ref.objects.write();
+            let result =
+                self.storage
+                    .publish_object(&dst_bucket, &dst_key, &dst_version_id, prepared);
             store.put(dst_obj);
-        }
+            result
+        };
 
         debug!(
             src_bucket = %src_bucket,
@@ -1040,6 +1048,31 @@ fn checksum_to_fields(checksum: &ChecksumData) -> ChecksumFields {
     fields
 }
 
+/// Validate the supplied checksum or compute the default CRC32.
+fn resolve_put_checksum(
+    input: &PutObjectInput,
+    upload: Option<&StagedUpload>,
+    body: &[u8],
+) -> Result<ChecksumData, S3ServiceError> {
+    let compute = |algorithm| match upload {
+        Some(upload) => upload.checksum(algorithm).map(str::to_owned),
+        None => Ok(compute_checksum(algorithm, body)),
+    };
+    if let Some(checksum) = extract_checksum_from_put(input)? {
+        let algorithm = ChecksumAlgorithm::from_str(&checksum.algorithm)
+            .map_err(|_| S3ServiceError::BadDigest)?;
+        if checksum.value != compute(algorithm)? {
+            return Err(S3ServiceError::BadDigest);
+        }
+        return Ok(checksum);
+    }
+    Ok(ChecksumData {
+        algorithm: "CRC32".to_owned(),
+        value: compute(ChecksumAlgorithm::Crc32)?,
+        checksum_type: "FULL_OBJECT".to_owned(),
+    })
+}
+
 /// Extract checksum data from a [`PutObjectInput`] if any checksum fields are
 /// set.
 ///
@@ -1070,13 +1103,191 @@ fn extract_checksum_from_put(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::{config::S3Config, storage::UploadWriter};
+
+    const TEST_BUCKET: &str = "conditional-put";
+    const TEST_KEY: &str = "key";
+
+    async fn test_provider() -> RustackS3 {
+        let provider = RustackS3::new(S3Config::default());
+        provider
+            .handle_create_bucket(rustack_s3_model::input::CreateBucketInput {
+                bucket: TEST_BUCKET.to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        provider
+    }
+
+    fn test_put(body: &'static [u8]) -> PutObjectInput {
+        PutObjectInput {
+            bucket: TEST_BUCKET.to_owned(),
+            key: TEST_KEY.to_owned(),
+            body: Some(StreamingBlob::new(Bytes::from_static(body))),
+            ..Default::default()
+        }
+    }
+
+    fn test_get() -> GetObjectInput {
+        GetObjectInput {
+            bucket: TEST_BUCKET.to_owned(),
+            key: TEST_KEY.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_conditionally_replace_current_etag() {
+        let provider = test_provider().await;
+        let original = provider
+            .handle_put_object(test_put(b"original"))
+            .await
+            .unwrap();
+        let updated = provider
+            .handle_put_object(PutObjectInput {
+                if_match: original.e_tag.clone(),
+                ..test_put(b"updated")
+            })
+            .await
+            .unwrap();
+        assert_ne!(original.e_tag, updated.e_tag);
+
+        let rejected = provider
+            .handle_put_object(PutObjectInput {
+                if_match: original.e_tag,
+                ..test_put(b"stale update")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code, S3ErrorCode::PreconditionFailed);
+        let current = provider.handle_get_object(test_get()).await.unwrap();
+        assert_eq!(current.e_tag, updated.e_tag);
+        assert_eq!(current.body.unwrap().data.as_ref(), b"updated");
+    }
+
+    #[tokio::test]
+    async fn test_should_check_only_the_current_object_version() {
+        let provider = test_provider().await;
+        let bucket = provider.state.get_bucket(TEST_BUCKET).unwrap();
+        bucket.enable_versioning();
+
+        let missing = provider
+            .handle_put_object(PutObjectInput {
+                if_match: Some("*".to_owned()),
+                ..test_put(b"unexpected")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, S3ErrorCode::NoSuchKey);
+
+        let original = provider
+            .handle_put_object(PutObjectInput {
+                if_none_match: Some("*".to_owned()),
+                ..test_put(b"original")
+            })
+            .await
+            .unwrap();
+        let marker = provider
+            .handle_delete_object(DeleteObjectInput {
+                bucket: TEST_BUCKET.to_owned(),
+                key: TEST_KEY.to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(marker.delete_marker, Some(true));
+
+        let missing = provider
+            .handle_put_object(PutObjectInput {
+                if_match: original.e_tag.clone(),
+                ..test_put(b"unexpected")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, S3ErrorCode::NoSuchKey);
+        assert_eq!(
+            provider
+                .handle_get_object(test_get())
+                .await
+                .unwrap_err()
+                .code,
+            S3ErrorCode::NoSuchKey
+        );
+
+        let recreated = provider
+            .handle_put_object(PutObjectInput {
+                if_none_match: Some("*".to_owned()),
+                ..test_put(b"recreated")
+            })
+            .await
+            .unwrap();
+        let rejected = provider
+            .handle_put_object(PutObjectInput {
+                if_none_match: Some("*".to_owned()),
+                ..test_put(b"unexpected")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code, S3ErrorCode::PreconditionFailed);
+
+        let current = provider.handle_get_object(test_get()).await.unwrap();
+        assert_eq!(current.version_id, recreated.version_id);
+        assert_eq!(current.body.unwrap().data.as_ref(), b"recreated");
+        let previous = provider
+            .handle_get_object(GetObjectInput {
+                version_id: original.version_id,
+                ..test_get()
+            })
+            .await
+            .unwrap();
+        assert_eq!(previous.e_tag, original.e_tag);
+        assert_eq!(previous.body.unwrap().data.as_ref(), b"original");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_should_commit_only_one_concurrent_update_with_the_same_etag() {
+        let provider = test_provider().await;
+        let original = provider
+            .handle_put_object(test_put(b"original"))
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let start_write = |body: &'static [u8]| {
+            let provider = provider.clone();
+            let barrier = Arc::clone(&barrier);
+            let etag = original.e_tag.clone();
+            tokio::spawn(async move {
+                let mut writer = UploadWriter::new().await.unwrap();
+                writer.write(body).await.unwrap();
+                let upload = Arc::new(writer.finish().await.unwrap());
+                let input = PutObjectInput {
+                    bucket: TEST_BUCKET.to_owned(),
+                    key: TEST_KEY.to_owned(),
+                    if_match: etag,
+                    ..Default::default()
+                };
+                barrier.wait().await;
+                provider.handle_put_object_staged(input, upload).await
+            })
+        };
+        let (first, second) = tokio::join!(start_write(b"first"), start_write(b"second"));
+        let (updated, body, rejected) = match (first.unwrap(), second.unwrap()) {
+            (Ok(updated), Err(rejected)) => (updated, b"first".as_slice(), rejected),
+            (Err(rejected), Ok(updated)) => (updated, b"second".as_slice(), rejected),
+            results => panic!("expected one conditional write to succeed: {results:?}"),
+        };
+        assert_eq!(rejected.code, S3ErrorCode::PreconditionFailed);
+        let current = provider.handle_get_object(test_get()).await.unwrap();
+        assert_eq!(current.e_tag, updated.e_tag);
+        assert_eq!(current.body.unwrap().data.as_ref(), body);
+    }
 
     #[tokio::test]
     async fn test_should_preserve_existing_object_after_bad_staged_checksum() {
-        use std::sync::Arc;
-
-        use crate::{config::S3Config, storage::UploadWriter};
         let provider = RustackS3::new(S3Config::default());
         provider
             .handle_create_bucket(rustack_s3_model::input::CreateBucketInput {

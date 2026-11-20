@@ -237,6 +237,40 @@ pub struct WriteResult {
     pub md5_hex: String,
 }
 
+/// Object data with its content and checksums ready to publish.
+#[derive(Debug)]
+pub(crate) struct PreparedObject {
+    data: StoredData,
+    pub(crate) result: WriteResult,
+}
+
+impl PreparedObject {
+    pub(crate) fn staged(upload: Arc<StagedUpload>) -> Self {
+        let md5_hex = upload.hashes.md5_hex.clone();
+        let result = WriteResult {
+            etag: format!("\"{md5_hex}\""),
+            size: upload.size,
+            md5_hex,
+        };
+        Self {
+            data: StoredData::Staged(upload),
+            result,
+        }
+    }
+
+    pub(crate) fn staged_checksum(
+        &self,
+        algorithm: checksums::ChecksumAlgorithm,
+    ) -> Result<&str, S3ServiceError> {
+        match &self.data {
+            StoredData::Staged(upload) => upload.checksum(algorithm),
+            _ => Err(S3ServiceError::Internal(anyhow::anyhow!(
+                "missing assembled multipart artifact"
+            ))),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // StoredData
 // ---------------------------------------------------------------------------
@@ -423,7 +457,7 @@ impl StoredData {
 /// ```
 pub struct InMemoryStorage {
     /// Object data keyed by `(bucket, key, version_id)`.
-    objects: DashMap<StorageKey, StoredData>,
+    objects: DashMap<StorageKey, Arc<StoredData>>,
     /// Multipart part data keyed by `(bucket, upload_id, part_number)`.
     parts: DashMap<PartKey, StoredData>,
     /// Max size in bytes for in-memory storage before spilling to disk.
@@ -483,23 +517,46 @@ impl InMemoryStorage {
         version_id: &str,
         data: Bytes,
     ) -> Result<WriteResult, S3ServiceError> {
+        let prepared = self.prepare_object(data).await?;
+        Ok(self.publish_object(bucket, key, version_id, prepared))
+    }
+
+    pub(crate) async fn prepare_object(
+        &self,
+        data: Bytes,
+    ) -> Result<PreparedObject, S3ServiceError> {
         let md5_hex = checksums::compute_md5(&data);
-        let etag = format!("\"{md5_hex}\"");
-        let size = data.len() as u64;
+        let result = WriteResult {
+            etag: format!("\"{md5_hex}\""),
+            size: data.len() as u64,
+            md5_hex,
+        };
+        Ok(PreparedObject {
+            data: self.store_data(data).await?,
+            result,
+        })
+    }
 
-        let stored = self.store_data(data).await?;
-
-        trace!(bucket, key, version_id, size, "stored object data");
+    /// Publish prepared bytes at the same commit point as the object metadata.
+    pub(crate) fn publish_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        prepared: PreparedObject,
+    ) -> WriteResult {
+        trace!(
+            bucket,
+            key,
+            version_id,
+            size = prepared.result.size,
+            "stored object data"
+        );
         self.objects.insert(
             (bucket.to_owned(), key.to_owned(), version_id.to_owned()),
-            stored,
+            Arc::new(prepared.data),
         );
-
-        Ok(WriteResult {
-            etag,
-            size,
-            md5_hex,
-        })
+        prepared.result
     }
 
     /// Publish a fully validated immutable staged object without copying its bytes.
@@ -511,16 +568,7 @@ impl InMemoryStorage {
         version_id: &str,
         upload: Arc<StagedUpload>,
     ) -> WriteResult {
-        let result = WriteResult {
-            etag: format!("\"{}\"", upload.hashes.md5_hex),
-            size: upload.size,
-            md5_hex: upload.hashes.md5_hex.clone(),
-        };
-        self.objects.insert(
-            (bucket.to_owned(), key.to_owned(), version_id.to_owned()),
-            StoredData::Staged(upload),
-        );
-        result
+        self.publish_object(bucket, key, version_id, PreparedObject::staged(upload))
     }
 
     /// Publish a fully validated immutable staged multipart part.
@@ -555,7 +603,7 @@ impl InMemoryStorage {
         self.objects
             .get(&(bucket.to_owned(), key.to_owned(), version_id.to_owned()))
             .and_then(|entry| {
-                if let StoredData::Staged(upload) = entry.value() {
+                if let StoredData::Staged(upload) = entry.value().as_ref() {
                     Some(Arc::clone(upload))
                 } else {
                     None
@@ -581,14 +629,16 @@ impl InMemoryStorage {
         range: Option<(u64, u64)>,
     ) -> Result<Bytes, S3ServiceError> {
         let storage_key = (bucket.to_owned(), key.to_owned(), version_id.to_owned());
-        let entry = self
+        // Keep the data alive without holding a shard lock during disk I/O.
+        let data = self
             .objects
             .get(&storage_key)
+            .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| S3ServiceError::NoSuchKey {
                 key: key.to_owned(),
             })?;
 
-        let all_data = entry.value().read_all().await?;
+        let all_data = data.read_all().await?;
 
         match range {
             Some((start, end)) => {
@@ -622,26 +672,23 @@ impl InMemoryStorage {
         dst_key: &str,
         dst_version_id: &str,
     ) -> Result<WriteResult, S3ServiceError> {
-        if let Some(upload) = self.staged_object(src_bucket, src_key, src_version_id) {
-            return Ok(self.write_staged_object(dst_bucket, dst_key, dst_version_id, upload));
-        }
-        let data = self
-            .read_object(src_bucket, src_key, src_version_id, None)
+        let prepared = self
+            .prepare_copy(src_bucket, src_key, src_version_id)
             .await?;
+        Ok(self.publish_object(dst_bucket, dst_key, dst_version_id, prepared))
+    }
 
-        debug!(
-            src_bucket,
-            src_key,
-            src_version_id,
-            dst_bucket,
-            dst_key,
-            dst_version_id,
-            size = data.len(),
-            "copying object data"
-        );
-
-        self.write_object(dst_bucket, dst_key, dst_version_id, data)
-            .await
+    pub(crate) async fn prepare_copy(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<PreparedObject, S3ServiceError> {
+        if let Some(upload) = self.staged_object(bucket, key, version_id) {
+            return Ok(PreparedObject::staged(upload));
+        }
+        let data = self.read_object(bucket, key, version_id, None).await?;
+        self.prepare_object(data).await
     }
 
     /// Delete object data.
@@ -731,6 +778,20 @@ impl InMemoryStorage {
         version_id: &str,
         part_numbers: &[u32],
     ) -> Result<(WriteResult, Vec<String>), S3ServiceError> {
+        let (prepared, part_md5_hexes) = self
+            .prepare_multipart(bucket, upload_id, part_numbers)
+            .await?;
+        let result = self.publish_object(bucket, key, version_id, prepared);
+        self.abort_multipart(bucket, upload_id);
+        Ok((result, part_md5_hexes))
+    }
+
+    pub(crate) async fn prepare_multipart(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_numbers: &[u32],
+    ) -> Result<(PreparedObject, Vec<String>), S3ServiceError> {
         let mut writer = UploadWriter::new()
             .await
             .map_err(|error| S3ServiceError::Internal(error.into()))?;
@@ -753,26 +814,6 @@ impl InMemoryStorage {
         // Compute composite ETag: MD5-of-concatenated-MD5s with part count suffix.
         let etag = checksums::compute_multipart_etag(&part_md5_hexes, part_numbers.len());
 
-        // Store the assembled object.
-        let stored = StoredData::Staged(upload);
-        self.objects.insert(
-            (bucket.to_owned(), key.to_owned(), version_id.to_owned()),
-            stored,
-        );
-
-        // Clean up the parts for this upload.
-        self.abort_multipart(bucket, upload_id);
-
-        debug!(
-            bucket,
-            upload_id,
-            key,
-            version_id,
-            size,
-            parts = part_numbers.len(),
-            "completed multipart upload"
-        );
-
         // The md5_hex for the composite result is the hash portion of the ETag
         // (without quotes and without the -N suffix).
         let composite_md5 = etag
@@ -783,10 +824,13 @@ impl InMemoryStorage {
             .to_owned();
 
         Ok((
-            WriteResult {
-                etag,
-                size,
-                md5_hex: composite_md5,
+            PreparedObject {
+                data: StoredData::Staged(upload),
+                result: WriteResult {
+                    etag,
+                    size,
+                    md5_hex: composite_md5,
+                },
             },
             part_md5_hexes,
         ))

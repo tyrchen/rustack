@@ -502,10 +502,10 @@ impl RustackS3 {
             "null".to_owned()
         };
 
-        // Assemble parts in storage.
-        let (write_result, _part_md5s) = self
+        // Assemble parts without publishing them.
+        let (prepared, _part_md5s) = self
             .storage
-            .complete_multipart(&bucket_name, &upload_id, &key, &version_id, &part_numbers)
+            .prepare_multipart(&bucket_name, &upload_id, &part_numbers)
             .await
             .map_err(|e| S3ServiceError::Internal(anyhow::anyhow!("{e}")).into_s3_error())?;
 
@@ -523,14 +523,8 @@ impl RustackS3 {
                 let checksum_type_str = upload.checksum_type.as_deref().unwrap_or("COMPOSITE");
 
                 let value = if checksum_type_str == "FULL_OBJECT" {
-                    let assembled = self
-                        .storage
-                        .staged_object(&bucket_name, &key, &version_id)
-                        .ok_or_else(|| {
-                            S3Error::internal_error("missing assembled multipart artifact")
-                        })?;
-                    assembled
-                        .checksum(algo)
+                    prepared
+                        .staged_checksum(algo)
                         .map_err(S3ServiceError::into_s3_error)?
                         .to_owned()
                 } else {
@@ -573,8 +567,8 @@ impl RustackS3 {
         let obj = S3Object {
             key: key.clone(),
             version_id: version_id.clone(),
-            etag: write_result.etag.clone(),
-            size: write_result.size,
+            etag: prepared.result.etag.clone(),
+            size: prepared.result.size,
             last_modified: Utc::now(),
             storage_class: upload.storage_class.clone(),
             metadata: upload.metadata.clone(),
@@ -587,13 +581,18 @@ impl RustackS3 {
                 .collect(),
         };
 
-        {
+        let write_result = {
             let mut store = bucket.objects.write();
+            let result = self
+                .storage
+                .publish_object(&bucket_name, &key, &version_id, prepared);
             store.put(obj);
-        }
+            result
+        };
 
-        // Remove the completed upload.
+        // Remove the completed upload and its parts.
         bucket.multipart_uploads.remove(&upload_id);
+        self.storage.abort_multipart(&bucket_name, &upload_id);
 
         debug!(
             bucket = %bucket_name,
