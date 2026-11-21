@@ -53,7 +53,7 @@ use crate::{
     state::{DynamoDBServiceState, DynamoDBTable},
     storage::{
         KeyAttribute, KeySchema, PrimaryKey, SortKeyCondition, SortableAttributeValue,
-        TableStorage, calculate_item_size, extract_primary_key, partition_key_segment,
+        TableStorage, calculate_item_size, extract_primary_key, partition_key_segment, take_page,
     },
     stream::{
         ChangeEvent, ChangeEventName, NoopStreamEmitter, NoopStreamLifecycle, StreamEmitter,
@@ -1660,7 +1660,12 @@ impl RustackDynamoDB {
             } else {
                 let start_pk = extract_primary_key(&table.key_schema, &input.exclusive_start_key)
                     .map_err(storage_error_to_dynamodb)?;
-                start_pk.sort_key
+                // Items of a table without a sort key are stored under the sentinel.
+                Some(
+                    start_pk
+                        .sort_key
+                        .unwrap_or(SortableAttributeValue::Sentinel),
+                )
             };
 
             let (items, last_key_sort) = table.storage.query(
@@ -4839,9 +4844,6 @@ fn build_last_evaluated_key(
     key
 }
 
-/// Maximum response size for a single Query/Scan response (1 MB).
-const MAX_RESPONSE_BYTES: u64 = 1_048_576;
-
 /// Result type for GSI query operations.
 type GsiQueryResult = (
     Vec<HashMap<String, AttributeValue>>,
@@ -4890,8 +4892,7 @@ fn query_gsi(
         );
     }
 
-    // Apply limit and 1 MB size cap.
-    let (selected, has_more) = gsi_apply_limit(matching, limit);
+    let (selected, has_more) = take_page(matching, limit, calculate_item_size);
 
     // Build last_evaluated_key containing both GSI keys and table primary keys.
     let last_evaluated_key = if has_more {
@@ -5010,30 +5011,6 @@ fn gsi_apply_pagination(
     }
 }
 
-/// Apply count limit and 1 MB size cap, returning `(selected_items, has_more)`.
-fn gsi_apply_limit(
-    items: Vec<HashMap<String, AttributeValue>>,
-    limit: Option<usize>,
-) -> (Vec<HashMap<String, AttributeValue>>, bool) {
-    let effective_limit = limit.unwrap_or(usize::MAX);
-    let mut selected: Vec<HashMap<String, AttributeValue>> = Vec::new();
-    let mut cumulative_size: u64 = 0;
-
-    for item in items {
-        if selected.len() >= effective_limit {
-            return (selected, true);
-        }
-        let item_size = calculate_item_size(&item);
-        if !selected.is_empty() && cumulative_size + item_size > MAX_RESPONSE_BYTES {
-            return (selected, true);
-        }
-        cumulative_size += item_size;
-        selected.push(item);
-    }
-
-    (selected, false)
-}
-
 /// Build the `last_evaluated_key` for a GSI query response.
 ///
 /// DynamoDB includes both the GSI keys and the table's primary keys in the
@@ -5086,8 +5063,8 @@ mod tests {
             DescribeTableInput, UpdateContinuousBackupsInput, UpdateItemInput,
         },
         types::{
-            AttributeDefinition, KeySchemaElement, KeyType, PutRequest, ScalarAttributeType,
-            WriteRequest,
+            AttributeDefinition, GlobalSecondaryIndex, KeySchemaElement, KeyType, Projection,
+            ProjectionType, PutRequest, ScalarAttributeType, WriteRequest,
         },
     };
 
@@ -5620,5 +5597,140 @@ mod tests {
                 )])),
             )])
         );
+    }
+
+    #[test]
+    fn test_should_return_last_key_when_limit_ends_on_last_gsi_item() {
+        let provider = RustackDynamoDB::new(DynamoDBConfig::default());
+        provider
+            .handle_create_table(CreateTableInput {
+                table_name: "GsiTable".to_owned(),
+                key_schema: vec![KeySchemaElement {
+                    attribute_name: "pk".to_owned(),
+                    key_type: KeyType::Hash,
+                }],
+                attribute_definitions: vec![
+                    AttributeDefinition {
+                        attribute_name: "pk".to_owned(),
+                        attribute_type: ScalarAttributeType::S,
+                    },
+                    AttributeDefinition {
+                        attribute_name: "gpk".to_owned(),
+                        attribute_type: ScalarAttributeType::S,
+                    },
+                    AttributeDefinition {
+                        attribute_name: "gsk".to_owned(),
+                        attribute_type: ScalarAttributeType::N,
+                    },
+                ],
+                global_secondary_indexes: vec![GlobalSecondaryIndex {
+                    index_name: "ByGroup".to_owned(),
+                    key_schema: vec![
+                        KeySchemaElement {
+                            attribute_name: "gpk".to_owned(),
+                            key_type: KeyType::Hash,
+                        },
+                        KeySchemaElement {
+                            attribute_name: "gsk".to_owned(),
+                            key_type: KeyType::Range,
+                        },
+                    ],
+                    projection: Projection {
+                        projection_type: Some(ProjectionType::All),
+                        non_key_attributes: Vec::new(),
+                    },
+                    provisioned_throughput: None,
+                }],
+                billing_mode: Some(BillingMode::PayPerRequest),
+                ..Default::default()
+            })
+            .unwrap();
+        for i in 1..=4 {
+            provider
+                .handle_put_item(PutItemInput {
+                    table_name: "GsiTable".to_owned(),
+                    item: HashMap::from([
+                        ("pk".to_owned(), AttributeValue::S(format!("item{i}"))),
+                        ("gpk".to_owned(), AttributeValue::S("group".to_owned())),
+                        ("gsk".to_owned(), AttributeValue::N(i.to_string())),
+                    ]),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let query = |exclusive_start_key| {
+            provider
+                .handle_query(QueryInput {
+                    table_name: "GsiTable".to_owned(),
+                    index_name: Some("ByGroup".to_owned()),
+                    key_condition_expression: Some("gpk = :g".to_owned()),
+                    expression_attribute_values: HashMap::from([(
+                        ":g".to_owned(),
+                        AttributeValue::S("group".to_owned()),
+                    )]),
+                    limit: Some(2),
+                    exclusive_start_key,
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+
+        let first = query(HashMap::new());
+        assert_eq!(first.count, 2);
+        assert!(!first.last_evaluated_key.is_empty());
+
+        // Limit stops this page on the last item: DynamoDB still returns a key.
+        let second = query(first.last_evaluated_key);
+        assert_eq!(second.count, 2);
+        assert_eq!(
+            second.last_evaluated_key,
+            HashMap::from([
+                ("gpk".to_owned(), AttributeValue::S("group".to_owned())),
+                ("gsk".to_owned(), AttributeValue::N("4".to_owned())),
+                ("pk".to_owned(), AttributeValue::S("item4".to_owned())),
+            ])
+        );
+
+        let third = query(second.last_evaluated_key);
+        assert_eq!(third.count, 0);
+        assert!(third.last_evaluated_key.is_empty());
+    }
+
+    #[test]
+    fn test_should_end_query_on_partition_key_only_table() {
+        let provider = setup_provider_with_table();
+        provider
+            .handle_put_item(PutItemInput {
+                table_name: "TestTable".to_owned(),
+                item: HashMap::from([("pk".to_owned(), AttributeValue::S("k1".to_owned()))]),
+                ..Default::default()
+            })
+            .unwrap();
+        let query = |exclusive_start_key| {
+            provider
+                .handle_query(QueryInput {
+                    table_name: "TestTable".to_owned(),
+                    key_condition_expression: Some("pk = :p".to_owned()),
+                    expression_attribute_values: HashMap::from([(
+                        ":p".to_owned(),
+                        AttributeValue::S("k1".to_owned()),
+                    )]),
+                    limit: Some(1),
+                    exclusive_start_key,
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+
+        let first = query(HashMap::new());
+        assert_eq!(first.count, 1);
+        assert_eq!(
+            first.last_evaluated_key,
+            HashMap::from([("pk".to_owned(), AttributeValue::S("k1".to_owned()))])
+        );
+
+        let second = query(first.last_evaluated_key);
+        assert_eq!(second.count, 0);
+        assert!(second.last_evaluated_key.is_empty());
     }
 }

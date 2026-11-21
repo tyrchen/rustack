@@ -589,8 +589,11 @@ impl TableStorage {
     /// Queries items in a single partition with optional sort key conditions.
     ///
     /// Returns a tuple of (items, last_evaluated_key). The last evaluated key
-    /// is `Some` when the result was truncated by the count limit or the 1 MB
-    /// response size cap, indicating that more items are available for pagination.
+    /// is `Some` whenever the count limit or the 1 MB response size cap stopped
+    /// the read, even when no items remain; the page after it is then empty.
+    ///
+    /// `exclusive_start_key` is the sort key of the last item already returned,
+    /// which is [`SortableAttributeValue::Sentinel`] on a table without a sort key.
     #[must_use]
     pub fn query(
         &self,
@@ -600,9 +603,6 @@ impl TableStorage {
         limit: Option<usize>,
         exclusive_start_key: Option<&SortableAttributeValue>,
     ) -> (Vec<HashMap<String, AttributeValue>>, Option<PrimaryKey>) {
-        /// DynamoDB caps a single Query response at 1 MB.
-        const MAX_RESPONSE_BYTES: u64 = 1_048_576;
-
         let Some(partition) = self.data.get(partition_key) else {
             return (Vec::new(), None);
         };
@@ -615,29 +615,11 @@ impl TableStorage {
             exclusive_start_key,
         );
 
-        // Apply the 1 MB size cap and optional count limit.
-        let effective_limit = limit.unwrap_or(usize::MAX);
-        let mut selected: Vec<&StoredItem> = Vec::new();
-        let mut cumulative_size: u64 = 0;
-        let mut size_limited = false;
+        let (selected, stopped) = take_page(all_items, limit, |item| {
+            calculate_item_size(&item.attributes)
+        });
 
-        for item in all_items.iter().take(effective_limit) {
-            let item_size = calculate_item_size(&item.attributes);
-            // Always include at least one item even if it exceeds 1 MB on its
-            // own, matching DynamoDB behaviour.
-            if !selected.is_empty() && cumulative_size + item_size > MAX_RESPONSE_BYTES {
-                size_limited = true;
-                break;
-            }
-            cumulative_size += item_size;
-            selected.push(item);
-        }
-
-        let count_limited =
-            !size_limited && selected.len() == effective_limit && effective_limit < all_items.len();
-        let has_more = size_limited || count_limited;
-
-        let last_key = if has_more {
+        let last_key = if stopped {
             build_last_evaluated_key(
                 &selected,
                 Some(selected.len()),
@@ -659,8 +641,8 @@ impl TableStorage {
     /// Scans all items in the table.
     ///
     /// Returns a tuple of (items, last_evaluated_key). The last evaluated key
-    /// is `Some` when the result was truncated by the limit or by the 1 MB
-    /// response size cap.
+    /// is `Some` whenever the limit or the 1 MB response size cap stopped the
+    /// read, even when no items remain; the page after it is then empty.
     ///
     /// When `segment` and `total_segments` are provided, only items whose
     /// partition key hashes into the given segment are included (parallel scan).
@@ -672,9 +654,6 @@ impl TableStorage {
         segment: Option<u32>,
         total_segments: Option<u32>,
     ) -> (Vec<HashMap<String, AttributeValue>>, Option<PrimaryKey>) {
-        /// DynamoDB caps a single Scan/Query response at 1 MB.
-        const MAX_RESPONSE_BYTES: u64 = 1_048_576;
-
         // Collect all items sorted deterministically by partition key then sort key.
         let mut all_items: Vec<(AttributeValue, SortableAttributeValue, &StoredItem)> = Vec::new();
 
@@ -700,46 +679,26 @@ impl TableStorage {
             }
         }
 
-        // Apply exclusive_start_key: skip items up to and including the start key.
-        let start_idx = if let Some(start_key) = exclusive_start_key {
-            let start_sk = start_key
+        // Apply exclusive_start_key: skip every item up to and including its place in scan order,
+        // so the scan resumes correctly even if the item it names has since been deleted.
+        let start_idx = exclusive_start_key.map_or(0, |start_key| {
+            let start_partition = format!("{}", start_key.partition_key);
+            let start_sort = start_key
                 .sort_key
                 .as_ref()
-                .map_or(&SortableAttributeValue::Sentinel, |sk| sk);
+                .unwrap_or(&SortableAttributeValue::Sentinel);
+            all_items.partition_point(|(pk, sk, _)| match format!("{pk}").cmp(&start_partition) {
+                Ordering::Less => true,
+                Ordering::Equal => sk <= start_sort,
+                Ordering::Greater => false,
+            })
+        });
 
-            all_items
-                .iter()
-                .position(|(pk, sk, _)| *pk == start_key.partition_key && *sk == *start_sk)
-                .map_or(0, |idx| idx + 1)
-        } else {
-            0
-        };
+        let (selected, stopped) = take_page(all_items.iter().skip(start_idx), limit, |entry| {
+            calculate_item_size(&entry.2.attributes)
+        });
 
-        let effective_limit = limit.unwrap_or(usize::MAX);
-
-        // Select items respecting both the count limit and the 1 MB size cap.
-        let mut selected: Vec<&(AttributeValue, SortableAttributeValue, &StoredItem)> = Vec::new();
-        let mut cumulative_size: u64 = 0;
-        let mut size_limited = false;
-
-        for entry in all_items.iter().skip(start_idx).take(effective_limit) {
-            let item_size = calculate_item_size(&entry.2.attributes);
-            // Always include at least one item even if it exceeds 1 MB on its
-            // own, matching DynamoDB behaviour.
-            if !selected.is_empty() && cumulative_size + item_size > MAX_RESPONSE_BYTES {
-                size_limited = true;
-                break;
-            }
-            cumulative_size += item_size;
-            selected.push(entry);
-        }
-
-        let count_limited = !size_limited
-            && selected.len() == effective_limit
-            && start_idx + effective_limit < all_items.len();
-        let has_more = size_limited || count_limited;
-
-        let last_key = if has_more {
+        let last_key = if stopped {
             selected.last().map(|(pk, sk, _)| {
                 PrimaryKey {
                     partition_key: pk.clone(),
@@ -769,6 +728,38 @@ impl TableStorage {
 
         (result, last_key)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Paging
+// ---------------------------------------------------------------------------
+
+/// DynamoDB caps a single Query or Scan response at 1 MB.
+const MAX_RESPONSE_BYTES: u64 = 1_048_576;
+
+/// Takes items in order until `limit` or the 1 MB response cap stops the read.
+///
+/// Returns the page and whether the read was stopped. DynamoDB returns a
+/// `LastEvaluatedKey` whenever it was, even when no items remain, so the page
+/// after it is empty. At least one item is taken even if it alone exceeds 1 MB.
+pub(crate) fn take_page<T>(
+    items: impl IntoIterator<Item = T>,
+    limit: Option<usize>,
+    item_size: impl Fn(&T) -> u64,
+) -> (Vec<T>, bool) {
+    let limit = limit.unwrap_or(usize::MAX);
+    let mut page = Vec::new();
+    let mut page_size: u64 = 0;
+    for item in items.into_iter().take(limit) {
+        let size = item_size(&item);
+        if !page.is_empty() && page_size.saturating_add(size) > MAX_RESPONSE_BYTES {
+            return (page, true);
+        }
+        page_size = page_size.saturating_add(size);
+        page.push(item);
+    }
+    let limited = page.len() == limit;
+    (page, limited)
 }
 
 // ---------------------------------------------------------------------------
@@ -857,8 +848,19 @@ fn collect_with_condition<'a>(
 ) -> Vec<&'a StoredItem> {
     match condition {
         SortKeyCondition::Eq(val) => {
-            // Exact match - at most one item.
-            partition.get(val).into_iter().collect()
+            // Exact match - at most one item, and none once paging has passed it.
+            let after_start = exclusive_start_key.is_none_or(|start| {
+                if scan_forward {
+                    val > start
+                } else {
+                    val < start
+                }
+            });
+            partition
+                .get(val)
+                .filter(|_| after_start)
+                .into_iter()
+                .collect()
         }
         SortKeyCondition::Lt(val) => collect_range(
             partition,
@@ -1604,6 +1606,99 @@ mod tests {
         for sk in &second_page_sks {
             assert!(!first_page_sks.contains(sk));
         }
+    }
+
+    #[test]
+    fn test_should_return_last_key_when_limit_ends_on_last_item() {
+        let storage = TableStorage::new(numeric_sort_key_schema());
+
+        for i in 1..=4 {
+            let item = make_item(&[
+                ("pk", AttributeValue::S("p1".to_owned())),
+                ("sk", AttributeValue::N(i.to_string())),
+            ]);
+            storage.put_item(item).ok();
+        }
+
+        let pk = AttributeValue::S("p1".to_owned());
+
+        let (items, last_key) = storage.query(&pk, None, true, Some(2), None);
+        assert_eq!(items.len(), 2);
+        let start_sk = last_key.as_ref().and_then(|k| k.sort_key.as_ref());
+
+        let (items2, last_key2) = storage.query(&pk, None, true, Some(2), start_sk);
+        assert_eq!(items2.len(), 2);
+        assert!(last_key2.is_some());
+        let start_sk2 = last_key2.as_ref().and_then(|k| k.sort_key.as_ref());
+
+        let (items3, last_key3) = storage.query(&pk, None, true, Some(2), start_sk2);
+        assert_eq!(items3.len(), 0);
+        assert!(last_key3.is_none());
+
+        let (scanned, scan_key) = storage.scan(Some(4), None, None, None);
+        assert_eq!(scanned.len(), 4);
+        assert!(scan_key.is_some());
+
+        // A Limit the items never reach does not stop the read.
+        let (items, last_key) = storage.query(&pk, None, true, Some(5), None);
+        assert_eq!(items.len(), 4);
+        assert!(last_key.is_none());
+    }
+
+    #[test]
+    fn test_should_end_equality_query_after_its_item() {
+        let storage = TableStorage::new(numeric_sort_key_schema());
+        for i in 1..=3 {
+            let item = make_item(&[
+                ("pk", AttributeValue::S("p1".to_owned())),
+                ("sk", AttributeValue::N(i.to_string())),
+            ]);
+            storage.put_item(item).ok();
+        }
+        let pk = AttributeValue::S("p1".to_owned());
+        let equals_two = SortKeyCondition::Eq(SortableAttributeValue::N("2".to_owned()));
+
+        for scan_forward in [true, false] {
+            let (items, last_key) =
+                storage.query(&pk, Some(&equals_two), scan_forward, Some(1), None);
+            assert_eq!(items.len(), 1);
+            let start = last_key.as_ref().and_then(|key| key.sort_key.as_ref());
+            assert!(start.is_some());
+
+            let (items, last_key) =
+                storage.query(&pk, Some(&equals_two), scan_forward, Some(1), start);
+            assert_eq!(items.len(), 0);
+            assert!(last_key.is_none());
+        }
+    }
+
+    #[test]
+    fn test_should_resume_scan_after_deleted_start_key() {
+        let storage = TableStorage::new(numeric_sort_key_schema());
+        for i in 1..=4 {
+            let item = make_item(&[
+                ("pk", AttributeValue::S("p1".to_owned())),
+                ("sk", AttributeValue::N(i.to_string())),
+            ]);
+            storage.put_item(item).ok();
+        }
+
+        let (items, last_key) = storage.scan(Some(2), None, None, None);
+        assert_eq!(items.len(), 2);
+        let Some(last_key) = last_key else {
+            panic!("Limit stopped the scan, so it returns a key");
+        };
+        assert!(storage.delete_item(&last_key).is_some());
+
+        let (items, _) = storage.scan(Some(2), Some(&last_key), None, None);
+        let sort_keys: Vec<_> = items.iter().filter_map(|item| item.get("sk")).collect();
+        assert_eq!(
+            sort_keys,
+            [
+                &AttributeValue::N("3".to_owned()),
+                &AttributeValue::N("4".to_owned())
+            ]
+        );
     }
 
     #[test]
