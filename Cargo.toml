@@ -131,7 +131,7 @@ rustls = { version = "~0.23.46", default-features = false, features = ["std", "a
 tokio-rustls = { version = "~0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 webpki-roots = "~1.0.11"
 rcgen = { version = "~0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
-url = "2.5.8"
+url = "2.5.9"
 
 # Serialization
 bollard-stubs = { version = "=1.53.1-rc.29.3.1", default-features = false }
